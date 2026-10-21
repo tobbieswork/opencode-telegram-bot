@@ -10,6 +10,7 @@
     "dev": "tsx src/index.ts",
     "start": "tsx src/index.ts",
     "smoke": "tsx scripts/smoke.ts",
+    "test:format": "tsx scripts/test-format.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
