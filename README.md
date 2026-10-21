@@ -87,6 +87,7 @@ bot:   The last commit adds retry logic but…
 | `/browse [path]` | Browse folders with buttons and open a session there |
 | `/models` | List available models |
 | `/model <id>` | Set the model (also accepts `provider/id`) |
+| `/variants [id]` | List/set the model's reasoning variant (default `xhigh`) |
 | `/agents` | List user-facing agents |
 | `/agent <id>` | Set the agent (`build`, `general`, `explore`, `plan`) |
 | `/stop` | Interrupt the running task |
@@ -178,6 +179,19 @@ a quick way to verify the whole loop.
   port). If it still fails, start the service (`opencode service`) and check
   `opencode service status`.
 
+## Contributing
+
+Contributions are welcome — see **[CONTRIBUTING.md](./CONTRIBUTING.md)** for the
+workflow (fork → branch → PR) and the project conventions. In short:
+
+- Fork, branch, make a focused change.
+- `npm run typecheck` must pass — it's enforced by **CI** on every push and PR.
+- Keep it **dependency-free and small** (just `@opencode/client` + Node `fetch`).
+- Open a PR and describe *why*.
+
+We follow a [Code of Conduct](./.github/CODE_OF_CONDUCT.md); new code is released
+under the [MIT license](./LICENSE).
+
 ## Project layout
 
 ```
@@ -189,9 +203,12 @@ src/
   telegram.ts   Telegram Bot API client (long polling)
   bot.ts        command routing + per-chat state + background prompt task
   state.ts      JSON persistence of per-chat state (+ event→chat routing for forms)
-  state.ts      JSON persistence of per-chat state
   format.ts     escaping / tag-stripping / chunking
   logger.ts     tiny timestamped logger
 scripts/
   smoke.ts      token-free end-to-end smoke test
 ```
+
+## License
+
+[MIT](./LICENSE) © Tobbies Nguyen
