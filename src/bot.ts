@@ -993,12 +993,17 @@ export class Bot {
     const info = await this.oc.serverInfo().catch(() => null);
     const busy = this.inflight.has(chatId);
     const mode = this.currentMode(state);
+    // Explicitly set model wins; otherwise observe what the session actually
+    // runs on (server-resolved default) from the newest assistant message.
+    const live = state.sessionID ? await this.oc.getSessionModel(state.sessionID).catch(() => undefined) : undefined;
+    const model = state.model ?? live;
+    const modelLabel = model ? (model.providerID && model.providerID !== "?" ? `${model.providerID}/${model.id}` : model.id) : null;
     const lines = [
       `<b>OpenCode</b>${info?.version ? " v" + info.version : ""}`,
       `url: <code>${esc((info?.urls ?? [info?.url]).filter(Boolean).join(", ") || "?")}</code>`,
       `dir: <code>${esc(state.directory || this.cfg.opencodeDirectory)}</code>`,
       `session: ${state.sessionID ? `<code>${state.sessionID}</code>` : "none"}`,
-      `model: ${state.model ? `<code>${state.model.id}</code>` : "default"}`,
+      `model: ${modelLabel ? `<code>${esc(modelLabel)}</code>` : "default"}`,
       `variant: <code>${esc(state.variant ?? this.cfg.defaultVariant)}</code>`,
       `mode: ${mode ? `<code>${esc(mode)}</code>` : "—"}`,
       `agent: ${state.agent ? `<code>${state.agent}</code>` : "default"}`,

@@ -238,6 +238,21 @@ export class OpenCodeCtl {
   }
 
   /**
+   * The model actually used by the newest assistant message. The session object
+   * carries no model field, so this is the only way to observe which model the
+   * session is running on (explicitly set or server-resolved default).
+   */
+  async getSessionModel(sessionID: string): Promise<{ id: string; providerID: string } | undefined> {
+    const msgs = ((await this.listMessages(sessionID, 10).catch(() => [])) as any[]) ?? [];
+    for (const m of msgs) {
+      if (m?.type === "assistant" && m.model?.id) {
+        return { id: m.model.id, providerID: m.model.providerID ?? "?" };
+      }
+    }
+    return undefined;
+  }
+
+  /**
    * Send a prompt, block until the session goes idle, then return the latest
    * assistant text. If the passed signal aborts (e.g. /stop), we still read
    * whatever partial reply exists and report `interrupted: true`.

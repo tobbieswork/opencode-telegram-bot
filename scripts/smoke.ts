@@ -111,6 +111,8 @@ async function main(): Promise<void> {
 
   await bot.handle(upd("/status"));
   show("/status");
+  const statusMsg = mock.out[mock.out.length - 1];
+  console.log("status model line:", (statusMsg.match(/model: .*/) ?? ["?"])[0]);
 
   await bot.handle(upd("/history"));
   show("/history");
