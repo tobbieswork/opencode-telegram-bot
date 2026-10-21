@@ -79,7 +79,7 @@ bot:   The last commit adds retry logic but…
 
 | Command | Description |
 | --- | --- |
-| `/help` | Show help |
+| `/help` | Show help + a tappable command menu |
 | `/new` | Start a fresh session in the current directory |
 | `/ls` | List recent sessions |
 | `/use <id>` | Switch this chat to an existing session |

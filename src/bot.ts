@@ -222,8 +222,12 @@ export class Bot {
 
   // ── send helpers ─────────────────────────────────────────────────────────
   /** Send short, already-formatted HTML (commands, status). */
-  private async sendHtml(chatId: number, html: string): Promise<void> {
-    for (const c of chunk(html, this.cfg.replyMaxLen)) await this.tg.sendMessage(chatId, c);
+  private async sendHtml(chatId: number, html: string, opts: { reply_markup?: Keyboard } = {}): Promise<void> {
+    const chunks = chunk(html, this.cfg.replyMaxLen);
+    // The keyboard (if any) rides on the final chunk.
+    for (let i = 0; i < chunks.length; i++) {
+      await this.tg.sendMessage(chatId, chunks[i], i === chunks.length - 1 ? opts : {});
+    }
   }
   /** Send a long model reply: render its Markdown as Telegram HTML, then chunk. */
   private async sendReply(chatId: number, text: string): Promise<void> {
@@ -422,12 +426,30 @@ export class Bot {
       "Khi OpenCode cần hỏi bạn, chọn đáp án bằng nút bấm hoặc tự gõ.",
       "",
       "<b>Control</b>",
-      "/stop — interrupt the running task",
-      "/history — show recent messages",
-      "/status — what I'm connected to",
-      "/clear — reset this chat's state",
-    ].join("\n");
-    await this.sendHtml(chatId, txt);
+       "/stop — interrupt the running task",
+       "/history — show recent messages",
+       "/status — what I'm connected to",
+       "/clear — reset this chat's state",
+       "",
+       "Bấm một nút bên dưới để chạy lệnh ngay:",
+     ].join("\n");
+    await this.sendHtml(chatId, txt, { reply_markup: this.commandMenu() });
+  }
+
+  /** The tappable command list shown under /help — one button per command. */
+  private commandMenu(): Keyboard {
+    const b = (text: string, cmd: string): Btn => ({ text, callback_data: cmd });
+    return {
+      inline_keyboard: [
+        [b("🆕 Session mới", "cmd:new"), b("📄 Sessions", "cmd:ls")],
+        [b("📍 Thư mục", "cmd:dir"), b("📁 Duyệt", "cmd:browse")],
+        [b("🎛 Mode", "cmd:mode"), b("🧩 Agents", "cmd:agents")],
+        [b("🤖 Models", "cmd:models"), b("🎚 Variants", "cmd:variants")],
+        [b("📊 Trạng thái", "cmd:status"), b("📜 Lịch sử", "cmd:history")],
+        [b("⏹ Dừng", "cmd:stop"), b("🧹 Xoá state", "cmd:clear")],
+        [b("📖 Help", "cmd:help")],
+      ],
+    };
   }
 
   private async cmdNew(chatId: number, state: ChatState): Promise<void> {
@@ -609,6 +631,10 @@ export class Bot {
       await this.handleModeCallback(cb, chatId, messageId);
       return;
     }
+    if (data.startsWith("cmd:")) {
+      await this.runCommandButton(cb, chatId, data.slice(4));
+      return;
+    }
     if (!data.startsWith("bs:")) {
       await this.tg.answerCallbackQuery(cb.id);
       return;
@@ -712,6 +738,59 @@ export class Bot {
     if (!messageId) return;
     const v = this.renderBrowse(b);
     await this.tg.editMessageText(chatId, messageId, v.text, { reply_markup: v.keyboard });
+  }
+
+  /** Run a bot command from an inline button (the /help menu). */
+  private async runCommandButton(cb: CallbackQuery, chatId: number, name: string): Promise<void> {
+    const state = this.st.get(chatId);
+    try {
+      switch (name) {
+        case "new":
+          await this.cmdNew(chatId, state);
+          break;
+        case "ls":
+          await this.cmdList(chatId);
+          break;
+        case "dir":
+          await this.cmdDir(chatId, "", state);
+          break;
+        case "browse":
+          await this.cmdBrowse(chatId, "", state);
+          break;
+        case "mode":
+          await this.cmdMode(chatId, "", state);
+          break;
+        case "models":
+          await this.cmdModels(chatId);
+          break;
+        case "variants":
+          await this.cmdVariants(chatId, "", state);
+          break;
+        case "agents":
+          await this.cmdAgents(chatId);
+          break;
+        case "stop":
+          await this.cmdStop(chatId, state);
+          break;
+        case "status":
+          await this.cmdStatus(chatId, state);
+          break;
+        case "history":
+          await this.cmdHistory(chatId, state);
+          break;
+        case "clear":
+          await this.cmdClear(chatId, state);
+          break;
+        case "help":
+          await this.cmdHelp(chatId);
+          break;
+        default:
+          await this.tg.sendMessage(chatId, "❓ Lệnh không rõ.");
+      }
+    } finally {
+      // Answer last so the tap spinner shows while the command runs.
+      await this.tg.answerCallbackQuery(cb.id).catch(() => {});
+    }
   }
 
   private async cmdModels(chatId: number): Promise<void> {
