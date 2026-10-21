@@ -130,6 +130,23 @@ async function main(): Promise<void> {
   await bot.handle(tap("mode:close"));
   show("mode: close picker");
 
+  // ── out-of-band turn (background-wake simulation) ───────────────────────────
+  // Prompt the session DIRECTLY via the API (not through the bot), exactly like
+  // OpenCode runs a turn triggered by a background-task completion. The bot's
+  // live event subscription should relay the reply — before this feature the
+  // output was silently dropped until the next restart.
+  {
+    const stt = st.get(42);
+    if (stt.sessionID) {
+      const probe = "SWEEP-PROBE-" + Date.now();
+      console.log("\n== sweep: out-of-band turn == (session " + stt.sessionID + ", probe " + probe + ")");
+      await oc.promptAndWait(stt.sessionID, `Reply with exactly the single word: ${probe}. Nothing else.`);
+      const swept = await waitFor((a) => a.some((m) => m.includes(probe)), mock.out);
+      console.log("sweep relayed the out-of-band reply to Telegram:", swept);
+      show("sweep: relayed out-of-band reply");
+    }
+  }
+
   await bot.handle(upd("/dir"));
   show("/dir");
 

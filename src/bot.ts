@@ -110,6 +110,8 @@ export class Bot {
   private questionForms = new Map<string, QuestionFormState>();
   /** Repeating "typing…" timers, one per chat, so the indicator lasts until the reply is sent. */
   private typing = new Map<number, ReturnType<typeof setInterval>>();
+  /** Chats whose unrelayed-reply sweep is currently running (prevents a double relay). */
+  private sweeping = new Set<number>();
 
   constructor(
     private tg: Telegram,
@@ -126,34 +128,64 @@ export class Bot {
   /**
    * Recover a reply that OpenCode produced but we never relayed — typically
    * because the process restarted (or was killed, e.g. by a restart or crash)
-   * while a turn was still in flight. On startup, for each chat we've been
-   * tracking relays for, if the newest assistant message is newer than the last
-   * one we already sent, send it. Conservative: only sends when strictly newer
-   * (and only for chats that already have a lastRelayedTime), so a clean restart
-   * sends nothing and pre-feature state never triggers a replay burst.
+   * while a turn was still in flight. On startup, sweep every chat we've been
+   * tracking relays for (see sweepUnrelayedReplies).
    */
   async recoverOrphanedReplies(): Promise<void> {
-    for (const [chatKey, st] of Object.entries(this.st.all())) {
-      if (!st.sessionID || !st.lastRelayedTime) continue;
-      const chatId = Number(chatKey);
-      try {
+    for (const chatKey of Object.keys(this.st.all())) {
+      await this.sweepUnrelayedReplies(Number(chatKey), "orphaned by a restart");
+    }
+  }
+
+  /**
+   * Relay the newest assistant reply that we haven't sent yet for one chat.
+   * The cursor is lastRelayedTime, so this is idempotent and safe to call
+   * often: it only acts on a strictly newer unrelayed text reply. Called at
+   * startup (recoverOrphanedReplies) and whenever a turn ends out-of-band —
+   * e.g. a background task waking the session after we stopped waiting on it
+   * (that is the classic "bot went silent and never reported back" gap).
+   */
+  private async sweepUnrelayedReplies(chatId: number, reason: string): Promise<void> {
+    if (this.sweeping.has(chatId)) return; // a sweep for this chat is already running
+    this.sweeping.add(chatId);
+    const st = this.st.get(chatId);
+    if (!st.sessionID || !st.lastRelayedTime) {
+      this.sweeping.delete(chatId);
+      return;
+    }
+    try {
+      // The final assistant message can land a few hundred ms after the
+      // execution.* event (the same race promptAndWait re-checks for), so
+      // retry a few times before concluding there is nothing to relay.
+      let text = "";
+      let newestTime = 0;
+      for (let attempt = 0; attempt < 4; attempt++) {
         const msgs = (await this.oc.listMessages(st.sessionID, 50).catch(() => [] as any[])) as any[];
         const assistants = msgs
           .filter((m: any) => m?.type === "assistant")
           .sort((a: any, b: any) => (b.time?.created ?? 0) - (a.time?.created ?? 0));
         const newest = assistants[0];
-        if (!newest || (newest.time?.created ?? 0) <= st.lastRelayedTime) continue; // already relayed
-        const text = (newest.content ?? [])
-          .filter((c: any) => c?.type === "text")
-          .map((c: any) => c.text)
-          .join("\n");
-        if (!text) continue;
-        await this.sendReply(chatId, text);
-        this.st.set(chatId, { lastRelayedTime: newest.time?.created });
-        log(`[chat ${chatId}] recovered a reply that was orphaned by a restart`);
-      } catch (e) {
-        warn("recoverOrphanedReplies:", (e as Error)?.message);
+        if (newest && (newest.time?.created ?? 0) > st.lastRelayedTime) {
+          const t = (newest.content ?? [])
+            .filter((c: any) => c?.type === "text")
+            .map((c: any) => c.text)
+            .join("\n");
+          if (t) {
+            text = t;
+            newestTime = newest.time?.created ?? 0;
+            break;
+          }
+        }
+        await new Promise((r) => setTimeout(r, 300));
       }
+      if (!text) return;
+      await this.sendReply(chatId, text);
+      this.st.set(chatId, { lastRelayedTime: newestTime });
+      log(`[chat ${chatId}] relayed an unrelayed reply (${reason})`);
+    } catch (e) {
+      warn("sweepUnrelayedReplies:", (e as Error)?.message);
+    } finally {
+      this.sweeping.delete(chatId);
     }
   }
 
@@ -932,6 +964,27 @@ export class Bot {
     } else if (t === "form.replied" || t === "form.cancelled") {
       const formID = ev?.data?.id;
       if (formID) void this.onFormResolved(formID, t);
+    } else if (
+      t === "session.execution.started" ||
+      t === "session.execution.succeeded" ||
+      t === "session.execution.failed" ||
+      t === "session.execution.interrupted"
+    ) {
+      // Execution lifecycle. While we own the turn (a prompt is in flight) the
+      // prompt path manages typing and the relay itself, so only act for
+      // out-of-band executions — e.g. a background task waking the session.
+      // That keeps Telegram in sync: typing while the session is busy, and the
+      // reply relayed as soon as the turn ends.
+      const chatKey = ev?.data?.sessionID ? this.st.findChatBySession(ev.data.sessionID) : undefined;
+      if (!chatKey) return;
+      const chatId = Number(chatKey);
+      if (this.inflight.has(chatId)) return;
+      if (t === "session.execution.started") {
+        this.startTyping(chatId);
+      } else {
+        this.stopTyping(chatId);
+        void this.sweepUnrelayedReplies(chatId, "turn ended out-of-band");
+      }
     }
   }
 
