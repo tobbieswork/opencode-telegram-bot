@@ -92,7 +92,7 @@ async function main(): Promise<void> {
 
   // ── command menu (buttons under /help) ───────────────────────────────────────
   const helpKb = mock.keyboards[mock.keyboards.length - 1];
-  const menuBtn = JSON.stringify(helpKb).match(/cmd:(?:new|ls|dir|browse|mode|agents|models|variants|status|history|stop|clear|help)/);
+  const menuBtn = JSON.stringify(helpKb).match(/cmd:(?:new|ls|dir|browse|mode|models|variants|status|history|stop|clear|help)/);
   console.log("menu button:", menuBtn ? menuBtn[0] : "NOT FOUND");
   if (menuBtn) {
     await bot.handle(tap("cmd:ls"));
@@ -138,6 +138,8 @@ async function main(): Promise<void> {
   }
   await bot.handle(upd("/mode explore"));
   show("mode: text switch to explore");
+  await bot.handle(tap("mode:info"));
+  show("mode: show roles");
   await bot.handle(tap("mode:build"));
   show("mode: back to build (for the rest of the smoke)");
   await bot.handle(tap("mode:close"));

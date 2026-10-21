@@ -419,9 +419,8 @@ export class Bot {
         "<b>Mode &amp; model/agent</b>",
         "/mode — chọn mode bằng nút: build / plan / general / explore",
         "/models — list models · /model &lt;id&gt; — set model",
-       "/variants — list/set reasoning variant (default xhigh)",
-       "/agents — list agents · /agent &lt;id&gt; — set agent",
-      "",
+        "/variants — list/set reasoning variant (default xhigh)",
+       "",
       "<b>Câu hỏi (questions)</b>",
       "Khi OpenCode cần hỏi bạn, chọn đáp án bằng nút bấm hoặc tự gõ.",
       "",
@@ -443,11 +442,10 @@ export class Bot {
       inline_keyboard: [
         [b("🆕 Session mới", "cmd:new"), b("📄 Sessions", "cmd:ls")],
         [b("📍 Thư mục", "cmd:dir"), b("📁 Duyệt", "cmd:browse")],
-        [b("🎛 Mode", "cmd:mode"), b("🧩 Agents", "cmd:agents")],
-        [b("🤖 Models", "cmd:models"), b("🎚 Variants", "cmd:variants")],
-        [b("📊 Trạng thái", "cmd:status"), b("📜 Lịch sử", "cmd:history")],
-        [b("⏹ Dừng", "cmd:stop"), b("🧹 Xoá state", "cmd:clear")],
-        [b("📖 Help", "cmd:help")],
+        [b("🎛 Mode", "cmd:mode"), b("🤖 Models", "cmd:models")],
+        [b("🎚 Variants", "cmd:variants"), b("📊 Trạng thái", "cmd:status")],
+        [b("📜 Lịch sử", "cmd:history"), b("⏹ Dừng", "cmd:stop")],
+        [b("🧹 Xoá state", "cmd:clear"), b("📖 Help", "cmd:help")],
       ],
     };
   }
@@ -883,7 +881,10 @@ export class Bot {
       }
       rows.push(row);
     }
-    rows.push([{ text: "❌ Đóng", callback_data: "mode:close" }]);
+    rows.push([
+      { text: "❓ Vai trò", callback_data: "mode:info" },
+      { text: "❌ Đóng", callback_data: "mode:close" },
+    ]);
     const curLabel = cur ? `<b>${esc(cur)}</b>` : "<i>chưa chọn</i>";
     return {
       text: `<b>Chọn mode</b> — ${curLabel}\n<i>bấm để đổi · mode hiện tại đánh dấu ▶️</i>`,
@@ -921,6 +922,12 @@ export class Bot {
     if (id === "close") {
       await this.tg.answerCallbackQuery(cb.id);
       if (messageId) await this.tg.deleteMessage(chatId, messageId);
+      return;
+    }
+    if (id === "info") {
+      await this.tg.answerCallbackQuery(cb.id);
+      const lines = Object.entries(MODES).map(([mid, m]) => `• <code>${esc(mid)}</code> — ${esc(m.hint)}`);
+      await this.tg.sendMessage(chatId, `📖 <b>Vai trò các mode</b>\n${lines.join("\n")}`);
       return;
     }
     const m = MODES[id];
