@@ -39,6 +39,8 @@ export interface Config {
   guideQuestions: boolean;
   defaultAgent?: string;
   defaultModel?: ModelRef;
+  /** Default reasoning variant applied to each session (e.g. "xhigh"); overridable via /variants. */
+  defaultVariant: string;
   /** Directories the folder browser is allowed to walk. */
   browseRoots: string[];
 }
@@ -73,6 +75,7 @@ export function loadConfig(root: string): Config {
     stateFile: resolve(process.env.STATE_FILE?.trim() || resolve(root, "data/state.json")),
     replyMaxLen: Math.max(500, Number(process.env.TELEGRAM_REPLY_MAX_LEN?.trim() || 4000)),
     guideQuestions: process.env.OPENCODE_TG_GUIDE !== "0",
+    defaultVariant: process.env.OPENCODE_DEFAULT_VARIANT?.trim() || "xhigh",
     browseRoots: [],
   };
   const agent = process.env.OPENCODE_DEFAULT_AGENT?.trim();

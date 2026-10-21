@@ -93,6 +93,8 @@ export class Bot {
   private inflight = new Map<number, AbortController>();
   private browsers = new Map<number, BrowseState>();
   private questionForms = new Map<string, QuestionFormState>();
+  /** Repeating "typing…" timers, one per chat, so the indicator lasts until the reply is sent. */
+  private typing = new Map<number, ReturnType<typeof setInterval>>();
 
   constructor(
     private tg: Telegram,
@@ -104,6 +106,40 @@ export class Bot {
   /** Begin relaying OpenCode question forms to Telegram. Called once from index.ts. */
   start(): void {
     this.oc.subscribeEvents((ev) => this.onOpenCodeEvent(ev), (e) => warn("event stream:", e?.message ?? e));
+  }
+
+  /**
+   * Recover a reply that OpenCode produced but we never relayed — typically
+   * because the process restarted (or was killed, e.g. by a restart or crash)
+   * while a turn was still in flight. On startup, for each chat we've been
+   * tracking relays for, if the newest assistant message is newer than the last
+   * one we already sent, send it. Conservative: only sends when strictly newer
+   * (and only for chats that already have a lastRelayedTime), so a clean restart
+   * sends nothing and pre-feature state never triggers a replay burst.
+   */
+  async recoverOrphanedReplies(): Promise<void> {
+    for (const [chatKey, st] of Object.entries(this.st.all())) {
+      if (!st.sessionID || !st.lastRelayedTime) continue;
+      const chatId = Number(chatKey);
+      try {
+        const msgs = (await this.oc.listMessages(st.sessionID, 50).catch(() => [] as any[])) as any[];
+        const assistants = msgs
+          .filter((m: any) => m?.type === "assistant")
+          .sort((a: any, b: any) => (b.time?.created ?? 0) - (a.time?.created ?? 0));
+        const newest = assistants[0];
+        if (!newest || (newest.time?.created ?? 0) <= st.lastRelayedTime) continue; // already relayed
+        const text = (newest.content ?? [])
+          .filter((c: any) => c?.type === "text")
+          .map((c: any) => c.text)
+          .join("\n");
+        if (!text) continue;
+        await this.sendReply(chatId, text);
+        this.st.set(chatId, { lastRelayedTime: newest.time?.created });
+        log(`[chat ${chatId}] recovered a reply that was orphaned by a restart`);
+      } catch (e) {
+        warn("recoverOrphanedReplies:", (e as Error)?.message);
+      }
+    }
   }
 
   private allowed(uid?: number): boolean {
@@ -149,6 +185,25 @@ export class Bot {
     for (const c of mdToHtmlChunks(clean, this.cfg.replyMaxLen)) await this.tg.sendMessage(chatId, c);
   }
 
+  // ── typing indicator ─────────────────────────────────────────────────────────
+  /**
+   * Keep "typing…" showing for as long as the turn runs. Telegram's indicator
+   * expires after ~5s, so we re-arm it on a timer until the reply is sent (stopTyping).
+   */
+  private startTyping(chatId: number): void {
+    this.stopTyping(chatId);
+    this.tg.sendChatAction(chatId, "typing");
+    const t = setInterval(() => this.tg.sendChatAction(chatId, "typing"), 4000);
+    (t as any).unref?.();
+    this.typing.set(chatId, t);
+  }
+  /** Stop the repeating typing indicator for a chat (no-op if not running). */
+  private stopTyping(chatId: number): void {
+    const t = this.typing.get(chatId);
+    if (t) clearInterval(t);
+    this.typing.delete(chatId);
+  }
+
   // ── command dispatch ─────────────────────────────────────────────────────
   private async handleCommand(chatId: number, raw: string, state: ChatState): Promise<void> {
     const [cmd, ...rest] = raw.split(/\s+/);
@@ -177,6 +232,9 @@ export class Bot {
         return this.cmdAgents(chatId);
       case "/agent":
         return this.cmdAgent(chatId, arg, state);
+      case "/variants":
+      case "/variant":
+        return this.cmdVariants(chatId, arg, state);
       case "/stop":
         return this.cmdStop(chatId, state);
       case "/status":
@@ -196,27 +254,32 @@ export class Bot {
       await this.tg.sendMessage(chatId, "⏳ Still working on the previous message. Send /stop to interrupt.");
       return;
     }
-    let sid = state.sessionID;
-    if (!sid) {
-      this.tg.sendChatAction(chatId, "typing");
-      sid = await this.oc.createSession(state.directory || this.cfg.opencodeDirectory);
-      if (state.model) await this.oc.setModel(sid, state.model).catch((e) => warn("setModel:", e?.message));
-      if (state.agent) await this.oc.setAgent(sid, state.agent).catch((e) => warn("setAgent:", e?.message));
-      this.st.set(chatId, { sessionID: sid });
+    // Keep the "typing…" indicator alive for the whole turn (until the reply is sent).
+    this.startTyping(chatId);
+    try {
+      let sid = state.sessionID;
+      if (!sid) {
+        sid = await this.oc.createSession(state.directory || this.cfg.opencodeDirectory);
+        await this.applyModelAndVariant(sid, state);
+        if (state.agent) await this.oc.setAgent(sid, state.agent).catch((e) => warn("setAgent:", e?.message));
+        this.st.set(chatId, { sessionID: sid });
+      }
+      // Inject the "ask via question tool" preamble once per session so the agent
+      // knows it is headless and should surface decisions as answerable questions.
+      let promptText = text;
+      if (this.cfg.guideQuestions && !state.guided) {
+        promptText = QUESTIONS_PREAMBLE + "\n\n" + text;
+        this.st.set(chatId, { guided: true });
+      }
+      const ac = new AbortController();
+      this.inflight.set(chatId, ac);
+      log(`[chat ${chatId}] prompt on ${sid} (${text.length} chars)`);
+      // Fire-and-forget: don't block the polling loop; /stop aborts `ac`.
+      void this.runPromptTask(chatId, sid, promptText, ac).catch((e) => error("prompt task:", e?.message));
+    } catch (e) {
+      this.stopTyping(chatId); // don't leave "typing…" running if the prompt never started
+      throw e;
     }
-    // Inject the "ask via question tool" preamble once per session so the agent
-    // knows it is headless and should surface decisions as answerable questions.
-    let promptText = text;
-    if (this.cfg.guideQuestions && !state.guided) {
-      promptText = QUESTIONS_PREAMBLE + "\n\n" + text;
-      this.st.set(chatId, { guided: true });
-    }
-    const ac = new AbortController();
-    this.inflight.set(chatId, ac);
-    this.tg.sendChatAction(chatId, "typing");
-    log(`[chat ${chatId}] prompt on ${sid} (${text.length} chars)`);
-    // Fire-and-forget: don't block the polling loop; /stop aborts `ac`.
-    void this.runPromptTask(chatId, sid, promptText, ac).catch((e) => error("prompt task:", e?.message));
   }
 
   private async runPromptTask(chatId: number, sid: string, text: string, ac: AbortController): Promise<void> {
@@ -237,13 +300,18 @@ export class Bot {
           throw e;
         }
       }
+      this.stopTyping(chatId);
       const reply = res.reply || (res.interrupted ? "(interrupted — no text produced yet)" : "(no text reply)");
       await this.sendReply(chatId, reply);
+      // Remember the newest reply we've relayed so a restart can recover any that
+      // were produced but never sent (see recoverOrphanedReplies).
+      if (res.replyTime) this.st.set(chatId, { lastRelayedTime: res.replyTime });
       // A quiet italic footer. The <i> tags are meant to render (HTML mode), so
       // we do NOT escape the whole string — only the server-supplied outcome text.
       const meta = `<i>${esc(res.outcome ?? "")} · ${(res.elapsedMs / 1000).toFixed(1)}s${res.interrupted ? " · stopped" : ""}</i>`;
       await this.tg.sendMessage(chatId, meta).catch(() => {});
     } catch (e) {
+      this.stopTyping(chatId);
       error("prompt error:", (e as Error)?.message);
       const msg = isTransportError(e)
         ? "⚠️ Không thể nối tới OpenCode (service có thể đang restart / chưa chạy). Hẵng thử lại sau, hoặc kiểm tra `opencode service status`."
@@ -255,8 +323,29 @@ export class Bot {
   }
 
   private async stopCurrent(chatId: number): Promise<void> {
+    this.stopTyping(chatId);
     const ac = this.inflight.get(chatId);
     if (ac) ac.abort();
+  }
+
+  // ── model + variant helpers ─────────────────────────────────────────────────────
+  /** Resolve the model ref to use: explicit per-chat > config default > session's current model. */
+  private async resolveModel(state: ChatState, sessionID?: string): Promise<{ id: string; providerID: string } | null> {
+    if (state.model) return state.model;
+    if (this.cfg.defaultModel) return this.cfg.defaultModel;
+    if (sessionID) {
+      const s = await this.oc.getSession(sessionID).catch(() => null);
+      if (s?.model?.id && s?.model?.providerID) return { id: s.model.id, providerID: s.model.providerID };
+    }
+    return null;
+  }
+
+  /** Apply the chat's model + effective variant to a session (best-effort, non-fatal). */
+  private async applyModelAndVariant(sessionID: string, state: ChatState): Promise<void> {
+    const model = await this.resolveModel(state, sessionID);
+    if (!model) return;
+    const variant = state.variant ?? this.cfg.defaultVariant;
+    await this.oc.setModel(sessionID, { ...model, variant }).catch((e) => warn("applyModelAndVariant:", e?.message));
   }
 
   // ── commands ─────────────────────────────────────────────────────────────
@@ -273,9 +362,10 @@ export class Bot {
       "/dir [path] — show / set the working directory",
       "/browse [path] — duyệt thư mục bằng nút bấm và mở OpenCode tại đó",
       "",
-      "<b>Model &amp; agent</b>",
-      "/models — list models · /model &lt;id&gt; — set model",
-      "/agents — list agents · /agent &lt;id&gt; — set agent",
+       "<b>Model &amp; agent</b>",
+       "/models — list models · /model &lt;id&gt; — set model",
+       "/variants — list/set reasoning variant (default xhigh)",
+       "/agents — list agents · /agent &lt;id&gt; — set agent",
       "",
       "<b>Câu hỏi (questions)</b>",
       "Khi OpenCode cần hỏi bạn, chọn đáp án bằng nút bấm hoặc tự gõ.",
@@ -292,9 +382,8 @@ export class Bot {
   private async cmdNew(chatId: number, state: ChatState): Promise<void> {
     await this.stopCurrent(chatId);
     const dir = state.directory || this.cfg.opencodeDirectory;
-    this.tg.sendChatAction(chatId, "typing");
     const sessionID = await this.oc.createSession(dir);
-    if (state.model) await this.oc.setModel(sessionID, state.model).catch((e) => warn("setModel:", e?.message));
+    await this.applyModelAndVariant(sessionID, state);
     if (state.agent) await this.oc.setAgent(sessionID, state.agent).catch((e) => warn("setAgent:", e?.message));
     this.st.set(chatId, { sessionID, directory: dir });
     await this.tg.sendMessage(chatId, `🆕 New session <code>${sessionID}</code>\ndir: <code>${esc(dir)}</code>`);
@@ -532,9 +621,7 @@ export class Bot {
           const state = this.st.get(chatId);
           await this.stopCurrent(chatId);
           const sessionID = await this.oc.createSession(b.path);
-          if (state.model) {
-            await this.oc.setModel(sessionID, state.model).catch((e) => warn("setModel:", e?.message));
-          }
+          await this.applyModelAndVariant(sessionID, state);
           if (state.agent) {
             await this.oc.setAgent(sessionID, state.agent).catch((e) => warn("setAgent:", e?.message));
           }
@@ -575,10 +662,29 @@ export class Bot {
   private async cmdModels(chatId: number): Promise<void> {
     const models = await this.oc.listModels();
     const cur = this.st.get(chatId).model?.id;
-    const lines = models
-      .slice(0, 25)
-      .map((m) => `${cur === m.id ? "▶️ " : ""}<code>${m.id}</code>${m.name ? ` — ${esc(m.name)}` : ""}`);
-    await this.sendHtml(chatId, `<b>Models (${models.length})</b> — first 25 shown.\n${lines.join("\n")}\n\nSet with /model &lt;id&gt;`);
+    const max = this.cfg.replyMaxLen;
+    const footer = "\n\nSet with /model <id>";
+    // Show EVERY model, packed into ≤max-char pages on line boundaries so each
+    // message is valid HTML with balanced tags (no mid-tag cuts → no 400s).
+    const units = [
+      `<b>Models (${models.length})</b>`,
+      ...models.map((m) => `${cur === m.id ? "▶️ " : ""}<code>${m.id}</code>${m.name ? ` — ${esc(m.name)}` : ""}`),
+    ];
+    const pages: string[] = [];
+    let page = "";
+    for (let i = 0; i < units.length; i++) {
+      const unit = units[i];
+      const final = i === units.length - 1;
+      const budget = max - (final ? footer.length : 0);
+      if (page && (page + "\n" + unit).length > budget) {
+        pages.push(page);
+        page = unit;
+      } else {
+        page = page ? page + "\n" + unit : unit;
+      }
+    }
+    if (page) pages.push(page + footer);
+    for (const p of pages) await this.tg.sendMessage(chatId, p);
   }
 
   private async cmdModel(chatId: number, arg: string, state: ChatState): Promise<void> {
@@ -588,9 +694,7 @@ export class Bot {
     if (!m) return this.tg.sendMessage(chatId, `❌ Unknown model: <code>${esc(arg)}</code>. See /models.`);
     this.st.set(chatId, { model: { id: m.id, providerID: m.providerID } });
     if (state.sessionID) {
-      await this.oc.setModel(state.sessionID, { id: m.id, providerID: m.providerID }).catch((e) =>
-        error("setModel:", e?.message),
-      );
+      await this.applyModelAndVariant(state.sessionID, this.st.get(chatId));
       await this.tg.sendMessage(chatId, `✅ Model → <code>${esc(m.id)}</code> (applied to current session)`);
     } else {
       await this.tg.sendMessage(chatId, `✅ Model → <code>${esc(m.id)}</code> (applies on /new)`);
@@ -619,6 +723,46 @@ export class Bot {
     }
   }
 
+  /**
+   * List or set the model's reasoning "variant" (e.g. xhigh / high / medium / low).
+   * No arg → show available variants + current. With arg → set it (persisted for
+   * this chat, applied to the current session if one is open).
+   */
+  private async cmdVariants(chatId: number, arg: string, state: ChatState): Promise<void> {
+    const want = arg.trim().toLowerCase();
+    const model = await this.resolveModel(state, state.sessionID);
+    const variants = model ? await this.oc.getVariants(model) : [];
+    const cur = state.variant ?? this.cfg.defaultVariant;
+
+    if (!want) {
+      const lines = variants.length
+        ? variants.map((v) => `${v === cur ? "▶️ " : ""}<code>${esc(v)}</code>`).join("\n")
+        : "<i>(no variants reported for this model)</i>";
+      const modelLabel = model ? ` — <code>${esc(model.id)}</code>` : " — <i>no model set</i>";
+      await this.sendHtml(
+        chatId,
+        `<b>Variants</b>${modelLabel}\n${lines}\n\n<i>current: ${esc(cur)}</i>\nSet with /variants &lt;id&gt;`,
+      );
+      return;
+    }
+    if (!model) {
+      return this.tg.sendMessage(chatId, "❌ No model set. Use /model first, then set a variant.");
+    }
+    if (variants.length && !variants.includes(want)) {
+      return this.tg.sendMessage(
+        chatId,
+        `❌ Unknown variant <code>${esc(want)}</code>. Available: ${esc(variants.join(", "))}`,
+      );
+    }
+    this.st.set(chatId, { variant: want });
+    if (state.sessionID) {
+      await this.applyModelAndVariant(state.sessionID, this.st.get(chatId));
+      await this.tg.sendMessage(chatId, `✅ Variant → <code>${esc(want)}</code> (applied to current session)`);
+    } else {
+      await this.tg.sendMessage(chatId, `✅ Variant → <code>${esc(want)}</code> (applies on /new)`);
+    }
+  }
+
   private async cmdStop(chatId: number, state: ChatState): Promise<void> {
     await this.stopCurrent(chatId);
     if (state.sessionID) await this.oc.interrupt(state.sessionID).catch(() => {});
@@ -634,6 +778,7 @@ export class Bot {
       `dir: <code>${esc(state.directory || this.cfg.opencodeDirectory)}</code>`,
       `session: ${state.sessionID ? `<code>${state.sessionID}</code>` : "none"}`,
       `model: ${state.model ? `<code>${state.model.id}</code>` : "default"}`,
+      `variant: <code>${esc(state.variant ?? this.cfg.defaultVariant)}</code>`,
       `agent: ${state.agent ? `<code>${state.agent}</code>` : "default"}`,
       `state: ${busy ? "⏳ busy" : "🟢 idle"}`,
     ];

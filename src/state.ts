@@ -11,8 +11,12 @@ export interface ChatState {
   directory?: string;
   model?: ModelRef;
   agent?: string;
+  /** Reasoning variant for the current model (e.g. "xhigh"); falls back to cfg.defaultVariant. */
+  variant?: string;
   /** Set once this session has received the "ask via question tool" preamble. */
   guided?: boolean;
+  /** time.created of the last assistant reply already relayed to Telegram (drives orphan recovery). */
+  lastRelayedTime?: number;
 }
 
 export type StateMap = Record<string, ChatState>;
@@ -56,6 +60,11 @@ export class StateManager {
       if (s.sessionID === sessionID) return chatId;
     }
     return undefined;
+  }
+
+  /** All chat states (used by the startup orphan-recovery sweep). */
+  all(): StateMap {
+    return this.data;
   }
 
   private save(): void {

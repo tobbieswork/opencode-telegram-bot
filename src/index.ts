@@ -34,6 +34,9 @@ async function main(): Promise<void> {
   const st = new StateManager(cfg.stateFile);
   const bot = new Bot(tg, oc, st, cfg);
   bot.start(); // relay OpenCode question forms to Telegram
+  // Recover any reply a previous (crashed/restarted) process produced but never
+  // relayed. Fire-and-forget so polling starts immediately.
+  void bot.recoverOrphanedReplies().catch((e) => warn("reply recovery:", e?.message));
 
   let shuttingDown = false;
   const shutdown = (sig: string): void => {

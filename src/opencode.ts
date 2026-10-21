@@ -7,6 +7,8 @@ export interface ModelInfo {
   id: string;
   providerID: string;
   name?: string;
+  /** Variant ids the model offers (e.g. ["xhigh","high","medium","low"]); empty if unknown. */
+  variants: string[];
 }
 export interface AgentInfo {
   id: string;
@@ -23,6 +25,8 @@ export interface PromptResult {
   outcome?: string;
   interrupted: boolean;
   elapsedMs: number;
+  /** time.created of the assistant message that produced `reply` (0 if none). */
+  replyTime?: number;
 }
 
 /**
@@ -164,8 +168,22 @@ export class OpenCodeCtl {
     this.ensureClient();
     if (this.modelsCache) return this.modelsCache;
     const arr = (unwrap<any[]>(await retryTransient(() => this.client.model.list())) ?? []) as any[];
-    this.modelsCache = arr.map((m) => ({ id: m.id, providerID: m.providerID, name: m.name }));
+    this.modelsCache = arr.map((m) => ({
+      id: m.id,
+      providerID: m.providerID,
+      name: m.name,
+      variants: ((m.variants ?? []) as any[]).map((v) => v?.id).filter(Boolean) as string[],
+    }));
     return this.modelsCache;
+  }
+
+  /** Variant ids a model offers (drives the /variants command). Empty if the model has none. */
+  async getVariants(model: { id: string; providerID: string }): Promise<string[]> {
+    const models = await this.listModels();
+    const m =
+      models.find((x) => x.id === model.id && x.providerID === model.providerID) ??
+      models.find((x) => x.id === model.id);
+    return m?.variants ?? [];
   }
 
   async listAgents(): Promise<AgentInfo[]> {
@@ -190,7 +208,7 @@ export class OpenCodeCtl {
     return id as string;
   }
 
-  async setModel(sessionID: string, model: { id: string; providerID: string }): Promise<void> {
+  async setModel(sessionID: string, model: { id: string; providerID: string; variant?: string }): Promise<void> {
     this.ensureClient();
     await retryTransient(() => this.client.session.switchModel({ sessionID, model }));
   }
@@ -267,6 +285,7 @@ export class OpenCodeCtl {
     // (i.e. produced by THIS turn). The session can go idle a moment before the
     // final message is listed, so re-check a few times before giving up.
     let reply = "";
+    let replyTime = 0;
     for (let attempt = 0; attempt < 4; attempt++) {
       const messages = (await this.listMessages(sessionID, 200).catch(() => [])) as any[];
       const fresh = messages.filter((m: any) => m && m.id && !beforeIds.has(m.id));
@@ -278,6 +297,7 @@ export class OpenCodeCtl {
           .join("\n");
         if (t) {
           reply = t;
+          replyTime = m.time?.created ?? 0;
           break; // messages are newest-first, so the first hit is the latest
         }
       }
@@ -290,7 +310,7 @@ export class OpenCodeCtl {
     } catch {
       /* ignore */
     }
-    return { reply, outcome, interrupted, elapsedMs: Date.now() - t0 };
+    return { reply, outcome, interrupted, elapsedMs: Date.now() - t0, replyTime };
   }
 
   // ── questions / forms ────────────────────────────────────────────────────
