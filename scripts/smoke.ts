@@ -110,6 +110,26 @@ async function main(): Promise<void> {
   await bot.handle(upd("/agents"));
   show("/agents");
 
+  // ── mode picker (buttons) ─────────────────────────────────────────────────────
+  await bot.handle(upd("/mode"));
+  show("mode: picker");
+  const modeKb = mock.keyboards[mock.keyboards.length - 1];
+  console.log("mode keyboard:", JSON.stringify(modeKb, null, 2));
+  const mBtn = JSON.stringify(modeKb).match(/mode:(plan|build|general|explore)/);
+  console.log("mode option button:", mBtn ? mBtn[0] : "NOT FOUND");
+  if (mBtn) {
+    await bot.handle(tap("mode:plan"));
+    show("mode: tap plan");
+    await bot.handle(tap("mode:build"));
+    show("mode: tap build");
+  }
+  await bot.handle(upd("/mode explore"));
+  show("mode: text switch to explore");
+  await bot.handle(tap("mode:build"));
+  show("mode: back to build (for the rest of the smoke)");
+  await bot.handle(tap("mode:close"));
+  show("mode: close picker");
+
   await bot.handle(upd("/dir"));
   show("/dir");
 

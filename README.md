@@ -90,6 +90,7 @@ bot:   The last commit adds retry logic but…
 | `/variants [id]` | List/set the model's reasoning variant (default `xhigh`) |
 | `/agents` | List user-facing agents |
 | `/agent <id>` | Set the agent (`build`, `general`, `explore`, `plan`) |
+| `/mode` | Pick an operating mode via buttons — `build` / `plan` / `general` / `explore` |
 | `/stop` | Interrupt the running task |
 | `/history` | Show the last few messages of the current session |
 | `/status` | Show what the bot is connected to |

@@ -11,6 +11,21 @@ import { log, warn, error } from "./logger.js";
 /** Agents shown to the user (the rest are internal OpenCode roles). */
 const AGENT_WHITELIST = ["build", "general", "explore", "plan"];
 
+/**
+ * User-facing "modes" — a small, curated set of operating styles the user can
+ * flip between with one command. A mode is just a friendlier label for an
+ * OpenCode agent (the thing that actually changes behaviour), so `/mode` is a
+ * higher-level front-end over `/agent` for the two workflows people switch
+ * between most: planning vs building. The current mode is derived from the
+ * session's agent, so /agent and /mode can never disagree.
+ */
+const MODES: Record<string, { agent: string; hint: string }> = {
+  build: { agent: "build", hint: "mặc định — viết & sửa code theo permission" },
+  plan: { agent: "plan", hint: "chỉ phân tích & lên kế hoạch — không sửa code" },
+  general: { agent: "general", hint: "đa dụng: research, multi-step, chạy song song" },
+  explore: { agent: "explore", hint: "duyệt codebase nhanh (tìm file/keyword)" },
+};
+
 /** Directory buttons shown per page in the folder browser. */
 const BROWSE_PAGE_SIZE = 12;
 /** Directory buttons per row in the folder browser. */
@@ -232,6 +247,9 @@ export class Bot {
         return this.cmdAgents(chatId);
       case "/agent":
         return this.cmdAgent(chatId, arg, state);
+      case "/modes":
+      case "/mode":
+        return this.cmdMode(chatId, arg, state);
       case "/variants":
       case "/variant":
         return this.cmdVariants(chatId, arg, state);
@@ -362,8 +380,9 @@ export class Bot {
       "/dir [path] — show / set the working directory",
       "/browse [path] — duyệt thư mục bằng nút bấm và mở OpenCode tại đó",
       "",
-       "<b>Model &amp; agent</b>",
-       "/models — list models · /model &lt;id&gt; — set model",
+        "<b>Mode &amp; model/agent</b>",
+        "/mode — chọn mode bằng nút: build / plan / general / explore",
+        "/models — list models · /model &lt;id&gt; — set model",
        "/variants — list/set reasoning variant (default xhigh)",
        "/agents — list agents · /agent &lt;id&gt; — set agent",
       "",
@@ -554,6 +573,10 @@ export class Bot {
       await this.handleFormCallback(cb, chatId, messageId);
       return;
     }
+    if (data.startsWith("mode:")) {
+      await this.handleModeCallback(cb, chatId, messageId);
+      return;
+    }
     if (!data.startsWith("bs:")) {
       await this.tg.answerCallbackQuery(cb.id);
       return;
@@ -723,6 +746,92 @@ export class Bot {
     }
   }
 
+  /** The current mode, derived from the session's agent (a curated label). */
+  private currentMode(state: ChatState): string | undefined {
+    return Object.entries(MODES).find(([, m]) => m.agent === state.agent)?.[0];
+  }
+
+  /** Switch the chat's mode (agent): persist it and apply to the open session. */
+  private async applyMode(chatId: number, state: ChatState, agent: string): Promise<void> {
+    this.st.set(chatId, { agent });
+    if (state.sessionID) {
+      await this.oc.setAgent(state.sessionID, agent).catch((e) => error("setAgent:", e?.message));
+    }
+  }
+
+  /** Build the inline "pick a mode" message: a short header + one button per mode. */
+  private renderModePicker(state: ChatState): { text: string; keyboard: Keyboard } {
+    const cur = this.currentMode(state);
+    const entries = Object.entries(MODES);
+    const rows: Btn[][] = [];
+    for (let i = 0; i < entries.length; i += 2) {
+      const row: Btn[] = [];
+      for (let j = i; j < Math.min(i + 2, entries.length); j++) {
+        const [id] = entries[j];
+        row.push({ text: `${cur === id ? "▶️ " : ""}${id}`, callback_data: `mode:${id}` });
+      }
+      rows.push(row);
+    }
+    rows.push([{ text: "❌ Đóng", callback_data: "mode:close" }]);
+    const curLabel = cur ? `<b>${esc(cur)}</b>` : "<i>chưa chọn</i>";
+    return {
+      text: `<b>Chọn mode</b> — ${curLabel}\n<i>bấm để đổi · mode hiện tại đánh dấu ▶️</i>`,
+      keyboard: { inline_keyboard: rows },
+    };
+  }
+
+  /**
+   * Show the mode picker (inline buttons), or switch straight to `/mode <name>`.
+   * A mode is a friendly front-end over the agent; the current mode is derived
+   * from the session's agent, so /agent and /mode can never disagree.
+   */
+  private async cmdMode(chatId: number, arg: string, state: ChatState): Promise<void> {
+    const want = arg.trim().toLowerCase();
+    if (!want) {
+      const v = this.renderModePicker(state);
+      await this.tg.sendMessage(chatId, v.text, { reply_markup: v.keyboard });
+      return;
+    }
+    const m = MODES[want];
+    if (!m) {
+      const v = this.renderModePicker(state);
+      await this.tg.sendMessage(chatId, `❌ Unknown mode: <code>${esc(want)}</code>`, { reply_markup: v.keyboard });
+      return;
+    }
+    await this.applyMode(chatId, state, m.agent);
+    const applied = state.sessionID ? "applied" : "applies on /new";
+    const v = this.renderModePicker(state);
+    await this.tg.sendMessage(chatId, `✅ Mode → <b>${esc(want)}</b> (${applied})`, { reply_markup: v.keyboard });
+  }
+
+  /** Handle a tap on the mode picker (switch in place, or close the picker). */
+  private async handleModeCallback(cb: CallbackQuery, chatId: number, messageId: number | undefined): Promise<void> {
+    const id = (cb.data ?? "").split(":")[1];
+    if (id === "close") {
+      await this.tg.answerCallbackQuery(cb.id);
+      if (messageId) await this.tg.deleteMessage(chatId, messageId);
+      return;
+    }
+    const m = MODES[id];
+    if (!m) {
+      await this.tg.answerCallbackQuery(cb.id, `❌ Unknown mode: ${esc(id)}`);
+      return;
+    }
+    const state = this.st.get(chatId);
+    const wasCurrent = this.currentMode(state) === id;
+    try {
+      await this.applyMode(chatId, state, m.agent);
+    } catch (e) {
+      await this.tg.answerCallbackQuery(cb.id, `⚠️ ${(e as Error).message}`);
+      return;
+    }
+    await this.tg.answerCallbackQuery(cb.id, `Mode → ${id}`);
+    if (messageId && !wasCurrent) {
+      const v = this.renderModePicker(state);
+      await this.tg.editMessageText(chatId, messageId, v.text, { reply_markup: v.keyboard });
+    }
+  }
+
   /**
    * List or set the model's reasoning "variant" (e.g. xhigh / high / medium / low).
    * No arg → show available variants + current. With arg → set it (persisted for
@@ -772,6 +881,7 @@ export class Bot {
   private async cmdStatus(chatId: number, state: ChatState): Promise<void> {
     const info = await this.oc.serverInfo().catch(() => null);
     const busy = this.inflight.has(chatId);
+    const mode = this.currentMode(state);
     const lines = [
       `<b>OpenCode</b>${info?.version ? " v" + info.version : ""}`,
       `url: <code>${esc((info?.urls ?? [info?.url]).filter(Boolean).join(", ") || "?")}</code>`,
@@ -779,6 +889,7 @@ export class Bot {
       `session: ${state.sessionID ? `<code>${state.sessionID}</code>` : "none"}`,
       `model: ${state.model ? `<code>${state.model.id}</code>` : "default"}`,
       `variant: <code>${esc(state.variant ?? this.cfg.defaultVariant)}</code>`,
+      `mode: ${mode ? `<code>${esc(mode)}</code>` : "—"}`,
       `agent: ${state.agent ? `<code>${state.agent}</code>` : "default"}`,
       `state: ${busy ? "⏳ busy" : "🟢 idle"}`,
     ];
