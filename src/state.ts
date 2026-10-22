@@ -29,6 +29,28 @@ export interface WorkerInfo {
   lastResult?: string;
 }
 
+/**
+ * A pending question-form or permission the user hasn't answered yet, with the
+ * bookkeeping for the exponential-backoff reminder nudges (see cfg.remind*). The
+ * actual prompt lives in OpenCode; this is only the bot's reminder schedule. It
+ * is persisted so a bot restart resumes nudging where it left off. One entry per
+ * pending prompt (keyed by the form/permission id in ChatState.pendingPrompts),
+ * so a conv's form and permission don't overwrite each other.
+ */
+export interface PendingPrompt {
+  kind: "form" | "permission";
+  /** Rendered question/permission body (Telegram HTML), re-sent on each reminder. */
+  text: string;
+  /** Inline keyboard for the prompt, so a reminder can re-offer the answer buttons. */
+  keyboard?: unknown;
+  /** When the prompt was first shown (ms epoch). */
+  firstShownAt: number;
+  /** How many reminders have been sent so far. */
+  remindersSent: number;
+  /** When the next reminder is due (ms epoch). */
+  nextReminderAt: number;
+}
+
 export interface ChatState {
   sessionID?: string;
   directory?: string;
@@ -38,6 +60,18 @@ export interface ChatState {
   variant?: string;
   /** Set once this session has received the "ask via question tool" preamble. */
   guided?: boolean;
+  /**
+   * The sessionID the "stay in the user's language" instruction was applied to.
+   * Stored per-session (not a boolean) so a brand-new session after /new, /use,
+   * setsess, or plan→build gets the instruction re-applied on its first prompt.
+   */
+  guidedLanguageSession?: string;
+  /**
+   * Pending form/permission prompts awaiting the user's answer, keyed by the
+   * prompt id (form id / permission request id). Each carries its reminder
+   * schedule, so a conv may hold several at once without them overwriting.
+   */
+  pendingPrompts?: Record<string, PendingPrompt>;
   /** time.created of the last assistant reply already relayed to Telegram (drives orphan recovery). */
   lastRelayedTime?: number;
   /** Present when this conversation is a worker topic. */

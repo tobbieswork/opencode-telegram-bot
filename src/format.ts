@@ -16,6 +16,54 @@ export function trunc(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n) + "…";
 }
 
+/** Transient provider RATE LIMIT — NOT a full context, so /clear won't help; retrying shortly does. */
+const RATE_LIMIT_RE = /rate ?limit|per (minute|hour|day)|too many requests|requests per (minute|hour)|throttl|overloaded/i;
+
+/** A plan/quota/credit cap — does NOT clear in seconds, so "wait a moment" would be wrong advice. */
+const USAGE_CAP_RE = /usage limit|quota|limit reached|insufficient (credit|balance|fund)|out of credit|billing/i;
+
+/** The model's CONTEXT was exceeded — fixable by starting a fresh session. */
+const CONTEXT_OVERFLOW_RE =
+  /context (length|window|limit|size)|maximum context|prompt is too long|input length|too many tokens/i;
+
+/**
+ * A short, actionable Telegram-HTML message for a failed turn. A failed turn
+ * almost always means the provider rejected the request. The raw error comes
+ * from the newest assistant / idle / compaction message's `.error` field (the
+ * session object carries none). We distinguish a *rate limit* (wait and retry —
+ * /clear is useless) from a *usage cap* (wait for a reset or switch model) and
+ * from *context overflow* (start a fresh session), then fall back to the raw message.
+ */
+export function formatTurnFailure(
+  error: { type?: string; message?: string } | undefined,
+  elapsedMs: number,
+): string {
+  const secs = (elapsedMs / 1000).toFixed(1);
+  const raw = (error?.message ?? "").trim();
+  const text = `${error?.type ?? ""}\n${raw}`;
+  // A rate/usage cap is not a full context — tell the user to wait, not /clear.
+  if (RATE_LIMIT_RE.test(text)) {
+    const detail = raw ? `\n<i>${esc(trunc(raw, 200))}</i>` : "";
+    return `⏳ Provider đang giới hạn tốc độ (rate limit) — không phải lỗi context, chờ vài giây rồi thử lại.${detail}`;
+  }
+  // Checked after RATE_LIMIT_RE so "usage limit … per minute" stays a rate limit.
+  if (USAGE_CAP_RE.test(text)) {
+    const detail = raw ? `\n<i>${esc(trunc(raw, 200))}</i>` : "";
+    return `🚫 Đã hết hạn mức sử dụng của provider/model — chờ đến khi hạn mức được reset hoặc đổi model bằng /model.${detail}`;
+  }
+  if (CONTEXT_OVERFLOW_RE.test(text)) {
+    return (
+      "⚠️ <b>Session đã đầy context</b> — vượt giới hạn token của model nên không chạy tiếp được.\n" +
+      "Gõ <code>/clear</code> để bắt đầu phiên mới."
+    );
+  }
+  if (raw) {
+    const type = error?.type ? ` <code>${esc(error.type)}</code>` : "";
+    return `❌ <b>Turn lỗi</b>${type}: ${esc(trunc(raw, 400))}\n<i>${secs}s</i>`;
+  }
+  return `❌ <b>Turn bị lỗi</b> (${secs}s) — không có thông tin chi tiết. Nếu lặp lại, thử <code>/clear</code>.`;
+}
+
 /** Compact number for display: "1.2K" / "3.4M" (plain if < 1000). */
 export function fmtNum(n: number): string {
   if (!Number.isFinite(n)) return "0";
@@ -74,7 +122,15 @@ function blockToHtml(raw: string): string {
     return `<pre><code>${esc(inner)}</code></pre>`;
   }
   let out = esc(raw);
-  out = out.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+  // Pull inline code spans out FIRST so the bold/italic/strikethrough passes
+  // below can't mistake a literal `*`, `_` or `~` inside code (e.g. a regex
+  // like `.*`) for a Markdown delimiter — that produced unbalanced <i>/<b>
+  // tags and Telegram's "can't parse entities". Restored after the passes.
+  const codeSpans: string[] = [];
+  out = out.replace(/`([^`\n]+)`/g, (_m: string, inner: string) => {
+    codeSpans.push(`<code>${inner}</code>`);
+    return `\u0000${codeSpans.length - 1}\u0000`;
+  });
   out = out.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
   out = out.replace(/__([^_]+)__/g, "<b>$1</b>");
   out = out.replace(/~~([^~]+)~~/g, "<s>$1</s>");
@@ -86,6 +142,8 @@ function blockToHtml(raw: string): string {
   out = out.replace(/^#{1,6}\s+(.*)$/, "<b>$1</b>");
   out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2">$1</a>');
   out = out.replace(/^(\s*)[-*]\s+/, "$1• ");
+  // Put the code spans back now that no delimiter passes are left to misread them.
+  out = out.replace(/\u0000(\d+)\u0000/g, (m: string, i: string) => codeSpans[Number(i)] ?? m);
   return out;
 }
 

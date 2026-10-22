@@ -5,7 +5,7 @@
  *
  * Run:  npx tsx scripts/test-format.ts
  */
-import { mdToHtmlChunks, fmtNum, timeAgo } from "../src/format.js";
+import { mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure } from "../src/format.js";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: string): void {
@@ -14,6 +14,15 @@ function check(name: string, cond: boolean, detail?: string): void {
     failures++;
     console.error(`FAIL  ${name}${detail ? `\n      ${detail}` : ""}`);
   }
+}
+
+/** Per-tag open/close balance for one message (b/i/s/code/pre/a all must match). */
+function countTags(msg: string): Array<{ tag: string; ok: boolean }> {
+  return ["b", "i", "s", "code", "pre", "a"].map((tag) => {
+    const open = (msg.match(new RegExp(`<${tag}[ >]`, "g")) ?? []).length;
+    const close = (msg.match(new RegExp(`</${tag}>`, "g")) ?? []).length;
+    return { tag, ok: open === close };
+  });
 }
 
 const MAX = 4000;
@@ -122,6 +131,114 @@ const show = (label: string, units: string[]) => {
   const md2 = "**bold** and *italic* and `code`";
   const units3 = mdToHtmlChunks(md2, MAX);
   check("markdown: bold/italic/code", units3[0] === "<b>bold</b> and <i>italic</i> and <code>code</code>", units3[0]);
+
+  // regression: a literal `*` (or `_`) inside inline code must NOT be treated
+  // as a Markdown delimiter — previously this unbalanced the <i>/<b> tags and
+  // made Telegram reject the message with "can't parse entities".
+  const codeStar = "match `a.* b` then *italic* text";
+  const u4 = mdToHtmlChunks(codeStar, MAX);
+  check("code-star: single msg", u4.length === 1, JSON.stringify(u4));
+  check("code-star: code kept intact", u4[0].includes("<code>a.* b</code>"), u4[0]);
+  check("code-star: italic intact", u4[0].includes("<i>italic</i>"), u4[0]);
+  check(
+    "code-star: tags balanced",
+    countTags(u4[0]).every((c) => c.ok),
+    u4[0],
+  );
+  // the star inside code stays literal, the real star pair becomes <i>…</i>
+  const codeUnder = "run `snake_case file_` and *em* ok";
+  const u5 = mdToHtmlChunks(codeUnder, MAX);
+  check("code-underscore: code intact", u5[0].includes("<code>snake_case file_</code>"), u5[0]);
+  check("code-underscore: tags balanced", countTags(u5[0]).every((c) => c.ok), u5[0]);
+}
+
+// ── failure messaging (context overflow vs generic provider error vs no detail) ──
+{
+  const ctx = formatTurnFailure(
+    {
+      type: "provider.invalid-request",
+      message:
+        "litellm.BadRequestError: OpenAIException - Requested token count exceeds the model's maximum context length of 160000 tokens. You requested a total of 166771 tokens.",
+    },
+    2400,
+  );
+  console.log(`\n== context overflow ==\n${ctx}\n`);
+  check("fail: ctx detected as overflow", ctx.includes("đầy context"), ctx);
+  check("fail: ctx suggests /clear", ctx.includes("/clear"), ctx);
+  check("fail: ctx has no raw token dump", !ctx.includes("166771"), ctx);
+
+  // A rate limit is NOT context overflow — it must not suggest /clear (the review
+  // flagged the old regex matching "exceeds the rate limit" / "…per minute").
+  const rateLimit = formatTurnFailure(
+    { type: "provider.rate-limit", message: "429 Too Many Requests — back off and retry." },
+    1200,
+  );
+  console.log(`\n== rate limit ==\n${rateLimit}\n`);
+  check("fail: rate-limit labelled as such", rateLimit.includes("giới hạn tốc độ"), rateLimit);
+  check("fail: rate-limit NOT ctx (no /clear advice)", !rateLimit.includes("đầy context") && !rateLimit.includes("/clear"), rateLimit);
+  check("fail: rate-limit shows raw detail", rateLimit.includes("429 Too Many Requests"), rateLimit);
+
+  // The per-minute token cap must ALSO be treated as rate limit, not context.
+  const ratePerMinute = formatTurnFailure(
+    { type: "provider.error", message: "You have exceeded your current usage limit: max 40000 input tokens per minute." },
+    900,
+  );
+  check("fail: per-minute cap → rate limit, not ctx", ratePerMinute.includes("giới hạn tốc độ") && !ratePerMinute.includes("đầy context"), ratePerMinute);
+
+  // Anthropic's real context-overflow message must be detected as ctx (the review
+  // flagged the old regex missing "…exceed context limit").
+  const ctxAnthropic = formatTurnFailure(
+    { type: "provider.invalid-request", message: "400 {\"error\":{\"type\":\"invalid_request_error\",\"message\":\"input length and max_tokens exceed context limit: 250000 > 128000\"}}" },
+    800,
+  );
+  check("fail: anthropic ctx detected", ctxAnthropic.includes("đầy context"), ctxAnthropic);
+  check("fail: anthropic ctx suggests /clear", ctxAnthropic.includes("/clear"), ctxAnthropic);
+
+  // A usage/quota cap does not clear in seconds: it must NOT say "wait a few seconds",
+  // and must not suggest /clear. (Real error seen from the free-tier model.)
+  const usageCap = formatTurnFailure({ type: "provider.error", message: "Free usage limit reached" }, 900);
+  check("fail: usage cap labelled as such", usageCap.includes("hết hạn mức") && usageCap.includes("/model"), usageCap);
+  check("fail: usage cap is NOT a rate limit", !usageCap.includes("giới hạn tốc độ") && !usageCap.includes("vài giây"), usageCap);
+  check("fail: usage cap NOT ctx", !usageCap.includes("/clear") && !usageCap.includes("đầy context"), usageCap);
+  check("fail: usage cap shows raw detail", usageCap.includes("Free usage limit reached"), usageCap);
+
+  // A generic (non-rate, non-context) error shows the raw message + type + elapsed.
+  const other = formatTurnFailure(
+    { type: "provider.error", message: "Internal error 500: server exploded" },
+    1200,
+  );
+  console.log(`\n== generic provider error ==\n${other}\n`);
+  check("fail: other shows type", other.includes("provider.error"), other);
+  check("fail: other shows message", other.includes("server exploded"), other);
+  check("fail: other not mislabeled as ctx", !other.includes("đầy context"), other);
+  check("fail: other shows elapsed", other.includes("1.2s"), other);
+
+  const none = formatTurnFailure(undefined, 500);
+  console.log(`\n== no detail ==\n${none}\n`);
+  check("fail: none is generic", none.includes("không có thông tin chi tiết"), none);
+
+  // every variant is valid, balanced Telegram-HTML and short enough for one message
+  for (const [label, msg] of [
+    ["ctx", ctx],
+    ["rateLimit", rateLimit],
+    ["ratePerMinute", ratePerMinute],
+    ["usageCap", usageCap],
+    ["ctxAnthropic", ctxAnthropic],
+    ["other", other],
+    ["none", none],
+  ] as const) {
+    for (const tag of ["b", "i", "code"]) {
+      const open = (msg.match(new RegExp(`<${tag}[ >]`, "g")) ?? []).length;
+      const close = (msg.match(new RegExp(`</${tag}>`, "g")) ?? []).length;
+      check(`fail ${label}: <${tag}> balanced`, open === close, msg);
+    }
+    check(`fail ${label}: fits one message`, msg.length <= 4000, `${msg.length} chars`);
+  }
+
+  // a raw message full of HTML must be escaped, not injected (no ctx keyword
+  // so it routes through the raw-message path, not the context-overflow branch)
+  const hostile = formatTurnFailure({ message: "boom & <script>alert(1)</script>" }, 300);
+  check("fail: hostile html escaped", hostile.includes("&lt;script&gt;") && !hostile.includes("<script>"), hostile);
 }
 
 // ── every tag balanced in every message (the invariant that keeps Telegram happy)
