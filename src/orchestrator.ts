@@ -292,14 +292,57 @@ export class Orchestrator {
     await this.h.sendHtml(conv, `${head}\n\n${lines.join("\n")}\n\n<i>/kill &lt;tên&gt; để dừng · /stopall dừng tất cả</i>`);
   }
 
+  /**
+   * `/kill [tên]` — stop a worker. Without a valid target (and not inside a
+   * worker's own topic) the user gets a button picker of the chat's workers.
+   */
   private async cmdKill(conv: ConvKey, arg: string): Promise<void> {
-    const target = arg ? this.h.st.findWorker(conv, arg.trim())?.[0] : this.h.st.peek(conv)?.worker ? conv : undefined;
-    if (!target) {
-      await this.h.sendHtml(conv, arg ? `❌ Không có worker <code>${esc(arg)}</code>.` : "Usage: <code>/kill &lt;tên&gt;</code> (hoặc gõ /kill trong topic của worker)");
+    const name = arg.trim();
+    const target = name ? this.h.st.findWorker(conv, name)?.[0] : this.h.st.peek(conv)?.worker ? conv : undefined;
+    if (target) {
+      const msg = await this.stopWorker(target, true);
+      await this.h.sendHtml(conv, msg);
       return;
     }
-    const msg = await this.stopWorker(target, true);
-    await this.h.sendHtml(conv, msg);
+    await this.showKillPicker(conv, name ? `❌ Không có worker <code>${esc(name)}</code>` : undefined);
+  }
+
+  /** The /kill picker card: one stop-button per worker + a hint line. */
+  private async showKillPicker(conv: ConvKey, errorNote?: string): Promise<void> {
+    const workers = this.workersOf(conv).map(([, s]) => s.worker!);
+    if (!workers.length) {
+      await this.h.sendHtml(conv, "Không có worker nào — /spawn để tạo.");
+      return;
+    }
+    const rows: Btn[][] = workers.map((w) => [{ text: `${ICON[w.status]} ${w.name}`, callback_data: `kill:${w.name}` }]);
+    rows.push([{ text: "❌ Đóng", callback_data: "kill:close" }]);
+    await this.h.sendHtml(
+      conv,
+      [errorNote ?? "❓ <b>/kill</b> cần tên worker", "Bấm để dừng worker:", "Hoặc gửi: <code>/kill &lt;tên&gt;</code>"].join("\n"),
+      { reply_markup: { inline_keyboard: rows } },
+    );
+  }
+
+  /**
+   * Handle a tap on the /kill picker (data = `kill:<name|close>`). Public because
+   * it is dispatched from Bot.handleCallback, like the other orchestrator callbacks.
+   */
+  async handleKillCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+    const name = (cb.data ?? "").slice("kill:".length);
+    if (name === "close") {
+      await this.h.tg.answerCallbackQuery(cb.id);
+      if (messageId) await this.h.tg.deleteMessage(conv, messageId).catch(() => {});
+      return;
+    }
+    const found = this.h.st.findWorker(chatOf(conv), name);
+    if (!found) {
+      await this.h.tg.answerCallbackQuery(cb.id, "Worker không còn tồn tại.");
+      if (messageId) await this.h.tg.editMessageText(conv, messageId, "⌛ Worker không còn tồn tại — /board để xem lại.").catch(() => {});
+      return;
+    }
+    await this.h.tg.answerCallbackQuery(cb.id, `Dừng ${name}`);
+    const msg = await this.stopWorker(found[0], true);
+    if (messageId) await this.h.tg.editMessageText(conv, messageId, msg).catch(() => {});
   }
 
   private async cmdStopAll(conv: ConvKey): Promise<void> {

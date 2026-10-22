@@ -1,7 +1,7 @@
 import { isAbsolute, resolve } from "node:path";
 import { existsSync, statSync } from "node:fs";
 import { Telegram, Update, CallbackQuery, Message } from "./telegram.js";
-import { OpenCodeCtl, newMessageID, assistantText } from "./opencode.js";
+import { OpenCodeCtl, newMessageID, assistantText, ModelInfo, SessionBrief } from "./opencode.js";
 import { StateManager, ChatState } from "./state.js";
 import { ConvKey, convKey, chatOf } from "./conv.js";
 import { Orchestrator } from "./orchestrator.js";
@@ -39,6 +39,8 @@ const MODES: Record<string, { agent: string; hint: string }> = {
 const BROWSE_PAGE_SIZE = 12;
 /** Directory buttons per row in the folder browser. */
 const BROWSE_COLUMNS = 2;
+/** Models shown per page in the /model button picker. */
+const MODEL_PAGE_SIZE = 10;
 
 /**
  * Preamble prepended to the FIRST prompt of each session so the agent knows it is
@@ -150,6 +152,8 @@ export class Bot {
   private activity = new Map<ConvKey, { msgId: number; label: string; toolStart: number }>();
   /** Tool-call id → tool name per conv (learned from session.tool.input.started). */
   private toolNames = new Map<ConvKey, Map<string, string>>();
+  /** Open /model button pickers, one per conv (in-memory; dead buttons after a restart are handled). */
+  private modelPickers = new Map<ConvKey, { models: ModelInfo[]; page: number }>();
 
   /** Worker topics + the Manager agent (multi-session layer). */
   private orch: Orchestrator;
@@ -593,8 +597,9 @@ export class Bot {
       case "/mode":
         return this.cmdMode(conv, arg, state);
       case "/variants":
-      case "/variant":
         return this.cmdVariants(conv, arg, state);
+      case "/variant":
+        return this.cmdVariantSet(conv, arg, state);
       case "/stop":
         return this.cmdStop(conv, state);
       case "/status":
@@ -891,12 +896,68 @@ export class Bot {
     await this.sendHtml(conv, `<b>Sessions (${sessions.length})</b>\n${lines.join("\n")}${active}`);
   }
 
+  /**
+   * `/use [session-id]` — switch to a session. Without a valid argument the
+   * user gets a button picker of the 10 newest sessions instead of a usage line.
+   */
   private async cmdUse(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
-    if (!arg) return this.tg.sendMessage(conv, "Usage: /use <session-id>");
-    this.st.set(conv, { sessionID: arg });
-    this.cancelAllReminders(conv); // switching sessions abandons the old pending prompts
     void state;
+    let sessions: SessionBrief[] | undefined;
+    try {
+      sessions = await this.oc.listSessions();
+    } catch (e) {
+      warn("listSessions:", (e as Error).message);
+    }
+    if (!arg) {
+      if (!sessions) return this.tg.sendMessage(conv, "⚠️ Không liệt kê được session — kiểm tra OpenCode rồi thử lại.");
+      if (!sessions.length) return this.tg.sendMessage(conv, "Chưa có session — gửi /new để tạo.");
+      return this.sendUsePicker(conv, sessions, undefined);
+    }
+    // Unknown id (and the listing succeeded) → show the picker too; a failed
+    // listing keeps the old behaviour of trusting the typed id.
+    if (sessions && !sessions.some((s) => s.id === arg)) {
+      return this.sendUsePicker(conv, sessions, `❌ Không có session <code>${esc(arg)}</code>`);
+    }
+    this.applyUseState(conv, arg);
     await this.tg.sendMessage(conv, `✅ Now using session <code>${esc(arg)}</code>`);
+  }
+
+  /** Apply the /use switch: remember the session and drop its predecessor's pending prompts. */
+  private applyUseState(conv: ConvKey, sessionID: string): void {
+    this.st.set(conv, { sessionID });
+    this.cancelAllReminders(conv); // switching sessions abandons the old pending prompts
+  }
+
+  /** The /use picker card: newest 10 sessions as buttons + a "type it instead" hint. */
+  private sendUsePicker(conv: ConvKey, sessions: SessionBrief[], errorNote?: string): Promise<void> {
+    const cur = this.st.get(conv).sessionID;
+    const newest = [...sessions].sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0)).slice(0, 10);
+    const rows: Btn[][] = newest.map((s) => [
+      { text: `${s.id === cur ? "▶️ " : ""}${trunc(s.id, 10)}${s.title ? " " + trunc(s.title, 20) : ""}`, callback_data: `use:${s.id}` },
+    ]);
+    rows.push([
+      { text: "📄 Xem tất cả", callback_data: "use:ls" },
+      { text: "❌ Đóng", callback_data: "use:close" },
+    ]);
+    return this.tg.sendMessage(
+      conv,
+      [errorNote ?? "❓ <b>/use</b> cần session-id", "Bấm để chọn session (mới nhất trước):", "Hoặc gửi: <code>/use &lt;session-id&gt;</code>"].join("\n"),
+      { reply_markup: { inline_keyboard: rows } },
+    );
+  }
+
+  /** Handle a tap on the /use picker (data = `use:<id|ls|close>`). */
+  private async handleUseCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+    const id = (cb.data ?? "").slice("use:".length);
+    if (id === "close" || id === "ls") {
+      await this.tg.answerCallbackQuery(cb.id);
+      if (messageId) await this.tg.deleteMessage(conv, messageId).catch(() => {});
+      if (id === "ls") await this.cmdList(conv);
+      return;
+    }
+    this.applyUseState(conv, id);
+    await this.tg.answerCallbackQuery(cb.id, `Dùng ${trunc(id, 30)}`);
+    if (messageId) await this.tg.editMessageText(conv, messageId, `✅ Đang dùng session <code>${esc(id)}</code>`).catch(() => {});
   }
 
   private async cmdDir(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
@@ -1058,6 +1119,23 @@ export class Bot {
       await this.handlePlanToBuildCallback(cb, conv);
       return;
     }
+    if (data.startsWith("use:")) {
+      await this.handleUseCallback(cb, conv, messageId);
+      return;
+    }
+    if (data.startsWith("agent:")) {
+      await this.handleAgentCallback(cb, conv, messageId);
+      return;
+    }
+    if (data.startsWith("variant:")) {
+      await this.handleVariantCallback(cb, conv, messageId);
+      return;
+    }
+    if (data.startsWith("mdl:")) {
+      await this.handleModelCallback(cb, conv, messageId);
+      return;
+    }
+    if (data.startsWith("kill:")) return this.orch.handleKillCallback(cb, conv, messageId);
     if (await this.orch.handleCallback(cb, conv, messageId)) return;
     if (data.startsWith("cmd:")) {
       await this.runCommandButton(cb, conv, data.slice(4));
@@ -1252,17 +1330,105 @@ export class Bot {
     for (const p of pages) await this.tg.sendMessage(conv, p);
   }
 
+  /**
+   * `/model [id]` — set the model. Without a valid argument the user gets a
+   * paged button picker (10 models/page) instead of the text list.
+   */
   private async cmdModel(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
-    if (!arg) return this.cmdModels(conv);
-    const models = await this.oc.listModels();
+    void state;
+    let models: ModelInfo[];
+    try {
+      models = await this.oc.listModels();
+    } catch (e) {
+      return this.tg.sendMessage(conv, `⚠️ Không liệt kê được model: ${(e as Error).message}`);
+    }
+    if (!arg) return this.showModelPicker(conv, models, 0, undefined);
     const m = models.find((x) => x.id === arg || `${x.providerID}/${x.id}` === arg);
-    if (!m) return this.tg.sendMessage(conv, `❌ Unknown model: <code>${esc(arg)}</code>. See /models.`);
+    if (!m) return this.showModelPicker(conv, models, 0, `❌ Unknown model: <code>${esc(arg)}</code>`);
+    await this.applyModelPick(conv, m);
+    await this.tg.sendMessage(conv, `✅ Model → <code>${esc(m.id)}</code> (${this.st.get(conv).sessionID ? "applied to current session" : "applies on /new"})`);
+  }
+
+  /** Apply the model choice (shared by the typed command and the picker buttons). */
+  private async applyModelPick(conv: ConvKey, m: ModelInfo): Promise<void> {
     this.st.set(conv, { model: { id: m.id, providerID: m.providerID } });
-    if (state.sessionID) {
-      await this.applyModelAndVariant(state.sessionID, this.st.get(conv));
-      await this.tg.sendMessage(conv, `✅ Model → <code>${esc(m.id)}</code> (applied to current session)`);
-    } else {
-      await this.tg.sendMessage(conv, `✅ Model → <code>${esc(m.id)}</code> (applies on /new)`);
+    const sid = this.st.get(conv).sessionID;
+    if (sid) await this.applyModelAndVariant(sid, this.st.get(conv));
+  }
+
+  /** The text + keyboard for one page of the /model picker. */
+  private renderModelPage(models: ModelInfo[], page: number, errorNote?: string, curId?: string): { text: string; keyboard: Keyboard } {
+    const pageCount = Math.max(1, Math.ceil(models.length / MODEL_PAGE_SIZE));
+    const p = Math.max(0, Math.min(page, pageCount - 1));
+    const slice = models.slice(p * MODEL_PAGE_SIZE, (p + 1) * MODEL_PAGE_SIZE);
+    const rows: Btn[][] = [];
+    for (let i = 0; i < slice.length; i += 2) {
+      rows.push(
+        slice.slice(i, i + 2).map((m, j) => ({
+          text: `${curId === m.id ? "▶️ " : ""}${trunc(m.id, 28)}`,
+          callback_data: `mdl:sel:${p * MODEL_PAGE_SIZE + i + j}`,
+        })),
+      );
+    }
+    if (pageCount > 1) {
+      const nav: Btn[] = [];
+      if (p > 0) nav.push({ text: "⬅️", callback_data: `mdl:pg:${p - 1}` });
+      nav.push({ text: `${p + 1}/${pageCount}`, callback_data: "mdl:noop" });
+      if (p < pageCount - 1) nav.push({ text: "➡️", callback_data: `mdl:pg:${p + 1}` });
+      rows.push(nav);
+    }
+    rows.push([{ text: "❌ Đóng", callback_data: "mdl:close" }]);
+    return {
+      text: [errorNote ?? "❓ <b>/model</b> cần tên model", `<i>trang ${p + 1}/${pageCount} · Hoặc gửi: <code>/model &lt;id&gt;</code></i>`].join("\n"),
+      keyboard: { inline_keyboard: rows },
+    };
+  }
+
+  /** Open the model picker (or re-show it after a bad argument) and remember the model list. */
+  private async showModelPicker(conv: ConvKey, models: ModelInfo[], page: number, errorNote?: string): Promise<void> {
+    const pageCount = Math.max(1, Math.ceil(models.length / MODEL_PAGE_SIZE));
+    const p = Math.max(0, Math.min(page, pageCount - 1));
+    this.modelPickers.set(conv, { models, page: p });
+    const v = this.renderModelPage(models, p, errorNote, this.st.get(conv).model?.id);
+    await this.tg.sendMessage(conv, v.text, { reply_markup: v.keyboard });
+  }
+
+  /** Handle a tap on the /model picker (data = `mdl:sel:<i>` / `mdl:pg:<n>` / `mdl:close` / `mdl:noop`). */
+  private async handleModelCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+    const [, op, arg] = (cb.data ?? "").split(":");
+    if (op === "close") {
+      this.modelPickers.delete(conv);
+      await this.tg.answerCallbackQuery(cb.id);
+      if (messageId) await this.tg.deleteMessage(conv, messageId).catch(() => {});
+      return;
+    }
+    const mp = this.modelPickers.get(conv);
+    if (!mp) {
+      await this.tg.answerCallbackQuery(cb.id, "Danh sách model đã đóng — gửi /model để mở lại.");
+      return;
+    }
+    try {
+      if (op === "sel") {
+        const m = mp.models[Number(arg)];
+        if (!m) throw new Error("Model không còn trong danh sách — gửi /model để mở lại.");
+        await this.applyModelPick(conv, m);
+        this.modelPickers.delete(conv);
+        await this.tg.answerCallbackQuery(cb.id, `Model → ${trunc(m.id, 40)}`);
+        if (messageId) await this.tg.editMessageText(conv, messageId, `✅ Model → <code>${esc(m.id)}</code> (${this.st.get(conv).sessionID ? "applied" : "applies on /new"})`).catch(() => {});
+        return;
+      }
+      if (op === "pg") {
+        await this.tg.answerCallbackQuery(cb.id);
+        if (!messageId) return;
+        const v = this.renderModelPage(mp.models, Number(arg) || 0, undefined, this.st.get(conv).model?.id);
+        this.modelPickers.set(conv, { ...mp, page: Math.max(0, Math.min(Number(arg) || 0, Math.ceil(mp.models.length / MODEL_PAGE_SIZE) - 1)) });
+        await this.tg.editMessageText(conv, messageId, v.text, { reply_markup: v.keyboard }).catch(() => {});
+        return;
+      }
+      // "noop" or unknown
+      await this.tg.answerCallbackQuery(cb.id);
+    } catch (e) {
+      await this.tg.answerCallbackQuery(cb.id, `⚠️ ${(e as Error).message}`);
     }
   }
 
@@ -1275,16 +1441,68 @@ export class Bot {
     await this.sendHtml(conv, `<b>Agents</b>\n${lines.join("\n")}\n\nSet with /agent &lt;id&gt;`);
   }
 
+  /**
+   * `/agent [id]` — set the agent. Without a valid argument the user gets a
+   * button picker of the whitelisted agents instead of the text list.
+   */
   private async cmdAgent(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
-    if (!arg) return this.cmdAgents(conv);
-    const agents = await this.oc.listAgents();
-    if (!agents.some((a) => a.id === arg)) return this.tg.sendMessage(conv, `❌ Unknown agent: <code>${esc(arg)}</code>. See /agents.`);
-    this.st.set(conv, { agent: arg });
-    if (state.sessionID) {
-      await this.oc.setAgent(state.sessionID, arg).catch((e) => error("setAgent:", e?.message));
-      await this.tg.sendMessage(conv, `✅ Agent → <code>${esc(arg)}</code> (applied to current session)`);
-    } else {
-      await this.tg.sendMessage(conv, `✅ Agent → <code>${esc(arg)}</code> (applies on /new)`);
+    void state;
+    let agents: { id: string }[] | undefined;
+    try {
+      agents = await this.oc.listAgents();
+    } catch (e) {
+      warn("listAgents:", (e as Error).message);
+    }
+    if (!arg) return this.sendAgentPicker(conv, undefined);
+    // Unknown id (and the listing succeeded) → show the picker too; a failed
+    // listing keeps the old behaviour of trusting the typed id.
+    if (agents && !agents.some((a) => a.id === arg)) return this.sendAgentPicker(conv, `❌ Unknown agent: <code>${esc(arg)}</code>`);
+    const how = await this.applyAgent(conv, arg);
+    await this.tg.sendMessage(conv, `✅ Agent → <code>${esc(arg)}</code> (${how === "applied" ? "applied to current session" : "applies on /new"})`);
+  }
+
+  /** Apply the agent switch (shared by the typed command and the picker buttons). */
+  private async applyAgent(conv: ConvKey, agent: string): Promise<"applied" | "applies on /new"> {
+    this.st.set(conv, { agent });
+    const sid = this.st.get(conv).sessionID;
+    if (sid) {
+      await this.oc.setAgent(sid, agent).catch((e) => error("setAgent:", e?.message));
+      return "applied";
+    }
+    return "applies on /new";
+  }
+
+  /** The /agent picker card: one button per whitelisted agent + a hint line. */
+  private sendAgentPicker(conv: ConvKey, errorNote?: string): Promise<void> {
+    const cur = this.st.get(conv).agent;
+    const rows: Btn[][] = [];
+    for (let i = 0; i < AGENT_WHITELIST.length; i += 2) {
+      rows.push(
+        AGENT_WHITELIST.slice(i, i + 2).map((id) => ({ text: `${cur === id ? "▶️ " : ""}${id}`, callback_data: `agent:${id}` })),
+      );
+    }
+    rows.push([{ text: "❌ Đóng", callback_data: "agent:close" }]);
+    return this.tg.sendMessage(
+      conv,
+      [errorNote ?? "❓ <b>/agent</b> cần tên agent", "Hoặc gửi: <code>/agent &lt;id&gt;</code>"].join("\n"),
+      { reply_markup: { inline_keyboard: rows } },
+    );
+  }
+
+  /** Handle a tap on the /agent picker (data = `agent:<id|close>`). */
+  private async handleAgentCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+    const id = (cb.data ?? "").slice("agent:".length);
+    if (id === "close") {
+      await this.tg.answerCallbackQuery(cb.id);
+      if (messageId) await this.tg.deleteMessage(conv, messageId).catch(() => {});
+      return;
+    }
+    try {
+      const how = await this.applyAgent(conv, id);
+      await this.tg.answerCallbackQuery(cb.id, `Agent → ${id}`);
+      if (messageId) await this.tg.editMessageText(conv, messageId, `✅ Agent → <code>${esc(id)}</code> (${how})`).catch(() => {});
+    } catch (e) {
+      await this.tg.answerCallbackQuery(cb.id, `⚠️ ${(e as Error).message}`);
     }
   }
 
@@ -1320,7 +1538,7 @@ export class Bot {
     ]);
     const curLabel = cur ? `<b>${esc(cur)}</b>` : "<i>chưa chọn</i>";
     return {
-      text: `<b>Chọn mode</b> — ${curLabel}\n<i>bấm để đổi · mode hiện tại đánh dấu ▶️</i>`,
+      text: `<b>Chọn mode</b> — ${curLabel}\n<i>bấm để đổi · mode hiện tại đánh dấu ▶️</i>\nHoặc gửi: <code>/mode &lt;id&gt;</code>`,
       keyboard: { inline_keyboard: rows },
     };
   }
@@ -1405,9 +1623,8 @@ export class Bot {
   }
 
   /**
-   * List or set the model's reasoning "variant" (e.g. xhigh / high / medium / low).
-   * No arg → show available variants + current. With arg → set it (persisted for
-   * this chat, applied to the current session if one is open).
+   * `/variants [id]` — list (no arg) or set the reasoning "variant" as a plain
+   * text message. The button-pick version lives in cmdVariantSet (/variant).
    */
   private async cmdVariants(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
     const want = arg.trim().toLowerCase();
@@ -1435,12 +1652,75 @@ export class Bot {
         `❌ Unknown variant <code>${esc(want)}</code>. Available: ${esc(variants.join(", "))}`,
       );
     }
+    const how = await this.applyVariant(conv, want);
+    await this.tg.sendMessage(conv, `✅ Variant → <code>${esc(want)}</code> (${how})`);
+  }
+
+  /**
+   * `/variant [id]` — set the reasoning variant, with a button picker when the
+   * argument is missing (or unknown). Models without variants keep the plain
+   * text answer (delegated to cmdVariants).
+   */
+  private async cmdVariantSet(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
+    const want = arg.trim().toLowerCase();
+    let model: { id: string; providerID: string } | null = null;
+    let variants: string[] = [];
+    try {
+      model = await this.resolveModel(state, state.sessionID);
+      if (model) variants = await this.oc.getVariants(model);
+    } catch (e) {
+      warn("variant lookup:", (e as Error).message);
+    }
+    // No model, or the model reports no variants: keep the existing text output.
+    if (!model || !variants.length) return this.cmdVariants(conv, arg, state);
+    const cur = state.variant ?? this.cfg.defaultVariant;
+    if (!want) return this.sendVariantPicker(conv, variants, cur, undefined);
+    if (!variants.includes(want)) return this.sendVariantPicker(conv, variants, cur, `❌ Unknown variant <code>${esc(want)}</code>`);
+    const how = await this.applyVariant(conv, want);
+    await this.tg.sendMessage(conv, `✅ Variant → <code>${esc(want)}</code> (${how})`);
+  }
+
+  /** Apply the variant choice (shared by /variants, /variant and the picker buttons). */
+  private async applyVariant(conv: ConvKey, want: string): Promise<"applied to current session" | "applies on /new"> {
     this.st.set(conv, { variant: want });
-    if (state.sessionID) {
-      await this.applyModelAndVariant(state.sessionID, this.st.get(conv));
-      await this.tg.sendMessage(conv, `✅ Variant → <code>${esc(want)}</code> (applied to current session)`);
-    } else {
-      await this.tg.sendMessage(conv, `✅ Variant → <code>${esc(want)}</code> (applies on /new)`);
+    const sid = this.st.get(conv).sessionID;
+    if (sid) {
+      await this.applyModelAndVariant(sid, this.st.get(conv));
+      return "applied to current session";
+    }
+    return "applies on /new";
+  }
+
+  /** The /variant picker card: one button per variant + a hint line. */
+  private sendVariantPicker(conv: ConvKey, variants: string[], cur: string, errorNote?: string): Promise<void> {
+    const rows: Btn[][] = [];
+    for (let i = 0; i < variants.length; i += 2) {
+      rows.push(
+        variants.slice(i, i + 2).map((v) => ({ text: `${v === cur ? "▶️ " : ""}${v}`, callback_data: `variant:${v}` })),
+      );
+    }
+    rows.push([{ text: "❌ Đóng", callback_data: "variant:close" }]);
+    return this.tg.sendMessage(
+      conv,
+      [errorNote ?? "❓ <b>/variant</b> cần tên variant", "Hoặc gửi: <code>/variant &lt;id&gt;</code>"].join("\n"),
+      { reply_markup: { inline_keyboard: rows } },
+    );
+  }
+
+  /** Handle a tap on the /variant picker (data = `variant:<id|close>`). */
+  private async handleVariantCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+    const id = (cb.data ?? "").slice("variant:".length);
+    if (id === "close") {
+      await this.tg.answerCallbackQuery(cb.id);
+      if (messageId) await this.tg.deleteMessage(conv, messageId).catch(() => {});
+      return;
+    }
+    try {
+      const how = await this.applyVariant(conv, id);
+      await this.tg.answerCallbackQuery(cb.id, `Variant → ${id}`);
+      if (messageId) await this.tg.editMessageText(conv, messageId, `✅ Variant → <code>${esc(id)}</code> (${how})`).catch(() => {});
+    } catch (e) {
+      await this.tg.answerCallbackQuery(cb.id, `⚠️ ${(e as Error).message}`);
     }
   }
 
