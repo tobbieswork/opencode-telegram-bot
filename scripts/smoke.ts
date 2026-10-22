@@ -30,6 +30,7 @@ class MockTelegram {
   }
   async answerCallbackQuery(_id: string, _text?: string): Promise<void> {}
   async deleteMessage(_chatId: number, _messageId: number): Promise<void> {}
+  async setMyCommands(_commands: Array<{ command: string; description: string }>): Promise<void> {}
   sendChatAction(): void {}
   async getMe() {
     return { id: 1, username: "Mock" };
@@ -64,6 +65,9 @@ async function main(): Promise<void> {
   process.env.TELEGRAM_BOT_TOKEN = "dummy";
   process.env.TELEGRAM_ALLOWED_USER_IDS = "1";
   process.env.OPENCODE_DIRECTORY = "/tmp/opencode/testws";
+  // Keep the live activity line off: its "✅ … · Ns" text would trip the
+  // smoke's prompt-completed heuristics. It has its own unit tests.
+  process.env.OPENCODE_TG_ACTIVITY = "0";
   process.env.STATE_FILE = mkdtempSync(tmpdir() + "/ocbot-") + "/state.json";
   const cfg = loadConfig(root);
 

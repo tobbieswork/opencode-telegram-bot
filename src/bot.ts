@@ -1,6 +1,6 @@
 import { isAbsolute, resolve } from "node:path";
 import { existsSync, statSync } from "node:fs";
-import { Telegram, Update, CallbackQuery } from "./telegram.js";
+import { Telegram, Update, CallbackQuery, Message } from "./telegram.js";
 import { OpenCodeCtl, newMessageID, assistantText } from "./opencode.js";
 import { StateManager, ChatState } from "./state.js";
 import { ConvKey, convKey, chatOf } from "./conv.js";
@@ -8,11 +8,17 @@ import { Orchestrator } from "./orchestrator.js";
 import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure } from "./format.js";
 import { firstReminderAt, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
+import { toolActivityLabel, activityDoneLine } from "./activity.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
 import { log, warn, error } from "./logger.js";
 
 /** Agents shown to the user (the rest are internal OpenCode roles). */
 const AGENT_WHITELIST = ["build", "general", "explore", "plan"];
+
+/** The message carries media (sticker/photo/video/voice/…) — used to acknowledge non-text input. */
+function hasNonTextContent(m: Message): boolean {
+  return Boolean(m.sticker || m.photo || m.video || m.voice || m.audio || m.document || m.animation);
+}
 
 /**
  * User-facing "modes" — a small, curated set of operating styles the user can
@@ -140,6 +146,10 @@ export class Bot {
   private reminders = new Map<string, ReturnType<typeof setTimeout>>();
   /** Sessions from which we already stripped the language instruction this process (when the toggle is off), so we don't call removeInstruction every prompt. */
   private languageRemoved = new Set<string>();
+  /** The self-editing "agent is doing…" line per conv: message id + current label. */
+  private activity = new Map<ConvKey, { msgId: number; label: string; toolStart: number }>();
+  /** Tool-call id → tool name per conv (learned from session.tool.input.started). */
+  private toolNames = new Map<ConvKey, Map<string, string>>();
 
   /** Worker topics + the Manager agent (multi-session layer). */
   private orch: Orchestrator;
@@ -173,6 +183,8 @@ export class Bot {
     );
     // Resume any pending-prompt reminder nudges that were scheduled before a restart.
     this.resumePromptReminders();
+    // Register the Telegram /command autocomplete menu (cosmetic, best-effort).
+    this.registerCommands();
   }
 
   /**
@@ -299,11 +311,20 @@ export class Bot {
       return;
     }
     const msg = u.message ?? u.edited_message;
-    if (!msg || !msg.text) return;
+    if (!msg) return;
     const conv = this.convOf(msg);
     const uid = msg.from?.id as number | undefined;
-    const text = (msg.text as string).trim();
-    if (!text) return;
+    // A media caption counts as text: it goes through the same dispatch as a plain message.
+    const text = (msg.text ?? msg.caption ?? "").trim();
+    if (!text) {
+      // A media-only message (sticker/photo/voice/…): acknowledge instead of
+      // dropping it silently. Strangers are still ignored, as before.
+      if (hasNonTextContent(msg)) {
+        if (this.allowed(uid)) await this.noteNonText(conv, msg);
+        else log(`Denied media from uid=${uid} chat=${conv}`);
+      }
+      return;
+    }
     if (!this.allowed(uid)) {
       log(`Denied message from uid=${uid} chat=${conv}`);
       await this.tg
@@ -341,6 +362,18 @@ export class Bot {
     for (const c of mdToHtmlChunks(clean, this.cfg.replyMaxLen)) await this.tg.sendMessage(conv, c);
   }
 
+  /** A media message with no text/caption — acknowledge it; the bot reads text only. */
+  private async noteNonText(conv: ConvKey, msg: Message): Promise<void> {
+    const note = msg.sticker
+      ? "🫣 Tôi chỉ đọc được văn bản — hãy gõ nội dung, hoặc gửi ảnh kèm caption."
+      : msg.voice
+        ? "🎤 Tôi chưa nghe được voice — xin gửi nội dung dạng văn bản."
+        : msg.photo
+          ? "📷 Tôi chưa xem được ảnh — hãy gửi kèm caption để tôi xử lý."
+          : "📎 Tôi mới chỉ xử lý được tin nhắn văn bản (và caption của media).";
+    await this.tg.sendMessage(conv, note).catch(() => {});
+  }
+
   // ── typing indicator ─────────────────────────────────────────────────────────
   /**
    * Keep "typing…" showing for as long as the turn runs. Telegram's indicator
@@ -358,6 +391,60 @@ export class Bot {
     const t = this.typing.get(conv);
     if (t) clearInterval(t);
     this.typing.delete(conv);
+  }
+
+  // ── live tool activity (one self-editing line per conv) ─────────────────────
+  /** Show (or update) the "agent is doing…" line for a conv. */
+  private async showActivity(conv: ConvKey, label: string): Promise<void> {
+    if (!this.cfg.activity) return;
+    const cur = this.activity.get(conv);
+    if (cur) {
+      this.activity.set(conv, { ...cur, label, toolStart: Date.now() });
+      await this.tg.editMessageText(conv, cur.msgId, label).catch(() => {});
+    } else {
+      const msgId = await this.tg.sendMessageId(conv, label).catch(() => -1);
+      if (msgId > 0) this.activity.set(conv, { msgId, label, toolStart: Date.now() });
+    }
+  }
+
+  /** Mark the current tool done (✅/❌ + elapsed) on the activity line. */
+  private async finishActivity(conv: ConvKey, ok: boolean): Promise<void> {
+    const cur = this.activity.get(conv);
+    if (!cur) return;
+    const secs = (Date.now() - cur.toolStart) / 1000;
+    await this.tg.editMessageText(conv, cur.msgId, activityDoneLine(cur.label, ok, secs)).catch(() => {});
+  }
+
+  /** Remove the activity line when the turn ends (idempotent). */
+  private clearActivity(conv: ConvKey): void {
+    const cur = this.activity.get(conv);
+    this.activity.delete(conv);
+    this.toolNames.delete(conv);
+    if (cur) void this.tg.deleteMessage(conv, cur.msgId).catch(() => {});
+  }
+
+  /** One OpenCode tool event → update the activity line (no-op when disabled). */
+  private onToolEvent(t: string, d: any): void {
+    if (!this.cfg.activity) return;
+    const conv = d?.sessionID ? this.st.findChatBySession(d.sessionID) : undefined;
+    if (!conv) return;
+    const id = typeof d?.id === "string" ? d.id : undefined;
+    const names = this.toolNames.get(conv);
+    if (t === "session.tool.input.started") {
+      if (id && typeof d?.name === "string" && d.name) {
+        if (!names) this.toolNames.set(conv, new Map([[id, d.name]]));
+        else names.set(id, d.name);
+      }
+      return;
+    }
+    const name = id ? names?.get(id) : undefined;
+    if (name === "question") return; // the question card already shows this
+    if (t === "session.tool.called") {
+      void this.showActivity(conv, toolActivityLabel(name ?? "tool", d?.input));
+    } else {
+      void this.finishActivity(conv, t === "session.tool.success");
+      if (id) names?.delete(id);
+    }
   }
 
   // ── command dispatch ─────────────────────────────────────────────────────
@@ -635,6 +722,7 @@ export class Bot {
         : `❌ Error: ${esc((e as Error).message)}`;
       await this.tg.sendMessage(conv, msg).catch(() => {});
     } finally {
+      this.clearActivity(conv);
       this.inflight.delete(conv);
     }
   }
@@ -664,6 +752,7 @@ export class Bot {
    */
   private async stopCurrent(conv: ConvKey, interrupt = false): Promise<void> {
     this.stopTyping(conv);
+    this.clearActivity(conv);
     const ac = this.inflight.get(conv);
     if (ac) ac.abort();
     const sid = this.st.peek(conv)?.sessionID;
@@ -730,6 +819,38 @@ export class Bot {
        "Bấm một nút bên dưới để chạy lệnh ngay:",
      ].join("\n");
     await this.sendHtml(conv, txt, { reply_markup: this.commandMenu() });
+  }
+
+  /** Register the Telegram /command menu (autocomplete) — cosmetic, best-effort. */
+  private registerCommands(): void {
+    const c = (command: string, description: string) => ({ command, description });
+    void this.tg
+      .setMyCommands([
+        c("help", "Trợ giúp — danh sách lệnh + nút bấm"),
+        c("new", "Bắt đầu phiên làm việc mới"),
+        c("ls", "Liệt kê phiên gần đây"),
+        c("use", "Chuyển sang một phiên (cần id)"),
+        c("dir", "Xem/đặt thư mục làm việc"),
+        c("browse", "Duyệt thư mục bằng nút bấm"),
+        c("mode", "Chọn mode: build / plan / general / explore"),
+        c("models", "Liệt kê model khả dụng"),
+        c("model", "Đặt model (cần id)"),
+        c("variants", "Đặt reasoning variant (vd: xhigh)"),
+        c("stop", "Dừng task đang chạy"),
+        c("status", "Trạng thái kết nối"),
+        c("context", "Ảnh chụp phiên hiện tại (usage + files)"),
+        c("history", "Xem tin nhắn gần đây"),
+        c("clear", "Xoá state của chat này"),
+        c("spawn", "Tạo worker (topic + session riêng)"),
+        c("board", "Trạng thái mọi worker"),
+        c("kill", "Dừng một worker (cần tên)"),
+        c("stopall", "Dừng mọi worker"),
+        c("manager", "Bật/tắt Manager (on|off)"),
+        c("auto", "Manager tự giao việc hay chờ duyệt (on|off)"),
+        c("wt", "Worktree: diff / merge / xoá (trong topic worker)"),
+        c("prune", "Dọn topic worker đã xong (mặc định >7 ngày)"),
+      ])
+      .catch((e) => warn("setMyCommands:", e?.message));
   }
 
   /** The tappable command list shown under /help — one button per command. */
@@ -1450,6 +1571,16 @@ export class Bot {
       if (owner) this.orch.onResumed(owner);
       if (d?.requestID) void this.onPermissionResolved(d.requestID, d.reply);
     } else if (
+      t === "session.tool.input.started" ||
+      t === "session.tool.called" ||
+      t === "session.tool.success" ||
+      t === "session.tool.failed"
+    ) {
+      this.onToolEvent(t, ev?.data);
+    } else if (t === "session.shell.started" || t === "session.shell.ended") {
+      const conv = ev?.data?.sessionID ? this.st.findChatBySession(ev.data.sessionID) : undefined;
+      if (conv) void (t === "session.shell.started" ? this.showActivity(conv, "▶ Đang chạy shell…") : this.finishActivity(conv, true));
+    } else if (
       t === "session.execution.started" ||
       t === "session.execution.succeeded" ||
       t === "session.execution.failed" ||
@@ -1468,6 +1599,7 @@ export class Bot {
         this.startTyping(conv);
       } else {
         this.stopTyping(conv);
+        this.clearActivity(conv);
         void this.sweepUnrelayedReplies(conv, "turn ended out-of-band", t === "session.execution.succeeded");
       }
     }

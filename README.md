@@ -38,6 +38,15 @@ The whole Telegram transport is ~130 lines you can read in one sitting.
   conversation with its own session, so several agents can work in parallel —
   and an optional **Manager agent** in the main chat splits your requests into
   tasks and hands them to worker sessions (see below).
+- **Live activity line**: while a turn runs, one self-editing message shows
+  what the agent is doing right now (`📖 Đang đọc src/bot.ts…`,
+  `▶ Đang chạy npm test…`, then `✅` with elapsed time). Hidden with
+  `OPENCODE_TG_ACTIVITY=0`.
+- **Stickers & media**: you can send stickers, photos, voice notes and files —
+  the caption is used as the prompt text. Media without a caption gets a short
+  acknowledgement (the bot reads text, not pixels).
+- **Command menu**: the bot registers its `/` commands with Telegram, so typing
+  `/` in the chat autocompletes them.
 
 ## Prerequisites
 

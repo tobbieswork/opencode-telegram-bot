@@ -10,6 +10,15 @@ export type Message = {
   message_thread_id?: number;
   is_topic_message?: boolean;
   forum_topic_created?: { name: string };
+  /** Caption on media (photo/sticker/video/voice/document); counts as text. */
+  caption?: string;
+  sticker?: { file_id?: string; type?: string };
+  photo?: Record<string, unknown>[];
+  video?: Record<string, unknown>;
+  voice?: Record<string, unknown>;
+  audio?: Record<string, unknown>;
+  document?: Record<string, unknown>;
+  animation?: Record<string, unknown>;
 };
 
 export type CallbackQuery = {
@@ -86,6 +95,11 @@ export class Telegram {
   /** `has_topics_enabled` tells whether this bot has topic mode in private chats. */
   getMe(): Promise<{ id: number; username?: string; first_name?: string; has_topics_enabled?: boolean }> {
     return this.api("getMe");
+  }
+
+  /** Register the /command autocomplete menu shown while the user types "/". */
+  setMyCommands(commands: Array<{ command: string; description: string }>): Promise<void> {
+    return this.api("setMyCommands", { commands });
   }
 
   /** Fire-and-forget typing indicator. */

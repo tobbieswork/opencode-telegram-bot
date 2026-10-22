@@ -13,10 +13,11 @@
     "test:format": "tsx scripts/test-format.ts",
     "test:fsbrowser": "tsx scripts/test-fsbrowser.ts",
     "test:state": "tsx scripts/test-state.ts",
+    "test:activity": "tsx scripts/test-activity.ts",
     "test:reminders": "tsx scripts/test-reminders.ts",
     "test:prune": "tsx scripts/test-prune.ts",
     "test:config": "tsx scripts/test-config.ts",
-    "test:unit": "npm run test:format && npm run test:fsbrowser && npm run test:state && npm run test:multi && npm run test:reminders && npm run test:prune && npm run test:config",
+    "test:unit": "npm run test:format && npm run test:fsbrowser && npm run test:state && npm run test:multi && npm run test:activity && npm run test:reminders && npm run test:prune && npm run test:config",
     "typecheck": "tsc --noEmit",
     "test:multi": "tsx scripts/test-multi.ts",
     "smoke:multi": "tsx scripts/smoke-multi.ts"

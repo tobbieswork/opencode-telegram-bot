@@ -39,6 +39,8 @@ export interface Config {
   guideQuestions: boolean;
   /** Set a per-session "reply in the user's language" instruction (stops CJK leaks); off removes it. */
   guideLanguage: boolean;
+  /** Show a live "agent is doing…" activity line while a turn runs. */
+  activity: boolean;
   /** Remind the user about a pending question-form / permission they haven't answered. */
   remind: boolean;
   /** Base delay (ms) before the FIRST reminder for a pending form/permission. */
@@ -96,6 +98,7 @@ export function loadConfig(root: string): Config {
     replyMaxLen: Math.max(500, Number(process.env.TELEGRAM_REPLY_MAX_LEN?.trim() || 4000)),
     guideQuestions: process.env.OPENCODE_TG_GUIDE !== "0",
     guideLanguage: process.env.OPENCODE_TG_LANGUAGE !== "0",
+    activity: process.env.OPENCODE_TG_ACTIVITY !== "0",
     remind: process.env.OPENCODE_TG_REMIND !== "0",
     // parseIntSetting/parseFloatSetting guard against a non-numeric env value (e.g.
     // OPENCODE_TG_REMIND_MAX=abc) yielding NaN, which would make the backoff fire ~every ms.
