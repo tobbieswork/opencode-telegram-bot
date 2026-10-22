@@ -6,7 +6,8 @@ import { StateManager, ChatState } from "./state.js";
 import { ConvKey, convKey, chatOf } from "./conv.js";
 import { Orchestrator } from "./orchestrator.js";
 import { Config } from "./config.js";
-import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo } from "./format.js";
+import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure } from "./format.js";
+import { firstReminderAt, reminderBudgetExhausted, nextScheduleAfterReminder } from "./reminders.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
 import { log, warn, error } from "./logger.js";
 
@@ -43,6 +44,14 @@ const QUESTIONS_PREAMBLE =
   "When you need a decision or input from the user, ask with the `question` tool using clear " +
   "multiple-choice options, ONE question at a time; the user answers via Telegram buttons. " +
   "Prefer asking over guessing when genuinely ambiguous.]";
+
+/** Key under which the per-session language instruction is stored (namespaced `api/<key>`). */
+const LANGUAGE_INSTRUCTION_KEY = "tgbot.language";
+/** Injected per-session so the model keeps the user's language and does not leak CJK. */
+const LANGUAGE_INSTRUCTION =
+  "Always reply in the SAME language the user wrote in, throughout the entire answer. Do NOT " +
+  "switch to or mix in any other language (e.g. Chinese, English) within the same reply — this " +
+  "includes code comments, labels, and short phrases.";
 
 /** True when an error is a network-level "Transport: fetch failed" blip. */
 function isTransportError(e: any): boolean {
@@ -123,6 +132,14 @@ export class Bot {
   private typing = new Map<ConvKey, ReturnType<typeof setInterval>>();
   /** Chats whose unrelayed-reply sweep is currently running (prevents a double relay). */
   private sweeping = new Set<ConvKey>();
+  /**
+   * Pending-prompt reminder timers, keyed by `${conv}::${promptId}` (one per
+   * pending form/permission, so a conv's form and permission don't share a slot).
+   * Exponential backoff — see cfg.remind*.
+   */
+  private reminders = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Sessions from which we already stripped the language instruction this process (when the toggle is off), so we don't call removeInstruction every prompt. */
+  private languageRemoved = new Set<string>();
 
   /** Worker topics + the Manager agent (multi-session layer). */
   private orch: Orchestrator;
@@ -154,6 +171,8 @@ export class Bot {
         void this.reconcile().catch((e) => warn("reconcile:", e?.message));
       },
     );
+    // Resume any pending-prompt reminder nudges that were scheduled before a restart.
+    this.resumePromptReminders();
   }
 
   /**
@@ -335,6 +354,108 @@ export class Bot {
   }
 
   // ── command dispatch ─────────────────────────────────────────────────────
+  // ── pending-prompt reminders (exponential backoff) ──────────────────────────
+  /** Timer key: scope a reminder to a conv + prompt id so a conv's form and
+   *  permission (or several prompts) each keep their own schedule. */
+  private reminderKey(conv: ConvKey, promptId: string): string {
+    return `${conv}::${promptId}`;
+  }
+
+  /**
+   * (Re)start the reminder nudges for one pending form/permission. Exponential
+   * backoff: the 1st reminder fires after `remindBaseMs`, each later one farther
+   * out (`base * factor^n`) — deliberately NOT a fixed interval.
+   */
+  private startPromptReminder(conv: ConvKey, promptId: string, kind: "form" | "permission", text: string, keyboard?: unknown): void {
+    if (!this.cfg.remind) return;
+    const now = Date.now();
+    const pp = { kind, text, keyboard, firstShownAt: now, remindersSent: 0, nextReminderAt: firstReminderAt(this.cfg.remindBaseMs, now) };
+    this.st.set(conv, { pendingPrompts: { ...this.st.get(conv).pendingPrompts, [promptId]: pp } });
+    this.armReminderTimer(conv, promptId);
+  }
+
+  /** (Re)arm the one-shot reminder timer for one prompt from its persisted schedule. */
+  private armReminderTimer(conv: ConvKey, promptId: string): void {
+    const key = this.reminderKey(conv, promptId);
+    const existing = this.reminders.get(key);
+    if (existing) clearTimeout(existing);
+    const pp = this.st.get(conv).pendingPrompts?.[promptId];
+    if (!pp) return;
+    const delay = Math.max(0, pp.nextReminderAt - Date.now()); // overdue → fire soon
+    this.reminders.set(key, setTimeout(() => void this.fireReminder(conv, promptId), delay));
+  }
+
+  /** Stop nudging one prompt and forget its schedule (the prompt stays pending). */
+  private cancelReminder(conv: ConvKey, promptId: string): void {
+    const key = this.reminderKey(conv, promptId);
+    const t = this.reminders.get(key);
+    if (t) clearTimeout(t);
+    this.reminders.delete(key);
+    const prompts = this.st.get(conv).pendingPrompts;
+    if (prompts && promptId in prompts) {
+      const next = { ...prompts };
+      delete next[promptId];
+      this.st.set(conv, { pendingPrompts: next });
+    }
+  }
+
+  /** Stop nudging ALL pending prompts of a conv (used by /new, /use, /stop, /clear). */
+  private cancelAllReminders(conv: ConvKey): void {
+    for (const id of Object.keys(this.st.get(conv).pendingPrompts ?? {})) this.cancelReminder(conv, id);
+  }
+
+  /**
+   * Find which conv holds a pending prompt by its id. Needed to cancel a
+   * reminder even after a restart, when the in-memory form/permission maps are
+   * empty but the schedule is still persisted in state.
+   */
+  private findPromptConv(promptId: string): ConvKey | undefined {
+    for (const conv of Object.keys(this.st.all())) {
+      if (this.st.get(conv).pendingPrompts?.[promptId]) return conv;
+    }
+    return undefined;
+  }
+
+  /** On startup, re-arm reminder timers for any persisted pending prompts. */
+  private resumePromptReminders(): void {
+    if (!this.cfg.remind) return;
+    for (const conv of Object.keys(this.st.all())) {
+      for (const id of Object.keys(this.st.get(conv).pendingPrompts ?? {})) this.armReminderTimer(conv, id);
+    }
+  }
+
+  /**
+   * Fire one reminder: re-send the prompt (with its buttons), then back off
+   * further until the budget is exhausted. Re-reads state AFTER the await so a
+   * prompt that was cancelled/answered/overwritten in the meantime is not
+   * nudged, and a different prompt isn't mistaken for this one.
+   */
+  private async fireReminder(conv: ConvKey, promptId: string): Promise<void> {
+    this.reminders.delete(this.reminderKey(conv, promptId));
+    const pp = this.st.get(conv).pendingPrompts?.[promptId];
+    if (!pp) return; // cancelled/answered in the meantime
+    const max = this.cfg.remindMax;
+    const sent = pp.remindersSent + 1;
+    // Re-send the ORIGINAL prompt + buttons so the user can just tap to answer.
+    await this.sendHtml(
+      conv,
+      `⏰ <i>Nhắc (${sent}/${max}): câu hỏi/quyền này vẫn đang chờ bạn trả lời — hoặc gõ /stop để bỏ.</i>\n\n${pp.text}`,
+      { reply_markup: pp.keyboard as Keyboard | undefined },
+    ).catch(() => {});
+    if (reminderBudgetExhausted(sent, max)) {
+      this.cancelReminder(conv, promptId); // budget exhausted: stop nudging; prompt stays pending
+      return;
+    }
+    // Re-read AFTER the await: only advance the schedule if this is STILL the
+    // same pending prompt (not cancelled, answered, or overwritten meanwhile).
+    const cur = this.st.get(conv).pendingPrompts?.[promptId];
+    const advance = nextScheduleAfterReminder(pp, cur, this.cfg.remindBaseMs, this.cfg.remindFactor, Date.now());
+    if (advance && cur) {
+      this.st.set(conv, { pendingPrompts: { ...this.st.get(conv).pendingPrompts, [promptId]: { ...cur, ...advance } } });
+      this.armReminderTimer(conv, promptId);
+    }
+  }
+
   private async handleCommand(conv: ConvKey, raw: string, state: ChatState): Promise<void> {
     const [rawCmd, ...rest] = raw.split(/\s+/);
     // In groups, commands may arrive as /cmd@BotName.
@@ -403,6 +524,29 @@ export class Bot {
         if (state.agent) await this.oc.setAgent(sid, state.agent).catch((e) => warn("setAgent:", e?.message));
         this.st.set(conv, { sessionID: sid });
       }
+      // "Stay in the user's language" is a per-session INSTRUCTION (OpenCode
+      // injects `api/*` entries into the system context), not prepended text —
+      // cleaner and it doesn't grow the user-turn context. Tracked per SESSION
+      // (guidedLanguageSession), so a brand-new session after /new, /use, setsess,
+      // or plan→build gets it re-applied on its first prompt.
+      if (this.cfg.guideLanguage) {
+        if (state.guidedLanguageSession !== sid) {
+          try {
+            await this.oc.setInstruction(sid, LANGUAGE_INSTRUCTION_KEY, LANGUAGE_INSTRUCTION);
+            // Record on success only — a failure is retried on the next prompt.
+            this.st.set(conv, { guidedLanguageSession: sid });
+          } catch (e) {
+            warn("setInstruction:", (e as Error)?.message);
+          }
+        }
+      } else if (!this.languageRemoved.has(sid)) {
+        // Toggle off: strip any instruction a previous (enabled) run left on this
+        // session (idempotent; remembered per process so we don't call it every
+        // prompt). Clear the applied-marker so re-enabling re-applies it.
+        this.languageRemoved.add(sid);
+        await this.oc.removeInstruction(sid, LANGUAGE_INSTRUCTION_KEY).catch(() => {});
+        if (state.guidedLanguageSession === sid) this.st.set(conv, { guidedLanguageSession: undefined });
+      }
       // Inject the "ask via question tool" preamble once per session so the agent
       // knows it is headless and should surface decisions as answerable questions.
       let promptText = text;
@@ -444,6 +588,16 @@ export class Bot {
         }
       }
       this.stopTyping(conv);
+      // A failed turn produced no useful reply — surface the real reason (often
+      // context overflow, fixable with /clear) instead of an opaque "failed · Xs".
+      if (res.outcome === "failed" && !res.interrupted) {
+        if (res.reply) {
+          await this.sendReply(conv, res.reply);
+          if (res.replyTime) this.st.set(conv, { lastRelayedTime: res.replyTime });
+        }
+        await this.sendHtml(conv, formatTurnFailure(res.error, res.elapsedMs));
+        return;
+      }
       const reply = res.reply || (res.interrupted ? "(interrupted — no text produced yet)" : "(no text reply)");
       await this.sendReply(conv, reply);
       // Remember the newest reply we've relayed so a restart can recover any that
@@ -576,6 +730,7 @@ export class Bot {
 
   private async cmdNew(conv: ConvKey, state: ChatState): Promise<void> {
     await this.stopCurrent(conv, true);
+    this.cancelAllReminders(conv); // abandoning the current session's pending prompts
     const dir = state.directory || this.cfg.opencodeDirectory;
     const sessionID = await this.oc.createSession(dir);
     await this.applyModelAndVariant(sessionID, state);
@@ -598,6 +753,7 @@ export class Bot {
   private async cmdUse(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
     if (!arg) return this.tg.sendMessage(conv, "Usage: /use <session-id>");
     this.st.set(conv, { sessionID: arg });
+    this.cancelAllReminders(conv); // switching sessions abandons the old pending prompts
     void state;
     await this.tg.sendMessage(conv, `✅ Now using session <code>${esc(arg)}</code>`);
   }
@@ -1149,6 +1305,7 @@ export class Bot {
 
   private async cmdStop(conv: ConvKey, state: ChatState): Promise<void> {
     await this.stopCurrent(conv);
+    this.cancelAllReminders(conv);
     if (state.sessionID) await this.oc.interrupt(state.sessionID).catch(() => {});
     await this.tg.sendMessage(conv, "⏹️ Interrupted.");
   }
@@ -1243,6 +1400,7 @@ export class Bot {
 
   private async cmdClear(conv: ConvKey, state: ChatState): Promise<void> {
     await this.stopCurrent(conv, true);
+    this.cancelAllReminders(conv); // stop nudging + clear schedules before wiping state
     void state;
     this.st.clear(conv);
     for (const [formId, qf] of this.questionForms) {
@@ -1328,13 +1486,22 @@ export class Bot {
     const v = this.renderQuestion(qf);
     const messageId = await this.tg.sendMessageId(conv, v.text, { reply_markup: v.keyboard }).catch(() => -1);
     qf.messageId = messageId;
+    // Start nudging if the user doesn't answer (exponential backoff; keyed by form id).
+    this.startPromptReminder(conv, formID, "form", v.text, v.keyboard);
   }
 
   /** A form was answered/cancelled out-of-band (e.g. in the TUI) — clean up. */
   private async onFormResolved(formID: string, type: string): Promise<void> {
     const qf = this.questionForms.get(formID);
-    if (!qf) return;
+    if (!qf) {
+      // After a restart the in-memory map is empty, but a reminder for this form
+      // may still be persisted — cancel it (find its conv) before bailing.
+      const rc = this.findPromptConv(formID);
+      if (rc) this.cancelReminder(rc, formID);
+      return;
+    }
     this.questionForms.delete(formID);
+    this.cancelReminder(qf.conv, formID);
     if (qf.messageId) {
       const msg =
         type === "form.cancelled"
@@ -1391,6 +1558,7 @@ export class Bot {
       if (op === "x") {
         await this.oc.cancelForm(qf.sessionID, qf.formId, "Cancelled by user via Telegram.");
         this.questionForms.delete(formID);
+        this.cancelReminder(conv, formID); // the form is really cancelled → stop nudging
         await this.tg.answerCallbackQuery(cb.id);
         if (messageId) await this.tg.editMessageText(conv, messageId, "❌ Đã huỷ câu hỏi.").catch(() => {});
         return;
@@ -1425,15 +1593,20 @@ export class Bot {
     qf.waitingCustom = undefined;
     if (qf.index + 1 < qf.fields.length) {
       qf.index += 1;
+      let nextText = "";
       if (messageId) {
         const v = this.renderQuestion(qf);
+        nextText = v.text;
         await this.tg.editMessageText(conv, messageId, v.text, { reply_markup: v.keyboard });
       }
+      // Keep nudging about the NEXT field of the same form (same form id).
+      if (nextText) this.startPromptReminder(conv, qf.formId, "form", nextText);
       return;
     }
     // All fields answered — submit the full answer to OpenCode.
     await this.oc.replyForm(qf.sessionID, qf.formId, qf.answers);
     this.questionForms.delete(qf.formId);
+    this.cancelReminder(conv, qf.formId); // form really submitted → stop nudging
     if (messageId) {
       const summary = Object.entries(qf.answers)
         .map(([k, v]) => `• ${esc(trunc(String(v), 80))}`)
@@ -1489,14 +1662,27 @@ export class Bot {
       ],
     };
     const messageId = await this.tg.sendMessageId(conv, lines.join("\n"), { reply_markup: kb }).catch(() => -1);
-    if (messageId > 0) this.permissionPrompts.set(requestID, { requestID, sessionID, conv, messageId });
+    if (messageId > 0) {
+      this.permissionPrompts.set(requestID, { requestID, sessionID, conv, messageId });
+      // Start nudging if unanswered — but ONLY when the card was actually sent.
+      // A failed send (messageId = -1) would leave a reminder re-sending a card
+      // whose buttons are no longer valid (dead buttons).
+      this.startPromptReminder(conv, requestID, "permission", lines.join("\n"), kb);
+    }
   }
 
   /** The request was answered elsewhere (e.g. the TUI) — settle the Telegram card. */
   private async onPermissionResolved(requestID: string, reply: string): Promise<void> {
     const p = this.permissionPrompts.get(requestID);
-    if (!p) return;
+    if (!p) {
+      // After a restart the in-memory map is empty, but a reminder may still be
+      // persisted — cancel it (find its conv) before bailing.
+      const rc = this.findPromptConv(requestID);
+      if (rc) this.cancelReminder(rc, requestID);
+      return;
+    }
     this.permissionPrompts.delete(requestID);
+    this.cancelReminder(p.conv, requestID);
     const label = reply === "reject" ? "từ chối" : reply === "always" ? "duyệt luôn" : "duyệt";
     if (p.messageId) {
       await this.tg
@@ -1524,12 +1710,14 @@ export class Bot {
       if (!labels[decision]) throw new Error("Lựa chọn không hợp lệ.");
       await this.oc.replyPermission(p.sessionID, p.requestID, decision as "once" | "always" | "reject");
       this.permissionPrompts.delete(requestID);
+      this.cancelReminder(conv, requestID); // answered → stop nudging
       await this.tg.answerCallbackQuery(cb.id);
       if (messageId) await this.tg.editMessageText(conv, messageId, labels[decision]).catch(() => {});
     } catch (e) {
       const msg = (e as Error)?.message ?? "";
       if (/not found|permission/i.test(msg)) {
         this.permissionPrompts.delete(requestID);
+        this.cancelReminder(conv, requestID); // answered elsewhere → stop nudging
         await this.tg.answerCallbackQuery(cb.id, "Yêu cầu này đã được xử lý ở nơi khác.");
         if (messageId) {
           await this.tg.editMessageText(conv, messageId, "ℹ️ Quyền đã được xử lý ở nơi khác.").catch(() => {});

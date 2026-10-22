@@ -30,6 +30,8 @@ export interface PromptResult {
   elapsedMs: number;
   /** time.created of the assistant message that produced `reply` (0 if none). */
   replyTime?: number;
+  /** Provider/turn error from the newest assistant/idle/compaction message (present on a failed turn). */
+  error?: { type?: string; message?: string };
 }
 
 /** Cumulative token usage for a session (as reported by OpenCode). */
@@ -334,6 +336,28 @@ export class OpenCodeCtl {
    * Tool parts carry their input under `state.input`; file tools put the
    * target at `state.input.path`.
    */
+  /**
+   * Put / list / remove a per-session instruction entry. OpenCode namespaces
+   * these as `api/<key>` and injects them into the session's system context
+   * (the same channel as AGENTS.md), so this is a clean way to steer the model
+   * WITHOUT polluting the user's actual prompt text.
+   */
+  async setInstruction(sessionID: string, key: string, value: unknown): Promise<void> {
+    this.ensureClient();
+    await retryTransient(() => this.client.session.instructions.entry.put({ sessionID, key, value }));
+  }
+
+  async listInstructions(sessionID: string): Promise<any[]> {
+    this.ensureClient();
+    const raw = (await retryTransient(() => this.client.session.instructions.entry.list({ sessionID }))) as any;
+    return (Array.isArray(raw) ? raw : (raw?.data ?? [])) as any[];
+  }
+
+  async removeInstruction(sessionID: string, key: string): Promise<void> {
+    this.ensureClient();
+    await retryTransient(() => this.client.session.instructions.entry.remove({ sessionID, key }));
+  }
+
   async getSessionReport(sessionID: string): Promise<SessionReport> {
     const s = ((await this.getSession(sessionID).catch(() => null)) ?? {}) as any;
     const msgs = ((await this.listMessages(sessionID).catch(() => [])) as any[]) ?? [];
@@ -435,10 +459,17 @@ export class OpenCodeCtl {
     // final message is listed, so re-check a few times before giving up.
     let reply = "";
     let replyTime = 0;
+    let error: { type?: string; message?: string } | undefined;
     for (let attempt = 0; attempt < 4; attempt++) {
       const messages = (await this.listMessages(sessionID, 200).catch(() => [])) as any[];
       const fresh = messages.filter((m: any) => m && m.id && !beforeIds.has(m.id));
       for (const m of fresh) {
+        // A failed turn leaves the provider/turn error NOT only on the assistant
+        // message but on the "idle" (outcome + error) and "compaction" messages
+        // too — grab the first of these types that carries an error.
+        if (!error && (m.type === "assistant" || m.type === "idle" || m.type === "compaction") && m.error) {
+          error = typeof m.error === "string" ? { message: m.error } : { type: m.error?.type, message: m.error?.message };
+        }
         if (m?.type !== "assistant") continue;
         const t = assistantText(m);
         if (t) {
@@ -447,7 +478,7 @@ export class OpenCodeCtl {
           break; // messages are newest-first, so the first hit is the latest
         }
       }
-      if (reply || opts.signal?.aborted) break;
+      if (reply || error || opts.signal?.aborted) break;
       await sleep(300);
     }
     let outcome: string | undefined;
@@ -456,7 +487,7 @@ export class OpenCodeCtl {
     } catch {
       /* ignore */
     }
-    return { reply, outcome, interrupted, elapsedMs: Date.now() - t0, replyTime };
+    return { reply, outcome, interrupted, elapsedMs: Date.now() - t0, replyTime, error };
   }
 
   /**

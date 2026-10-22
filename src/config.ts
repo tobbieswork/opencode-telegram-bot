@@ -37,6 +37,16 @@ export interface Config {
   replyMaxLen: number;
   /** Prepend a "ask via the question tool" note to the first prompt of each session. */
   guideQuestions: boolean;
+  /** Set a per-session "reply in the user's language" instruction (stops CJK leaks); off removes it. */
+  guideLanguage: boolean;
+  /** Remind the user about a pending question-form / permission they haven't answered. */
+  remind: boolean;
+  /** Base delay (ms) before the FIRST reminder for a pending form/permission. */
+  remindBaseMs: number;
+  /** Multiplier applied after each reminder (exponential backoff, not a fixed interval). */
+  remindFactor: number;
+  /** Max number of reminders before we stop nudging (the prompt stays pending). */
+  remindMax: number;
   defaultAgent?: string;
   defaultModel?: ModelRef;
   /** Default reasoning variant applied to each session (e.g. "xhigh"); overridable via /variants. */
@@ -83,6 +93,13 @@ export function loadConfig(root: string): Config {
     stateFile: resolve(process.env.STATE_FILE?.trim() || resolve(root, "data/state.json")),
     replyMaxLen: Math.max(500, Number(process.env.TELEGRAM_REPLY_MAX_LEN?.trim() || 4000)),
     guideQuestions: process.env.OPENCODE_TG_GUIDE !== "0",
+    guideLanguage: process.env.OPENCODE_TG_LANGUAGE !== "0",
+    remind: process.env.OPENCODE_TG_REMIND !== "0",
+    // parseIntSetting/parseFloatSetting guard against a non-numeric env value (e.g.
+    // OPENCODE_TG_REMIND_MAX=abc) yielding NaN, which would make the backoff fire ~every ms.
+    remindBaseMs: parseIntSetting("OPENCODE_TG_REMIND_BASE_MS", 5 * 60_000, 1000),
+    remindFactor: parseFloatSetting("OPENCODE_TG_REMIND_FACTOR", 2, 1),
+    remindMax: parseIntSetting("OPENCODE_TG_REMIND_MAX", 4, 1),
     defaultVariant: process.env.OPENCODE_DEFAULT_VARIANT?.trim() || "xhigh",
     browseRoots: [],
     managerDir: resolve(process.env.OPENCODE_TG_MANAGER_DIR?.trim() || resolve(root, "data/manager")),
@@ -106,6 +123,16 @@ function parseIntSetting(name: string, fallback: number, min: number): number {
   const n = Number(raw);
   if (Number.isInteger(n) && n >= min) return n;
   warn(`${name}=${raw} is not a whole number >= ${min} — using ${fallback}`);
+  return fallback;
+}
+
+/** A float setting; anything non-finite or below `min` falls back to the default (with a warning). */
+function parseFloatSetting(name: string, fallback: number, min: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const n = Number(raw);
+  if (Number.isFinite(n) && n >= min) return n;
+  warn(`${name}=${raw} is not a number >= ${min} — using ${fallback}`);
   return fallback;
 }
 
