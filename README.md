@@ -31,6 +31,9 @@ The whole Telegram transport is ~130 lines you can read in one sitting.
   relays the request as a card with buttons (`Duyệt 1 lần` / `Duyệt luôn` /
   `Từ chối`) — tap one to answer from Telegram, or answer in the terminal TUI;
   whichever comes first settles the other side.
+- **Plan → build handoff**: after any successful turn that ends in `plan` mode,
+  the bot offers a one-tap button that switches the session to `build` and
+  executes the plan that is already in context.
 
 ## Prerequisites
 

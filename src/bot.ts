@@ -154,7 +154,7 @@ export class Bot {
    * e.g. a background task waking the session after we stopped waiting on it
    * (that is the classic "bot went silent and never reported back" gap).
    */
-  private async sweepUnrelayedReplies(chatId: number, reason: string): Promise<void> {
+  private async sweepUnrelayedReplies(chatId: number, reason: string, succeeded?: boolean): Promise<void> {
     if (this.sweeping.has(chatId)) return; // a sweep for this chat is already running
     this.sweeping.add(chatId);
     const st = this.st.get(chatId);
@@ -191,6 +191,7 @@ export class Bot {
       await this.sendReply(chatId, text);
       this.st.set(chatId, { lastRelayedTime: newestTime });
       log(`[chat ${chatId}] relayed an unrelayed reply (${reason})`);
+      if (succeeded) await this.maybeOfferPlanToBuild(chatId);
     } catch (e) {
       warn("sweepUnrelayedReplies:", (e as Error)?.message);
     } finally {
@@ -376,6 +377,7 @@ export class Bot {
       // we do NOT escape the whole string — only the server-supplied outcome text.
       const meta = `<i>${esc(res.outcome ?? "")} · ${(res.elapsedMs / 1000).toFixed(1)}s${res.interrupted ? " · stopped" : ""}</i>`;
       await this.tg.sendMessage(chatId, meta).catch(() => {});
+      if (!res.interrupted && res.reply) await this.maybeOfferPlanToBuild(chatId);
     } catch (e) {
       this.stopTyping(chatId);
       error("prompt error:", (e as Error)?.message);
@@ -386,6 +388,24 @@ export class Bot {
     } finally {
       this.inflight.delete(chatId);
     }
+  }
+
+  /**
+   * After a successful turn that ENDED in plan mode, offer the one-tap
+   * plan-to-build handoff: switch to the build agent and execute the plan that
+   * is already in the session context. Offered on every successful plan turn
+   * (not just once), and skipped while the agent is mid-question.
+   */
+  private async maybeOfferPlanToBuild(chatId: number): Promise<void> {
+    const st = this.st.get(chatId);
+    if (st.agent !== "plan") return;
+    if ([...this.questionForms.values()].some((q) => q.chatId === chatId)) return;
+    const kb: Keyboard = {
+      inline_keyboard: [[{ text: "🔨 Sang build & thực thi", callback_data: "pb:go" }]],
+    };
+    await this.tg
+      .sendMessage(chatId, "📐 <b>Kế hoạch đã sẵn sàng</b> — bấm để chuyển sang build và thực thi.", { reply_markup: kb })
+      .catch(() => {});
   }
 
   private async stopCurrent(chatId: number): Promise<void> {
@@ -645,6 +665,10 @@ export class Bot {
     }
     if (data.startsWith("perm:")) {
       await this.handlePermissionCallback(cb, chatId, messageId);
+      return;
+    }
+    if (data.startsWith("pb:")) {
+      await this.handlePlanToBuildCallback(cb, chatId);
       return;
     }
     if (data.startsWith("cmd:")) {
@@ -971,6 +995,27 @@ export class Bot {
     }
   }
 
+  /** Handle a tap on the plan-to-build button (data = `pb:go`). */
+  private async handlePlanToBuildCallback(cb: CallbackQuery, chatId: number): Promise<void> {
+    const state = this.st.get(chatId);
+    if (this.inflight.has(chatId)) {
+      await this.tg.answerCallbackQuery(cb.id, "Đang chạy task — hẵng thử lại sau.");
+      return;
+    }
+    if (!state.sessionID) {
+      await this.tg.answerCallbackQuery(cb.id, "Chưa có session — hãy gửi một tin nhắn trước.");
+      return;
+    }
+    await this.applyMode(chatId, state, "build");
+    await this.tg.answerCallbackQuery(cb.id, "Mode → build");
+    await this.tg.sendMessage(chatId, "Đã chuyển sang <b>build</b> — bắt đầu thực thi kế hoạch.").catch(() => {});
+    const prompt =
+      "Đã chuyển sang chế độ build. Hãy thực thi kế hoạch vừa được lập trong cuộc hội thoại này: bắt đầu từ bước 1, làm tuần tự, và dừng lại để hỏi nếu thiếu thông tin quan trọng. Nếu không có kế hoạch nào chưa thực thi, chỉ cần xác nhận đã sẵn sàng.";
+    const ac = new AbortController();
+    this.inflight.set(chatId, ac);
+    void this.runPromptTask(chatId, state.sessionID, prompt, ac).catch((e) => error("prompt task:", e?.message));
+  }
+
   /**
    * List or set the model's reasoning "variant" (e.g. xhigh / high / medium / low).
    * No arg → show available variants + current. With arg → set it (persisted for
@@ -1150,7 +1195,7 @@ export class Bot {
         this.startTyping(chatId);
       } else {
         this.stopTyping(chatId);
-        void this.sweepUnrelayedReplies(chatId, "turn ended out-of-band");
+        void this.sweepUnrelayedReplies(chatId, "turn ended out-of-band", t === "session.execution.succeeded");
       }
     }
   }

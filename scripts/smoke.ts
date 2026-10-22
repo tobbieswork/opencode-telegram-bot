@@ -199,6 +199,39 @@ async function main(): Promise<void> {
       }
     }
   }
+
+  // ── plan → build handoff ────────────────────────────────────────────────────
+  // A successful turn that ENDS in plan mode should offer the one-tap
+  // plan-to-build button; tapping it must switch the agent to build and run
+  // the execution prompt (which the bot then relays as a normal reply).
+  {
+    const stt = st.get(42);
+    if (stt.sessionID) {
+      console.log("\n== plan-to-build: plan turn + tap ==");
+      await bot.handle(upd("/mode plan"));
+      const probe = "PLAN2BUILD-" + Date.now();
+      await bot.handle(
+        upd(
+          `Viết kế hoạch ${probe}: liệt kê đúng 3 bước ngắn để tạo file hello.txt với nội dung "hi". Chỉ liệt kê, chưa thực hiện, không cần hỏi thêm.`,
+        ),
+      );
+      const offered = await waitFor((a) => a.some((m) => m.includes("Kế hoạch đã sẵn sàng")), mock.out, 120000);
+      console.log("plan-to-build offered:", offered);
+      if (offered) {
+        const before = mock.out.length;
+        await bot.handle(tap("pb:go"));
+        const executed = await waitFor((a) => a.length >= before + 2, mock.out, 120000);
+        console.log("execution turn relayed after tap:", executed);
+        await bot.handle(upd("/status"));
+        const statusMsg = mock.out[mock.out.length - 1];
+        console.log("status after tap:", (statusMsg.match(/agent: .*/) ?? ["?"])[0]);
+        show("plan-to-build: offer + tap + status");
+      } else {
+        await bot.handle(upd("/mode build"));
+        console.log("plan-to-build offer not surfaced — restoring build mode");
+      }
+    }
+  }
   await bot.handle(upd("/dir"));
   show("/dir");
 
