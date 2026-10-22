@@ -93,6 +93,7 @@ bot:   The last commit adds retry logic but…
 | `/mode` | Pick an operating mode via buttons — `build` / `plan` / `general` / `explore` |
 | `/stop` | Interrupt the running task |
 | `/history` | Show the last few messages of the current session |
+| `/context` | Photo of the current session — usage, files touched, last prompt |
 | `/status` | Show what the bot is connected to |
 | `/clear` | Reset this chat's session/dir/model/agent |
 

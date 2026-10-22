@@ -16,6 +16,28 @@ export function trunc(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n) + "…";
 }
 
+/** Compact number for display: "1.2K" / "3.4M" (plain if < 1000). */
+export function fmtNum(n: number): string {
+  if (!Number.isFinite(n)) return "0";
+  const abs = Math.abs(n);
+  const trim = (x: number) => x.toFixed(1).replace(/\.0$/, "");
+  if (abs >= 1e6) return trim(n / 1e6) + "M";
+  if (abs >= 1e3) return trim(n / 1e3) + "K";
+  return String(Math.round(n));
+}
+
+/** Relative time from a Unix-epoch-ms timestamp ("3m ago" style). */
+export function timeAgo(ts: number): string {
+  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+
 /**
  * Split text into chunks of at most `max` chars, preferring line boundaries.
  * Safe for sending escaped plain text to Telegram (4096 char limit).

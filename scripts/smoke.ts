@@ -92,7 +92,7 @@ async function main(): Promise<void> {
 
   // ── command menu (buttons under /help) ───────────────────────────────────────
   const helpKb = mock.keyboards[mock.keyboards.length - 1];
-  const menuBtn = JSON.stringify(helpKb).match(/cmd:(?:new|ls|dir|browse|mode|models|variants|status|history|stop|clear|help)/);
+  const menuBtn = JSON.stringify(helpKb).match(/cmd:(?:new|ls|dir|browse|mode|models|variants|status|context|history|stop|clear|help)/);
   console.log("menu button:", menuBtn ? menuBtn[0] : "NOT FOUND");
   if (menuBtn) {
     await bot.handle(tap("cmd:ls"));
@@ -116,6 +116,12 @@ async function main(): Promise<void> {
 
   await bot.handle(upd("/history"));
   show("/history");
+
+  await bot.handle(upd("/context"));
+  show("/context");
+  const ctxMsg = mock.out[mock.out.length - 1];
+  console.log("context has files:", /files: /.test(ctxMsg));
+  console.log("context has tokens:", /tokens: /.test(ctxMsg));
 
   await bot.handle(upd("/models"));
   show("/models");

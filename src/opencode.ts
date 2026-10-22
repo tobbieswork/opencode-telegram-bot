@@ -3,6 +3,9 @@ import { Service } from "@opencode/client/service";
 import { existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
+/** Tool names that modify files (their input carries the target at `.path`). */
+const MUTATING_TOOLS = new Set(["write", "edit", "apply_patch", "delete_file", "create_file", "move"]);
+
 export interface ModelInfo {
   id: string;
   providerID: string;
@@ -27,6 +30,37 @@ export interface PromptResult {
   elapsedMs: number;
   /** time.created of the assistant message that produced `reply` (0 if none). */
   replyTime?: number;
+}
+
+/** Cumulative token usage for a session (as reported by OpenCode). */
+export interface SessionTokens {
+  input: number;
+  output: number;
+  reasoning: number;
+  cache: number;
+}
+
+/**
+ * A snapshot of a session for `/context`: identity, cumulative usage, and the
+ * files it most recently modified. OpenCode exposes no context-window-remaining
+ * field, so this is cumulative tokens + observed file activity — not "how much
+ * context is left".
+ */
+export interface SessionReport {
+  id: string;
+  title?: string;
+  directory?: string;
+  agent?: string;
+  outcome?: string;
+  created?: number;
+  updated?: number;
+  messageCount: number;
+  tokens?: SessionTokens;
+  cost?: number;
+  /** Unique file paths most recently modified (newest first), capped. */
+  modifiedFiles: string[];
+  /** Text of the newest user prompt. */
+  lastUserPrompt?: string;
 }
 
 /**
@@ -250,6 +284,61 @@ export class OpenCodeCtl {
       }
     }
     return undefined;
+  }
+
+  /**
+   * Snapshot for `/context`: identity, cumulative usage, message count, the
+   * files the session most recently modified, and the newest user prompt.
+   * Tool parts carry their input under `state.input`; file tools put the
+   * target at `state.input.path`.
+   */
+  async getSessionReport(sessionID: string): Promise<SessionReport> {
+    const s = ((await this.getSession(sessionID).catch(() => null)) ?? {}) as any;
+    const msgs = ((await this.listMessages(sessionID).catch(() => [])) as any[]) ?? [];
+
+    // File-modification events in message order (each hit is one write/edit/...).
+    const events: string[] = [];
+    let lastUserPrompt: string | undefined;
+    for (const m of msgs) {
+      if (m?.type === "user") lastUserPrompt = typeof m.text === "string" ? m.text : lastUserPrompt;
+      for (const c of m?.content ?? []) {
+        if (c?.type !== "tool") continue;
+        if (!MUTATING_TOOLS.has(c.name)) continue;
+        const p = c.state?.input?.path;
+        if (typeof p === "string") events.push(p);
+      }
+    }
+
+    // Newest-first, de-duplicated, capped.
+    const seen = new Set<string>();
+    const modifiedFiles: string[] = [];
+    for (let i = events.length - 1; i >= 0 && modifiedFiles.length < 8; i--) {
+      if (seen.has(events[i])) continue;
+      seen.add(events[i]);
+      modifiedFiles.push(events[i]);
+    }
+
+    return {
+      id: s.id ?? sessionID,
+      title: s.title,
+      directory: s.location?.directory,
+      agent: s.agent,
+      outcome: s.outcome,
+      created: s.time?.created,
+      updated: s.time?.updated,
+      messageCount: msgs.length,
+      tokens: s.tokens
+        ? {
+            input: s.tokens.input ?? 0,
+            output: s.tokens.output ?? 0,
+            reasoning: s.tokens.reasoning ?? 0,
+            cache: s.tokens.cache?.read ?? 0,
+          }
+        : undefined,
+      cost: typeof s.cost === "number" ? s.cost : undefined,
+      modifiedFiles,
+      lastUserPrompt,
+    };
   }
 
   /**

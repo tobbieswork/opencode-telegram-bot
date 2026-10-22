@@ -4,7 +4,7 @@ import { Telegram, Update, CallbackQuery } from "./telegram.js";
 import { OpenCodeCtl } from "./opencode.js";
 import { StateManager, ChatState } from "./state.js";
 import { Config } from "./config.js";
-import { esc, stripTags, chunk, trunc, mdToHtmlChunks } from "./format.js";
+import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo } from "./format.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
 import { log, warn, error } from "./logger.js";
 
@@ -293,6 +293,9 @@ export class Bot {
         return this.cmdStop(chatId, state);
       case "/status":
         return this.cmdStatus(chatId, state);
+      case "/context":
+      case "/ctx":
+        return this.cmdContext(chatId, state);
       case "/history":
         return this.cmdHistory(chatId, state);
       case "/clear":
@@ -424,9 +427,10 @@ export class Bot {
       "<b>Câu hỏi (questions)</b>",
       "Khi OpenCode cần hỏi bạn, chọn đáp án bằng nút bấm hoặc tự gõ.",
       "",
-      "<b>Control</b>",
-       "/stop — interrupt the running task",
-       "/history — show recent messages",
+       "<b>Control</b>",
+        "/stop — interrupt the running task",
+        "/context — photo of the current session (usage + files touched)",
+        "/history — show recent messages",
        "/status — what I'm connected to",
        "/clear — reset this chat's state",
        "",
@@ -444,8 +448,9 @@ export class Bot {
         [b("📍 Thư mục", "cmd:dir"), b("📁 Duyệt", "cmd:browse")],
         [b("🎛 Mode", "cmd:mode"), b("🤖 Models", "cmd:models")],
         [b("🎚 Variants", "cmd:variants"), b("📊 Trạng thái", "cmd:status")],
-        [b("📜 Lịch sử", "cmd:history"), b("⏹ Dừng", "cmd:stop")],
-        [b("🧹 Xoá state", "cmd:clear"), b("📖 Help", "cmd:help")],
+        [b("📋 Context", "cmd:context"), b("📜 Lịch sử", "cmd:history")],
+        [b("⏹ Dừng", "cmd:stop"), b("🧹 Xoá state", "cmd:clear")],
+        [b("📖 Help", "cmd:help")],
       ],
     };
   }
@@ -773,6 +778,9 @@ export class Bot {
         case "status":
           await this.cmdStatus(chatId, state);
           break;
+        case "context":
+          await this.cmdContext(chatId, state);
+          break;
         case "history":
           await this.cmdHistory(chatId, state);
           break;
@@ -1016,6 +1024,55 @@ export class Bot {
       `agent: ${state.agent ? `<code>${state.agent}</code>` : "default"}`,
       `state: ${busy ? "⏳ busy" : "🟢 idle"}`,
     ];
+    await this.sendHtml(chatId, lines.join("\n"));
+  }
+
+  /**
+   * `/context` — a photo of the current session: what it is, how much it has
+   * used, and what it most recently touched. Distinct from /status (connection
+   * + settings) and /history (recent message text).
+   */
+  private async cmdContext(chatId: number, state: ChatState): Promise<void> {
+    if (!state.sessionID) return this.tg.sendMessage(chatId, "No current session. Send /new.");
+    let r;
+    try {
+      r = await this.oc.getSessionReport(state.sessionID);
+    } catch (e) {
+      return this.tg.sendMessage(chatId, `⚠️ Could not read the session: ${(e as Error).message}`);
+    }
+    const base = r.directory || state.directory || this.cfg.opencodeDirectory;
+    const rel = (p: string) => (base && p.startsWith(base) ? p.slice(base.length).replace(/^\//, "") : p);
+
+    const lines: string[] = [];
+    lines.push(`📋 <b>Session</b> — ${esc(trunc(r.title || "(no title)", 60))}`);
+    lines.push(`id: <code>${esc(r.id)}</code>`);
+    if (r.directory) lines.push(`📁 <code>${esc(r.directory)}</code>`);
+
+    const live = await this.oc.getSessionModel(state.sessionID).catch(() => undefined);
+    const model = state.model ?? live;
+    const modelLabel = model ? (model.providerID && model.providerID !== "?" ? `${model.providerID}/${model.id}` : model.id) : null;
+    lines.push(
+      `🤖 model: ${modelLabel ? `<code>${esc(modelLabel)}</code>` : "default"} · agent: ${r.agent ? `<code>${esc(r.agent)}</code>` : "default"}`,
+    );
+
+    const t = r.tokens;
+    if (t) lines.push(`📦 tokens: in ${fmtNum(t.input)} / out ${fmtNum(t.output)} / reasoning ${fmtNum(t.reasoning)} · cache ${fmtNum(t.cache)}`);
+    if (typeof r.cost === "number" && r.cost > 0) lines.push(`💰 cost: $${r.cost.toFixed(4)}`);
+    lines.push(`💬 ${r.messageCount} messages`);
+    if (r.created) lines.push(`🕐 started ${timeAgo(r.created)}`);
+
+    if (r.modifiedFiles.length) {
+      const files = r.modifiedFiles.map((f) => `<code>${esc(rel(f))}</code>`).join(", ");
+      lines.push(`📝 files: ${files}`);
+    }
+    if (r.lastUserPrompt) {
+      // The first prompt is sent with the headless preamble prepended; strip it
+      // so the "last" line shows what the user actually typed.
+      const last = r.lastUserPrompt.startsWith(QUESTIONS_PREAMBLE)
+        ? r.lastUserPrompt.slice(QUESTIONS_PREAMBLE.length).replace(/^\s+\n+/, "").replace(/\n+$/, "")
+        : r.lastUserPrompt;
+      if (last.trim()) lines.push(`👤 last: “${esc(trunc(stripTags(last), 120))}”`);
+    }
     await this.sendHtml(chatId, lines.join("\n"));
   }
 

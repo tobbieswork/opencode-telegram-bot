@@ -5,7 +5,7 @@
  *
  * Run:  npx tsx scripts/test-format.ts
  */
-import { mdToHtmlChunks } from "../src/format.js";
+import { mdToHtmlChunks, fmtNum, timeAgo } from "../src/format.js";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: string): void {
@@ -21,6 +21,20 @@ const show = (label: string, units: string[]) => {
   console.log(`\n== ${label} == (${units.length} message(s))`);
   units.forEach((u, i) => console.log(`--- message ${i + 1} ---\n${u}\n`));
 };
+
+// ── number / time formatting ─────────────────────────────────────────────────
+{
+  check("fmtNum small", fmtNum(42) === "42");
+  check("fmtNum thousand", fmtNum(1234) === "1.2K");
+  check("fmtNum round K", fmtNum(2000) === "2K");
+  check("fmtNum million", fmtNum(9569987) === "9.6M");
+  check("fmtNum zero", fmtNum(0) === "0");
+  const now = Date.now();
+  check("timeAgo seconds", timeAgo(now - 30_000) === "30s ago");
+  check("timeAgo minutes", timeAgo(now - 5 * 60_000) === "5m ago");
+  check("timeAgo hours", timeAgo(now - 3 * 3600_000) === "3h ago");
+  check("timeAgo days", timeAgo(now - 2 * 86400_000) === "2d ago");
+}
 
 // ── narrow table → aligned monospace block ──────────────────────────────────
 {
