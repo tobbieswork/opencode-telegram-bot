@@ -9,7 +9,7 @@
   existing sessions reattach — do not delete it casually.
 
 ## Testing & verification
-- Verify in this order: `npm run typecheck` + `npm run test:format` first
+- Verify in this order: `npm run typecheck` + `npm run test:unit` first
   (seconds), `npm run smoke` last (minutes).
 - `npm run smoke` is a real end-to-end run: it drives the live OpenCode
   service with 3 real LLM prompts and takes ~3-4 minutes. It needs the
