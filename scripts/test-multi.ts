@@ -11,12 +11,12 @@ import { mkdtempSync, mkdirSync, readdirSync, realpathSync, rmSync, symlinkSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { convKey, parseConv, chatOf } from "../src/conv.js";
-import { newMessageID } from "../src/opencode.js";
+import { newMessageID, OpenCodeCtl } from "../src/opencode.js";
 import { StateManager } from "../src/state.js";
 import { McpBridge } from "../src/mcp-bridge.js";
 import { addWorktree, diffSummary, gitRoot, mergeWorktree, removeWorktree } from "../src/worktree.js";
 import { Orchestrator, Host } from "../src/orchestrator.js";
-import type { Config } from "../src/config.js";
+import { loadConfig, type Config } from "../src/config.js";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: string): void {
@@ -112,8 +112,11 @@ const repo = join(tmp, "repo");
   check("gitRoot from a subfolder", (await gitRoot(join(repo, "pkg"))) === repo);
   check("gitRoot outside a repo", (await gitRoot(tmp)) === undefined);
   const wt = await addWorktree(repo, join(repo, "pkg"), "w1");
-  check("worktree keeps the subfolder", wt.directory === join(tmp, "repo.worktrees", "w1", "pkg"), wt.directory);
-  check("worktree branch + base", wt.branch === "tg/w1" && wt.base === "main");
+  check("worktree keeps the subfolder", wt.directory === join(wt.root, "pkg") && wt.root.startsWith(join(tmp, "repo.worktrees", "w1-")), wt.directory);
+  check("worktree branch + base", /^tg\/w1-[0-9a-f]{6}$/.test(wt.branch) && wt.base === "main", wt.branch);
+  const twin = await addWorktree(repo, repo, "w1");
+  check("same worker name twice in one repo gets distinct worktrees", twin.branch !== wt.branch && twin.root !== wt.root);
+  await removeWorktree(repo, twin);
   writeFileSync(join(wt.directory, "a.txt"), "one\ntwo\n");
   writeFileSync(join(wt.directory, "new.txt"), "x\n");
   const diff = await diffSummary(wt);
@@ -130,8 +133,10 @@ const repo = join(tmp, "repo");
 // ── orchestrator (mock Telegram + OpenCode) ─────────────────────────────────
 {
   const sent: string[] = [];
+  const deletedTopics: string[] = [];
   const topics: string[] = [];
   const prompts: { sid: string; text: string }[] = [];
+  const replyOpts: any[] = [];
   let sessions = 0;
   const tg: any = {
     createForumTopic: async (_chat: number, name: string) => (topics.push(name), 100 + topics.length),
@@ -140,12 +145,14 @@ const repo = join(tmp, "repo");
     answerCallbackQuery: async () => {},
     editMessageText: async (_c: unknown, _m: number, text: string) => void sent.push("[edit] " + text),
     deleteMessage: async () => {},
+    deleteForumTopic: async (conv: string) => void deletedTopics.push(conv),
   };
   const oc: any = {
     createSession: async () => `ses_${++sessions}`,
     prompt: async (sid: string, text: string) => (prompts.push({ sid, text }), "msg_x"),
     interrupt: async () => {},
-    latestReply: async () => ({ text: "did it\nSUMMARY: ok", time: 5 }),
+    latestReply: async (_sid: string, _after: number, opts: any) => (replyOpts.push(opts), { text: "did it\nSUMMARY: ok", time: 5 }),
+    sessionState: async () => ({ busy: true }),
   };
   const root = join(tmp, "work");
   mkdirSync(join(root, "proj"), { recursive: true });
@@ -196,8 +203,9 @@ const repo = join(tmp, "repo");
   check("last result is kept for the Manager", /SUMMARY: ok/.test(st.get(r.conv).worker?.lastResult ?? ""));
   const b = await spawn("repo-b", repo, { task: "edit" });
   check("first writer uses the main checkout", !st.get(a.conv).worker?.worktree);
-  check("second writer in the same repo gets a worktree", st.get(b.conv).worker?.worktree?.branch === "tg/repo-b", JSON.stringify(st.get(b.conv).worker));
-  check("…and runs inside it", st.get(b.conv).directory === join(tmp, "repo.worktrees", "repo-b"));
+  check("second writer in the same repo gets a worktree", /^tg\/repo-b-/.test(st.get(b.conv).worker?.worktree?.branch ?? ""), JSON.stringify(st.get(b.conv).worker));
+  check("…and runs inside it", st.get(b.conv).directory === st.get(b.conv).worker?.worktree?.root);
+  check("the turn's reply is read from the last turn only", replyOpts.every((o) => o?.lastTurn === true) && replyOpts.length > 0);
   orch.onWaiting(b.conv);
   check("permission ask -> waiting", st.get(b.conv).worker?.status === "waiting" && topics.includes("🟡 repo-b"));
   orch.onResumed(b.conv);
@@ -213,11 +221,14 @@ const repo = join(tmp, "repo");
   const before = sessions;
   const pending = await tool("spawn_worker").run({ name: "docs", directory: root, task: "write docs", agent: "plan" });
   check("confirm mode: spawn waits for approval", /^PENDING/.test(pending) && sessions === before);
-  check("approval card has buttons", JSON.stringify(lastKb).includes("ap:1:ok") && JSON.stringify(lastKb).includes("ap:1:no"));
-  await orch.handleCallback({ id: "c1", data: "ap:1:ok" } as any, "42", 9);
+  const okBtn = JSON.stringify(lastKb).match(/ap:([0-9a-f]+):ok/);
+  check("approval card has buttons with a random id", !!okBtn && okBtn[1].length === 10 && JSON.stringify(lastKb).includes(`ap:${okBtn?.[1]}:no`));
+  check("a card tapped from another chat is refused", (await orch.handleCallback({ id: "c0", data: okBtn![0] } as any, "77", 9)) && sessions === before);
+  await orch.handleCallback({ id: "c1", data: okBtn![0] } as any, "42:5", 9);
   check("approve -> worker spawned", sessions === before + 1 && !!st.findWorker("42", "docs"));
   check("approved plan worker is read-only", st.findWorker("42", "docs")?.[1].worker?.writes === false);
-  check("stale approval tap is refused", (await orch.handleCallback({ id: "c2", data: "ap:1:ok" } as any, "42", 9)) && sessions === before + 1);
+  check("stale approval tap is refused", (await orch.handleCallback({ id: "c2", data: okBtn![0] } as any, "42", 9)) && sessions === before + 1);
+  check("an old card's id (pre-restart counter) matches nothing", (await orch.handleCallback({ id: "c3", data: "ap:1:ok" } as any, "42", 9)) && /hết hạn/.test(sent.join("\n") + ""));
 
   st.set("42", { auto: true });
   const auto = await tool("send_to_worker").run({ name: "api-fix", message: "also do Y" });
@@ -246,9 +257,130 @@ const repo = join(tmp, "repo");
     check("a bridge that fails to connect is reported, not silently ignored", !st.get("56").manager && /HTTP 404/.test(sent.at(-1) ?? ""), sent.at(-1));
   }
 
+  // #5: an approved/auto send can't start a second turn or exceed the limit.
+  {
+    const conv = st.findWorker("42", "api-fix")![0];
+    check("send to a busy worker is refused even when approved", await throws(() => (orch as any).sendToWorker(conv, "again"), /đang running/));
+    for (const [k] of st.convsOfChat("42").filter(([, x]) => x.worker)) (orch as any).setStatus(k, "done");
+    const busyNames = ["docs", "repo-a"].map((n) => st.findWorker("42", n)![0]);
+    for (const k of busyNames) (orch as any).setStatus(k, "running"); // 2 busy = the limit
+    check("send to an idle worker respects the busy limit", await throws(() => (orch as any).sendToWorker(conv, "again"), /tối đa 2/));
+    for (const k of busyNames) (orch as any).setStatus(k, "done");
+  }
+
+  // #4: /kill must not be reported to the Manager as a finished turn.
+  {
+    const conv = st.findWorker("42", "api-fix")![0];
+    (orch as any).setStatus(conv, "running");
+    oc.interrupt = async () => orch.onExecution(conv, "session.execution.interrupted"); // event fires mid-call
+    (orch as any).reports.delete("42");
+    await (orch as any).stopWorker(conv, false);
+    await new Promise((res) => setTimeout(res, 50));
+    check("killed worker is stopped", st.get(conv).worker?.status === "stopped");
+    check("…and not reported to the Manager", !(orch as any).reports.get("42")?.some((r: string) => /api-fix/.test(r)));
+    oc.interrupt = async () => {};
+  }
+
+  // #1: a worker whose turn ended while nobody was listening gets settled.
+  {
+    const conv = st.findWorker("42", "docs")![0];
+    (orch as any).setStatus(conv, "running");
+    await orch.healWorkers();
+    check("still-busy session stays running", st.get(conv).worker?.status === "running");
+    oc.sessionState = async () => ({ busy: false, outcome: "succeeded" });
+    await orch.healWorkers();
+    check("idle session heals a stuck 'running' worker to done", st.get(conv).worker?.status === "done");
+    oc.sessionState = async () => ({ busy: true });
+  }
+
+  // #3: concurrent spawns can't race past the name check or the busy limit.
+  {
+    for (const [k] of st.convsOfChat("42").filter(([, x]) => x.worker)) (orch as any).setStatus(k, "done");
+    const slow = oc.createSession;
+    oc.createSession = async () => (await new Promise((r) => setTimeout(r, 30)), `ses_${++sessions}`);
+    const same = await Promise.allSettled([spawn("twin", root), spawn("twin", root)]);
+    check("same name spawned twice at once -> exactly one", same.filter((r) => r.status === "fulfilled").length === 1);
+    const many = await Promise.allSettled(["p1", "p2", "p3", "p4"].map((n) => spawn(n, root, { task: "t" })));
+    check("parallel spawns respect the busy limit", many.filter((r) => r.status === "fulfilled").length === 2, JSON.stringify(many.map((r) => r.status)));
+    oc.createSession = slow;
+    for (const [k] of st.convsOfChat("42").filter(([, x]) => x.worker)) (orch as any).setStatus(k, "done");
+  }
+
+  // #7: a failed session create leaves no topic, no worktree, and the name free.
+  {
+    const ok = oc.createSession;
+    oc.createSession = async () => {
+      throw new Error("Transport: fetch failed");
+    };
+    const n = deletedTopics.length;
+    check("session create failure is reported", await throws(() => spawn("flaky", root), /fetch failed/));
+    check("…the orphan topic is deleted", deletedTopics.length === n + 1);
+    oc.createSession = ok;
+    check("…and the name can be used again", !!(await spawn("flaky", root)).conv);
+  }
+
   (orch as any).budget.set("42", 0);
   check("dispatch budget stops runaway loops", await throws(() => tool("spawn_worker").run({ name: "more", directory: root, task: "t" }), /budget/));
   check("list_directories stays inside the roots", await throws(() => tool("list_directories").run({ path: join(tmp, "outside") }), /ngoài vùng/));
+}
+
+// ── #9: removing a worktree retires the session that lived in it ────────────
+{
+  const sent: string[] = [];
+  const st = new StateManager(join(tmp, "wt-state.json"));
+  const host: Host = {
+    tg: { answerCallbackQuery: async () => {}, editMessageText: async () => {}, editForumTopic: async () => {} } as any,
+    oc: {} as any,
+    st,
+    cfg: { browseRoots: [repo], managerDir: join(tmp, "mgr"), maxWorkers: 2, worktreeMode: "auto" } as any,
+    sendHtml: async (_c, html) => void sent.push(html),
+    applyModelAndVariant: async () => {},
+    startTyping: () => {},
+  };
+  const orch = new Orchestrator(host);
+  const wt = await addWorktree(repo, join(repo, "pkg"), "gone");
+  st.set("9:1", {
+    sessionID: "ses_wt",
+    directory: wt.directory,
+    worker: { name: "gone", status: "done", spawnedBy: "user", writes: true, repoRoot: repo, worktree: { root: wt.root, branch: wt.branch, base: wt.base }, createdAt: 1, updatedAt: 1 },
+  });
+  await orch.handleCallback({ id: "w", data: "wt:gone:rmok" } as any, "9:1", 3);
+  const after = st.get("9:1");
+  check("worktree removed -> session retired", after.sessionID === undefined && after.worker?.status === "stopped" && !after.worker?.worktree);
+  check("…topic points back at the main checkout subfolder", after.directory === join(repo, "pkg"), after.directory);
+}
+
+// ── #6 + #1: OpenCode helpers (real logic, stubbed transport) ───────────────
+{
+  const oc = new OpenCodeCtl() as any;
+  oc.listMessages = async () => [
+    { type: "assistant", time: { created: 30 }, content: [{ type: "tool" }] },
+    { type: "user", time: { created: 20 } },
+    { type: "assistant", time: { created: 10 }, content: [{ type: "text", text: "OLD ANSWER" }] },
+  ];
+  check("latestReply(lastTurn) ignores the previous turn's answer", (await oc.latestReply("s", 0, { lastTurn: true })) === undefined);
+  check("latestReply without lastTurn still finds it", (await oc.latestReply("s"))?.text === "OLD ANSWER");
+  oc.getSession = async () => ({ outcome: "succeeded", time: { updated: 100, idle: 90 } });
+  check("session updated after idle = busy (outcome is stale)", JSON.stringify(await oc.sessionState("s")) === JSON.stringify({ busy: true }));
+  oc.getSession = async () => ({ outcome: "failed", time: { updated: 100, idle: 104 } });
+  check("idle caught up = finished, with its outcome", (await oc.sessionState("s")).outcome === "failed");
+  oc.getSession = async () => ({ time: { updated: 100 } });
+  check("never ran = busy (not settled)", (await oc.sessionState("s")).busy === true);
+}
+
+// ── #10: limits are never silently disabled by a typo ──────────────────────
+{
+  process.env.TELEGRAM_BOT_TOKEN = "x";
+  process.env.TELEGRAM_ALLOWED_USER_IDS = "1";
+  process.env.OPENCODE_TG_MAX_WORKERS = "five";
+  process.env.OPENCODE_TG_BRIDGE_PORT = "80a";
+  const c = loadConfig(tmp);
+  check("non-numeric OPENCODE_TG_MAX_WORKERS falls back to 5", c.maxWorkers === 5);
+  check("non-numeric bridge port falls back to random", c.bridgePort === 0);
+  process.env.OPENCODE_TG_MAX_WORKERS = "0";
+  check("a limit of 0 falls back too", loadConfig(tmp).maxWorkers === 5);
+  process.env.OPENCODE_TG_MAX_WORKERS = "3";
+  check("a valid value is kept", loadConfig(tmp).maxWorkers === 3);
 }
 
 rmSync(tmp, { recursive: true, force: true });

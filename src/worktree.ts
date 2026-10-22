@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { basename, dirname, join, relative } from "node:path";
 import { existsSync } from "node:fs";
 
@@ -28,15 +29,17 @@ export interface Worktree {
 }
 
 /**
- * Give a worker its own checkout: `<repo>.worktrees/<name>` on a new branch
- * `tg/<name>` cut from the repo's current HEAD, so parallel workers editing the
- * same repo never overwrite each other's files. `dir` may be a subfolder of
- * the repo; the returned `directory` points at the same subfolder inside the
- * worktree.
+ * Give a worker its own checkout: `<repo>.worktrees/<name>-<id>` on a new
+ * branch `tg/<name>-<id>` cut from the repo's current HEAD, so parallel workers
+ * editing the same repo never overwrite each other's files. The random id keeps
+ * names unique per repo (worker names are only unique per chat, and kept
+ * unmerged branches outlive their worker). `dir` may be a subfolder of the
+ * repo; the returned `directory` points at the same subfolder in the worktree.
  */
 export async function addWorktree(repoRoot: string, dir: string, name: string): Promise<Worktree> {
-  const branch = `tg/${name}`;
-  const root = join(dirname(repoRoot), `${basename(repoRoot)}.worktrees`, name);
+  const slug = `${name}-${randomBytes(3).toString("hex")}`;
+  const branch = `tg/${slug}`;
+  const root = join(dirname(repoRoot), `${basename(repoRoot)}.worktrees`, slug);
   if (existsSync(root)) throw new Error(`Worktree path already exists: ${root}`);
   const head = await git(repoRoot, ["rev-parse", "--abbrev-ref", "HEAD"]);
   const base = head === "HEAD" ? await git(repoRoot, ["rev-parse", "HEAD"]) : head;

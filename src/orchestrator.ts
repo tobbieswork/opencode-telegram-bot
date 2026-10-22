@@ -1,4 +1,5 @@
 import { mkdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Telegram, CallbackQuery, TOPIC_COLORS } from "./telegram.js";
 import { OpenCodeCtl } from "./opencode.js";
@@ -127,7 +128,6 @@ interface Approval {
 export class Orchestrator {
   private bridge?: McpBridge;
   private approvals = new Map<string, Approval>();
-  private approvalSeq = 0;
   private reports = new Map<ConvKey, string[]>();
   private reportTimers = new Map<ConvKey, ReturnType<typeof setTimeout>>();
   /** Remaining Manager dispatches per chat until the user speaks again. */
@@ -140,6 +140,14 @@ export class Orchestrator {
    * the server failed for good if that first call is refused.
    */
   private bridgeChats = new Set<ConvKey>();
+  /**
+   * Names being spawned right now, per chat. Spawning awaits several calls
+   * (git, Telegram, OpenCode) before the worker is saved; reserving the name
+   * synchronously first makes concurrent spawns see each other, so neither the
+   * name check nor the busy limit can be raced past.
+   */
+  private reserved = new Map<ConvKey, Set<string>>();
+  private healTimer?: ReturnType<typeof setInterval>;
 
   constructor(private h: Host) {}
 
@@ -148,6 +156,31 @@ export class Orchestrator {
   async onConnect(): Promise<void> {
     for (const [conv, s] of Object.entries(this.h.st.all())) {
       if (s.manager) await this.ensureManagerTooling(chatOf(conv)).catch((e) => warn("manager tooling:", e?.message));
+    }
+    await this.healWorkers();
+    if (!this.healTimer) {
+      // Events can also be lost while connected (a dropped frame, a server
+      // hiccup); a slow sweep keeps a missed turn-end from pinning a worker
+      // as busy forever.
+      this.healTimer = setInterval(() => void this.healWorkers().catch((e) => warn("heal workers:", e?.message)), 60_000);
+      (this.healTimer as any).unref?.();
+    }
+  }
+
+  /**
+   * Worker status only moves on live events, so after a restart or a dropped
+   * stream a worker can look busy long after its turn ended. Ask the server
+   * for the truth and settle any busy worker whose session is actually idle.
+   */
+  async healWorkers(): Promise<void> {
+    for (const [conv, s] of Object.entries(this.h.st.all())) {
+      const w = s.worker;
+      if (!w || !s.sessionID || !BUSY.includes(w.status)) continue;
+      const state = await this.h.oc.sessionState(s.sessionID).catch(() => undefined);
+      if (!state || state.busy) continue;
+      const status: WorkerStatus = state.outcome === "succeeded" ? "done" : state.outcome === "failed" ? "failed" : "stopped";
+      log(`[chat ${chatOf(conv)}] worker ${w.name} ended while unobserved — ${status}`);
+      await this.onWorkerFinished(conv, status);
     }
   }
 
@@ -378,10 +411,34 @@ export class Orchestrator {
   async spawn(chat: ConvKey, spec: SpawnSpec): Promise<{ conv: ConvKey; worker: WorkerInfo }> {
     const name = spec.name.trim().toLowerCase();
     if (!NAME_RE.test(name)) throw new Error(`Tên worker không hợp lệ "${spec.name}" — dùng a-z, 0-9, dấu gạch ngang, tối đa 24 ký tự.`);
-    if (this.h.st.findWorker(chat, name)) throw new Error(`Đã có worker tên "${name}". Hãy chọn tên khác.`);
-    const busy = this.workersOf(chat).filter(([, s]) => BUSY.includes(s.worker!.status)).length;
-    if (busy >= this.h.cfg.maxWorkers) throw new Error(`Đã có ${busy} worker đang chạy (tối đa ${this.h.cfg.maxWorkers}). Chờ bớt hoặc /kill bớt.`);
+    const pending = this.reserved.get(chat) ?? new Set<string>();
+    if (this.h.st.findWorker(chat, name) || pending.has(name)) throw new Error(`Đã có worker tên "${name}". Hãy chọn tên khác.`);
+    // Only spawns that will start working (have a task) take a busy slot.
+    if (spec.task) this.assertCapacity(chat);
+    pending.add(name);
+    this.reserved.set(chat, pending);
+    try {
+      return await this.spawnReserved(chat, name, spec);
+    } finally {
+      pending.delete(name);
+      if (!pending.size) this.reserved.delete(chat);
+    }
+  }
 
+  /** Busy workers of a chat, counting spawns in flight. */
+  private busyCount(chat: ConvKey, except?: ConvKey): number {
+    const busy = this.workersOf(chat).filter(([k, s]) => k !== except && BUSY.includes(s.worker!.status)).length;
+    return busy + (this.reserved.get(chatOf(chat))?.size ?? 0);
+  }
+
+  private assertCapacity(chat: ConvKey, except?: ConvKey): void {
+    const busy = this.busyCount(chat, except);
+    if (busy >= this.h.cfg.maxWorkers) {
+      throw new Error(`Đã có ${busy} worker đang chạy (tối đa ${this.h.cfg.maxWorkers}). Chờ bớt hoặc /kill bớt.`);
+    }
+  }
+
+  private async spawnReserved(chat: ConvKey, name: string, spec: SpawnSpec): Promise<{ conv: ConvKey; worker: WorkerInfo }> {
     let directory = this.vetDirectory(spec.directory);
     const agent = spec.agent && ["build", "plan", "explore", "general"].includes(spec.agent) ? spec.agent : "build";
     const writes = spec.writes ?? agent === "build";
@@ -429,11 +486,20 @@ export class Orchestrator {
     }
     const conv = convKey(chatId, threadId);
     const top = this.h.st.get(chat);
-    const sessionID = await this.h.oc.createSession(directory, {
-      title: `tg:${name}`,
-      agent,
-      metadata: { tgWorker: name, tgChat: chat },
-    });
+    let sessionID: string;
+    try {
+      sessionID = await this.h.oc.createSession(directory, {
+        title: `tg:${name}`,
+        agent,
+        metadata: { tgWorker: name, tgChat: chat },
+      });
+    } catch (e) {
+      // Nothing was saved yet: undo the topic and worktree so a retry with the
+      // same name works and nothing is left orphaned.
+      await this.h.tg.deleteForumTopic(conv).catch(() => this.h.tg.editForumTopic(conv, `❌ ${name}`).catch(() => {}));
+      if (worktree && repoRoot) await removeWorktree(repoRoot, worktree).catch(() => {});
+      throw e;
+    }
     // Workers inherit the chat's model/variant choice (the Manager's own agent aside).
     this.h.st.set(conv, {
       sessionID,
@@ -469,6 +535,10 @@ export class Orchestrator {
     const s = this.h.st.get(conv);
     if (!s.sessionID || !s.worker) throw new Error("Worker không còn session.");
     if (s.worker.status === "stopped") throw new Error(`Worker "${s.worker.name}" đã bị dừng.`);
+    // Checked here, not only in the tool, so an approval tapped later can't
+    // start a second turn on a busy worker or exceed the busy limit.
+    if (BUSY.includes(s.worker.status)) throw new Error(`Worker "${s.worker.name}" đang ${s.worker.status}; chờ nó xong đã.`);
+    this.assertCapacity(chatOf(conv), conv);
     await this.h.sendHtml(conv, `📨 <b>Manager:</b> ${esc(trunc(message, 1500))}`).catch(() => {});
     await this.h.oc.prompt(s.sessionID, message);
     this.setStatus(conv, "running");
@@ -478,8 +548,11 @@ export class Orchestrator {
   private async stopWorker(conv: ConvKey, close: boolean): Promise<string> {
     const s = this.h.st.get(conv);
     const w = s.worker!;
-    if (s.sessionID) await this.h.oc.interrupt(s.sessionID).catch(() => {});
+    // Mark first: the interrupt fires session.execution.interrupted while the
+    // call is still in flight, and that must not read as a normal finish (it
+    // would be reported to the Manager, which might restart the work).
     this.setStatus(conv, "stopped");
+    if (s.sessionID) await this.h.oc.interrupt(s.sessionID).catch(() => {});
     if (close) await this.h.tg.closeForumTopic(conv);
     return `⏹ Đã dừng worker <b>${esc(w.name)}</b>.${w.worktree ? " Worktree vẫn giữ — dùng /wt trong topic để xem diff / merge / xoá." : ""}`;
   }
@@ -522,11 +595,12 @@ export class Orchestrator {
     try {
       const s = this.h.st.get(conv);
       const w = s.worker!;
-      if (w.status === "stopped" && status !== "done") return; // /kill already settled it
-      // The final message can land a moment after the event.
+      if (w.status === "stopped") return; // stopped by the user: no report, nothing to restart
+      // The final message can land a moment after the event. Only this turn's
+      // reply counts (after the newest user message), never the previous one.
       let reply: { text: string; time: number } | undefined;
       for (let i = 0; i < 4 && !reply; i++) {
-        reply = s.sessionID ? await this.h.oc.latestReply(s.sessionID) : undefined;
+        reply = s.sessionID ? await this.h.oc.latestReply(s.sessionID, 0, { lastTurn: true }) : undefined;
         if (!reply) await new Promise((r) => setTimeout(r, 400));
       }
       const tail = reply ? stripTags(reply.text).trim().slice(-1500) : error ? `error: ${error}` : "(no text reply)";
@@ -592,7 +666,9 @@ export class Orchestrator {
 
   // ── approvals (confirm mode) ──────────────────────────────────────────────
   private async requestApproval(a: Omit<Approval, "id">): Promise<string> {
-    const id = String(++this.approvalSeq);
+    // Random, not a counter: a counter restarts after a bot restart, and an old
+    // card's button would then approve a different, unseen request.
+    const id = randomBytes(5).toString("hex");
     this.approvals.set(id, { ...a, id });
     const lines = ["🛂 <b>Manager muốn giao việc</b>"];
     if (a.kind === "spawn" && a.spawn) {
@@ -652,8 +728,9 @@ export class Orchestrator {
   private async handleApprovalCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
     const [, id, op] = (cb.data ?? "").split(":");
     const a = this.approvals.get(id);
-    if (!a) {
+    if (!a || a.chat !== chatOf(conv)) {
       await this.h.tg.answerCallbackQuery(cb.id, "Yêu cầu này đã hết hạn.");
+      if (messageId) await this.h.tg.editMessageText(conv, messageId, "⌛ Yêu cầu này đã hết hạn (bot đã khởi động lại hoặc đã xử lý).").catch(() => {});
       return;
     }
     this.approvals.delete(id);
@@ -726,7 +803,16 @@ export class Orchestrator {
         });
       } else if (op === "rmok") {
         const msg = await removeWorktree(w.repoRoot, wt);
-        this.h.st.set(found[0], { worker: { ...w, worktree: undefined, updatedAt: Date.now() } });
+        // The session lives in the deleted folder: retire it, and point the
+        // topic back at the same subfolder of the main checkout so a new
+        // message there starts a fresh session that works.
+        const sub = relative(wt.root, found[1].directory ?? wt.root);
+        this.h.st.set(found[0], {
+          sessionID: undefined,
+          directory: join(w.repoRoot, sub),
+          worker: { ...w, worktree: undefined, status: "stopped", updatedAt: Date.now() },
+        });
+        void this.h.tg.editForumTopic(found[0], `${ICON.stopped} ${w.name}`).catch(() => {});
         if (messageId) await this.h.tg.editMessageText(conv, messageId, `🗑 ${esc(msg)}`).catch(() => {});
       } else if (op === "keep" && messageId) {
         await this.h.tg.deleteMessage(conv, messageId);

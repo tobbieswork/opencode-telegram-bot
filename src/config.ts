@@ -86,9 +86,9 @@ export function loadConfig(root: string): Config {
     defaultVariant: process.env.OPENCODE_DEFAULT_VARIANT?.trim() || "xhigh",
     browseRoots: [],
     managerDir: resolve(process.env.OPENCODE_TG_MANAGER_DIR?.trim() || resolve(root, "data/manager")),
-    maxWorkers: Math.max(1, Number(process.env.OPENCODE_TG_MAX_WORKERS?.trim() || 5)),
+    maxWorkers: parseIntSetting("OPENCODE_TG_MAX_WORKERS", 5, 1),
     worktreeMode: parseWorktreeMode(process.env.OPENCODE_TG_WORKTREE),
-    bridgePort: Number(process.env.OPENCODE_TG_BRIDGE_PORT?.trim() || 0),
+    bridgePort: parseIntSetting("OPENCODE_TG_BRIDGE_PORT", 0, 0),
   };
   const agent = process.env.OPENCODE_DEFAULT_AGENT?.trim();
   if (agent) cfg.defaultAgent = agent;
@@ -97,6 +97,16 @@ export function loadConfig(root: string): Config {
   if (modelId && modelProvider) cfg.defaultModel = { id: modelId, providerID: modelProvider };
   cfg.browseRoots = loadBrowseRoots(cfg.opencodeDirectory);
   return cfg;
+}
+
+/** An integer setting; anything unparsable or below `min` falls back to the default (with a warning). */
+function parseIntSetting(name: string, fallback: number, min: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const n = Number(raw);
+  if (Number.isInteger(n) && n >= min) return n;
+  warn(`${name}=${raw} is not a whole number >= ${min} — using ${fallback}`);
+  return fallback;
 }
 
 function parseWorktreeMode(raw?: string): Config["worktreeMode"] {

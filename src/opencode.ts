@@ -471,13 +471,39 @@ export class OpenCodeCtl {
     return id;
   }
 
-  /** Newest assistant text in a session created after `afterTime` (0 = any), with its time. */
-  async latestReply(sessionID: string, afterTime = 0): Promise<{ text: string; time: number } | undefined> {
+  /**
+   * Newest assistant text in a session created after `afterTime` (0 = any),
+   * with its time. With `lastTurn`, only replies after the newest user message
+   * count — so a turn that ended without text never returns the previous
+   * turn's answer.
+   */
+  async latestReply(
+    sessionID: string,
+    afterTime = 0,
+    opts: { lastTurn?: boolean } = {},
+  ): Promise<{ text: string; time: number } | undefined> {
     const msgs = (await this.listMessages(sessionID, 50).catch(() => [] as any[])) as any[];
+    if (opts.lastTurn) {
+      const lastUser = Math.max(0, ...msgs.filter((m: any) => m?.type === "user").map((m: any) => m.time?.created ?? 0));
+      afterTime = Math.max(afterTime, lastUser);
+    }
     const newest = msgs
       .filter((m: any) => m?.type === "assistant" && (m.time?.created ?? 0) > afterTime && assistantText(m))
       .sort((a: any, b: any) => (b.time?.created ?? 0) - (a.time?.created ?? 0))[0];
     return newest ? { text: assistantText(newest), time: newest.time?.created ?? 0 } : undefined;
+  }
+
+  /**
+   * Whether a session's turn is still running, and how the last one ended.
+   * There is no status endpoint: a session is idle once `time.idle` has caught
+   * up with `time.updated` (while busy, `updated` moves past `idle` and
+   * `outcome` still describes the previous turn).
+   */
+  async sessionState(sessionID: string): Promise<{ busy: boolean; outcome?: string }> {
+    const s = await this.getSession(sessionID);
+    const idle = s?.time?.idle;
+    const busy = !idle || (s?.time?.updated ?? 0) > idle;
+    return { busy, outcome: busy ? undefined : s?.outcome };
   }
 
   /** Pending permission requests of one session (to re-surface after a missed event). */
