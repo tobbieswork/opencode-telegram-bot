@@ -41,8 +41,16 @@ export interface Config {
   defaultModel?: ModelRef;
   /** Default reasoning variant applied to each session (e.g. "xhigh"); overridable via /variants. */
   defaultVariant: string;
-  /** Directories the folder browser is allowed to walk. */
+  /** Directories the folder browser is allowed to walk (also where workers may run). */
   browseRoots: string[];
+  /** Where each chat's Manager session lives (`<managerDir>/<chatId>`); holds its agent file. */
+  managerDir: string;
+  /** Max workers per chat that may be busy at once (running or waiting). */
+  maxWorkers: number;
+  /** Git worktree isolation for writing workers: "auto" (when another writer shares the repo), "always", "off". */
+  worktreeMode: "auto" | "always" | "off";
+  /** Port of the Manager's local MCP bridge (0 = pick a free one). */
+  bridgePort: number;
 }
 
 export function loadConfig(root: string): Config {
@@ -77,6 +85,10 @@ export function loadConfig(root: string): Config {
     guideQuestions: process.env.OPENCODE_TG_GUIDE !== "0",
     defaultVariant: process.env.OPENCODE_DEFAULT_VARIANT?.trim() || "xhigh",
     browseRoots: [],
+    managerDir: resolve(process.env.OPENCODE_TG_MANAGER_DIR?.trim() || resolve(root, "data/manager")),
+    maxWorkers: parseIntSetting("OPENCODE_TG_MAX_WORKERS", 5, 1),
+    worktreeMode: parseWorktreeMode(process.env.OPENCODE_TG_WORKTREE),
+    bridgePort: parseIntSetting("OPENCODE_TG_BRIDGE_PORT", 0, 0),
   };
   const agent = process.env.OPENCODE_DEFAULT_AGENT?.trim();
   if (agent) cfg.defaultAgent = agent;
@@ -85,6 +97,21 @@ export function loadConfig(root: string): Config {
   if (modelId && modelProvider) cfg.defaultModel = { id: modelId, providerID: modelProvider };
   cfg.browseRoots = loadBrowseRoots(cfg.opencodeDirectory);
   return cfg;
+}
+
+/** An integer setting; anything unparsable or below `min` falls back to the default (with a warning). */
+function parseIntSetting(name: string, fallback: number, min: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const n = Number(raw);
+  if (Number.isInteger(n) && n >= min) return n;
+  warn(`${name}=${raw} is not a whole number >= ${min} — using ${fallback}`);
+  return fallback;
+}
+
+function parseWorktreeMode(raw?: string): Config["worktreeMode"] {
+  const v = raw?.trim().toLowerCase();
+  return v === "always" || v === "off" ? v : "auto";
 }
 
 /**

@@ -34,6 +34,10 @@ The whole Telegram transport is ~130 lines you can read in one sitting.
 - **Plan → build handoff**: after any successful turn that ends in `plan` mode,
   the bot offers a one-tap button that switches the session to `build` and
   executes the plan that is already in context.
+- **Many sessions at once**: each Telegram **forum topic** is its own
+  conversation with its own session, so several agents can work in parallel —
+  and an optional **Manager agent** in the main chat splits your requests into
+  tasks and hands them to worker sessions (see below).
 
 ## Prerequisites
 
@@ -122,6 +126,12 @@ bot:   The last commit adds retry logic but…
 | `/context` | Photo of the current session — usage, files touched, last prompt |
 | `/status` | Show what the bot is connected to |
 | `/clear` | Reset this chat's session/dir/model/agent |
+| `/spawn <name> [dir]` | Create a worker: a new topic with its own session |
+| `/board` | Status of every worker in this chat |
+| `/kill [name]` | Stop a worker (in its topic: no name needed) · `/stopall` stops all |
+| `/manager on\|off` | Turn the Manager agent on/off in the main chat |
+| `/auto on\|off` | Manager dispatches on its own, or waits for your ✅ |
+| `/wt` | In a worker topic: diff / merge / remove its git worktree |
 
 ### When OpenCode asks a question
 
@@ -141,6 +151,50 @@ Multiple-choice answers are button taps; free-text answers are typed (tap
 note telling the agent it's headless and should ask decisions via the `question`
 tool (disable with `OPENCODE_TG_GUIDE=0`).
 
+## Many sessions in parallel (topics + Manager)
+
+Telegram **forum topics** turn one chat into many conversations. The bot treats
+every topic as its own conversation — its own session, directory, model, agent,
+`/stop`, and history — so you can keep several agents busy at the same time.
+
+Topics work in a **private chat with the bot** when the bot has topic mode
+(Bot API 9.3+; the bot logs `topics in private chats: on/off` at startup), or in a
+**supergroup with Topics enabled**, where the bot must be an admin with the
+*Manage topics* right.
+
+```
+📁 Chat with the bot
+├─ General          ← you ⇄ Manager agent (or a normal session)
+├─ 🟢 api-auth       ← worker: own session + directory (or git worktree)
+├─ 🟡 fix-login      ← waiting for you (permission / question)
+└─ ✅ write-tests    ← done
+```
+
+**By hand**: `/spawn api-auth ~/Code/app` creates a topic + session; just talk
+in that topic. `/board` shows all of them; topic titles show live status
+(🟢 running · 🟡 waiting for you · ✅ done · ❌ failed · ⏹ stopped).
+
+**With the Manager**: `/manager on` in the main chat starts a Manager agent (an
+OpenCode session with its own agent prompt). Tell it what you want; it picks
+directories, splits the work, and dispatches it to workers through a small tool
+bridge (a local MCP server inside the bot, bound to `127.0.0.1`, token-guarded,
+registered only for the Manager's own folder). When workers finish, their
+results are fed back to the Manager, which summarises them for you.
+
+- **Approval**: by default (`/auto off`) every dispatch the Manager wants —
+  a new worker or a follow-up — appears as a card: `✅ Giao` / `❌ Huỷ` /
+  `⚡ Giao + bật auto`. With `/auto on` it dispatches on its own.
+- **Permissions and questions** of a worker always go to *you*, in that
+  worker's topic. The Manager never answers them.
+- **Guard rails**: at most `OPENCODE_TG_MAX_WORKERS` busy workers per chat; a
+  dispatch budget per user message stops Manager ↔ worker loops; workers may
+  only run under `OPENCODE_TG_BROWSE_ROOTS` (symlinks resolved first).
+- **Parallel edits in one repo**: a writing worker that would share a git
+  checkout with another busy writer gets its **own worktree + branch**
+  (`<repo>.worktrees/<name>`, branch `tg/<name>`). When it's done, the topic
+  offers **Diff / Merge / Remove**. Merge only runs on a clean main checkout on
+  the base branch and aborts cleanly on conflict; remove keeps unmerged branches.
+
 ## Configuration
 
 All settings are environment variables (see `.env.example`).
@@ -158,7 +212,11 @@ All settings are environment variables (see `.env.example`).
 | `STATE_FILE` | | `./data/state.json` | Where per-chat state is stored |
 | `TELEGRAM_REPLY_MAX_LEN` | | `4000` | Max chars per outgoing message |
 | `OPENCODE_TG_GUIDE` | | on | `0` = don't prepend the "ask via question tool" note to new sessions |
-| `OPENCODE_TG_BROWSE_ROOTS` | | home dir | Comma-separated dirs the `/browse` browser may walk |
+| `OPENCODE_TG_BROWSE_ROOTS` | | home dir | Comma-separated dirs the `/browse` browser may walk — and where workers may run |
+| `OPENCODE_TG_MAX_WORKERS` | | `5` | Max busy (running/waiting) workers per chat |
+| `OPENCODE_TG_WORKTREE` | | `auto` | Worktree isolation for writing workers: `auto` / `always` / `off` |
+| `OPENCODE_TG_MANAGER_DIR` | | `./data/manager` | Where each chat's Manager session and agent file live |
+| `OPENCODE_TG_BRIDGE_PORT` | | random | Port of the Manager's local MCP bridge |
 
 \* required unless `OPENCODE_TG_ALLOW_ANY=1`.
 
@@ -184,7 +242,9 @@ Then `systemctl --user enable --now opencode-tg`.
 
 ```sh
 npm run typecheck   # strict tsc, no emit
+npm run test:unit   # fast checks, no service needed (incl. topics, bridge, worktrees, orchestrator)
 npm run smoke       # drive the bot through a mock Telegram + real OpenCode
+npm run smoke:multi # parallel topics + Manager + approval against real OpenCode (a few minutes)
 npm run dev         # same as start
 ```
 
@@ -228,13 +288,19 @@ src/
   config.ts     env loading + validation
   opencode.ts   OpenCode control wrapper (sessions, prompts, models, agents)
   fsbrowser.ts  directory listing for the /browse picker
-  telegram.ts   Telegram Bot API client (long polling)
-  bot.ts        command routing + per-chat state + background prompt task
-  state.ts      JSON persistence of per-chat state (+ event→chat routing for forms)
+  telegram.ts   Telegram Bot API client (long polling, forum topics)
+  bot.ts        command routing + per-conversation state + background prompt task
+  conv.ts       conversation keys: a chat, or one forum topic in it
+  orchestrator.ts  worker topics, the Manager agent, approvals, worktree actions
+  mcp-bridge.ts tiny MCP server the Manager calls to steer workers
+  worktree.ts   git worktree isolation for parallel writers
+  state.ts      JSON persistence of per-conversation state (+ event→conversation routing)
   format.ts     escaping / tag-stripping / chunking
   logger.ts     tiny timestamped logger
 scripts/
   smoke.ts      token-free end-to-end smoke test
+  smoke-multi.ts  end-to-end test of topics + Manager
+  test-*.ts     unit checks (npm run test:unit)
 ```
 
 ## License

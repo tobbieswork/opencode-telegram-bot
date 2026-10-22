@@ -1,8 +1,10 @@
 import { isAbsolute, resolve } from "node:path";
 import { existsSync, statSync } from "node:fs";
 import { Telegram, Update, CallbackQuery } from "./telegram.js";
-import { OpenCodeCtl } from "./opencode.js";
+import { OpenCodeCtl, newMessageID, assistantText } from "./opencode.js";
 import { StateManager, ChatState } from "./state.js";
+import { ConvKey, convKey, chatOf } from "./conv.js";
+import { Orchestrator } from "./orchestrator.js";
 import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo } from "./format.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
@@ -90,7 +92,7 @@ interface QField {
 interface QuestionFormState {
   formId: string;
   sessionID: string;
-  chatId: number;
+  conv: ConvKey;
   messageId?: number;
   fields: QField[];
   index: number;
@@ -103,7 +105,7 @@ interface QuestionFormState {
 interface PermissionPrompt {
   requestID: string;
   sessionID: string;
-  chatId: number;
+  conv: ConvKey;
   messageId: number;
 }
 
@@ -113,25 +115,64 @@ interface PermissionPrompt {
  * can interrupt it.
  */
 export class Bot {
-  private inflight = new Map<number, AbortController>();
-  private browsers = new Map<number, BrowseState>();
+  private inflight = new Map<ConvKey, AbortController>();
+  private browsers = new Map<ConvKey, BrowseState>();
   private questionForms = new Map<string, QuestionFormState>();
   private permissionPrompts = new Map<string, PermissionPrompt>();
   /** Repeating "typing…" timers, one per chat, so the indicator lasts until the reply is sent. */
-  private typing = new Map<number, ReturnType<typeof setInterval>>();
+  private typing = new Map<ConvKey, ReturnType<typeof setInterval>>();
   /** Chats whose unrelayed-reply sweep is currently running (prevents a double relay). */
-  private sweeping = new Set<number>();
+  private sweeping = new Set<ConvKey>();
+
+  /** Worker topics + the Manager agent (multi-session layer). */
+  private orch: Orchestrator;
 
   constructor(
     private tg: Telegram,
     private oc: OpenCodeCtl,
     private st: StateManager,
     private cfg: Config,
-  ) {}
+  ) {
+    this.orch = new Orchestrator({
+      tg,
+      oc,
+      st,
+      cfg,
+      sendHtml: (conv, html, opts) => this.sendHtml(conv, html, opts),
+      applyModelAndVariant: (sid, state) => this.applyModelAndVariant(sid, state),
+      startTyping: (conv) => this.startTyping(conv),
+    });
+  }
 
   /** Begin relaying OpenCode question forms to Telegram. Called once from index.ts. */
   start(): void {
-    this.oc.subscribeEvents((ev) => this.onOpenCodeEvent(ev), (e) => warn("event stream:", e?.message ?? e));
+    this.oc.subscribeEvents(
+      (ev) => this.onOpenCodeEvent(ev),
+      (e) => warn("event stream:", e?.message ?? e),
+      () => {
+        void this.orch.onConnect().catch((e) => warn("orchestrator:", e?.message));
+        void this.reconcile().catch((e) => warn("reconcile:", e?.message));
+      },
+    );
+  }
+
+  /**
+   * The event stream has no replay, so on every (re)connect re-read what we
+   * may have missed while disconnected: pending questions and permission asks
+   * of every tracked session (re-surfaced as buttons), and replies of turns
+   * that finished meanwhile. Idempotent — known forms/requests are skipped.
+   */
+  private async reconcile(): Promise<void> {
+    // Let the fresh subscription settle so nothing falls between the reads and the stream.
+    await new Promise((r) => setTimeout(r, 1000));
+    for (const [conv, s] of Object.entries(this.st.all())) {
+      if (!s.sessionID || this.st.findChatBySession(s.sessionID) !== conv) continue;
+      const forms = await this.oc.listForms(s.sessionID).catch(() => [] as any[]);
+      for (const f of forms) if (f?.id && !this.questionForms.has(f.id)) await this.onFormCreated({ ...f, sessionID: s.sessionID });
+      const perms = await this.oc.listPermissions(s.sessionID).catch(() => [] as any[]);
+      for (const p of perms) if (p?.id && !this.permissionPrompts.has(p.id)) await this.onPermissionAsked({ ...p, sessionID: s.sessionID });
+      if (!this.inflight.has(conv)) await this.sweepUnrelayedReplies(conv, "missed while disconnected");
+    }
   }
 
   /**
@@ -141,8 +182,8 @@ export class Bot {
    * tracking relays for (see sweepUnrelayedReplies).
    */
   async recoverOrphanedReplies(): Promise<void> {
-    for (const chatKey of Object.keys(this.st.all())) {
-      await this.sweepUnrelayedReplies(Number(chatKey), "orphaned by a restart");
+    for (const conv of Object.keys(this.st.all())) {
+      await this.sweepUnrelayedReplies(conv, "orphaned by a restart");
     }
   }
 
@@ -154,54 +195,76 @@ export class Bot {
    * e.g. a background task waking the session after we stopped waiting on it
    * (that is the classic "bot went silent and never reported back" gap).
    */
-  private async sweepUnrelayedReplies(chatId: number, reason: string, succeeded?: boolean): Promise<void> {
-    if (this.sweeping.has(chatId)) return; // a sweep for this chat is already running
-    this.sweeping.add(chatId);
-    const st = this.st.get(chatId);
+  private async sweepUnrelayedReplies(conv: ConvKey, reason: string, succeeded?: boolean): Promise<void> {
+    if (this.sweeping.has(conv)) return; // a sweep for this chat is already running
+    this.sweeping.add(conv);
+    const st = this.st.get(conv);
     if (!st.sessionID || !st.lastRelayedTime) {
-      this.sweeping.delete(chatId);
+      this.sweeping.delete(conv);
       return;
     }
     try {
       // The final assistant message can land a few hundred ms after the
       // execution.* event (the same race promptAndWait re-checks for), so
       // retry a few times before concluding there is nothing to relay.
-      let text = "";
-      let newestTime = 0;
+      // Every unrelayed text reply, oldest first: two turns can end between
+      // sweeps (e.g. the Manager answering the user, then a worker report).
+      let replies: { text: string; time: number }[] = [];
       for (let attempt = 0; attempt < 4; attempt++) {
         const msgs = (await this.oc.listMessages(st.sessionID, 50).catch(() => [] as any[])) as any[];
-        const assistants = msgs
-          .filter((m: any) => m?.type === "assistant")
-          .sort((a: any, b: any) => (b.time?.created ?? 0) - (a.time?.created ?? 0));
-        const newest = assistants[0];
-        if (newest && (newest.time?.created ?? 0) > st.lastRelayedTime) {
-          const t = (newest.content ?? [])
-            .filter((c: any) => c?.type === "text")
-            .map((c: any) => c.text)
-            .join("\n");
-          if (t) {
-            text = t;
-            newestTime = newest.time?.created ?? 0;
-            break;
-          }
-        }
+        replies = msgs
+          .filter((m: any) => m?.type === "assistant" && (m.time?.created ?? 0) > (st.lastRelayedTime ?? 0))
+          .map((m: any) => ({ text: assistantText(m), time: m.time?.created ?? 0 }))
+          .filter((r) => r.text)
+          .sort((a, b) => a.time - b.time)
+          .slice(-3);
+        if (replies.length) break;
         await new Promise((r) => setTimeout(r, 300));
       }
-      if (!text) return;
-      await this.sendReply(chatId, text);
-      this.st.set(chatId, { lastRelayedTime: newestTime });
-      log(`[chat ${chatId}] relayed an unrelayed reply (${reason})`);
-      if (succeeded) await this.maybeOfferPlanToBuild(chatId);
+      if (!replies.length) return;
+      for (const r of replies) {
+        await this.sendReply(conv, r.text);
+        this.st.set(conv, { lastRelayedTime: r.time });
+      }
+      log(`[chat ${conv}] relayed ${replies.length} unrelayed repl${replies.length > 1 ? "ies" : "y"} (${reason})`);
+      if (succeeded) await this.maybeOfferPlanToBuild(conv);
     } catch (e) {
       warn("sweepUnrelayedReplies:", (e as Error)?.message);
     } finally {
-      this.sweeping.delete(chatId);
+      this.sweeping.delete(conv);
     }
   }
 
   private allowed(uid?: number): boolean {
     if (this.cfg.allowAny) return true;
     return uid !== undefined && this.cfg.allowedUserIds.includes(uid);
+  }
+
+  /** Per-conversation tail of the update queue (see enqueue). */
+  private queues = new Map<ConvKey, Promise<void>>();
+
+  /**
+   * Hand an update to `handle` without blocking the polling loop: updates of
+   * the same conversation still run in order, but a slow command in one topic
+   * (e.g. /models) no longer holds up every other topic.
+   */
+  enqueue(u: Update): void {
+    const m = u.message ?? u.edited_message ?? u.callback_query?.message;
+    const key = m ? this.convOf(m) : "_";
+    const prev = this.queues.get(key) ?? Promise.resolve();
+    const next = prev
+      .then(() => this.handle(u))
+      .catch((e) => error("Update handler error:", (e as Error)?.message ?? e))
+      .finally(() => {
+        if (this.queues.get(key) === next) this.queues.delete(key);
+      });
+    this.queues.set(key, next);
+  }
+
+  /** The conversation a message belongs to: its forum topic if any, else the chat. */
+  private convOf(m: { chat: { id: number }; message_thread_id?: number; is_topic_message?: boolean }): ConvKey {
+    // message_thread_id is also set on plain reply threads; only topics count.
+    return convKey(m.chat.id, m.is_topic_message ? m.message_thread_id : undefined);
   }
 
   async handle(u: Update): Promise<void> {
@@ -211,39 +274,45 @@ export class Bot {
     }
     const msg = u.message ?? u.edited_message;
     if (!msg || !msg.text) return;
-    const chatId = msg.chat.id as number;
+    const conv = this.convOf(msg);
     const uid = msg.from?.id as number | undefined;
     const text = (msg.text as string).trim();
     if (!text) return;
     if (!this.allowed(uid)) {
-      log(`Denied message from uid=${uid} chat=${chatId}`);
+      log(`Denied message from uid=${uid} chat=${conv}`);
       await this.tg
-        .sendMessage(chatId, "⛔ <b>Not authorized.</b> You are not on the allowlist.")
+        .sendMessage(conv, "⛔ <b>Not authorized.</b> You are not on the allowlist.")
         .catch(() => {});
       return;
     }
-    const state = this.st.get(chatId);
-    if (!state.directory) state.directory = this.cfg.opencodeDirectory;
+    const state = this.st.get(conv);
+    if (!state.directory) {
+      // A topic the user opened by hand starts where the chat's main session works
+      // (unless that is the Manager, whose folder is not a project).
+      const top = this.st.peek(chatOf(conv));
+      state.directory = top && !top.manager && top.directory ? top.directory : this.cfg.opencodeDirectory;
+    }
 
-    if (text.startsWith("/")) await this.handleCommand(chatId, text, state);
-    else if (await this.handleFormText(chatId, text)) return;
-    else await this.runPrompt(chatId, text, state);
+    if (text.startsWith("/")) await this.handleCommand(conv, text, state);
+    else if (await this.handleFormText(conv, text)) return;
+    else if (state.manager) await this.orch.promptManager(conv, text);
+    else await this.runPrompt(conv, text, state);
   }
 
   // ── send helpers ─────────────────────────────────────────────────────────
   /** Send short, already-formatted HTML (commands, status). */
-  private async sendHtml(chatId: number, html: string, opts: { reply_markup?: Keyboard } = {}): Promise<void> {
+  private async sendHtml(conv: ConvKey, html: string, opts: { reply_markup?: Keyboard } = {}): Promise<void> {
     const chunks = chunk(html, this.cfg.replyMaxLen);
     // The keyboard (if any) rides on the final chunk.
     for (let i = 0; i < chunks.length; i++) {
-      await this.tg.sendMessage(chatId, chunks[i], i === chunks.length - 1 ? opts : {});
+      await this.tg.sendMessage(conv, chunks[i], i === chunks.length - 1 ? opts : {});
     }
   }
   /** Send a long model reply: render its Markdown as Telegram HTML, then chunk. */
-  private async sendReply(chatId: number, text: string): Promise<void> {
+  private async sendReply(conv: ConvKey, text: string): Promise<void> {
     const clean = stripTags(text ?? "");
     if (!clean) return;
-    for (const c of mdToHtmlChunks(clean, this.cfg.replyMaxLen)) await this.tg.sendMessage(chatId, c);
+    for (const c of mdToHtmlChunks(clean, this.cfg.replyMaxLen)) await this.tg.sendMessage(conv, c);
   }
 
   // ── typing indicator ─────────────────────────────────────────────────────────
@@ -251,106 +320,113 @@ export class Bot {
    * Keep "typing…" showing for as long as the turn runs. Telegram's indicator
    * expires after ~5s, so we re-arm it on a timer until the reply is sent (stopTyping).
    */
-  private startTyping(chatId: number): void {
-    this.stopTyping(chatId);
-    this.tg.sendChatAction(chatId, "typing");
-    const t = setInterval(() => this.tg.sendChatAction(chatId, "typing"), 4000);
+  private startTyping(conv: ConvKey): void {
+    this.stopTyping(conv);
+    this.tg.sendChatAction(conv, "typing");
+    const t = setInterval(() => this.tg.sendChatAction(conv, "typing"), 4000);
     (t as any).unref?.();
-    this.typing.set(chatId, t);
+    this.typing.set(conv, t);
   }
   /** Stop the repeating typing indicator for a chat (no-op if not running). */
-  private stopTyping(chatId: number): void {
-    const t = this.typing.get(chatId);
+  private stopTyping(conv: ConvKey): void {
+    const t = this.typing.get(conv);
     if (t) clearInterval(t);
-    this.typing.delete(chatId);
+    this.typing.delete(conv);
   }
 
   // ── command dispatch ─────────────────────────────────────────────────────
-  private async handleCommand(chatId: number, raw: string, state: ChatState): Promise<void> {
-    const [cmd, ...rest] = raw.split(/\s+/);
+  private async handleCommand(conv: ConvKey, raw: string, state: ChatState): Promise<void> {
+    const [rawCmd, ...rest] = raw.split(/\s+/);
+    // In groups, commands may arrive as /cmd@BotName.
+    const cmd = rawCmd.replace(/@\w+$/, "");
     const arg = rest.join(" ").trim();
+    if (await this.orch.handleCommand(conv, cmd.toLowerCase(), arg)) return;
     switch (cmd.toLowerCase()) {
       case "/start":
       case "/help":
-        return this.cmdHelp(chatId);
+        return this.cmdHelp(conv);
       case "/new":
-        return this.cmdNew(chatId, state);
+        return this.cmdNew(conv, state);
       case "/ls":
       case "/sessions":
-        return this.cmdList(chatId);
+        return this.cmdList(conv);
       case "/use":
-        return this.cmdUse(chatId, arg, state);
+        return this.cmdUse(conv, arg, state);
       case "/dir":
-        return this.cmdDir(chatId, arg, state);
+        return this.cmdDir(conv, arg, state);
       case "/browse":
       case "/b":
-        return this.cmdBrowse(chatId, arg, state);
+        return this.cmdBrowse(conv, arg, state);
       case "/models":
-        return this.cmdModels(chatId);
+        return this.cmdModels(conv);
       case "/model":
-        return this.cmdModel(chatId, arg, state);
+        return this.cmdModel(conv, arg, state);
       case "/agents":
-        return this.cmdAgents(chatId);
+        return this.cmdAgents(conv);
       case "/agent":
-        return this.cmdAgent(chatId, arg, state);
+        return this.cmdAgent(conv, arg, state);
       case "/modes":
       case "/mode":
-        return this.cmdMode(chatId, arg, state);
+        return this.cmdMode(conv, arg, state);
       case "/variants":
       case "/variant":
-        return this.cmdVariants(chatId, arg, state);
+        return this.cmdVariants(conv, arg, state);
       case "/stop":
-        return this.cmdStop(chatId, state);
+        return this.cmdStop(conv, state);
       case "/status":
-        return this.cmdStatus(chatId, state);
+        return this.cmdStatus(conv, state);
       case "/context":
       case "/ctx":
-        return this.cmdContext(chatId, state);
+        return this.cmdContext(conv, state);
       case "/history":
-        return this.cmdHistory(chatId, state);
+        return this.cmdHistory(conv, state);
       case "/clear":
-        return this.cmdClear(chatId, state);
+        return this.cmdClear(conv, state);
       default:
-        return this.tg.sendMessage(chatId, `Unknown command: ${esc(cmd)}\nSend /help`);
+        return this.tg.sendMessage(conv, `Unknown command: ${esc(cmd)}\nSend /help`);
     }
   }
 
   // ── the long-running prompt ──────────────────────────────────────────────
-  private async runPrompt(chatId: number, text: string, state: ChatState): Promise<void> {
-    if (this.inflight.has(chatId)) {
-      await this.tg.sendMessage(chatId, "⏳ Still working on the previous message. Send /stop to interrupt.");
+  private async runPrompt(conv: ConvKey, text: string, state: ChatState): Promise<void> {
+    if (this.inflight.has(conv)) {
+      await this.tg.sendMessage(conv, "⏳ Still working on the previous message. Send /stop to interrupt.");
       return;
     }
     // Keep the "typing…" indicator alive for the whole turn (until the reply is sent).
-    this.startTyping(chatId);
+    this.startTyping(conv);
     try {
       let sid = state.sessionID;
       if (!sid) {
         sid = await this.oc.createSession(state.directory || this.cfg.opencodeDirectory);
         await this.applyModelAndVariant(sid, state);
         if (state.agent) await this.oc.setAgent(sid, state.agent).catch((e) => warn("setAgent:", e?.message));
-        this.st.set(chatId, { sessionID: sid });
+        this.st.set(conv, { sessionID: sid });
       }
       // Inject the "ask via question tool" preamble once per session so the agent
       // knows it is headless and should surface decisions as answerable questions.
       let promptText = text;
       if (this.cfg.guideQuestions && !state.guided) {
         promptText = QUESTIONS_PREAMBLE + "\n\n" + text;
-        this.st.set(chatId, { guided: true });
+        this.st.set(conv, { guided: true });
       }
       const ac = new AbortController();
-      this.inflight.set(chatId, ac);
-      log(`[chat ${chatId}] prompt on ${sid} (${text.length} chars)`);
+      this.inflight.set(conv, ac);
+      log(`[chat ${conv}] prompt on ${sid} (${text.length} chars)`);
       // Fire-and-forget: don't block the polling loop; /stop aborts `ac`.
-      void this.runPromptTask(chatId, sid, promptText, ac).catch((e) => error("prompt task:", e?.message));
+      void this.runPromptTask(conv, sid, promptText, ac).catch((e) => error("prompt task:", e?.message));
     } catch (e) {
-      this.stopTyping(chatId); // don't leave "typing…" running if the prompt never started
+      this.stopTyping(conv); // don't leave "typing…" running if the prompt never started
       throw e;
     }
   }
 
-  private async runPromptTask(chatId: number, sid: string, text: string, ac: AbortController): Promise<void> {
-    const run = () => this.oc.promptAndWait(sid, text, { signal: ac.signal });
+  private async runPromptTask(conv: ConvKey, sid: string, text: string, ac: AbortController): Promise<void> {
+    // One id for this user message, reused by the reconnect retry below: the
+    // server dedupes on it, so the retry waits on the same turn instead of
+    // running the instruction a second time.
+    const messageID = newMessageID();
+    const run = () => this.oc.promptAndWait(sid, text, { signal: ac.signal, messageID });
     try {
       let res;
       try {
@@ -367,26 +443,26 @@ export class Bot {
           throw e;
         }
       }
-      this.stopTyping(chatId);
+      this.stopTyping(conv);
       const reply = res.reply || (res.interrupted ? "(interrupted — no text produced yet)" : "(no text reply)");
-      await this.sendReply(chatId, reply);
+      await this.sendReply(conv, reply);
       // Remember the newest reply we've relayed so a restart can recover any that
       // were produced but never sent (see recoverOrphanedReplies).
-      if (res.replyTime) this.st.set(chatId, { lastRelayedTime: res.replyTime });
+      if (res.replyTime) this.st.set(conv, { lastRelayedTime: res.replyTime });
       // A quiet italic footer. The <i> tags are meant to render (HTML mode), so
       // we do NOT escape the whole string — only the server-supplied outcome text.
       const meta = `<i>${esc(res.outcome ?? "")} · ${(res.elapsedMs / 1000).toFixed(1)}s${res.interrupted ? " · stopped" : ""}</i>`;
-      await this.tg.sendMessage(chatId, meta).catch(() => {});
-      if (!res.interrupted && res.reply) await this.maybeOfferPlanToBuild(chatId);
+      await this.tg.sendMessage(conv, meta).catch(() => {});
+      if (!res.interrupted && res.reply) await this.maybeOfferPlanToBuild(conv);
     } catch (e) {
-      this.stopTyping(chatId);
+      this.stopTyping(conv);
       error("prompt error:", (e as Error)?.message);
       const msg = isTransportError(e)
         ? "⚠️ Không thể nối tới OpenCode (service có thể đang restart / chưa chạy). Hẵng thử lại sau, hoặc kiểm tra `opencode service status`."
         : `❌ Error: ${esc((e as Error).message)}`;
-      await this.tg.sendMessage(chatId, msg).catch(() => {});
+      await this.tg.sendMessage(conv, msg).catch(() => {});
     } finally {
-      this.inflight.delete(chatId);
+      this.inflight.delete(conv);
     }
   }
 
@@ -396,22 +472,29 @@ export class Bot {
    * is already in the session context. Offered on every successful plan turn
    * (not just once), and skipped while the agent is mid-question.
    */
-  private async maybeOfferPlanToBuild(chatId: number): Promise<void> {
-    const st = this.st.get(chatId);
+  private async maybeOfferPlanToBuild(conv: ConvKey): Promise<void> {
+    const st = this.st.get(conv);
     if (st.agent !== "plan") return;
-    if ([...this.questionForms.values()].some((q) => q.chatId === chatId)) return;
+    if ([...this.questionForms.values()].some((q) => q.conv === conv)) return;
     const kb: Keyboard = {
       inline_keyboard: [[{ text: "🔨 Sang build & thực thi", callback_data: "pb:go" }]],
     };
     await this.tg
-      .sendMessage(chatId, "📐 <b>Kế hoạch đã sẵn sàng</b> — bấm để chuyển sang build và thực thi.", { reply_markup: kb })
+      .sendMessage(conv, "📐 <b>Kế hoạch đã sẵn sàng</b> — bấm để chuyển sang build và thực thi.", { reply_markup: kb })
       .catch(() => {});
   }
 
-  private async stopCurrent(chatId: number): Promise<void> {
-    this.stopTyping(chatId);
-    const ac = this.inflight.get(chatId);
+  /**
+   * Stop waiting on the conversation's running turn. With `interrupt`, also
+   * interrupt that turn on the server — otherwise switching away (/new, /clear,
+   * opening another session) left the old session running and spending tokens.
+   */
+  private async stopCurrent(conv: ConvKey, interrupt = false): Promise<void> {
+    this.stopTyping(conv);
+    const ac = this.inflight.get(conv);
     if (ac) ac.abort();
+    const sid = this.st.peek(conv)?.sessionID;
+    if (ac && interrupt && sid) await this.oc.interrupt(sid).catch((e) => warn("interrupt:", e?.message));
   }
 
   // ── model + variant helpers ─────────────────────────────────────────────────────
@@ -435,7 +518,7 @@ export class Bot {
   }
 
   // ── commands ─────────────────────────────────────────────────────────────
-  private async cmdHelp(chatId: number): Promise<void> {
+  private async cmdHelp(conv: ConvKey): Promise<void> {
     const txt = [
       "<b>OpenCode Remote</b> — drive your OpenCode agent from Telegram.",
       "",
@@ -456,6 +539,13 @@ export class Bot {
       "<b>Câu hỏi (questions)</b>",
       "Khi OpenCode cần hỏi bạn, chọn đáp án bằng nút bấm hoặc tự gõ.",
       "",
+       "<b>Nhiều session (topic) &amp; Manager</b>",
+       "/spawn &lt;tên&gt; [dir] — tạo worker: topic + session riêng",
+       "/board — trạng thái mọi worker · /kill [tên] — dừng worker · /stopall",
+       "/manager on|off — Manager nhận việc ở chat chính và giao cho worker",
+       "/auto on|off — Manager tự giao việc hay chờ bạn duyệt",
+       "/wt — trong topic worker: diff / merge / xoá git worktree",
+       "",
        "<b>Control</b>",
         "/stop — interrupt the running task",
         "/context — photo of the current session (usage + files touched)",
@@ -465,7 +555,7 @@ export class Bot {
        "",
        "Bấm một nút bên dưới để chạy lệnh ngay:",
      ].join("\n");
-    await this.sendHtml(chatId, txt, { reply_markup: this.commandMenu() });
+    await this.sendHtml(conv, txt, { reply_markup: this.commandMenu() });
   }
 
   /** The tappable command list shown under /help — one button per command. */
@@ -484,43 +574,43 @@ export class Bot {
     };
   }
 
-  private async cmdNew(chatId: number, state: ChatState): Promise<void> {
-    await this.stopCurrent(chatId);
+  private async cmdNew(conv: ConvKey, state: ChatState): Promise<void> {
+    await this.stopCurrent(conv, true);
     const dir = state.directory || this.cfg.opencodeDirectory;
     const sessionID = await this.oc.createSession(dir);
     await this.applyModelAndVariant(sessionID, state);
     if (state.agent) await this.oc.setAgent(sessionID, state.agent).catch((e) => warn("setAgent:", e?.message));
-    this.st.set(chatId, { sessionID, directory: dir });
-    await this.tg.sendMessage(chatId, `🆕 New session <code>${sessionID}</code>\ndir: <code>${esc(dir)}</code>`);
+    this.st.set(conv, { sessionID, directory: dir });
+    await this.tg.sendMessage(conv, `🆕 New session <code>${sessionID}</code>\ndir: <code>${esc(dir)}</code>`);
   }
 
-  private async cmdList(chatId: number): Promise<void> {
+  private async cmdList(conv: ConvKey): Promise<void> {
     const sessions = await this.oc.listSessions();
-    if (!sessions.length) return this.tg.sendMessage(chatId, "No sessions yet. Send /new.");
-    const cur = this.st.get(chatId).sessionID;
+    if (!sessions.length) return this.tg.sendMessage(conv, "No sessions yet. Send /new.");
+    const cur = this.st.get(conv).sessionID;
     const lines = sessions
       .slice(0, 15)
       .map((s) => `${s.id === cur ? "▶️ " : ""}<code>${s.id}</code>${s.title ? " — " + esc(s.title) : ""}`);
     const active = cur ? `\n\nCurrent: <code>${cur}</code>` : "\n\nNo current session — send /new";
-    await this.sendHtml(chatId, `<b>Sessions (${sessions.length})</b>\n${lines.join("\n")}${active}`);
+    await this.sendHtml(conv, `<b>Sessions (${sessions.length})</b>\n${lines.join("\n")}${active}`);
   }
 
-  private async cmdUse(chatId: number, arg: string, state: ChatState): Promise<void> {
-    if (!arg) return this.tg.sendMessage(chatId, "Usage: /use <session-id>");
-    this.st.set(chatId, { sessionID: arg });
+  private async cmdUse(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
+    if (!arg) return this.tg.sendMessage(conv, "Usage: /use <session-id>");
+    this.st.set(conv, { sessionID: arg });
     void state;
-    await this.tg.sendMessage(chatId, `✅ Now using session <code>${esc(arg)}</code>`);
+    await this.tg.sendMessage(conv, `✅ Now using session <code>${esc(arg)}</code>`);
   }
 
-  private async cmdDir(chatId: number, arg: string, state: ChatState): Promise<void> {
+  private async cmdDir(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
     if (!arg) {
-      return this.tg.sendMessage(chatId, `📁 Current directory:\n<code>${esc(state.directory || this.cfg.opencodeDirectory)}</code>`);
+      return this.tg.sendMessage(conv, `📁 Current directory:\n<code>${esc(state.directory || this.cfg.opencodeDirectory)}</code>`);
     }
     const p = isAbsolute(arg) ? arg : resolve(this.cfg.opencodeDirectory, arg);
-    if (!existsSync(p)) return this.tg.sendMessage(chatId, `❌ No such directory: <code>${esc(p)}</code>`);
-    this.st.set(chatId, { directory: p });
+    if (!existsSync(p)) return this.tg.sendMessage(conv, `❌ No such directory: <code>${esc(p)}</code>`);
+    this.st.set(conv, { directory: p });
     await this.tg.sendMessage(
-      chatId,
+      conv,
       `📁 Directory set to <code>${esc(p)}</code>\n(used for the next /new)\nTip: /browse to pick a folder with buttons.`,
     );
   }
@@ -531,9 +621,9 @@ export class Bot {
    * browser lives in a single message: every button tap edits that message
    * instead of posting new ones, so the chat stays readable.
    */
-  private async cmdBrowse(chatId: number, arg: string, state: ChatState): Promise<void> {
+  private async cmdBrowse(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
     const roots = this.cfg.browseRoots;
-    if (!roots.length) return this.tg.sendMessage(chatId, "❌ Không có thư mục nào được phép duyệt.");
+    if (!roots.length) return this.tg.sendMessage(conv, "❌ Không có thư mục nào được phép duyệt.");
     const requested = arg
       ? resolve(this.cfg.opencodeDirectory, arg)
       : state.directory || this.cfg.opencodeDirectory;
@@ -550,13 +640,13 @@ export class Bot {
     } catch {
       isDir = false;
     }
-    if (!isDir) return this.tg.sendMessage(chatId, `❌ Không phải thư mục: <code>${esc(path)}</code>`);
+    if (!isDir) return this.tg.sendMessage(conv, `❌ Không phải thư mục: <code>${esc(path)}</code>`);
 
     const b: BrowseState = { path, showHidden: false, items: [], page: 0, view: "list", opened: false, note };
     await this.reloadBrowse(b);
-    this.browsers.set(chatId, b);
+    this.browsers.set(conv, b);
     const v = this.renderBrowse(b);
-    await this.tg.sendMessage(chatId, v.text, { reply_markup: v.keyboard });
+    await this.tg.sendMessage(conv, v.text, { reply_markup: v.keyboard });
   }
 
   /** Re-read the current directory and keep the page index in range. */
@@ -648,38 +738,39 @@ export class Bot {
       await this.tg.answerCallbackQuery(cb.id, "⛔ Không được phép");
       return;
     }
-    const chatId = cb.message?.chat.id;
+    const conv = cb.message ? this.convOf(cb.message) : undefined;
     const messageId = cb.message?.message_id;
     const data = cb.data ?? "";
-    if (!chatId) {
+    if (!conv) {
       await this.tg.answerCallbackQuery(cb.id);
       return;
     }
     if (data.startsWith("fq:")) {
-      await this.handleFormCallback(cb, chatId, messageId);
+      await this.handleFormCallback(cb, conv, messageId);
       return;
     }
     if (data.startsWith("mode:")) {
-      await this.handleModeCallback(cb, chatId, messageId);
+      await this.handleModeCallback(cb, conv, messageId);
       return;
     }
     if (data.startsWith("perm:")) {
-      await this.handlePermissionCallback(cb, chatId, messageId);
+      await this.handlePermissionCallback(cb, conv, messageId);
       return;
     }
     if (data.startsWith("pb:")) {
-      await this.handlePlanToBuildCallback(cb, chatId);
+      await this.handlePlanToBuildCallback(cb, conv);
       return;
     }
+    if (await this.orch.handleCallback(cb, conv, messageId)) return;
     if (data.startsWith("cmd:")) {
-      await this.runCommandButton(cb, chatId, data.slice(4));
+      await this.runCommandButton(cb, conv, data.slice(4));
       return;
     }
     if (!data.startsWith("bs:")) {
       await this.tg.answerCallbackQuery(cb.id);
       return;
     }
-    const b = this.browsers.get(chatId);
+    const b = this.browsers.get(conv);
     if (!b) {
       await this.tg.answerCallbackQuery(cb.id, "Phiên duyệt đã đóng — gửi /browse");
       return;
@@ -728,7 +819,7 @@ export class Bot {
           break;
         }
         case "setdir": {
-          this.st.set(chatId, { directory: b.path });
+          this.st.set(conv, { directory: b.path });
           b.view = "done";
           b.opened = false;
           b.result = [
@@ -739,14 +830,14 @@ export class Bot {
           break;
         }
         case "setsess": {
-          const state = this.st.get(chatId);
-          await this.stopCurrent(chatId);
+          const state = this.st.get(conv);
+          await this.stopCurrent(conv, true);
           const sessionID = await this.oc.createSession(b.path);
           await this.applyModelAndVariant(sessionID, state);
           if (state.agent) {
             await this.oc.setAgent(sessionID, state.agent).catch((e) => warn("setAgent:", e?.message));
           }
-          this.st.set(chatId, { sessionID, directory: b.path });
+          this.st.set(conv, { sessionID, directory: b.path });
           b.view = "done";
           b.opened = true;
           b.result = [
@@ -771,64 +862,64 @@ export class Bot {
 
     await this.tg.answerCallbackQuery(cb.id);
     if (close) {
-      this.browsers.delete(chatId);
-      if (messageId) await this.tg.deleteMessage(chatId, messageId);
+      this.browsers.delete(conv);
+      if (messageId) await this.tg.deleteMessage(conv, messageId);
       return;
     }
     if (!messageId) return;
     const v = this.renderBrowse(b);
-    await this.tg.editMessageText(chatId, messageId, v.text, { reply_markup: v.keyboard });
+    await this.tg.editMessageText(conv, messageId, v.text, { reply_markup: v.keyboard });
   }
 
   /** Run a bot command from an inline button (the /help menu). */
-  private async runCommandButton(cb: CallbackQuery, chatId: number, name: string): Promise<void> {
-    const state = this.st.get(chatId);
+  private async runCommandButton(cb: CallbackQuery, conv: ConvKey, name: string): Promise<void> {
+    const state = this.st.get(conv);
     try {
       switch (name) {
         case "new":
-          await this.cmdNew(chatId, state);
+          await this.cmdNew(conv, state);
           break;
         case "ls":
-          await this.cmdList(chatId);
+          await this.cmdList(conv);
           break;
         case "dir":
-          await this.cmdDir(chatId, "", state);
+          await this.cmdDir(conv, "", state);
           break;
         case "browse":
-          await this.cmdBrowse(chatId, "", state);
+          await this.cmdBrowse(conv, "", state);
           break;
         case "mode":
-          await this.cmdMode(chatId, "", state);
+          await this.cmdMode(conv, "", state);
           break;
         case "models":
-          await this.cmdModels(chatId);
+          await this.cmdModels(conv);
           break;
         case "variants":
-          await this.cmdVariants(chatId, "", state);
+          await this.cmdVariants(conv, "", state);
           break;
         case "agents":
-          await this.cmdAgents(chatId);
+          await this.cmdAgents(conv);
           break;
         case "stop":
-          await this.cmdStop(chatId, state);
+          await this.cmdStop(conv, state);
           break;
         case "status":
-          await this.cmdStatus(chatId, state);
+          await this.cmdStatus(conv, state);
           break;
         case "context":
-          await this.cmdContext(chatId, state);
+          await this.cmdContext(conv, state);
           break;
         case "history":
-          await this.cmdHistory(chatId, state);
+          await this.cmdHistory(conv, state);
           break;
         case "clear":
-          await this.cmdClear(chatId, state);
+          await this.cmdClear(conv, state);
           break;
         case "help":
-          await this.cmdHelp(chatId);
+          await this.cmdHelp(conv);
           break;
         default:
-          await this.tg.sendMessage(chatId, "❓ Lệnh không rõ.");
+          await this.tg.sendMessage(conv, "❓ Lệnh không rõ.");
       }
     } finally {
       // Answer last so the tap spinner shows while the command runs.
@@ -836,9 +927,9 @@ export class Bot {
     }
   }
 
-  private async cmdModels(chatId: number): Promise<void> {
+  private async cmdModels(conv: ConvKey): Promise<void> {
     const models = await this.oc.listModels();
-    const cur = this.st.get(chatId).model?.id;
+    const cur = this.st.get(conv).model?.id;
     const max = this.cfg.replyMaxLen;
     const footer = "\n\nSet with /model <id>";
     // Show EVERY model, packed into ≤max-char pages on line boundaries so each
@@ -861,42 +952,42 @@ export class Bot {
       }
     }
     if (page) pages.push(page + footer);
-    for (const p of pages) await this.tg.sendMessage(chatId, p);
+    for (const p of pages) await this.tg.sendMessage(conv, p);
   }
 
-  private async cmdModel(chatId: number, arg: string, state: ChatState): Promise<void> {
-    if (!arg) return this.cmdModels(chatId);
+  private async cmdModel(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
+    if (!arg) return this.cmdModels(conv);
     const models = await this.oc.listModels();
     const m = models.find((x) => x.id === arg || `${x.providerID}/${x.id}` === arg);
-    if (!m) return this.tg.sendMessage(chatId, `❌ Unknown model: <code>${esc(arg)}</code>. See /models.`);
-    this.st.set(chatId, { model: { id: m.id, providerID: m.providerID } });
+    if (!m) return this.tg.sendMessage(conv, `❌ Unknown model: <code>${esc(arg)}</code>. See /models.`);
+    this.st.set(conv, { model: { id: m.id, providerID: m.providerID } });
     if (state.sessionID) {
-      await this.applyModelAndVariant(state.sessionID, this.st.get(chatId));
-      await this.tg.sendMessage(chatId, `✅ Model → <code>${esc(m.id)}</code> (applied to current session)`);
+      await this.applyModelAndVariant(state.sessionID, this.st.get(conv));
+      await this.tg.sendMessage(conv, `✅ Model → <code>${esc(m.id)}</code> (applied to current session)`);
     } else {
-      await this.tg.sendMessage(chatId, `✅ Model → <code>${esc(m.id)}</code> (applies on /new)`);
+      await this.tg.sendMessage(conv, `✅ Model → <code>${esc(m.id)}</code> (applies on /new)`);
     }
   }
 
-  private async cmdAgents(chatId: number): Promise<void> {
+  private async cmdAgents(conv: ConvKey): Promise<void> {
     const agents = await this.oc.listAgents();
-    const cur = this.st.get(chatId).agent;
+    const cur = this.st.get(conv).agent;
     const lines = agents
       .filter((a) => AGENT_WHITELIST.includes(a.id))
       .map((a) => `${cur === a.id ? "▶️ " : ""}<code>${a.id}</code>${a.description ? ` — ${esc(trunc(a.description, 44))}` : ""}`);
-    await this.sendHtml(chatId, `<b>Agents</b>\n${lines.join("\n")}\n\nSet with /agent &lt;id&gt;`);
+    await this.sendHtml(conv, `<b>Agents</b>\n${lines.join("\n")}\n\nSet with /agent &lt;id&gt;`);
   }
 
-  private async cmdAgent(chatId: number, arg: string, state: ChatState): Promise<void> {
-    if (!arg) return this.cmdAgents(chatId);
+  private async cmdAgent(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
+    if (!arg) return this.cmdAgents(conv);
     const agents = await this.oc.listAgents();
-    if (!agents.some((a) => a.id === arg)) return this.tg.sendMessage(chatId, `❌ Unknown agent: <code>${esc(arg)}</code>. See /agents.`);
-    this.st.set(chatId, { agent: arg });
+    if (!agents.some((a) => a.id === arg)) return this.tg.sendMessage(conv, `❌ Unknown agent: <code>${esc(arg)}</code>. See /agents.`);
+    this.st.set(conv, { agent: arg });
     if (state.sessionID) {
       await this.oc.setAgent(state.sessionID, arg).catch((e) => error("setAgent:", e?.message));
-      await this.tg.sendMessage(chatId, `✅ Agent → <code>${esc(arg)}</code> (applied to current session)`);
+      await this.tg.sendMessage(conv, `✅ Agent → <code>${esc(arg)}</code> (applied to current session)`);
     } else {
-      await this.tg.sendMessage(chatId, `✅ Agent → <code>${esc(arg)}</code> (applies on /new)`);
+      await this.tg.sendMessage(conv, `✅ Agent → <code>${esc(arg)}</code> (applies on /new)`);
     }
   }
 
@@ -906,8 +997,8 @@ export class Bot {
   }
 
   /** Switch the chat's mode (agent): persist it and apply to the open session. */
-  private async applyMode(chatId: number, state: ChatState, agent: string): Promise<void> {
-    this.st.set(chatId, { agent });
+  private async applyMode(conv: ConvKey, state: ChatState, agent: string): Promise<void> {
+    this.st.set(conv, { agent });
     if (state.sessionID) {
       await this.oc.setAgent(state.sessionID, agent).catch((e) => error("setAgent:", e?.message));
     }
@@ -942,37 +1033,37 @@ export class Bot {
    * A mode is a friendly front-end over the agent; the current mode is derived
    * from the session's agent, so /agent and /mode can never disagree.
    */
-  private async cmdMode(chatId: number, arg: string, state: ChatState): Promise<void> {
+  private async cmdMode(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
     const want = arg.trim().toLowerCase();
     if (!want) {
       const v = this.renderModePicker(state);
-      await this.tg.sendMessage(chatId, v.text, { reply_markup: v.keyboard });
+      await this.tg.sendMessage(conv, v.text, { reply_markup: v.keyboard });
       return;
     }
     const m = MODES[want];
     if (!m) {
       const v = this.renderModePicker(state);
-      await this.tg.sendMessage(chatId, `❌ Unknown mode: <code>${esc(want)}</code>`, { reply_markup: v.keyboard });
+      await this.tg.sendMessage(conv, `❌ Unknown mode: <code>${esc(want)}</code>`, { reply_markup: v.keyboard });
       return;
     }
-    await this.applyMode(chatId, state, m.agent);
+    await this.applyMode(conv, state, m.agent);
     const applied = state.sessionID ? "applied" : "applies on /new";
     const v = this.renderModePicker(state);
-    await this.tg.sendMessage(chatId, `✅ Mode → <b>${esc(want)}</b> (${applied})`, { reply_markup: v.keyboard });
+    await this.tg.sendMessage(conv, `✅ Mode → <b>${esc(want)}</b> (${applied})`, { reply_markup: v.keyboard });
   }
 
   /** Handle a tap on the mode picker (switch in place, or close the picker). */
-  private async handleModeCallback(cb: CallbackQuery, chatId: number, messageId: number | undefined): Promise<void> {
+  private async handleModeCallback(cb: CallbackQuery, conv: ConvKey, messageId: number | undefined): Promise<void> {
     const id = (cb.data ?? "").split(":")[1];
     if (id === "close") {
       await this.tg.answerCallbackQuery(cb.id);
-      if (messageId) await this.tg.deleteMessage(chatId, messageId);
+      if (messageId) await this.tg.deleteMessage(conv, messageId);
       return;
     }
     if (id === "info") {
       await this.tg.answerCallbackQuery(cb.id);
       const lines = Object.entries(MODES).map(([mid, m]) => `• <code>${esc(mid)}</code> — ${esc(m.hint)}`);
-      await this.tg.sendMessage(chatId, `📖 <b>Vai trò các mode</b>\n${lines.join("\n")}`);
+      await this.tg.sendMessage(conv, `📖 <b>Vai trò các mode</b>\n${lines.join("\n")}`);
       return;
     }
     const m = MODES[id];
@@ -980,10 +1071,10 @@ export class Bot {
       await this.tg.answerCallbackQuery(cb.id, `❌ Unknown mode: ${esc(id)}`);
       return;
     }
-    const state = this.st.get(chatId);
+    const state = this.st.get(conv);
     const wasCurrent = this.currentMode(state) === id;
     try {
-      await this.applyMode(chatId, state, m.agent);
+      await this.applyMode(conv, state, m.agent);
     } catch (e) {
       await this.tg.answerCallbackQuery(cb.id, `⚠️ ${(e as Error).message}`);
       return;
@@ -991,14 +1082,14 @@ export class Bot {
     await this.tg.answerCallbackQuery(cb.id, `Mode → ${id}`);
     if (messageId && !wasCurrent) {
       const v = this.renderModePicker(state);
-      await this.tg.editMessageText(chatId, messageId, v.text, { reply_markup: v.keyboard });
+      await this.tg.editMessageText(conv, messageId, v.text, { reply_markup: v.keyboard });
     }
   }
 
   /** Handle a tap on the plan-to-build button (data = `pb:go`). */
-  private async handlePlanToBuildCallback(cb: CallbackQuery, chatId: number): Promise<void> {
-    const state = this.st.get(chatId);
-    if (this.inflight.has(chatId)) {
+  private async handlePlanToBuildCallback(cb: CallbackQuery, conv: ConvKey): Promise<void> {
+    const state = this.st.get(conv);
+    if (this.inflight.has(conv)) {
       await this.tg.answerCallbackQuery(cb.id, "Đang chạy task — hẵng thử lại sau.");
       return;
     }
@@ -1006,14 +1097,14 @@ export class Bot {
       await this.tg.answerCallbackQuery(cb.id, "Chưa có session — hãy gửi một tin nhắn trước.");
       return;
     }
-    await this.applyMode(chatId, state, "build");
+    await this.applyMode(conv, state, "build");
     await this.tg.answerCallbackQuery(cb.id, "Mode → build");
-    await this.tg.sendMessage(chatId, "Đã chuyển sang <b>build</b> — bắt đầu thực thi kế hoạch.").catch(() => {});
+    await this.tg.sendMessage(conv, "Đã chuyển sang <b>build</b> — bắt đầu thực thi kế hoạch.").catch(() => {});
     const prompt =
       "Đã chuyển sang chế độ build. Hãy thực thi kế hoạch vừa được lập trong cuộc hội thoại này: bắt đầu từ bước 1, làm tuần tự, và dừng lại để hỏi nếu thiếu thông tin quan trọng. Nếu không có kế hoạch nào chưa thực thi, chỉ cần xác nhận đã sẵn sàng.";
     const ac = new AbortController();
-    this.inflight.set(chatId, ac);
-    void this.runPromptTask(chatId, state.sessionID, prompt, ac).catch((e) => error("prompt task:", e?.message));
+    this.inflight.set(conv, ac);
+    void this.runPromptTask(conv, state.sessionID, prompt, ac).catch((e) => error("prompt task:", e?.message));
   }
 
   /**
@@ -1021,7 +1112,7 @@ export class Bot {
    * No arg → show available variants + current. With arg → set it (persisted for
    * this chat, applied to the current session if one is open).
    */
-  private async cmdVariants(chatId: number, arg: string, state: ChatState): Promise<void> {
+  private async cmdVariants(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
     const want = arg.trim().toLowerCase();
     const model = await this.resolveModel(state, state.sessionID);
     const variants = model ? await this.oc.getVariants(model) : [];
@@ -1033,38 +1124,38 @@ export class Bot {
         : "<i>(no variants reported for this model)</i>";
       const modelLabel = model ? ` — <code>${esc(model.id)}</code>` : " — <i>no model set</i>";
       await this.sendHtml(
-        chatId,
+        conv,
         `<b>Variants</b>${modelLabel}\n${lines}\n\n<i>current: ${esc(cur)}</i>\nSet with /variants &lt;id&gt;`,
       );
       return;
     }
     if (!model) {
-      return this.tg.sendMessage(chatId, "❌ No model set. Use /model first, then set a variant.");
+      return this.tg.sendMessage(conv, "❌ No model set. Use /model first, then set a variant.");
     }
     if (variants.length && !variants.includes(want)) {
       return this.tg.sendMessage(
-        chatId,
+        conv,
         `❌ Unknown variant <code>${esc(want)}</code>. Available: ${esc(variants.join(", "))}`,
       );
     }
-    this.st.set(chatId, { variant: want });
+    this.st.set(conv, { variant: want });
     if (state.sessionID) {
-      await this.applyModelAndVariant(state.sessionID, this.st.get(chatId));
-      await this.tg.sendMessage(chatId, `✅ Variant → <code>${esc(want)}</code> (applied to current session)`);
+      await this.applyModelAndVariant(state.sessionID, this.st.get(conv));
+      await this.tg.sendMessage(conv, `✅ Variant → <code>${esc(want)}</code> (applied to current session)`);
     } else {
-      await this.tg.sendMessage(chatId, `✅ Variant → <code>${esc(want)}</code> (applies on /new)`);
+      await this.tg.sendMessage(conv, `✅ Variant → <code>${esc(want)}</code> (applies on /new)`);
     }
   }
 
-  private async cmdStop(chatId: number, state: ChatState): Promise<void> {
-    await this.stopCurrent(chatId);
+  private async cmdStop(conv: ConvKey, state: ChatState): Promise<void> {
+    await this.stopCurrent(conv);
     if (state.sessionID) await this.oc.interrupt(state.sessionID).catch(() => {});
-    await this.tg.sendMessage(chatId, "⏹️ Interrupted.");
+    await this.tg.sendMessage(conv, "⏹️ Interrupted.");
   }
 
-  private async cmdStatus(chatId: number, state: ChatState): Promise<void> {
+  private async cmdStatus(conv: ConvKey, state: ChatState): Promise<void> {
     const info = await this.oc.serverInfo().catch(() => null);
-    const busy = this.inflight.has(chatId);
+    const busy = this.inflight.has(conv);
     const mode = this.currentMode(state);
     // Explicitly set model wins; otherwise observe what the session actually
     // runs on (server-resolved default) from the newest assistant message.
@@ -1082,7 +1173,7 @@ export class Bot {
       `agent: ${state.agent ? `<code>${state.agent}</code>` : "default"}`,
       `state: ${busy ? "⏳ busy" : "🟢 idle"}`,
     ];
-    await this.sendHtml(chatId, lines.join("\n"));
+    await this.sendHtml(conv, lines.join("\n"));
   }
 
   /**
@@ -1090,13 +1181,13 @@ export class Bot {
    * used, and what it most recently touched. Distinct from /status (connection
    * + settings) and /history (recent message text).
    */
-  private async cmdContext(chatId: number, state: ChatState): Promise<void> {
-    if (!state.sessionID) return this.tg.sendMessage(chatId, "No current session. Send /new.");
+  private async cmdContext(conv: ConvKey, state: ChatState): Promise<void> {
+    if (!state.sessionID) return this.tg.sendMessage(conv, "No current session. Send /new.");
     let r;
     try {
       r = await this.oc.getSessionReport(state.sessionID);
     } catch (e) {
-      return this.tg.sendMessage(chatId, `⚠️ Could not read the session: ${(e as Error).message}`);
+      return this.tg.sendMessage(conv, `⚠️ Could not read the session: ${(e as Error).message}`);
     }
     const base = r.directory || state.directory || this.cfg.opencodeDirectory;
     const rel = (p: string) => (base && p.startsWith(base) ? p.slice(base.length).replace(/^\//, "") : p);
@@ -1131,11 +1222,11 @@ export class Bot {
         : r.lastUserPrompt;
       if (last.trim()) lines.push(`👤 last: “${esc(trunc(stripTags(last), 120))}”`);
     }
-    await this.sendHtml(chatId, lines.join("\n"));
+    await this.sendHtml(conv, lines.join("\n"));
   }
 
-  private async cmdHistory(chatId: number, state: ChatState): Promise<void> {
-    if (!state.sessionID) return this.tg.sendMessage(chatId, "No current session. Send /new.");
+  private async cmdHistory(conv: ConvKey, state: ChatState): Promise<void> {
+    if (!state.sessionID) return this.tg.sendMessage(conv, "No current session. Send /new.");
     const msgs = await this.oc.listMessages(state.sessionID).catch(() => [] as any[]);
     const sorted = [...msgs].sort((a: any, b: any) => (a.time?.created ?? 0) - (b.time?.created ?? 0));
     const recent = sorted.slice(-6);
@@ -1147,17 +1238,17 @@ export class Bot {
       }
       return "· " + m.type;
     });
-    await this.sendHtml(chatId, `<b>Recent messages</b>\n${lines.join("\n")}`);
+    await this.sendHtml(conv, `<b>Recent messages</b>\n${lines.join("\n")}`);
   }
 
-  private async cmdClear(chatId: number, state: ChatState): Promise<void> {
-    await this.stopCurrent(chatId);
+  private async cmdClear(conv: ConvKey, state: ChatState): Promise<void> {
+    await this.stopCurrent(conv, true);
     void state;
-    this.st.clear(chatId);
+    this.st.clear(conv);
     for (const [formId, qf] of this.questionForms) {
-      if (qf.chatId === chatId) this.questionForms.delete(formId);
+      if (qf.conv === conv) this.questionForms.delete(formId);
     }
-    await this.tg.sendMessage(chatId, "🧹 State cleared. Next message starts a fresh session.");
+    await this.tg.sendMessage(conv, "🧹 State cleared. Next message starts a fresh session.");
   }
 
   // ── question forms (the agent's `question` tool) ──────────────────────────
@@ -1169,12 +1260,16 @@ export class Bot {
       if (form?.id && form?.sessionID) void this.onFormCreated(form);
     } else if (t === "form.replied" || t === "form.cancelled") {
       const formID = ev?.data?.id;
+      const owner = this.questionForms.get(formID)?.conv;
+      if (owner) this.orch.onResumed(owner);
       if (formID) void this.onFormResolved(formID, t);
     } else if (t === "permission.asked") {
       const d = ev?.data;
       if (d?.id && d?.sessionID) void this.onPermissionAsked(d);
     } else if (t === "permission.replied") {
       const d = ev?.data;
+      const owner = d?.sessionID ? this.st.findChatBySession(d.sessionID) : this.permissionPrompts.get(d?.requestID)?.conv;
+      if (owner) this.orch.onResumed(owner);
       if (d?.requestID) void this.onPermissionResolved(d.requestID, d.reply);
     } else if (
       t === "session.execution.started" ||
@@ -1187,15 +1282,15 @@ export class Bot {
       // out-of-band executions — e.g. a background task waking the session.
       // That keeps Telegram in sync: typing while the session is busy, and the
       // reply relayed as soon as the turn ends.
-      const chatKey = ev?.data?.sessionID ? this.st.findChatBySession(ev.data.sessionID) : undefined;
-      if (!chatKey) return;
-      const chatId = Number(chatKey);
-      if (this.inflight.has(chatId)) return;
+      const conv = ev?.data?.sessionID ? this.st.findChatBySession(ev.data.sessionID) : undefined;
+      if (!conv) return;
+      this.orch.onExecution(conv, t, ev?.data?.error?.message ?? (typeof ev?.data?.error === "string" ? ev.data.error : undefined));
+      if (this.inflight.has(conv)) return;
       if (t === "session.execution.started") {
-        this.startTyping(chatId);
+        this.startTyping(conv);
       } else {
-        this.stopTyping(chatId);
-        void this.sweepUnrelayedReplies(chatId, "turn ended out-of-band", t === "session.execution.succeeded");
+        this.stopTyping(conv);
+        void this.sweepUnrelayedReplies(conv, "turn ended out-of-band", t === "session.execution.succeeded");
       }
     }
   }
@@ -1205,12 +1300,11 @@ export class Bot {
     const sessionID = form.sessionID as string;
     const formID = form.id as string;
     if (this.questionForms.has(formID)) return;
-    const chatKey = this.st.findChatBySession(sessionID);
-    if (!chatKey) {
+    const conv = this.st.findChatBySession(sessionID);
+    if (!conv) {
       warn(`form.created for session ${sessionID} with no mapped chat — ignoring`);
       return;
     }
-    const chatId = Number(chatKey);
     const fields: QField[] = (form.fields ?? [])
       .filter((f: any) => !f.hidden)
       .map((f: any) => ({
@@ -1224,14 +1318,15 @@ export class Bot {
       }));
     if (!fields.length) {
       await this.tg
-        .sendMessage(chatId, "❓ OpenCode đang hỏi (không có lựa chọn) — xem /history để biết chi tiết.")
+        .sendMessage(conv, "❓ OpenCode đang hỏi (không có lựa chọn) — xem /history để biết chi tiết.")
         .catch(() => {});
       return;
     }
-    const qf: QuestionFormState = { formId: formID, sessionID, chatId, fields, index: 0, answers: {} };
+    const qf: QuestionFormState = { formId: formID, sessionID, conv, fields, index: 0, answers: {} };
+    this.orch.onWaiting(conv);
     this.questionForms.set(formID, qf);
     const v = this.renderQuestion(qf);
-    const messageId = await this.tg.sendMessageId(chatId, v.text, { reply_markup: v.keyboard }).catch(() => -1);
+    const messageId = await this.tg.sendMessageId(conv, v.text, { reply_markup: v.keyboard }).catch(() => -1);
     qf.messageId = messageId;
   }
 
@@ -1245,7 +1340,7 @@ export class Bot {
         type === "form.cancelled"
           ? "ℹ️ Câu hỏi đã được huỷ bởi OpenCode."
           : "ℹ️ Câu hỏi đã được trả lời (nơi khác).";
-      await this.tg.editMessageText(qf.chatId, qf.messageId, msg).catch(() => {});
+      await this.tg.editMessageText(qf.conv, qf.messageId, msg).catch(() => {});
     }
   }
 
@@ -1282,7 +1377,7 @@ export class Bot {
   }
 
   /** Handle a tap on a question-form button (data = `fq:<formId>:<op>`). */
-  private async handleFormCallback(cb: CallbackQuery, chatId: number, messageId?: number): Promise<void> {
+  private async handleFormCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
     const data = cb.data ?? "";
     const parts = data.split(":");
     const formID = parts[1];
@@ -1297,7 +1392,7 @@ export class Bot {
         await this.oc.cancelForm(qf.sessionID, qf.formId, "Cancelled by user via Telegram.");
         this.questionForms.delete(formID);
         await this.tg.answerCallbackQuery(cb.id);
-        if (messageId) await this.tg.editMessageText(chatId, messageId, "❌ Đã huỷ câu hỏi.").catch(() => {});
+        if (messageId) await this.tg.editMessageText(conv, messageId, "❌ Đã huỷ câu hỏi.").catch(() => {});
         return;
       }
       if (op === "c") {
@@ -1305,7 +1400,7 @@ export class Bot {
         await this.tg.answerCallbackQuery(cb.id);
         if (messageId) {
           const v = this.renderQuestion(qf);
-          await this.tg.editMessageText(chatId, messageId, v.text, { reply_markup: v.keyboard });
+          await this.tg.editMessageText(conv, messageId, v.text, { reply_markup: v.keyboard });
         }
         return;
       }
@@ -1316,7 +1411,7 @@ export class Bot {
         if (!opt) throw new Error("Đáp án không hợp lệ — vui lòng thử lại.");
         qf.answers[f.key] = opt.value;
         await this.tg.answerCallbackQuery(cb.id);
-        await this.advanceOrSubmit(qf, chatId, messageId);
+        await this.advanceOrSubmit(qf, conv, messageId);
         return;
       }
       await this.tg.answerCallbackQuery(cb.id);
@@ -1326,13 +1421,13 @@ export class Bot {
   }
 
   /** After recording an answer: show the next field, or submit if all answered. */
-  private async advanceOrSubmit(qf: QuestionFormState, chatId: number, messageId?: number): Promise<void> {
+  private async advanceOrSubmit(qf: QuestionFormState, conv: ConvKey, messageId?: number): Promise<void> {
     qf.waitingCustom = undefined;
     if (qf.index + 1 < qf.fields.length) {
       qf.index += 1;
       if (messageId) {
         const v = this.renderQuestion(qf);
-        await this.tg.editMessageText(chatId, messageId, v.text, { reply_markup: v.keyboard });
+        await this.tg.editMessageText(conv, messageId, v.text, { reply_markup: v.keyboard });
       }
       return;
     }
@@ -1344,7 +1439,7 @@ export class Bot {
         .map(([k, v]) => `• ${esc(trunc(String(v), 80))}`)
         .join("\n");
       await this.tg
-        .editMessageText(chatId, messageId, `✅ Đã gửi câu trả lời cho OpenCode.${summary ? "\n" + summary : ""}`)
+        .editMessageText(conv, messageId, `✅ Đã gửi câu trả lời cho OpenCode.${summary ? "\n" + summary : ""}`)
         .catch(() => {});
     }
   }
@@ -1353,12 +1448,12 @@ export class Bot {
    * If a question form in this chat is waiting for a typed (custom) answer,
    * consume this text as that answer. Returns true if the text was consumed.
    */
-  private async handleFormText(chatId: number, text: string): Promise<boolean> {
+  private async handleFormText(conv: ConvKey, text: string): Promise<boolean> {
     for (const qf of this.questionForms.values()) {
-      if (qf.chatId === chatId && qf.waitingCustom !== undefined) {
+      if (qf.conv === conv && qf.waitingCustom !== undefined) {
         const f = qf.fields[qf.index];
         qf.answers[f.key] = text;
-        await this.advanceOrSubmit(qf, chatId, qf.messageId);
+        await this.advanceOrSubmit(qf, conv, qf.messageId);
         return true;
       }
     }
@@ -1371,12 +1466,12 @@ export class Bot {
     const requestID = d.id as string;
     const sessionID = d.sessionID as string;
     if (this.permissionPrompts.has(requestID)) return;
-    const chatKey = this.st.findChatBySession(sessionID);
-    if (!chatKey) {
+    const conv = this.st.findChatBySession(sessionID);
+    if (!conv) {
       warn(`permission.asked for session ${sessionID} with no mapped chat — ignoring`);
       return;
     }
-    const chatId = Number(chatKey);
+    this.orch.onWaiting(conv);
     const lines: string[] = ["🔐 <b>OpenCode xin quyền</b>"];
     lines.push(`action: <code>${esc(d.action ?? "?")}</code>`);
     for (const r of (d.resources ?? []) as string[]) {
@@ -1393,8 +1488,8 @@ export class Bot {
         [{ text: "❌ Từ chối", callback_data: `perm:${requestID}:reject` }],
       ],
     };
-    const messageId = await this.tg.sendMessageId(chatId, lines.join("\n"), { reply_markup: kb }).catch(() => -1);
-    if (messageId > 0) this.permissionPrompts.set(requestID, { requestID, sessionID, chatId, messageId });
+    const messageId = await this.tg.sendMessageId(conv, lines.join("\n"), { reply_markup: kb }).catch(() => -1);
+    if (messageId > 0) this.permissionPrompts.set(requestID, { requestID, sessionID, conv, messageId });
   }
 
   /** The request was answered elsewhere (e.g. the TUI) — settle the Telegram card. */
@@ -1405,13 +1500,13 @@ export class Bot {
     const label = reply === "reject" ? "từ chối" : reply === "always" ? "duyệt luôn" : "duyệt";
     if (p.messageId) {
       await this.tg
-        .editMessageText(p.chatId, p.messageId, `ℹ️ Quyền đã được ${label} ở nơi khác.`)
+        .editMessageText(p.conv, p.messageId, `ℹ️ Quyền đã được ${label} ở nơi khác.`)
         .catch(() => {});
     }
   }
 
   /** Handle a tap on a permission button (data = `perm:<requestID>:<once|always|reject>`). */
-  private async handlePermissionCallback(cb: CallbackQuery, chatId: number, messageId?: number): Promise<void> {
+  private async handlePermissionCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
     const parts = (cb.data ?? "").split(":");
     const requestID = parts[1];
     const decision = parts[2];
@@ -1430,14 +1525,14 @@ export class Bot {
       await this.oc.replyPermission(p.sessionID, p.requestID, decision as "once" | "always" | "reject");
       this.permissionPrompts.delete(requestID);
       await this.tg.answerCallbackQuery(cb.id);
-      if (messageId) await this.tg.editMessageText(chatId, messageId, labels[decision]).catch(() => {});
+      if (messageId) await this.tg.editMessageText(conv, messageId, labels[decision]).catch(() => {});
     } catch (e) {
       const msg = (e as Error)?.message ?? "";
       if (/not found|permission/i.test(msg)) {
         this.permissionPrompts.delete(requestID);
         await this.tg.answerCallbackQuery(cb.id, "Yêu cầu này đã được xử lý ở nơi khác.");
         if (messageId) {
-          await this.tg.editMessageText(chatId, messageId, "ℹ️ Quyền đã được xử lý ở nơi khác.").catch(() => {});
+          await this.tg.editMessageText(conv, messageId, "ℹ️ Quyền đã được xử lý ở nơi khác.").catch(() => {});
         }
         return;
       }
