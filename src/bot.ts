@@ -933,7 +933,7 @@ export class Bot {
     const cur = this.st.get(conv).sessionID;
     const newest = [...sessions].sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0)).slice(0, 10);
     const rows: Btn[][] = newest.map((s) => [
-      { text: `${s.id === cur ? "▶️ " : ""}${trunc(s.id, 10)}${s.title ? " " + trunc(s.title, 20) : ""}`, callback_data: `use:${s.id}` },
+      { text: `${s.id === cur ? "▶️ " : ""}${s.title ? trunc(s.title, 40) : trunc(s.id, 14)}`, callback_data: `use:${s.id}` },
     ]);
     rows.push([
       { text: "📄 Xem tất cả", callback_data: "use:ls" },
