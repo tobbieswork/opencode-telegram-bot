@@ -526,6 +526,9 @@ export class Bot {
 
   // ── the long-running prompt ──────────────────────────────────────────────
   private async runPrompt(conv: ConvKey, text: string, state: ChatState): Promise<void> {
+    // A closed worker topic reopens itself when the user speaks in it
+    // (openForumTopic is a no-op on an already-open topic, so safe every time).
+    if (state.worker) void this.tg.openForumTopic(conv).catch(() => {});
     if (this.inflight.has(conv)) {
       await this.tg.sendMessage(conv, "⏳ Still working on the previous message. Send /stop to interrupt.");
       return;
@@ -714,7 +717,8 @@ export class Bot {
        "/board — trạng thái mọi worker · /kill [tên] — dừng worker · /stopall",
        "/manager on|off — Manager nhận việc ở chat chính và giao cho worker",
        "/auto on|off — Manager tự giao việc hay chờ bạn duyệt",
-       "/wt — trong topic worker: diff / merge / xoá git worktree",
+        "/wt — trong topic worker: diff / merge / xoá git worktree",
+        "/prune [số_ngày] — dọn topic worker đã xong (mặc định >7 ngày)",
        "",
        "<b>Control</b>",
         "/stop — interrupt the running task",

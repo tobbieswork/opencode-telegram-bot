@@ -286,6 +286,12 @@ export class OpenCodeCtl {
     return id as string;
   }
 
+  /** Delete a session on the server (used by /prune to retire a finished worker's session). */
+  async removeSession(sessionID: string): Promise<void> {
+    this.ensureClient();
+    await retryTransient(() => this.client.session.remove({ sessionID }));
+  }
+
   async setModel(sessionID: string, model: { id: string; providerID: string; variant?: string }): Promise<void> {
     this.ensureClient();
     await retryTransient(() => this.client.session.switchModel({ sessionID, model }));

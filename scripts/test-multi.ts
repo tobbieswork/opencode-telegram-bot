@@ -134,6 +134,8 @@ const repo = join(tmp, "repo");
 {
   const sent: string[] = [];
   const deletedTopics: string[] = [];
+  const closedTopics: string[] = [];
+  const removedSessions: string[] = [];
   const topics: string[] = [];
   const prompts: { sid: string; text: string }[] = [];
   const replyOpts: any[] = [];
@@ -141,7 +143,8 @@ const repo = join(tmp, "repo");
   const tg: any = {
     createForumTopic: async (_chat: number, name: string) => (topics.push(name), 100 + topics.length),
     editForumTopic: async (_conv: string, name: string) => void topics.push(name),
-    closeForumTopic: async () => {},
+    closeForumTopic: async (conv: string) => void closedTopics.push(conv),
+    openForumTopic: async () => {},
     answerCallbackQuery: async () => {},
     editMessageText: async (_c: unknown, _m: number, text: string) => void sent.push("[edit] " + text),
     deleteMessage: async () => {},
@@ -151,6 +154,7 @@ const repo = join(tmp, "repo");
     createSession: async () => `ses_${++sessions}`,
     prompt: async (sid: string, text: string) => (prompts.push({ sid, text }), "msg_x"),
     interrupt: async () => {},
+    removeSession: async (sid: string) => void removedSessions.push(sid),
     latestReply: async (_sid: string, _after: number, opts: any) => (replyOpts.push(opts), { text: "did it\nSUMMARY: ok", time: 5 }),
     sessionState: async () => ({ busy: true }),
   };
@@ -165,6 +169,7 @@ const repo = join(tmp, "repo");
     maxWorkers: 2,
     worktreeMode: "auto",
     bridgePort: 0,
+    autoClose: true,
   } as unknown as Config;
   const st = new StateManager(join(tmp, "orch-state.json"));
   let lastKb: any;
@@ -200,6 +205,7 @@ const repo = join(tmp, "repo");
   orch.onExecution(r.conv, "session.execution.succeeded");
   await new Promise((res) => setTimeout(res, 50));
   check("turn end marks the worker done + renames the topic", st.get(r.conv).worker?.status === "done" && topics.includes("✅ api-fix"));
+  check("finished worker's topic is auto-closed (autoClose on)", closedTopics.includes(r.conv));
   check("last result is kept for the Manager", /SUMMARY: ok/.test(st.get(r.conv).worker?.lastResult ?? ""));
   const b = await spawn("repo-b", repo, { task: "edit" });
   check("first writer uses the main checkout", !st.get(a.conv).worker?.worktree);
@@ -322,6 +328,46 @@ const repo = join(tmp, "repo");
   (orch as any).budget.set("42", 0);
   check("dispatch budget stops runaway loops", await throws(() => tool("spawn_worker").run({ name: "more", directory: root, task: "t" }), /budget/));
   check("list_directories stays inside the roots", await throws(() => tool("list_directories").run({ path: join(tmp, "outside") }), /ngoài vùng/));
+
+  // /prune: only FINISHED workers older than the cutoff are offered; busy and
+  // fresh ones survive. Confirming deletes topic + session + state entry.
+  {
+    const now = Date.now();
+    const DAY = 86_400_000;
+    const doneOld = st.findWorker("42", "api-fix")![0];
+    st.set(doneOld, { worker: { ...st.get(doneOld).worker!, status: "done", updatedAt: now - 8 * DAY } });
+    const freshDone = st.findWorker("42", "flaky")![0];
+    (orch as any).setStatus(freshDone, "done"); // finished, but recent (updatedAt = now)
+    const busyOld = st.findWorker("42", "twin")![0];
+    // done + old → it goes into the prune list; we flip it back to "running"
+    // right before confirming to prove the confirm step skips busy workers.
+    st.set(busyOld, { worker: { ...st.get(busyOld).worker!, status: "done", updatedAt: now - 30 * DAY } });
+    await orch.handleCommand("42", "/prune", "");
+    const pruneBtn = JSON.stringify(lastKb).match(/prune:([0-9a-f]+)/);
+    check(
+      "prune card lists the old finished workers, not the fresh one",
+      !!pruneBtn && /api-fix/.test(sent.at(-1) ?? "") && !/flaky/.test(sent.at(-1) ?? ""),
+      sent.at(-1),
+    );
+    await orch.handleCommand(doneOld, "/prune", "");
+    check("prune is refused inside a topic", /khung chat chính/.test(sent.at(-1) ?? ""), sent.at(-1));
+    const ses = st.get(doneOld).sessionID;
+    // Between showing the card and the user confirming, twin starts a new turn:
+    (orch as any).setStatus(busyOld, "running");
+    await orch.handleCallback({ id: "p0", data: pruneBtn![0] } as any, "42", 9);
+    check("prune deletes the topic", deletedTopics.includes(doneOld));
+    check("prune retires the worker session", removedSessions.includes(ses ?? ""));
+    check("prune clears the state entry", st.peek(doneOld) === undefined);
+    check("…and skips a worker that went busy again", st.get(busyOld).worker?.status === "running" && !deletedTopics.includes(busyOld) && /bỏ qua 1/.test(sent.at(-1) ?? ""), sent.at(-1));
+    check("fresh finished worker is kept", !!st.peek(freshDone)?.worker);
+    await orch.handleCommand("42", "/prune", "7");
+    check("second /prune finds nothing left", /Không có topic worker cũ nào/.test(sent.at(-1) ?? ""), sent.at(-1));
+    lastKb = undefined;
+    await orch.handleCommand("42", "/prune", "1");
+    check("/prune 1 day: api-fix gone, flaky (0d old) not prunable → no card", lastKb === undefined, JSON.stringify(lastKb));
+    await orch.handleCommand("42", "/prune", "abc");
+    check("invalid day arg falls back to the default (no candidates)", /Không có topic worker cũ nào/.test(sent.at(-1) ?? ""), sent.at(-1));
+  }
 }
 
 // ── #9: removing a worktree retires the session that lived in it ────────────

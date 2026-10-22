@@ -61,6 +61,8 @@ export interface Config {
   worktreeMode: "auto" | "always" | "off";
   /** Port of the Manager's local MCP bridge (0 = pick a free one). */
   bridgePort: number;
+  /** Close a worker's topic when the worker finishes (the user reopens it by messaging in it). */
+  autoClose: boolean;
 }
 
 export function loadConfig(root: string): Config {
@@ -106,6 +108,7 @@ export function loadConfig(root: string): Config {
     maxWorkers: parseIntSetting("OPENCODE_TG_MAX_WORKERS", 5, 1),
     worktreeMode: parseWorktreeMode(process.env.OPENCODE_TG_WORKTREE),
     bridgePort: parseIntSetting("OPENCODE_TG_BRIDGE_PORT", 0, 0),
+    autoClose: process.env.OPENCODE_TG_AUTO_CLOSE !== "0",
   };
   const agent = process.env.OPENCODE_DEFAULT_AGENT?.trim();
   if (agent) cfg.defaultAgent = agent;

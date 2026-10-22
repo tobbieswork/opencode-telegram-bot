@@ -188,6 +188,13 @@ export class Telegram {
     await this.api("closeForumTopic", { chat_id: chatId, message_thread_id: threadId }).catch(() => {});
   }
 
+  /** Reopen a closed topic. A no-op if it is already open, so it is safe to call often. */
+  async openForumTopic(to: ConvKey): Promise<void> {
+    const { chatId, threadId } = parseConv(to);
+    if (!threadId) return;
+    await this.api("openForumTopic", { chat_id: chatId, message_thread_id: threadId }).catch(() => {});
+  }
+
   async deleteForumTopic(to: ConvKey): Promise<void> {
     const { chatId, threadId } = parseConv(to);
     if (!threadId) return;
