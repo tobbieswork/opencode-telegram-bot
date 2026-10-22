@@ -134,6 +134,12 @@ export class Orchestrator {
   private budget = new Map<ConvKey, number>();
   /** Worker convs whose turn-end we are already processing. */
   private finishing = new Set<ConvKey>();
+  /**
+   * Chats whose bridge route is open. Opened BEFORE the bridge is registered:
+   * OpenCode connects (initialize + tools/list) the moment it is added and marks
+   * the server failed for good if that first call is refused.
+   */
+  private bridgeChats = new Set<ConvKey>();
 
   constructor(private h: Host) {}
 
@@ -147,7 +153,7 @@ export class Orchestrator {
 
   private async ensureBridge(): Promise<McpBridge> {
     if (this.bridge) return this.bridge;
-    const b = new McpBridge((route) => (this.h.st.peek(route)?.manager ? this.toolsFor(route) : undefined), BRIDGE_NAME);
+    const b = new McpBridge((route) => (this.bridgeChats.has(route) ? this.toolsFor(route) : undefined), BRIDGE_NAME);
     await b.listen(this.h.cfg.bridgePort);
     this.bridge = b;
     return b;
@@ -163,7 +169,15 @@ export class Orchestrator {
     mkdirSync(join(dir, ".opencode", "agents"), { recursive: true });
     writeFileSync(join(dir, ".opencode", "agents", `${MANAGER_AGENT}.md`), MANAGER_PROMPT(this.h.cfg.maxWorkers));
     const b = await this.ensureBridge();
+    this.bridgeChats.add(chat);
     await this.h.oc.addRemoteMcp(dir, BRIDGE_NAME, b.url(chat), { Authorization: `Bearer ${b.token}` });
+    // Connecting is asynchronous on the server; give it a moment, then insist.
+    let st = { status: "pending" } as { status: string; error?: string };
+    for (let i = 0; i < 10 && st.status !== "connected" && st.status !== "failed"; i++) {
+      await new Promise((r) => setTimeout(r, 300));
+      st = await this.h.oc.mcpStatus(dir, BRIDGE_NAME);
+    }
+    if (st.status !== "connected") throw new Error(`Bridge tool chưa kết nối được (${st.status}${st.error ? `: ${st.error}` : ""}).`);
     return dir;
   }
 
@@ -266,6 +280,7 @@ export class Orchestrator {
     if (want === "off") {
       if (!top.manager) return void (await this.h.sendHtml(conv, "Manager đang tắt."));
       if (top.sessionID) await this.h.oc.interrupt(top.sessionID).catch(() => {});
+      this.bridgeChats.delete(chat);
       this.h.st.set(chat, { manager: false, sessionID: undefined, agent: undefined, directory: undefined, guided: false });
       await this.h.sendHtml(conv, "🧭 Đã tắt Manager. Chat chính quay lại làm việc như một session bình thường; các worker vẫn giữ nguyên.");
       return;

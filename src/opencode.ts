@@ -503,6 +503,14 @@ export class OpenCodeCtl {
     await retryTransient(() => this.client.mcp.connect({ server: name, location })).catch(() => {});
   }
 
+  /** Connection status of one MCP server at a location ("connected", "failed", …) plus its error. */
+  async mcpStatus(directory: string, name: string): Promise<{ status: string; error?: string }> {
+    this.ensureClient();
+    const raw = (await retryTransient(() => this.client.mcp.list({ location: { directory } }))) as any;
+    const s = ((raw?.data ?? raw ?? []) as any[]).find((x) => x?.name === name)?.status;
+    return { status: s?.status ?? "missing", error: s?.error };
+  }
+
   // ── questions / forms ────────────────────────────────────────────────────
   /**
    * A *form* is how OpenCode surfaces the agent's `question` tool (and other

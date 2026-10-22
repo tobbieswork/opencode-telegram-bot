@@ -226,6 +226,26 @@ const repo = join(tmp, "repo");
   check("list_workers summarises", /api-fix — running/.test(await tool("list_workers").run({})));
   check("unknown worker is a clear error", await throws(() => tool("get_worker_result").run({ name: "ghost" }), /No worker named/));
 
+  // /manager on: OpenCode connects to the bridge the moment it is registered
+  // (before the chat is marked as having a Manager) — that first call must work.
+  {
+    let firstCall = 0;
+    oc.addRemoteMcp = async (_dir: string, _name: string, url: string, headers: Record<string, string>) => {
+      const r = await fetch(url, { method: "POST", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
+      firstCall = r.status;
+    };
+    oc.mcpStatus = async () => ({ status: firstCall === 200 ? "connected" : "failed" });
+    oc.createSession = async () => "ses_mgr2";
+    st.set("55", {});
+    await orch.handleCommand("55", "/manager", "on");
+    check("bridge answers OpenCode's first connect during /manager on", firstCall === 200, `HTTP ${firstCall}`);
+    check("manager turned on", st.get("55").manager === true && st.get("55").sessionID === "ses_mgr2");
+    oc.mcpStatus = async () => ({ status: "failed", error: "HTTP 404" });
+    st.set("56", {});
+    await orch.handleCommand("56", "/manager", "on");
+    check("a bridge that fails to connect is reported, not silently ignored", !st.get("56").manager && /HTTP 404/.test(sent.at(-1) ?? ""), sent.at(-1));
+  }
+
   (orch as any).budget.set("42", 0);
   check("dispatch budget stops runaway loops", await throws(() => tool("spawn_worker").run({ name: "more", directory: root, task: "t" }), /budget/));
   check("list_directories stays inside the roots", await throws(() => tool("list_directories").run({ path: join(tmp, "outside") }), /ngoài vùng/));
