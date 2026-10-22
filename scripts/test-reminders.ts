@@ -7,7 +7,15 @@
  * Run:  npx tsx scripts/test-reminders.ts
  */
 import { rm } from "node:fs/promises";
-import { firstReminderAt, nextReminderDelay, reminderBudgetExhausted, nextScheduleAfterReminder } from "../src/reminders.js";
+import {
+  firstReminderAt,
+  nextReminderDelay,
+  reminderBudgetExhausted,
+  nextScheduleAfterReminder,
+  stalePromptIds,
+  clampTimerDelay,
+  MAX_TIMER_MS,
+} from "../src/reminders.js";
 import { StateManager } from "../src/state.js";
 
 let failures = 0;
@@ -75,6 +83,25 @@ const MIN = 60_000;
     "race: prompt replaced (firstShownAt changed) → no advance",
     nextScheduleAfterReminder(captured, { firstShownAt: 999_999, remindersSent: 0 }, 5 * MIN, 2, 1_000_000) === undefined,
   );
+}
+
+// ── setTimeout overflow: an env-tuned backoff must never exceed 2^31-1 ms ────
+{
+  // OPENCODE_TG_REMIND_MAX=20 → 5min * 2^19 ≈ 99 days would overflow and fire at once.
+  check("overflow: 99-day gap is clamped", nextReminderDelay(5 * MIN, 2, 19) === MAX_TIMER_MS);
+  check("overflow: huge base is clamped", firstReminderAt(1e12, 1_000) === 1_000 + MAX_TIMER_MS);
+  check("overflow: small delay untouched", clampTimerDelay(5 * MIN) === 5 * MIN);
+}
+
+// ── stalePromptIds: restart pruning (unknown != gone) ───────────────────────
+{
+  const pending = { f1: { kind: "form" as const }, f2: { kind: "form" as const }, p1: { kind: "permission" as const } };
+  const sorted = (a: string[]) => [...a].sort().join(",");
+  check("stale: ids OpenCode no longer lists are stale", sorted(stalePromptIds(pending, { form: new Set(["f1"]), permission: new Set(["p1"]) })) === "f2");
+  check("stale: empty live sets → all stale", sorted(stalePromptIds(pending, { form: new Set(), permission: new Set() })) === "f1,f2,p1");
+  check("stale: failed form listing (undefined) → forms kept", sorted(stalePromptIds(pending, { permission: new Set() })) === "p1");
+  check("stale: both listings failed → nothing pruned", stalePromptIds(pending, {}).length === 0);
+  check("stale: no pending prompts → nothing", stalePromptIds(undefined, { form: new Set() }).length === 0);
 }
 
 // ── restart: pending prompts persist (id-keyed) and survive a reload ─────────

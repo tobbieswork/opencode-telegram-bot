@@ -7,7 +7,7 @@ import { ConvKey, convKey, chatOf } from "./conv.js";
 import { Orchestrator } from "./orchestrator.js";
 import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure } from "./format.js";
-import { firstReminderAt, reminderBudgetExhausted, nextScheduleAfterReminder } from "./reminders.js";
+import { firstReminderAt, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
 import { log, warn, error } from "./logger.js";
 
@@ -186,10 +186,17 @@ export class Bot {
     await new Promise((r) => setTimeout(r, 1000));
     for (const [conv, s] of Object.entries(this.st.all())) {
       if (!s.sessionID || this.st.findChatBySession(s.sessionID) !== conv) continue;
-      const forms = await this.oc.listForms(s.sessionID).catch(() => [] as any[]);
-      for (const f of forms) if (f?.id && !this.questionForms.has(f.id)) await this.onFormCreated({ ...f, sessionID: s.sessionID });
-      const perms = await this.oc.listPermissions(s.sessionID).catch(() => [] as any[]);
-      for (const p of perms) if (p?.id && !this.permissionPrompts.has(p.id)) await this.onPermissionAsked({ ...p, sessionID: s.sessionID });
+      // undefined = the listing failed (unknown), as opposed to [] = nothing pending.
+      const forms = await this.oc.listForms(s.sessionID).catch(() => undefined);
+      for (const f of forms ?? []) if (f?.id && !this.questionForms.has(f.id)) await this.onFormCreated({ ...f, sessionID: s.sessionID });
+      const perms = await this.oc.listPermissions(s.sessionID).catch(() => undefined);
+      for (const p of perms ?? []) if (p?.id && !this.permissionPrompts.has(p.id)) await this.onPermissionAsked({ ...p, sessionID: s.sessionID });
+      // Reminders persisted before a restart for prompts answered/cancelled meanwhile.
+      const stale = stalePromptIds(this.st.get(conv).pendingPrompts, {
+        form: forms && new Set(forms.map((f: any) => f?.id)),
+        permission: perms && new Set(perms.map((p: any) => p?.id)),
+      });
+      for (const id of stale) this.cancelReminder(conv, id);
       if (!this.inflight.has(conv)) await this.sweepUnrelayedReplies(conv, "missed while disconnected");
     }
   }
@@ -381,7 +388,7 @@ export class Bot {
     if (existing) clearTimeout(existing);
     const pp = this.st.get(conv).pendingPrompts?.[promptId];
     if (!pp) return;
-    const delay = Math.max(0, pp.nextReminderAt - Date.now()); // overdue → fire soon
+    const delay = clampTimerDelay(Math.max(0, pp.nextReminderAt - Date.now())); // overdue → fire soon
     this.reminders.set(key, setTimeout(() => void this.fireReminder(conv, promptId), delay));
   }
 
@@ -434,6 +441,15 @@ export class Bot {
     this.reminders.delete(this.reminderKey(conv, promptId));
     const pp = this.st.get(conv).pendingPrompts?.[promptId];
     if (!pp) return; // cancelled/answered in the meantime
+    // The live prompt must be tracked in memory. After a restart an overdue timer
+    // can fire before reconcile() has re-read OpenCode; if the prompt was settled
+    // meanwhile this would re-send a card with dead buttons. A prompt that is
+    // still pending gets re-registered (and re-scheduled) by reconcile().
+    const live = pp.kind === "form" ? this.questionForms.has(promptId) : this.permissionPrompts.has(promptId);
+    if (!live) {
+      this.cancelReminder(conv, promptId);
+      return;
+    }
     const max = this.cfg.remindMax;
     const sent = pp.remindersSent + 1;
     // Re-send the ORIGINAL prompt + buttons so the user can just tap to answer.
@@ -1486,8 +1502,10 @@ export class Bot {
     const v = this.renderQuestion(qf);
     const messageId = await this.tg.sendMessageId(conv, v.text, { reply_markup: v.keyboard }).catch(() => -1);
     qf.messageId = messageId;
-    // Start nudging if the user doesn't answer (exponential backoff; keyed by form id).
-    this.startPromptReminder(conv, formID, "form", v.text, v.keyboard);
+    // Start nudging if the user doesn't answer (exponential backoff; keyed by form id)
+    // — but ONLY when the card was actually sent, else a reminder would re-send
+    // buttons that were never delivered.
+    if (messageId > 0) this.startPromptReminder(conv, formID, "form", v.text, v.keyboard);
   }
 
   /** A form was answered/cancelled out-of-band (e.g. in the TUI) — clean up. */
@@ -1593,14 +1611,16 @@ export class Bot {
     qf.waitingCustom = undefined;
     if (qf.index + 1 < qf.fields.length) {
       qf.index += 1;
-      let nextText = "";
       if (messageId) {
         const v = this.renderQuestion(qf);
-        nextText = v.text;
         await this.tg.editMessageText(conv, messageId, v.text, { reply_markup: v.keyboard });
+        // Keep nudging about the NEXT field of the same form (same form id), with
+        // its buttons so the reminder is answerable.
+        this.startPromptReminder(conv, qf.formId, "form", v.text, v.keyboard);
+      } else {
+        // Nothing was shown for the new field: don't keep nudging about the old one.
+        this.cancelReminder(conv, qf.formId);
       }
-      // Keep nudging about the NEXT field of the same form (same form id).
-      if (nextText) this.startPromptReminder(conv, qf.formId, "form", nextText);
       return;
     }
     // All fields answered — submit the full answer to OpenCode.

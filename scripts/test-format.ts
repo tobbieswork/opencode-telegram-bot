@@ -194,6 +194,14 @@ const show = (label: string, units: string[]) => {
   check("fail: anthropic ctx detected", ctxAnthropic.includes("đầy context"), ctxAnthropic);
   check("fail: anthropic ctx suggests /clear", ctxAnthropic.includes("/clear"), ctxAnthropic);
 
+  // A usage/quota cap does not clear in seconds: it must NOT say "wait a few seconds",
+  // and must not suggest /clear. (Real error seen from the free-tier model.)
+  const usageCap = formatTurnFailure({ type: "provider.error", message: "Free usage limit reached" }, 900);
+  check("fail: usage cap labelled as such", usageCap.includes("hết hạn mức") && usageCap.includes("/model"), usageCap);
+  check("fail: usage cap is NOT a rate limit", !usageCap.includes("giới hạn tốc độ") && !usageCap.includes("vài giây"), usageCap);
+  check("fail: usage cap NOT ctx", !usageCap.includes("/clear") && !usageCap.includes("đầy context"), usageCap);
+  check("fail: usage cap shows raw detail", usageCap.includes("Free usage limit reached"), usageCap);
+
   // A generic (non-rate, non-context) error shows the raw message + type + elapsed.
   const other = formatTurnFailure(
     { type: "provider.error", message: "Internal error 500: server exploded" },
@@ -214,6 +222,7 @@ const show = (label: string, units: string[]) => {
     ["ctx", ctx],
     ["rateLimit", rateLimit],
     ["ratePerMinute", ratePerMinute],
+    ["usageCap", usageCap],
     ["ctxAnthropic", ctxAnthropic],
     ["other", other],
     ["none", none],

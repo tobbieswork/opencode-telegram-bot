@@ -212,6 +212,11 @@ All settings are environment variables (see `.env.example`).
 | `STATE_FILE` | | `./data/state.json` | Where per-chat state is stored |
 | `TELEGRAM_REPLY_MAX_LEN` | | `4000` | Max chars per outgoing message |
 | `OPENCODE_TG_GUIDE` | | on | `0` = don't prepend the "ask via question tool" note to new sessions |
+| `OPENCODE_TG_LANGUAGE` | | on | `0` = don't set the per-session "reply in the user's language" instruction (and remove it from sessions that have it) |
+| `OPENCODE_TG_REMIND` | | on | `0` = don't re-send unanswered questions/permissions |
+| `OPENCODE_TG_REMIND_BASE_MS` | | `300000` | Delay before the first reminder (ms, min 1000) |
+| `OPENCODE_TG_REMIND_FACTOR` | | `2` | Backoff multiplier between reminders (min 1) |
+| `OPENCODE_TG_REMIND_MAX` | | `4` | Reminders per prompt before the bot stops nudging (the prompt stays pending) |
 | `OPENCODE_TG_BROWSE_ROOTS` | | home dir | Comma-separated dirs the `/browse` browser may walk — and where workers may run |
 | `OPENCODE_TG_MAX_WORKERS` | | `5` | Max busy (running/waiting) workers per chat |
 | `OPENCODE_TG_WORKTREE` | | `auto` | Worktree isolation for writing workers: `auto` / `always` / `off` |

@@ -331,12 +331,6 @@ export class OpenCodeCtl {
   }
 
   /**
-   * Snapshot for `/context`: identity, cumulative usage, message count, the
-   * files the session most recently modified, and the newest user prompt.
-   * Tool parts carry their input under `state.input`; file tools put the
-   * target at `state.input.path`.
-   */
-  /**
    * Put / list / remove a per-session instruction entry. OpenCode namespaces
    * these as `api/<key>` and injects them into the session's system context
    * (the same channel as AGENTS.md), so this is a clean way to steer the model
@@ -358,6 +352,12 @@ export class OpenCodeCtl {
     await retryTransient(() => this.client.session.instructions.entry.remove({ sessionID, key }));
   }
 
+  /**
+   * Snapshot for `/context`: identity, cumulative usage, message count, the
+   * files the session most recently modified, and the newest user prompt.
+   * Tool parts carry their input under `state.input`; file tools put the
+   * target at `state.input.path`.
+   */
   async getSessionReport(sessionID: string): Promise<SessionReport> {
     const s = ((await this.getSession(sessionID).catch(() => null)) ?? {}) as any;
     const msgs = ((await this.listMessages(sessionID).catch(() => [])) as any[]) ?? [];

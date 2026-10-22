@@ -16,9 +16,11 @@ export function trunc(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n) + "…";
 }
 
-/** Provider RATE LIMIT / usage cap — NOT a full context, so /clear won't help. */
-const RATE_LIMIT_RE =
-  /rate ?limit|per (minute|hour|day)|usage limit|too many requests|requests per (minute|hour)|throttl|quota|overloaded/i;
+/** Transient provider RATE LIMIT — NOT a full context, so /clear won't help; retrying shortly does. */
+const RATE_LIMIT_RE = /rate ?limit|per (minute|hour|day)|too many requests|requests per (minute|hour)|throttl|overloaded/i;
+
+/** A plan/quota/credit cap — does NOT clear in seconds, so "wait a moment" would be wrong advice. */
+const USAGE_CAP_RE = /usage limit|quota|limit reached|insufficient (credit|balance|fund)|out of credit|billing/i;
 
 /** The model's CONTEXT was exceeded — fixable by starting a fresh session. */
 const CONTEXT_OVERFLOW_RE =
@@ -29,8 +31,8 @@ const CONTEXT_OVERFLOW_RE =
  * almost always means the provider rejected the request. The raw error comes
  * from the newest assistant / idle / compaction message's `.error` field (the
  * session object carries none). We distinguish a *rate limit* (wait and retry —
- * /clear is useless) from *context overflow* (start a fresh session), then fall
- * back to the raw message.
+ * /clear is useless) from a *usage cap* (wait for a reset or switch model) and
+ * from *context overflow* (start a fresh session), then fall back to the raw message.
  */
 export function formatTurnFailure(
   error: { type?: string; message?: string } | undefined,
@@ -43,6 +45,11 @@ export function formatTurnFailure(
   if (RATE_LIMIT_RE.test(text)) {
     const detail = raw ? `\n<i>${esc(trunc(raw, 200))}</i>` : "";
     return `⏳ Provider đang giới hạn tốc độ (rate limit) — không phải lỗi context, chờ vài giây rồi thử lại.${detail}`;
+  }
+  // Checked after RATE_LIMIT_RE so "usage limit … per minute" stays a rate limit.
+  if (USAGE_CAP_RE.test(text)) {
+    const detail = raw ? `\n<i>${esc(trunc(raw, 200))}</i>` : "";
+    return `🚫 Đã hết hạn mức sử dụng của provider/model — chờ đến khi hạn mức được reset hoặc đổi model bằng /model.${detail}`;
   }
   if (CONTEXT_OVERFLOW_RE.test(text)) {
     return (
@@ -136,7 +143,7 @@ function blockToHtml(raw: string): string {
   out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2">$1</a>');
   out = out.replace(/^(\s*)[-*]\s+/, "$1• ");
   // Put the code spans back now that no delimiter passes are left to misread them.
-  out = out.replace(/\u0000(\d+)\u0000/g, (_m: string, i: string) => codeSpans[Number(i)]);
+  out = out.replace(/\u0000(\d+)\u0000/g, (m: string, i: string) => codeSpans[Number(i)] ?? m);
   return out;
 }
 
