@@ -6,7 +6,7 @@
  *
  * Run:  npx tsx scripts/test-prune.ts
  */
-import { selectPruneable } from "../src/prune.js";
+import { selectPruneable, selectFinishedWorkers } from "../src/prune.js";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: string): void {
@@ -83,6 +83,39 @@ const d7 = 7 * DAY;
 {
   check("no items → nothing", selectPruneable([], now, d7).length === 0);
   check("missing updatedAt treated as 0 (ancient finished → selected)", selectPruneable([{ conv: "1:22", status: "stopped" } as any], now, d7).length === 1);
+}
+
+// ── startup sweep: selectFinishedWorkers (no age cutoff) ─────────────────────
+{
+  const items = [
+    { conv: "1:30", status: "done" },
+    { conv: "1:31", status: "failed" },
+    { conv: "1:32", status: "stopped" },
+    { conv: "1:33", status: "running" }, // never
+    { conv: "1:34", status: "waiting" }, // never
+    { conv: "1:35", status: "idle" }, // never
+  ];
+  const got = selectFinishedWorkers(items);
+  check("done → selected", got.includes("1:30"));
+  check("failed → selected", got.includes("1:31"));
+  check("stopped → selected", got.includes("1:32"));
+  check("running → NEVER selected", !got.includes("1:33"));
+  check("waiting → NEVER selected", !got.includes("1:34"));
+  check("idle → NEVER selected", !got.includes("1:35"));
+  check(
+    "exactly the three finished convs, in order",
+    JSON.stringify(got) === JSON.stringify(["1:30", "1:31", "1:32"]),
+    JSON.stringify(got),
+  );
+}
+{
+  check("no items → nothing", selectFinishedWorkers([]).length === 0);
+  check(
+    "only busy/idle workers → nothing selected",
+    selectFinishedWorkers([{ conv: "1:36", status: "running" }, { conv: "1:37", status: "idle" }]).length === 0,
+  );
+  // No age cutoff: a "fresh" finished worker is still selected (unlike /prune).
+  check("no age cutoff — a just-finished worker is selected", selectFinishedWorkers([{ conv: "1:38", status: "done" }]).length === 1);
 }
 
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);

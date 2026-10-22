@@ -187,6 +187,9 @@ export class Bot {
     );
     // Resume any pending-prompt reminder nudges that were scheduled before a restart.
     this.resumePromptReminders();
+    // Close topics left open by workers that finished before auto-close existed
+    // (or while the service was down). Fire-and-forget; never fails startup.
+    void this.orch.closeFinishedTopicsAtStartup().catch((e) => warn("startup topic close:", e?.message));
     // Register the Telegram /command autocomplete menu (cosmetic, best-effort).
     this.registerCommands();
   }

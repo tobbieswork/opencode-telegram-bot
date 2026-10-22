@@ -20,3 +20,24 @@ export function selectPruneable(items: PruneItem[], nowMs: number, daysMs: numbe
   const finished = new Set(["done", "failed", "stopped"]);
   return items.filter((it) => finished.has(it.status) && (it.updatedAt ?? 0) < cutoff).map((it) => it.conv);
 }
+
+/** A worker topic as seen by the startup close sweep: only the fields the selection needs. */
+export interface WorkerConv {
+  /** Conversation key of the worker topic (`chat:topic`). */
+  conv: string;
+  /** Current worker status (running/waiting/done/failed/stopped/idle). */
+  status: string;
+}
+
+/**
+ * Worker topics to close at startup: EVERY finished worker (done/failed/stopped),
+ * with no age cutoff — unlike /prune, recency is irrelevant here. This sweeps the
+ * topics that went orphaned because the worker finished before auto-close existed
+ * or while the service was down/restarting; closing an already-closed topic is a
+ * no-op, so re-running is safe. Busy (running/waiting) and idle workers are never
+ * selected. Pure — no clock or state inside, so the policy is unit-testable.
+ */
+export function selectFinishedWorkers(items: WorkerConv[]): string[] {
+  const finished = new Set(["done", "failed", "stopped"]);
+  return items.filter((it) => finished.has(it.status)).map((it) => it.conv);
+}

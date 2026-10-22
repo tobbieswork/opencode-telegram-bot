@@ -9,7 +9,7 @@ import { ConvKey, chatOf, convKey, parseConv } from "./conv.js";
 import { McpBridge, BridgeTool } from "./mcp-bridge.js";
 import { addWorktree, diffSummary, gitRoot, mergeWorktree, removeWorktree } from "./worktree.js";
 import { listDirs } from "./fsbrowser.js";
-import { selectPruneable } from "./prune.js";
+import { selectPruneable, selectFinishedWorkers, WorkerConv } from "./prune.js";
 import { esc, trunc, timeAgo, stripTags } from "./format.js";
 import { log, warn } from "./logger.js";
 
@@ -184,6 +184,31 @@ export class Orchestrator {
       const status: WorkerStatus = state.outcome === "succeeded" ? "done" : state.outcome === "failed" ? "failed" : "stopped";
       log(`[chat ${chatOf(conv)}] worker ${w.name} ended while unobserved — ${status}`);
       await this.onWorkerFinished(conv, status);
+    }
+  }
+
+  /**
+   * Retroactive auto-close at startup: a worker that finished before auto-close
+   * existed (or while the service was down/restarting) never got its topic
+   * closed and now sits open forever. Close the topic of every finished worker
+   * (done/failed/stopped); closing an already-closed topic is a no-op, so this
+   * is safe to re-run on every restart. Best-effort — it never fails startup.
+   * Returns the number of topics attempted.
+   */
+  async closeFinishedTopicsAtStartup(): Promise<number> {
+    if (!this.h.cfg.autoClose) return 0;
+    try {
+      const items: WorkerConv[] = [];
+      for (const [conv, s] of Object.entries(this.h.st.all())) {
+        if (s.worker) items.push({ conv, status: s.worker.status });
+      }
+      const targets = selectFinishedWorkers(items);
+      for (const conv of targets) await this.h.tg.closeForumTopic(conv).catch(() => {});
+      if (targets.length) log(`startup: retroactively closed ${targets.length} finished worker topics`);
+      return targets.length;
+    } catch (e) {
+      warn("startup topic close:", e instanceof Error ? e.message : String(e));
+      return 0;
     }
   }
 
