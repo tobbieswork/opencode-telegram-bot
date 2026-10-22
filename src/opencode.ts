@@ -3,6 +3,9 @@ import { Service } from "@opencode/client/service";
 import { existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
+/** Tool names that modify files (their input carries the target at `.path`). */
+const MUTATING_TOOLS = new Set(["write", "edit", "apply_patch", "delete_file", "create_file", "move"]);
+
 export interface ModelInfo {
   id: string;
   providerID: string;
@@ -27,6 +30,37 @@ export interface PromptResult {
   elapsedMs: number;
   /** time.created of the assistant message that produced `reply` (0 if none). */
   replyTime?: number;
+}
+
+/** Cumulative token usage for a session (as reported by OpenCode). */
+export interface SessionTokens {
+  input: number;
+  output: number;
+  reasoning: number;
+  cache: number;
+}
+
+/**
+ * A snapshot of a session for `/context`: identity, cumulative usage, and the
+ * files it most recently modified. OpenCode exposes no context-window-remaining
+ * field, so this is cumulative tokens + observed file activity — not "how much
+ * context is left".
+ */
+export interface SessionReport {
+  id: string;
+  title?: string;
+  directory?: string;
+  agent?: string;
+  outcome?: string;
+  created?: number;
+  updated?: number;
+  messageCount: number;
+  tokens?: SessionTokens;
+  cost?: number;
+  /** Unique file paths most recently modified (newest first), capped. */
+  modifiedFiles: string[];
+  /** Text of the newest user prompt. */
+  lastUserPrompt?: string;
 }
 
 /**
@@ -238,6 +272,76 @@ export class OpenCodeCtl {
   }
 
   /**
+   * The model actually used by the newest assistant message. The session object
+   * carries no model field, so this is the only way to observe which model the
+   * session is running on (explicitly set or server-resolved default).
+   */
+  async getSessionModel(sessionID: string): Promise<{ id: string; providerID: string } | undefined> {
+    const msgs = ((await this.listMessages(sessionID, 10).catch(() => [])) as any[]) ?? [];
+    for (const m of msgs) {
+      if (m?.type === "assistant" && m.model?.id) {
+        return { id: m.model.id, providerID: m.model.providerID ?? "?" };
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Snapshot for `/context`: identity, cumulative usage, message count, the
+   * files the session most recently modified, and the newest user prompt.
+   * Tool parts carry their input under `state.input`; file tools put the
+   * target at `state.input.path`.
+   */
+  async getSessionReport(sessionID: string): Promise<SessionReport> {
+    const s = ((await this.getSession(sessionID).catch(() => null)) ?? {}) as any;
+    const msgs = ((await this.listMessages(sessionID).catch(() => [])) as any[]) ?? [];
+
+    // File-modification events in message order (each hit is one write/edit/...).
+    const events: string[] = [];
+    let lastUserPrompt: string | undefined;
+    for (const m of msgs) {
+      if (m?.type === "user") lastUserPrompt = typeof m.text === "string" ? m.text : lastUserPrompt;
+      for (const c of m?.content ?? []) {
+        if (c?.type !== "tool") continue;
+        if (!MUTATING_TOOLS.has(c.name)) continue;
+        const p = c.state?.input?.path;
+        if (typeof p === "string") events.push(p);
+      }
+    }
+
+    // Newest-first, de-duplicated, capped.
+    const seen = new Set<string>();
+    const modifiedFiles: string[] = [];
+    for (let i = events.length - 1; i >= 0 && modifiedFiles.length < 8; i--) {
+      if (seen.has(events[i])) continue;
+      seen.add(events[i]);
+      modifiedFiles.push(events[i]);
+    }
+
+    return {
+      id: s.id ?? sessionID,
+      title: s.title,
+      directory: s.location?.directory,
+      agent: s.agent,
+      outcome: s.outcome,
+      created: s.time?.created,
+      updated: s.time?.updated,
+      messageCount: msgs.length,
+      tokens: s.tokens
+        ? {
+            input: s.tokens.input ?? 0,
+            output: s.tokens.output ?? 0,
+            reasoning: s.tokens.reasoning ?? 0,
+            cache: s.tokens.cache?.read ?? 0,
+          }
+        : undefined,
+      cost: typeof s.cost === "number" ? s.cost : undefined,
+      modifiedFiles,
+      lastUserPrompt,
+    };
+  }
+
+  /**
    * Send a prompt, block until the session goes idle, then return the latest
    * assistant text. If the passed signal aborts (e.g. /stop), we still read
    * whatever partial reply exists and report `interrupted: true`.
@@ -333,17 +437,56 @@ export class OpenCodeCtl {
     await retryTransient(() => this.client.session.form.reply({ sessionID, formID, answer }));
   }
 
-  async cancelForm(sessionID: string, formID: string, message?: string): Promise<void> {
-    this.ensureClient();
-    await retryTransient(() =>
-      this.client.session.form.cancel({
-        sessionID,
-        formID,
-        ...(message ? { message } : {}),
-      }),
-    );
-  }
+   async cancelForm(sessionID: string, formID: string, message?: string): Promise<void> {
+     this.ensureClient();
+     await retryTransient(() =>
+       this.client.session.form.cancel({
+         sessionID,
+         formID,
+         ...(message ? { message } : {}),
+       }),
+     );
+   }
 
+   /**
+    * Answer a pending permission request (what the TUI does when you press a
+    * key). `decision`: "once" (allow just this call), "always" (save a rule
+    * so this is never asked again), or "reject".
+    */
+   async replyPermission(
+     sessionID: string,
+     requestID: string,
+     decision: "once" | "always" | "reject",
+     message?: string,
+   ): Promise<void> {
+     this.ensureClient();
+     await retryTransient(() =>
+       this.client.permission.reply({
+         sessionID,
+         requestID,
+         decision,
+         ...(message ? { message } : {}),
+       }),
+     );
+   }
+
+   /**
+    * Create a permission request on a session, the same way a tool call would.
+    * Returns the request id and its resolved effect ("ask" = pending, fires
+    * the `permission.asked` event; "allow"/"deny" = settled by saved rules).
+    * Used by the smoke test to drive the permission relay end-to-end.
+    */
+   async createPermission(
+     sessionID: string,
+     action: string,
+     resources: string[],
+   ): Promise<{ id: string; effect: string }> {
+     this.ensureClient();
+     const raw = (await retryTransient(() =>
+       this.client.permission.create({ sessionID, action, resources }),
+     )) as any;
+     return { id: String(raw?.id ?? ""), effect: String(raw?.effect ?? "") };
+   }
   /**
    * Subscribe to the OpenCode event stream and forward every event to
    * `onEvent`. The stream is live-only with no replay, so on a drop we

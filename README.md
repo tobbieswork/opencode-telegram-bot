@@ -27,6 +27,13 @@ The whole Telegram transport is ~130 lines you can read in one sitting.
   **inline buttons**, one question at a time — tap an option or type your own
   answer. Answering the form on the OpenCode side is what un-blocks the session
   (a question that was never answered used to hang the whole task).
+- When a tool needs a **permission** the agent doesn't already have, the bot
+  relays the request as a card with buttons (`Duyệt 1 lần` / `Duyệt luôn` /
+  `Từ chối`) — tap one to answer from Telegram, or answer in the terminal TUI;
+  whichever comes first settles the other side.
+- **Plan → build handoff**: after any successful turn that ends in `plan` mode,
+  the bot offers a one-tap button that switches the session to `build` and
+  executes the plan that is already in context.
 
 ## Prerequisites
 
@@ -64,6 +71,25 @@ On first run it prints the connected OpenCode URL/version and your bot's
 > `TELEGRAM_ALLOWED_USER_IDS` to yourself. Do **not** set
 > `OPENCODE_TG_ALLOW_ANY=1` on an exposed network.
 
+## Running as a systemd service (optional)
+
+To keep the bot alive across restarts/logouts and auto-restart it on crash,
+install the bundled user-level unit (it pins an absolute Node path, because
+systemd's default PATH won't see nvm):
+
+```sh
+cp deploy/opencode-bot.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now opencode-bot
+```
+
+- Status/logs: `systemctl --user status opencode-bot`, `journalctl --user -u opencode-bot -f`
+- Keep it running after you log out (needs sudo, once): `sudo loginctl enable-linger $USER`
+- Before enabling, stop any manual `npm start`/`nohup` instance first, or two
+  processes will fight over Telegram polling (409 conflicts in the log).
+- After changing the Node version in nvm, update the pinned paths in the
+  unit and `systemctl --user restart opencode-bot`.
+
 ## Usage
 
 Send any message to run it. Example:
@@ -79,7 +105,7 @@ bot:   The last commit adds retry logic but…
 
 | Command | Description |
 | --- | --- |
-| `/help` | Show help |
+| `/help` | Show help + a tappable command menu |
 | `/new` | Start a fresh session in the current directory |
 | `/ls` | List recent sessions |
 | `/use <id>` | Switch this chat to an existing session |
@@ -90,8 +116,10 @@ bot:   The last commit adds retry logic but…
 | `/variants [id]` | List/set the model's reasoning variant (default `xhigh`) |
 | `/agents` | List user-facing agents |
 | `/agent <id>` | Set the agent (`build`, `general`, `explore`, `plan`) |
+| `/mode` | Pick an operating mode via buttons — `build` / `plan` / `general` / `explore` |
 | `/stop` | Interrupt the running task |
 | `/history` | Show the last few messages of the current session |
+| `/context` | Photo of the current session — usage, files touched, last prompt |
 | `/status` | Show what the bot is connected to |
 | `/clear` | Reset this chat's session/dir/model/agent |
 
