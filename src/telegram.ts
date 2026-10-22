@@ -1,16 +1,22 @@
 import { log, warn, error } from "./logger.js";
+import { ConvKey, parseConv } from "./conv.js";
 
 export type Message = {
+  message_id?: number;
   text?: string;
-  chat: { id: number };
+  chat: { id: number; type?: string; is_forum?: boolean };
   from?: { id: number; first_name?: string; username?: string };
+  /** Forum topic the message belongs to (only meaningful when is_topic_message). */
+  message_thread_id?: number;
+  is_topic_message?: boolean;
+  forum_topic_created?: { name: string };
 };
 
 export type CallbackQuery = {
   id: string;
   data?: string;
   from?: { id: number; first_name?: string; username?: string };
-  message?: { chat: { id: number }; message_id: number };
+  message?: { chat: { id: number }; message_id: number; message_thread_id?: number; is_topic_message?: boolean };
 };
 
 export type Update = {
@@ -21,6 +27,18 @@ export type Update = {
 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Where to send: a conversation key (`chat` or `chat:topic`) or a bare chat id.
+ * Expands to `chat_id` plus `message_thread_id` when it names a topic.
+ */
+function dest(to: ConvKey | number): { chat_id: number; message_thread_id?: number } {
+  const { chatId, threadId } = parseConv(to);
+  return threadId ? { chat_id: chatId, message_thread_id: threadId } : { chat_id: chatId };
+}
+
+/** Topic icon colors Telegram accepts for createForumTopic. */
+export const TOPIC_COLORS = [0x6fb9f0, 0xffd67e, 0xcb86db, 0x8eee98, 0xff93b2, 0xfb6f5f];
 
 /**
  * Minimal Telegram Bot API client using long polling over global fetch.
@@ -65,18 +83,19 @@ export class Telegram {
     return json.result as T;
   }
 
-  getMe(): Promise<{ id: number; username?: string; first_name?: string }> {
+  /** `has_topics_enabled` tells whether this bot has topic mode in private chats. */
+  getMe(): Promise<{ id: number; username?: string; first_name?: string; has_topics_enabled?: boolean }> {
     return this.api("getMe");
   }
 
   /** Fire-and-forget typing indicator. */
-  sendChatAction(chatId: number, action = "typing"): void {
-    void this.api("sendChatAction", { chat_id: chatId, action }).catch(() => {});
+  sendChatAction(to: ConvKey | number, action = "typing"): void {
+    void this.api("sendChatAction", { ...dest(to), action }).catch(() => {});
   }
 
-  async sendMessage(chatId: number, text: string, opts: Record<string, unknown> = {}): Promise<void> {
+  async sendMessage(to: ConvKey | number, text: string, opts: Record<string, unknown> = {}): Promise<void> {
     await this.api("sendMessage", {
-      chat_id: chatId,
+      ...dest(to),
       text,
       parse_mode: "HTML",
       disable_web_page_preview: true,
@@ -85,9 +104,9 @@ export class Telegram {
   }
 
   /** Like sendMessage but resolves to the Telegram message_id (for editing later). */
-  async sendMessageId(chatId: number, text: string, opts: Record<string, unknown> = {}): Promise<number> {
+  async sendMessageId(to: ConvKey | number, text: string, opts: Record<string, unknown> = {}): Promise<number> {
     const res = await this.api<{ message_id: number }>("sendMessage", {
-      chat_id: chatId,
+      ...dest(to),
       text,
       parse_mode: "HTML",
       disable_web_page_preview: true,
@@ -101,14 +120,14 @@ export class Telegram {
    * message instead of spamming the chat.
    */
   async editMessageText(
-    chatId: number,
+    to: ConvKey | number,
     messageId: number,
     text: string,
     opts: Record<string, unknown> = {},
   ): Promise<void> {
     try {
       await this.api("editMessageText", {
-        chat_id: chatId,
+        chat_id: parseConv(to).chatId,
         message_id: messageId,
         text,
         parse_mode: "HTML",
@@ -131,12 +150,48 @@ export class Telegram {
     }
   }
 
-  async deleteMessage(chatId: number, messageId: number): Promise<void> {
+  async deleteMessage(to: ConvKey | number, messageId: number): Promise<void> {
     try {
-      await this.api("deleteMessage", { chat_id: chatId, message_id: messageId });
+      await this.api("deleteMessage", { chat_id: parseConv(to).chatId, message_id: messageId });
     } catch {
       // Already gone.
     }
+  }
+
+  // ── forum topics (supergroups, and private chats with topic mode) ──────────
+  /** Create a topic; resolves to its message_thread_id. */
+  async createForumTopic(chatId: number, name: string, iconColor?: number): Promise<number> {
+    const res = await this.api<{ message_thread_id: number }>("createForumTopic", {
+      chat_id: chatId,
+      name: name.slice(0, 128),
+      ...(iconColor ? { icon_color: iconColor } : {}),
+    });
+    return res.message_thread_id;
+  }
+
+  /** Rename a topic (used to show worker status as a title prefix). Best-effort. */
+  async editForumTopic(to: ConvKey, name: string): Promise<void> {
+    const { chatId, threadId } = parseConv(to);
+    if (!threadId) return;
+    try {
+      await this.api("editForumTopic", { chat_id: chatId, message_thread_id: threadId, name: name.slice(0, 128) });
+    } catch (e) {
+      // 400 TOPIC_NOT_MODIFIED (same name) is harmless.
+      if ((e as any)?.code !== 400) throw e;
+    }
+  }
+
+  /** Close a topic. Only supergroups support this; private chats just keep it open. */
+  async closeForumTopic(to: ConvKey): Promise<void> {
+    const { chatId, threadId } = parseConv(to);
+    if (!threadId) return;
+    await this.api("closeForumTopic", { chat_id: chatId, message_thread_id: threadId }).catch(() => {});
+  }
+
+  async deleteForumTopic(to: ConvKey): Promise<void> {
+    const { chatId, threadId } = parseConv(to);
+    if (!threadId) return;
+    await this.api("deleteForumTopic", { chat_id: chatId, message_thread_id: threadId });
   }
 
   /**

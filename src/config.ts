@@ -41,8 +41,16 @@ export interface Config {
   defaultModel?: ModelRef;
   /** Default reasoning variant applied to each session (e.g. "xhigh"); overridable via /variants. */
   defaultVariant: string;
-  /** Directories the folder browser is allowed to walk. */
+  /** Directories the folder browser is allowed to walk (also where workers may run). */
   browseRoots: string[];
+  /** Where each chat's Manager session lives (`<managerDir>/<chatId>`); holds its agent file. */
+  managerDir: string;
+  /** Max workers per chat that may be busy at once (running or waiting). */
+  maxWorkers: number;
+  /** Git worktree isolation for writing workers: "auto" (when another writer shares the repo), "always", "off". */
+  worktreeMode: "auto" | "always" | "off";
+  /** Port of the Manager's local MCP bridge (0 = pick a free one). */
+  bridgePort: number;
 }
 
 export function loadConfig(root: string): Config {
@@ -77,6 +85,10 @@ export function loadConfig(root: string): Config {
     guideQuestions: process.env.OPENCODE_TG_GUIDE !== "0",
     defaultVariant: process.env.OPENCODE_DEFAULT_VARIANT?.trim() || "xhigh",
     browseRoots: [],
+    managerDir: resolve(process.env.OPENCODE_TG_MANAGER_DIR?.trim() || resolve(root, "data/manager")),
+    maxWorkers: Math.max(1, Number(process.env.OPENCODE_TG_MAX_WORKERS?.trim() || 5)),
+    worktreeMode: parseWorktreeMode(process.env.OPENCODE_TG_WORKTREE),
+    bridgePort: Number(process.env.OPENCODE_TG_BRIDGE_PORT?.trim() || 0),
   };
   const agent = process.env.OPENCODE_DEFAULT_AGENT?.trim();
   if (agent) cfg.defaultAgent = agent;
@@ -85,6 +97,11 @@ export function loadConfig(root: string): Config {
   if (modelId && modelProvider) cfg.defaultModel = { id: modelId, providerID: modelProvider };
   cfg.browseRoots = loadBrowseRoots(cfg.opencodeDirectory);
   return cfg;
+}
+
+function parseWorktreeMode(raw?: string): Config["worktreeMode"] {
+  const v = raw?.trim().toLowerCase();
+  return v === "always" || v === "off" ? v : "auto";
 }
 
 /**

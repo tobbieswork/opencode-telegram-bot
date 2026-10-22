@@ -21,7 +21,7 @@ async function main(): Promise<void> {
 
   const tg = new Telegram(cfg.telegramToken);
   const me = await tg.getMe();
-  log(`Telegram bot: @${me.username ?? "?"} (id ${me.id})`);
+  log(`Telegram bot: @${me.username ?? "?"} (id ${me.id}) · topics in private chats: ${me.has_topics_enabled ? "on" : "off"}`);
 
   if (cfg.allowAny) {
     warn("OPENCODE_TG_ALLOW_ANY=1 — the bot will respond to ANYONE. Prefer TELEGRAM_ALLOWED_USER_IDS.");
@@ -50,7 +50,7 @@ async function main(): Promise<void> {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("unhandledRejection", (e) => error("Unhandled rejection:", e));
 
-  await tg.poll((u) => bot.handle(u));
+  await tg.poll((u) => bot.enqueue(u));
 }
 
 main().catch((e) => {
