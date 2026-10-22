@@ -64,6 +64,25 @@ On first run it prints the connected OpenCode URL/version and your bot's
 > `TELEGRAM_ALLOWED_USER_IDS` to yourself. Do **not** set
 > `OPENCODE_TG_ALLOW_ANY=1` on an exposed network.
 
+## Running as a systemd service (optional)
+
+To keep the bot alive across restarts/logouts and auto-restart it on crash,
+install the bundled user-level unit (it pins an absolute Node path, because
+systemd's default PATH won't see nvm):
+
+```sh
+cp deploy/opencode-bot.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now opencode-bot
+```
+
+- Status/logs: `systemctl --user status opencode-bot`, `journalctl --user -u opencode-bot -f`
+- Keep it running after you log out (needs sudo, once): `sudo loginctl enable-linger $USER`
+- Before enabling, stop any manual `npm start`/`nohup` instance first, or two
+  processes will fight over Telegram polling (409 conflicts in the log).
+- After changing the Node version in nvm, update the pinned paths in the
+  unit and `systemctl --user restart opencode-bot`.
+
 ## Usage
 
 Send any message to run it. Example:

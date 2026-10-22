@@ -1,0 +1,35 @@
+# User-level systemd unit for the OpenCode Telegram bot.
+#
+# Install:
+#   cp deploy/opencode-bot.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now opencode-bot
+#
+# Keep it running after logout (needs sudo):
+#   sudo loginctl enable-linger $USER
+#
+# Useful:
+#   systemctl --user status opencode-bot
+#   journalctl --user -u opencode-bot -f
+#
+# NOTE: stop the old nohup instance first, or two processes will fight over
+# the Telegram polling loop (409 conflicts in the log):
+#   pkill -f "tsx src/index.ts"
+
+[Unit]
+Description=OpenCode Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# systemd's default PATH picks up /usr/bin/node (v18); pin the nvm Node 24 that
+# the bot is developed against (Promise.withResolvers needs >= 22).
+Environment=PATH=/home/phatnd12/.nvm/versions/node/v24.21.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+WorkingDirectory=/home/phatnd12/fpt/opencode-telegram-bot
+ExecStart=/home/phatnd12/.nvm/versions/node/v24.21.0/bin/node /home/phatnd12/fpt/opencode-telegram-bot/node_modules/.bin/tsx src/index.ts
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
