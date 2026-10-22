@@ -27,6 +27,10 @@ The whole Telegram transport is ~130 lines you can read in one sitting.
   **inline buttons**, one question at a time — tap an option or type your own
   answer. Answering the form on the OpenCode side is what un-blocks the session
   (a question that was never answered used to hang the whole task).
+- When a tool needs a **permission** the agent doesn't already have, the bot
+  relays the request as a card with buttons (`Duyệt 1 lần` / `Duyệt luôn` /
+  `Từ chối`) — tap one to answer from Telegram, or answer in the terminal TUI;
+  whichever comes first settles the other side.
 
 ## Prerequisites
 

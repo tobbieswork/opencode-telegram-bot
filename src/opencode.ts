@@ -437,17 +437,56 @@ export class OpenCodeCtl {
     await retryTransient(() => this.client.session.form.reply({ sessionID, formID, answer }));
   }
 
-  async cancelForm(sessionID: string, formID: string, message?: string): Promise<void> {
-    this.ensureClient();
-    await retryTransient(() =>
-      this.client.session.form.cancel({
-        sessionID,
-        formID,
-        ...(message ? { message } : {}),
-      }),
-    );
-  }
+   async cancelForm(sessionID: string, formID: string, message?: string): Promise<void> {
+     this.ensureClient();
+     await retryTransient(() =>
+       this.client.session.form.cancel({
+         sessionID,
+         formID,
+         ...(message ? { message } : {}),
+       }),
+     );
+   }
 
+   /**
+    * Answer a pending permission request (what the TUI does when you press a
+    * key). `decision`: "once" (allow just this call), "always" (save a rule
+    * so this is never asked again), or "reject".
+    */
+   async replyPermission(
+     sessionID: string,
+     requestID: string,
+     decision: "once" | "always" | "reject",
+     message?: string,
+   ): Promise<void> {
+     this.ensureClient();
+     await retryTransient(() =>
+       this.client.permission.reply({
+         sessionID,
+         requestID,
+         decision,
+         ...(message ? { message } : {}),
+       }),
+     );
+   }
+
+   /**
+    * Create a permission request on a session, the same way a tool call would.
+    * Returns the request id and its resolved effect ("ask" = pending, fires
+    * the `permission.asked` event; "allow"/"deny" = settled by saved rules).
+    * Used by the smoke test to drive the permission relay end-to-end.
+    */
+   async createPermission(
+     sessionID: string,
+     action: string,
+     resources: string[],
+   ): Promise<{ id: string; effect: string }> {
+     this.ensureClient();
+     const raw = (await retryTransient(() =>
+       this.client.permission.create({ sessionID, action, resources }),
+     )) as any;
+     return { id: String(raw?.id ?? ""), effect: String(raw?.effect ?? "") };
+   }
   /**
    * Subscribe to the OpenCode event stream and forward every event to
    * `onEvent`. The stream is live-only with no replay, so on a drop we

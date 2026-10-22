@@ -99,6 +99,14 @@ interface QuestionFormState {
   waitingCustom?: number;
 }
 
+/** A pending OpenCode permission request relayed to Telegram (buttons to answer it). */
+interface PermissionPrompt {
+  requestID: string;
+  sessionID: string;
+  chatId: number;
+  messageId: number;
+}
+
 /**
  * Glue between Telegram and OpenCode. Owns per-chat state and the in-flight
  * prompt task, so a running prompt never blocks the polling loop and /stop
@@ -108,6 +116,7 @@ export class Bot {
   private inflight = new Map<number, AbortController>();
   private browsers = new Map<number, BrowseState>();
   private questionForms = new Map<string, QuestionFormState>();
+  private permissionPrompts = new Map<string, PermissionPrompt>();
   /** Repeating "typing…" timers, one per chat, so the indicator lasts until the reply is sent. */
   private typing = new Map<number, ReturnType<typeof setInterval>>();
   /** Chats whose unrelayed-reply sweep is currently running (prevents a double relay). */
@@ -634,6 +643,10 @@ export class Bot {
       await this.handleModeCallback(cb, chatId, messageId);
       return;
     }
+    if (data.startsWith("perm:")) {
+      await this.handlePermissionCallback(cb, chatId, messageId);
+      return;
+    }
     if (data.startsWith("cmd:")) {
       await this.runCommandButton(cb, chatId, data.slice(4));
       return;
@@ -1112,6 +1125,12 @@ export class Bot {
     } else if (t === "form.replied" || t === "form.cancelled") {
       const formID = ev?.data?.id;
       if (formID) void this.onFormResolved(formID, t);
+    } else if (t === "permission.asked") {
+      const d = ev?.data;
+      if (d?.id && d?.sessionID) void this.onPermissionAsked(d);
+    } else if (t === "permission.replied") {
+      const d = ev?.data;
+      if (d?.requestID) void this.onPermissionResolved(d.requestID, d.reply);
     } else if (
       t === "session.execution.started" ||
       t === "session.execution.succeeded" ||
@@ -1299,5 +1318,85 @@ export class Bot {
       }
     }
     return false;
+  }
+
+  // ── permission prompts (OpenCode tool permission asks) ────────────────────
+  /** A permission request is pending — relay it to the owning chat as buttons. */
+  private async onPermissionAsked(d: any): Promise<void> {
+    const requestID = d.id as string;
+    const sessionID = d.sessionID as string;
+    if (this.permissionPrompts.has(requestID)) return;
+    const chatKey = this.st.findChatBySession(sessionID);
+    if (!chatKey) {
+      warn(`permission.asked for session ${sessionID} with no mapped chat — ignoring`);
+      return;
+    }
+    const chatId = Number(chatKey);
+    const lines: string[] = ["🔐 <b>OpenCode xin quyền</b>"];
+    lines.push(`action: <code>${esc(d.action ?? "?")}</code>`);
+    for (const r of (d.resources ?? []) as string[]) {
+      lines.push(`resource: <code>${esc(trunc(r, 150))}</code>`);
+    }
+    if (d.message) lines.push(esc(trunc(String(d.message), 300)));
+    lines.push("", "<i>Bấm để trả lời — hoặc xử lý trong terminal TUI (bot tự cập nhật).</i>");
+    const kb: Keyboard = {
+      inline_keyboard: [
+        [
+          { text: "✅ Duyệt 1 lần", callback_data: `perm:${requestID}:once` },
+          { text: "♾️ Duyệt luôn", callback_data: `perm:${requestID}:always` },
+        ],
+        [{ text: "❌ Từ chối", callback_data: `perm:${requestID}:reject` }],
+      ],
+    };
+    const messageId = await this.tg.sendMessageId(chatId, lines.join("\n"), { reply_markup: kb }).catch(() => -1);
+    if (messageId > 0) this.permissionPrompts.set(requestID, { requestID, sessionID, chatId, messageId });
+  }
+
+  /** The request was answered elsewhere (e.g. the TUI) — settle the Telegram card. */
+  private async onPermissionResolved(requestID: string, reply: string): Promise<void> {
+    const p = this.permissionPrompts.get(requestID);
+    if (!p) return;
+    this.permissionPrompts.delete(requestID);
+    const label = reply === "reject" ? "từ chối" : reply === "always" ? "duyệt luôn" : "duyệt";
+    if (p.messageId) {
+      await this.tg
+        .editMessageText(p.chatId, p.messageId, `ℹ️ Quyền đã được ${label} ở nơi khác.`)
+        .catch(() => {});
+    }
+  }
+
+  /** Handle a tap on a permission button (data = `perm:<requestID>:<once|always|reject>`). */
+  private async handlePermissionCallback(cb: CallbackQuery, chatId: number, messageId?: number): Promise<void> {
+    const parts = (cb.data ?? "").split(":");
+    const requestID = parts[1];
+    const decision = parts[2];
+    const p = this.permissionPrompts.get(requestID);
+    if (!p) {
+      await this.tg.answerCallbackQuery(cb.id, "Yêu cầu quyền này đã hết hạn.");
+      return;
+    }
+    const labels: Record<string, string> = {
+      once: "✅ Đã duyệt (1 lần).",
+      always: "♾️ Đã duyệt luôn — quyền này được lưu, không hỏi lại.",
+      reject: "❌ Đã từ chối.",
+    };
+    try {
+      if (!labels[decision]) throw new Error("Lựa chọn không hợp lệ.");
+      await this.oc.replyPermission(p.sessionID, p.requestID, decision as "once" | "always" | "reject");
+      this.permissionPrompts.delete(requestID);
+      await this.tg.answerCallbackQuery(cb.id);
+      if (messageId) await this.tg.editMessageText(chatId, messageId, labels[decision]).catch(() => {});
+    } catch (e) {
+      const msg = (e as Error)?.message ?? "";
+      if (/not found|permission/i.test(msg)) {
+        this.permissionPrompts.delete(requestID);
+        await this.tg.answerCallbackQuery(cb.id, "Yêu cầu này đã được xử lý ở nơi khác.");
+        if (messageId) {
+          await this.tg.editMessageText(chatId, messageId, "ℹ️ Quyền đã được xử lý ở nơi khác.").catch(() => {});
+        }
+        return;
+      }
+      await this.tg.answerCallbackQuery(cb.id, `⚠️ ${msg.slice(0, 100)}`);
+    }
   }
 }

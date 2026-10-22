@@ -164,10 +164,41 @@ async function main(): Promise<void> {
       await oc.promptAndWait(stt.sessionID, `Reply with exactly the single word: ${probe}. Nothing else.`);
       const swept = await waitFor((a) => a.some((m) => m.includes(probe)), mock.out);
       console.log("sweep relayed the out-of-band reply to Telegram:", swept);
-      show("sweep: relayed out-of-band reply");
+       show("sweep: relayed out-of-band reply");
     }
   }
 
+  // ── permission relay (approve a tool permission from Telegram) ──────────────
+  // Create a real permission request on the session (like a tool call would).
+  // If it stays pending, the live event stream must surface it as buttons and
+  // tapping one must answer it through the API.
+  {
+    const stt = st.get(42);
+    if (stt.sessionID) {
+      console.log("\n== permission: relay + tap ==");
+      // Deliberately outside /tmp/opencode (a saved "always" rule from earlier
+      // approvals auto-allow it), so the request stays pending (effect "ask").
+      const perm = await oc.createPermission(stt.sessionID, "external_directory", ["/tmp/opencode-smoke-perm-test"]);
+      console.log("permission created:", perm.id, "effect:", perm.effect || "?");
+      if (perm.id && perm.effect === "ask") {
+        const surfaced = await waitFor((a) => a.some((m) => m.includes("🔐")), mock.out);
+        console.log("permission prompt surfaced:", surfaced);
+        if (surfaced) {
+          await bot.handle(tap(`perm:${perm.id}:once`));
+          const answered = await waitFor((a) => a.some((m) => m.startsWith("[edit]") && m.includes("Đã duyệt")), mock.out);
+          console.log("permission answered via Telegram:", answered);
+          if (!answered) {
+            // Settle it so it doesn't linger as a pending prompt in the TUI.
+            await oc.replyPermission(stt.sessionID, perm.id, "reject").catch(() => {});
+            console.log("tap did not settle the request — rejected as cleanup");
+          }
+          show("permission: prompt + answer");
+        }
+      } else {
+        console.log("permission auto-settled by saved rules — skipping tap (effect:", perm.effect || "unknown", ")");
+      }
+    }
+  }
   await bot.handle(upd("/dir"));
   show("/dir");
 
