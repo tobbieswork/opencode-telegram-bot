@@ -971,12 +971,51 @@ export class Orchestrator {
     return false;
   }
 
-  /**
-   * The user confirmed a /prune: delete each listed topic (best-effort, count
-   * failures), retire its OpenCode session, and clear its state entry. A worker
-   * that started running again since the list was shown is skipped.
+    /**
+   * Fully retire a conversation: remove its git worktree (if any), its OpenCode
+   * session, and its state entry. Idempotent — safe when the state is already
+   * gone. The worktree is removed before the state is cleared (removal reads the
+   * state); unmerged work is never lost (removeWorktree keeps unmerged branches).
+   * Shared by the /prune confirm and the forum_topic_deleted handler.
    */
-  private async handlePruneCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+  private async purgeConv(conv: ConvKey): Promise<void> {
+    const s = this.h.st.peek(conv);
+    if (!s) return;
+    const w = s.worker;
+    if (w?.worktree && w.repoRoot) {
+      await removeWorktree(w.repoRoot, w.worktree).catch((e) =>
+        warn(`removeWorktree (${w.name}):`, (e as Error)?.message ?? e),
+      );
+    }
+    if (s.sessionID) await this.h.oc.removeSession(s.sessionID).catch(() => {});
+    this.h.st.clear(conv);
+  }
+
+  /**
+   * Called when the user deletes a forum topic in the Telegram UI
+   * (a forum_topic_deleted update). Before this, the bot was blind to it and the
+   * topic's state, OpenCode session, and (for workers) git worktree all became
+   * permanent orphans. Now we retire the conversation. A worker still
+   * running/waiting is left alone so in-flight work isn't destroyed.
+   */
+  async onTopicDeleted(conv: ConvKey): Promise<void> {
+    const s = this.h.st.peek(conv);
+    if (!s) return; // already gone (deleted twice, or never tracked)
+    const w = s.worker;
+    if (w && (w.status === "running" || w.status === "waiting")) {
+      log(`topic deleted for running worker ${w.name} (${conv}) — keeping session+worktree for in-flight work`);
+      return;
+    }
+    log(`topic deleted for ${conv} — retiring (worker=${w?.name ?? "none"}, session=${s.sessionID ?? "none"}, worktree=${w?.worktree?.branch ?? "none"})`);
+    await this.purgeConv(conv);
+  }
+
+  /**
+    * The user confirmed a /prune: delete each listed topic (best-effort, count
+    * failures), retire its OpenCode session, and clear its state entry. A worker
+    * that started running again since the list was shown is skipped.
+    */
+   private async handlePruneCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
     const id = (cb.data ?? "").split(":")[1];
     const p = this.prunePending.get(id);
     if (!p || p.chat !== chatOf(conv)) {
@@ -1000,8 +1039,7 @@ export class Orchestrator {
       } catch (e) {
         warn("deleteForumTopic:", (e as Error)?.message);
       }
-      if (s?.sessionID) await this.h.oc.removeSession(s.sessionID).catch(() => {});
-      this.h.st.clear(k);
+      await this.purgeConv(k); // worktree + session + state (was leaking the worktree before)
       ok++;
     }
     await this.h.tg.answerCallbackQuery(cb.id);

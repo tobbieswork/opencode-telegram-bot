@@ -475,6 +475,15 @@ export class Bot {
   }
 
   async handle(u: Update): Promise<void> {
+    if (u.forum_topic_deleted) {
+      // The user deleted a forum topic in the Telegram UI. We were previously blind to
+      // this (only message + callback_query were subscribed), so its state, session, and
+      // worktree became permanent orphans. Retire the conversation now.
+      const ft = u.forum_topic_deleted;
+      const conv = convKey(ft.chat.id, ft.message_thread_id);
+      await this.orch.onTopicDeleted(conv).catch((e) => error(`onTopicDeleted (${conv}):`, (e as Error)?.message ?? e));
+      return;
+    }
     if (u.callback_query) {
       await this.handleCallback(u.callback_query);
       return;
