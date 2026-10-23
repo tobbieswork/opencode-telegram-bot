@@ -174,6 +174,20 @@ export class Telegram {
   }
 
   /**
+   * Send a final model reply as a native rich message (Telegram Bot API 10.1+):
+   * `markdown` is parsed server-side as GFM, so no manual HTML conversion and a
+   * 32 768-char limit instead of 4 096. Mirrors sendMessage's dest() chat_id +
+   * message_thread_id split and its void-on-resolve return style.
+   */
+  async sendRich(to: ConvKey | number, markdown: string, opts: { reply_markup?: unknown } = {}): Promise<void> {
+    await this.api("sendRichMessage", {
+      ...dest(to),
+      rich_message: { markdown },
+      ...(opts.reply_markup ? { reply_markup: opts.reply_markup } : {}),
+    });
+  }
+
+  /**
    * Rewrite a message in place — used to keep the folder browser in a single
    * message instead of spamming the chat.
    */

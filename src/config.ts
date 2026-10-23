@@ -73,6 +73,8 @@ export interface Config {
   dnsHealMinFailures: number;
   /** Minimum gap between two DNS heals, ms. */
   dnsHealCooldownMs: number;
+  /** Send final model replies as native rich Markdown (server-side GFM) instead of hand-rolled HTML. */
+  richReplies: boolean;
 }
 
 export function loadConfig(root: string): Config {
@@ -124,6 +126,8 @@ export function loadConfig(root: string): Config {
     dnsStaleIp: process.env.OPENCODE_TG_DNS_STALE_IP?.trim() ?? "",
     dnsHealMinFailures: parseIntSetting("OPENCODE_TG_DNS_HEAL_MIN_FAILURES", 3, 1),
     dnsHealCooldownMs: parseIntSetting("OPENCODE_TG_DNS_HEAL_COOLDOWN_MS", 10 * 60_000, 1000),
+    // Default OFF: only an explicit "1"/"true" enables rich (server-side GFM) replies.
+    richReplies: process.env.OPENCODE_TG_RICH === "1" || process.env.OPENCODE_TG_RICH === "true",
   };
   const agent = process.env.OPENCODE_DEFAULT_AGENT?.trim();
   if (agent) cfg.defaultAgent = agent;

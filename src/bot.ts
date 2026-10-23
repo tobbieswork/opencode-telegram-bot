@@ -7,7 +7,8 @@ import { ConvKey, convKey, chatOf } from "./conv.js";
 import { Orchestrator } from "./orchestrator.js";
 import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure } from "./format.js";
-import { firstReminderAt, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
+import { richMarkdownChunks } from "./rich.js";
+import { scheduleForRegistration, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
 import { CONTINUE_PROMPT, CONTINUE_BUTTON_LABEL, shouldOfferContinue, continueCallbackData, parseContinueData, alreadyOfferedContinue } from "./continue.js";
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
@@ -368,10 +369,29 @@ export class Bot {
       await this.tg.sendMessage(conv, chunks[i], i === chunks.length - 1 ? opts : {});
     }
   }
-  /** Send a long model reply: render its Markdown as Telegram HTML, then chunk. */
+  /** Send a long model reply.
+   * With `richReplies` on, send the raw Markdown as native rich (server-side
+   * GFM, ~32 768-char limit) — one message unless it is a rare >30k tail — and
+   * fall back to HTML per-message on error. Otherwise hand-render Markdown as
+   * Telegram HTML (4 096-char limit). The quiet meta footer is a separate
+   * message (see runPrompt) and is unaffected here. */
   private async sendReply(conv: ConvKey, text: string): Promise<void> {
     const clean = stripTags(text ?? "");
     if (!clean) return;
+    if (this.cfg.richReplies) {
+      for (const c of richMarkdownChunks(clean)) {
+        try {
+          await this.tg.sendRich(conv, c);
+        } catch (e) {
+          // Per-message graceful fallback: retry THIS chunk through the existing
+          // HTML path (mdToHtmlChunks + sendMessage) so a rich parse/method error
+          // costs only this message, never a lost reply.
+          warn(`sendRich failed (${(e as Error)?.message ?? e}) — falling back to HTML for one chunk`);
+          for (const h of mdToHtmlChunks(c, this.cfg.replyMaxLen)) await this.tg.sendMessage(conv, h);
+        }
+      }
+      return;
+    }
     for (const c of mdToHtmlChunks(clean, this.cfg.replyMaxLen)) await this.tg.sendMessage(conv, c);
   }
 
@@ -488,8 +508,8 @@ export class Bot {
    */
   private startPromptReminder(conv: ConvKey, promptId: string, kind: "form" | "permission", text: string, keyboard?: unknown): void {
     if (!this.cfg.remind) return;
-    const now = Date.now();
-    const pp = { kind, text, keyboard, firstShownAt: now, remindersSent: 0, nextReminderAt: firstReminderAt(this.cfg.remindBaseMs, now) };
+    const sched = scheduleForRegistration(this.st.get(conv).pendingPrompts?.[promptId], kind, this.cfg.remindBaseMs, Date.now());
+    const pp = { kind, text, keyboard, ...sched };
     this.st.set(conv, { pendingPrompts: { ...this.st.get(conv).pendingPrompts, [promptId]: pp } });
     this.armReminderTimer(conv, promptId);
   }
@@ -501,6 +521,7 @@ export class Bot {
     if (existing) clearTimeout(existing);
     const pp = this.st.get(conv).pendingPrompts?.[promptId];
     if (!pp) return;
+    if (reminderBudgetExhausted(pp.remindersSent, this.cfg.remindMax)) return; // spent: stays persisted, no more nudges
     const delay = clampTimerDelay(Math.max(0, pp.nextReminderAt - Date.now())); // overdue → fire soon
     this.reminders.set(key, setTimeout(() => void this.fireReminder(conv, promptId), delay));
   }
@@ -555,14 +576,12 @@ export class Bot {
     const pp = this.st.get(conv).pendingPrompts?.[promptId];
     if (!pp) return; // cancelled/answered in the meantime
     // The live prompt must be tracked in memory. After a restart an overdue timer
-    // can fire before reconcile() has re-read OpenCode; if the prompt was settled
-    // meanwhile this would re-send a card with dead buttons. A prompt that is
-    // still pending gets re-registered (and re-scheduled) by reconcile().
+    // can fire before reconcile() has re-read OpenCode; re-sending then could show
+    // a card with dead buttons. Do NOT forget the schedule here: reconcile() either
+    // re-registers a still-pending prompt (scheduleForRegistration keeps this
+    // schedule and re-arms it) or drops a settled one as stale.
     const live = pp.kind === "form" ? this.questionForms.has(promptId) : this.permissionPrompts.has(promptId);
-    if (!live) {
-      this.cancelReminder(conv, promptId);
-      return;
-    }
+    if (!live) return;
     const max = this.cfg.remindMax;
     const sent = pp.remindersSent + 1;
     // Re-send the ORIGINAL prompt + buttons so the user can just tap to answer.
@@ -572,7 +591,12 @@ export class Bot {
       { reply_markup: pp.keyboard as Keyboard | undefined },
     ).catch(() => {});
     if (reminderBudgetExhausted(sent, max)) {
-      this.cancelReminder(conv, promptId); // budget exhausted: stop nudging; prompt stays pending
+      // Budget exhausted: stop nudging (the prompt stays pending). Keep the entry
+      // with the spent count so a restart doesn't hand it a fresh budget.
+      const spent = this.st.get(conv).pendingPrompts?.[promptId];
+      if (spent && spent.firstShownAt === pp.firstShownAt) {
+        this.st.set(conv, { pendingPrompts: { ...this.st.get(conv).pendingPrompts, [promptId]: { ...spent, remindersSent: sent } } });
+      }
       return;
     }
     // Re-read AFTER the await: only advance the schedule if this is STILL the
@@ -676,8 +700,12 @@ export class Bot {
         // Toggle off: strip any instruction a previous (enabled) run left on this
         // session (idempotent; remembered per process so we don't call it every
         // prompt). Clear the applied-marker so re-enabling re-applies it.
-        this.languageRemoved.add(sid);
-        await this.oc.removeInstruction(sid, LANGUAGE_INSTRUCTION_KEY).catch(() => {});
+        try {
+          await this.oc.removeInstruction(sid, LANGUAGE_INSTRUCTION_KEY);
+          this.languageRemoved.add(sid); // success only — a failure is retried on the next prompt
+        } catch (e) {
+          warn("removeInstruction:", (e as Error)?.message);
+        }
         if (state.guidedLanguageSession === sid) this.st.set(conv, { guidedLanguageSession: undefined });
       }
       // Inject the "ask via question tool" preamble once per session so the agent
