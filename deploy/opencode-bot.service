@@ -25,7 +25,10 @@ Wants=network-online.target
 Type=simple
 # systemd's default PATH picks up /usr/bin/node (v18); pin the nvm Node 24 that
 # the bot is developed against (Promise.withResolvers needs >= 22).
-Environment=PATH=/home/phatnd12/.nvm/versions/node/v24.21.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# ~/.opencode/bin is included so Service.ensure() can find the `opencode` binary
+# and auto-spawn the service after a reboot (the bot falls back to ensure() when
+# no running service is discovered).
+Environment=PATH=/home/phatnd12/.opencode/bin:/home/phatnd12/.nvm/versions/node/v24.21.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 WorkingDirectory=/home/phatnd12/fpt/opencode-telegram-bot
 ExecStart=/home/phatnd12/.nvm/versions/node/v24.21.0/bin/node /home/phatnd12/fpt/opencode-telegram-bot/node_modules/.bin/tsx src/index.ts
 Restart=always
