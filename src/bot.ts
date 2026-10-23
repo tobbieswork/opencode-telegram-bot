@@ -8,6 +8,7 @@ import { Orchestrator } from "./orchestrator.js";
 import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure } from "./format.js";
 import { firstReminderAt, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
+import { CONTINUE_PROMPT, CONTINUE_BUTTON_LABEL, shouldOfferContinue, continueCallbackData, parseContinueData, alreadyOfferedContinue } from "./continue.js";
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
 import { log, warn, error } from "./logger.js";
@@ -709,7 +710,10 @@ export class Bot {
           await this.sendReply(conv, res.reply);
           if (res.replyTime) this.st.set(conv, { lastRelayedTime: res.replyTime });
         }
-        await this.sendHtml(conv, formatTurnFailure(res.error, res.elapsedMs));
+        // A genuine failure (not a user /stop): attach a one-tap "⏯ Chạy tiếp"
+        // button to the failure message so the user can resume the same session.
+        const kb = this.offerContinueKeyboard(conv, sid, messageID, res.outcome, res.interrupted);
+        await this.sendHtml(conv, formatTurnFailure(res.error, res.elapsedMs), kb ? { reply_markup: kb } : {});
         return;
       }
       const reply = res.reply || (res.interrupted ? "(interrupted — no text produced yet)" : "(no text reply)");
@@ -751,6 +755,28 @@ export class Bot {
     await this.tg
       .sendMessage(conv, "📐 <b>Kế hoạch đã sẵn sàng</b> — bấm để chuyển sang build và thực thi.", { reply_markup: kb })
       .catch(() => {});
+  }
+
+  /**
+   * Decide whether to offer the "⏯ Chạy tiếp" button for a turn that just ended
+   * in this conv, and if so record the anti-spam marker and return its keyboard.
+   * Returns undefined (no button) when it is not a genuine failure, when we have
+   * already offered one for this same turn, or when the callback data would
+   * exceed Telegram's limit. Pure decision + encoding live in src/continue.ts.
+   */
+  private offerContinueKeyboard(
+    conv: ConvKey,
+    sessionID: string,
+    turnId: string,
+    outcome: string | undefined,
+    interrupted: boolean,
+  ): Keyboard | undefined {
+    if (!shouldOfferContinue({ outcome, interrupted })) return undefined;
+    const data = continueCallbackData(sessionID);
+    if (!data) return undefined; // too long to ship — omit the button
+    if (alreadyOfferedContinue(this.st.peek(conv)?.continueOfferedTurn, turnId)) return undefined;
+    this.st.set(conv, { continueOfferedTurn: turnId });
+    return { inline_keyboard: [[{ text: CONTINUE_BUTTON_LABEL, callback_data: data }]] };
   }
 
   /**
@@ -1120,6 +1146,10 @@ export class Bot {
     }
     if (data.startsWith("pb:")) {
       await this.handlePlanToBuildCallback(cb, conv);
+      return;
+    }
+    if (data.startsWith("cont:")) {
+      await this.handleContinueCallback(cb, conv, messageId);
       return;
     }
     if (data.startsWith("use:")) {
@@ -1623,6 +1653,34 @@ export class Bot {
     const ac = new AbortController();
     this.inflight.set(conv, ac);
     void this.runPromptTask(conv, state.sessionID, prompt, ac).catch((e) => error("prompt task:", e?.message));
+  }
+
+  /** Handle a tap on the "⏯ Chạy tiếp" button (data = `cont:<sessionID>`). */
+  private async handleContinueCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+    const target = parseContinueData(cb.data);
+    // The button is one-shot: drop it immediately so a re-tap (or a stale button
+    // left over after a /new) can never fire a second continue.
+    if (messageId) {
+      await this.tg
+        .editMessageReplyMarkup(conv, messageId, { reply_markup: { inline_keyboard: [] } })
+        .catch(() => {});
+    }
+    const state = this.st.peek(conv);
+    // Reject malformed data, or a conv whose session is no longer the one that
+    // failed (a /new or /use replaced it) — continuing would hit the wrong session.
+    if (!target || !state?.sessionID || state.sessionID !== target) {
+      await this.tg.answerCallbackQuery(cb.id, "Nút này không còn áp dụng cho phiên hiện tại.");
+      return;
+    }
+    if (this.inflight.has(conv)) {
+      await this.tg.answerCallbackQuery(cb.id, "Đang chạy task — hẵng thử lại sau.");
+      return;
+    }
+    await this.tg.answerCallbackQuery(cb.id, "⏯ Đang chạy tiếp…");
+    this.startTyping(conv);
+    const ac = new AbortController();
+    this.inflight.set(conv, ac);
+    void this.runPromptTask(conv, target, CONTINUE_PROMPT, ac).catch((e) => error("prompt task:", e?.message));
   }
 
   /**

@@ -155,6 +155,25 @@ export class Telegram {
     }
   }
 
+  /**
+   * Remove (or replace) an inline keyboard on a message, keeping its text — used
+   * to take the "⏯ Chạy tiếp" button off a failure message after it is tapped,
+   * so the one-shot button can't be clicked again or go stale after a /new.
+   */
+  async editMessageReplyMarkup(to: ConvKey | number, messageId: number, opts: Record<string, unknown> = {}): Promise<void> {
+    try {
+      await this.api("editMessageReplyMarkup", {
+        chat_id: parseConv(to).chatId,
+        message_id: messageId,
+        ...opts,
+      });
+    } catch (e) {
+      // 400 = "message is not modified" (nothing changed) — harmless.
+      if ((e as any)?.code === 400) return;
+      throw e;
+    }
+  }
+
   /** Stop the client's button-spinner; `text` shows a short toast. */
   async answerCallbackQuery(id: string, text?: string): Promise<void> {
     try {
