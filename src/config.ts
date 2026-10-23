@@ -65,6 +65,12 @@ export interface Config {
   bridgePort: number;
   /** Close a worker's topic when the worker finishes (the user reopens it by messaging in it). */
   autoClose: boolean;
+  /** Self-heal stale VPN DNS: restart systemd-resolved after repeated fetch failures. */
+  dnsHeal: boolean;
+  /** Consecutive network failures before the DNS heal is allowed to run. */
+  dnsHealMinFailures: number;
+  /** Minimum gap between two DNS heals, ms. */
+  dnsHealCooldownMs: number;
 }
 
 export function loadConfig(root: string): Config {
@@ -112,6 +118,9 @@ export function loadConfig(root: string): Config {
     worktreeMode: parseWorktreeMode(process.env.OPENCODE_TG_WORKTREE),
     bridgePort: parseIntSetting("OPENCODE_TG_BRIDGE_PORT", 0, 0),
     autoClose: process.env.OPENCODE_TG_AUTO_CLOSE !== "0",
+    dnsHeal: process.env.OPENCODE_TG_DNS_HEAL !== "0",
+    dnsHealMinFailures: parseIntSetting("OPENCODE_TG_DNS_HEAL_MIN_FAILURES", 3, 1),
+    dnsHealCooldownMs: parseIntSetting("OPENCODE_TG_DNS_HEAL_COOLDOWN_MS", 10 * 60_000, 1000),
   };
   const agent = process.env.OPENCODE_DEFAULT_AGENT?.trim();
   if (agent) cfg.defaultAgent = agent;

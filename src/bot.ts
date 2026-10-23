@@ -155,6 +155,8 @@ export class Bot {
   private toolNames = new Map<ConvKey, Map<string, string>>();
   /** Open /model button pickers, one per conv (in-memory; dead buttons after a restart are handled). */
   private modelPickers = new Map<ConvKey, { models: ModelInfo[]; page: number }>();
+  /** The user's most recent top-level chat, for proactive notices (e.g. DNS heal). */
+  private lastActiveConv?: ConvKey;
 
   /** Worker topics + the Manager agent (multi-session layer). */
   private orch: Orchestrator;
@@ -340,6 +342,9 @@ export class Bot {
         .catch(() => {});
       return;
     }
+    // Remember the user's top-level chat so proactive notices (e.g. DNS heal)
+    // have a destination even mid-polling-failure.
+    this.lastActiveConv = chatOf(conv);
     const state = this.st.get(conv);
     if (!state.directory) {
       // A topic the user opened by hand starts where the chat's main session works
@@ -380,6 +385,19 @@ export class Bot {
           ? "📷 Tôi chưa xem được ảnh — hãy gửi kèm caption để tôi xử lý."
           : "📎 Tôi mới chỉ xử lý được tin nhắn văn bản (và caption của media).";
     await this.tg.sendMessage(conv, note).catch(() => {});
+  }
+
+  /**
+   * One short user notice per DNS self-heal incident (called from the Telegram
+   * poll loop after the heal command finishes). Sent to the user's last active
+   * top-level chat, falling back to their private chat (user id == chat id in a
+   * 1:1). Best-effort: the network may still be down, so the send may fail.
+   */
+  notifyDnsHeal(): void {
+    const conv = this.lastActiveConv ?? (this.cfg.allowedUserIds[0] ? String(this.cfg.allowedUserIds[0]) : undefined);
+    if (!conv) return;
+    log(`DNS heal: notifying user in ${conv}`);
+    void this.tg.sendMessage(conv, "🔧 Bot tự sửa DNS (VPN) — polling có thể gián đoạn vài giây.").catch(() => {});
   }
 
   // ── typing indicator ─────────────────────────────────────────────────────────
