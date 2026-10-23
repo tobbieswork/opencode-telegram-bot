@@ -2000,6 +2000,7 @@ export class Bot {
   private async cmdStop(conv: ConvKey, state: ChatState): Promise<void> {
     await this.stopCurrent(conv);
     this.cancelAllReminders(conv);
+    this.orch.clearManagerBusy(conv); // never let a stuck busy flag block the Manager chat
     if (state.sessionID) await this.oc.interrupt(state.sessionID).catch(() => {});
     await this.tg.sendMessage(conv, "⏹️ Interrupted.");
   }

@@ -146,6 +146,14 @@ export class Orchestrator {
   /** Worker convs whose turn-end we are already processing. */
   private finishing = new Set<ConvKey>();
   /**
+   * Manager convs whose turn is currently running (a user prompt or a bot event
+   * like a worker report). Set synchronously in promptManager so two rapid user
+   * messages can't both get through; cleared by the session.execution.* terminal
+   * event in onExecution. This restores the "⏳ still working" block for the
+   * Manager chat, which the fire-and-forget prompt path otherwise skips.
+   */
+  private managerBusy = new Set<ConvKey>();
+  /**
    * Chats whose bridge route is open. Opened BEFORE the bridge is registered:
    * OpenCode connects (initialize + tools/list) the moment it is added and marks
    * the server failed for good if that first call is refused.
@@ -686,7 +694,18 @@ export class Orchestrator {
   // ── OpenCode lifecycle hooks (called by Bot.onOpenCodeEvent) ───────────────
   onExecution(conv: ConvKey, type: string, error?: string): void {
     const s = this.h.st.peek(conv);
-    if (!s?.worker) return;
+    if (!s) return;
+    // Manager turns are fire-and-forget (no inflight AbortController), so their
+    // busy state is tracked here from the execution lifecycle. This keeps the
+    // "⏳ still working" block in promptManager accurate, and also covers
+    // out-of-band executions (worker reports, background tasks) that prompt the
+    // Manager without going through promptManager.
+    if (s.manager && !s.worker) {
+      if (type === "session.execution.started") this.managerBusy.add(conv);
+      else this.managerBusy.delete(conv); // succeeded / failed / interrupted
+      return;
+    }
+    if (!s.worker) return;
     if (type === "session.execution.started") {
       if (s.worker.status !== "waiting") this.setStatus(conv, "running");
       return;
@@ -830,9 +849,26 @@ export class Orchestrator {
       await this.cmdManager(conv, "on");
       if (!this.h.st.get(conv).sessionID) return;
     }
+    // A turn is already running (this user's previous message, or a bot event
+    // such as a worker report): block and notify, matching normal chats.
+    if (this.managerBusy.has(conv)) {
+      await this.h.tg.sendMessage(conv, "⏳ Still working on the previous message. Send /stop to interrupt.");
+      return;
+    }
+    this.managerBusy.add(conv); // mark before the await so a 2nd message can't slip through
     this.budget.set(conv, DISPATCH_BUDGET); // the user spoke: refill the dispatch budget
-    await this.h.oc.prompt(this.h.st.get(conv).sessionID!, text);
+    try {
+      await this.h.oc.prompt(this.h.st.get(conv).sessionID!, text);
+    } catch (e) {
+      this.managerBusy.delete(conv); // the prompt was never accepted — don't stay busy forever
+      throw e;
+    }
     this.h.startTyping(conv);
+  }
+
+  /** Drop the Manager busy flag (used by /stop so a stuck flag can't wedge the chat). */
+  clearManagerBusy(conv: ConvKey): void {
+    this.managerBusy.delete(conv);
   }
 
   /** Batch worker reports and feed them to the Manager as one "[Bot event]" message. */
