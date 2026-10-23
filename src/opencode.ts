@@ -212,7 +212,18 @@ export class OpenCodeCtl {
       try {
         ep = await Service.discover();
       } catch {
+        ep = undefined;
+      }
+      // discover() resolves to undefined (it does not throw) when the
+      // registered service is not running. Fall back to ensure(), which
+      // spawns `opencode serve --service` when missing and waits (up to
+      // ~2 min) for it to become ready — this is what brings the bot back
+      // after a machine reboot without any manual intervention.
+      if (!ep) {
         ep = await Service.ensure();
+      }
+      if (!ep) {
+        throw new Error("OpenCode service unavailable: discover() and ensure() both returned no endpoint");
       }
       url = ep.url;
       headers = Service.headers(ep) as Record<string, string>;
