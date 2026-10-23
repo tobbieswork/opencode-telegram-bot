@@ -15,6 +15,7 @@ import {
   stalePromptIds,
   clampTimerDelay,
   MAX_TIMER_MS,
+  scheduleForRegistration,
 } from "../src/reminders.js";
 import { StateManager } from "../src/state.js";
 
@@ -121,6 +122,20 @@ const MIN = 60_000;
   } finally {
     await rm(file, { force: true });
   }
+}
+
+// ── scheduleForRegistration: a restart must not reset the backoff ────────────
+{
+  const base = 300_000;
+  const fresh = scheduleForRegistration(undefined, "form", base, 1000);
+  check("register: new prompt starts at the first reminder", fresh.firstShownAt === 1000 && fresh.remindersSent === 0 && fresh.nextReminderAt === 1000 + base);
+  const mid = { kind: "form", firstShownAt: 50, remindersSent: 3, nextReminderAt: 99999 };
+  const kept = scheduleForRegistration(mid, "form", base, 1000);
+  check("register: persisted prompt keeps its schedule (restart/reconcile)", kept.firstShownAt === 50 && kept.remindersSent === 3 && kept.nextReminderAt === 99999);
+  const spent = scheduleForRegistration({ ...mid, remindersSent: 4 }, "form", base, 1000);
+  check("register: an exhausted prompt does not get a fresh budget", spent.remindersSent === 4);
+  const other = scheduleForRegistration(mid, "permission", base, 1000);
+  check("register: same id but different kind → fresh schedule", other.remindersSent === 0 && other.firstShownAt === 1000);
 }
 
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);
