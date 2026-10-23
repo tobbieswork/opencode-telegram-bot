@@ -42,11 +42,19 @@ export type CallbackQuery = {
   message?: { chat: { id: number }; message_id: number; message_thread_id?: number; is_topic_message?: boolean };
 };
 
+/** A forum topic the user deleted in the Telegram UI (forum_topic_deleted). */
+export type ForumTopicDeleted = {
+  chat: { id: number; type?: string };
+  message_thread_id?: number;
+  date?: number;
+};
+
 export type Update = {
   update_id: number;
   message?: Message;
   edited_message?: Message;
   callback_query?: CallbackQuery;
+  forum_topic_deleted?: ForumTopicDeleted;
 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -310,7 +318,7 @@ export class Telegram {
           (await this.api<Update[]>("getUpdates", {
             offset: this.offset,
             timeout: 30,
-            allowed_updates: ["message", "callback_query"],
+            allowed_updates: ["message", "callback_query", "forum_topic_deleted"],
           }, this.abort.signal)) ?? [];
         if (this.healState) recordSuccess(this.healState);
       } catch (e) {

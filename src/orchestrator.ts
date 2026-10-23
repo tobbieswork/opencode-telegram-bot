@@ -146,6 +146,14 @@ export class Orchestrator {
   /** Worker convs whose turn-end we are already processing. */
   private finishing = new Set<ConvKey>();
   /**
+   * Manager convs whose turn is currently running (a user prompt or a bot event
+   * like a worker report). Set synchronously in promptManager so two rapid user
+   * messages can't both get through; cleared by the session.execution.* terminal
+   * event in onExecution. This restores the "⏳ still working" block for the
+   * Manager chat, which the fire-and-forget prompt path otherwise skips.
+   */
+  private managerBusy = new Set<ConvKey>();
+  /**
    * Chats whose bridge route is open. Opened BEFORE the bridge is registered:
    * OpenCode connects (initialize + tools/list) the moment it is added and marks
    * the server failed for good if that first call is refused.
@@ -686,7 +694,18 @@ export class Orchestrator {
   // ── OpenCode lifecycle hooks (called by Bot.onOpenCodeEvent) ───────────────
   onExecution(conv: ConvKey, type: string, error?: string): void {
     const s = this.h.st.peek(conv);
-    if (!s?.worker) return;
+    if (!s) return;
+    // Manager turns are fire-and-forget (no inflight AbortController), so their
+    // busy state is tracked here from the execution lifecycle. This keeps the
+    // "⏳ still working" block in promptManager accurate, and also covers
+    // out-of-band executions (worker reports, background tasks) that prompt the
+    // Manager without going through promptManager.
+    if (s.manager && !s.worker) {
+      if (type === "session.execution.started") this.managerBusy.add(conv);
+      else this.managerBusy.delete(conv); // succeeded / failed / interrupted
+      return;
+    }
+    if (!s.worker) return;
     if (type === "session.execution.started") {
       if (s.worker.status !== "waiting") this.setStatus(conv, "running");
       return;
@@ -830,9 +849,26 @@ export class Orchestrator {
       await this.cmdManager(conv, "on");
       if (!this.h.st.get(conv).sessionID) return;
     }
+    // A turn is already running (this user's previous message, or a bot event
+    // such as a worker report): block and notify, matching normal chats.
+    if (this.managerBusy.has(conv)) {
+      await this.h.tg.sendMessage(conv, "⏳ Still working on the previous message. Send /stop to interrupt.");
+      return;
+    }
+    this.managerBusy.add(conv); // mark before the await so a 2nd message can't slip through
     this.budget.set(conv, DISPATCH_BUDGET); // the user spoke: refill the dispatch budget
-    await this.h.oc.prompt(this.h.st.get(conv).sessionID!, text);
+    try {
+      await this.h.oc.prompt(this.h.st.get(conv).sessionID!, text);
+    } catch (e) {
+      this.managerBusy.delete(conv); // the prompt was never accepted — don't stay busy forever
+      throw e;
+    }
     this.h.startTyping(conv);
+  }
+
+  /** Drop the Manager busy flag (used by /stop so a stuck flag can't wedge the chat). */
+  clearManagerBusy(conv: ConvKey): void {
+    this.managerBusy.delete(conv);
   }
 
   /** Batch worker reports and feed them to the Manager as one "[Bot event]" message. */
@@ -935,12 +971,51 @@ export class Orchestrator {
     return false;
   }
 
-  /**
-   * The user confirmed a /prune: delete each listed topic (best-effort, count
-   * failures), retire its OpenCode session, and clear its state entry. A worker
-   * that started running again since the list was shown is skipped.
+    /**
+   * Fully retire a conversation: remove its git worktree (if any), its OpenCode
+   * session, and its state entry. Idempotent — safe when the state is already
+   * gone. The worktree is removed before the state is cleared (removal reads the
+   * state); unmerged work is never lost (removeWorktree keeps unmerged branches).
+   * Shared by the /prune confirm and the forum_topic_deleted handler.
    */
-  private async handlePruneCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+  private async purgeConv(conv: ConvKey): Promise<void> {
+    const s = this.h.st.peek(conv);
+    if (!s) return;
+    const w = s.worker;
+    if (w?.worktree && w.repoRoot) {
+      await removeWorktree(w.repoRoot, w.worktree).catch((e) =>
+        warn(`removeWorktree (${w.name}):`, (e as Error)?.message ?? e),
+      );
+    }
+    if (s.sessionID) await this.h.oc.removeSession(s.sessionID).catch(() => {});
+    this.h.st.clear(conv);
+  }
+
+  /**
+   * Called when the user deletes a forum topic in the Telegram UI
+   * (a forum_topic_deleted update). Before this, the bot was blind to it and the
+   * topic's state, OpenCode session, and (for workers) git worktree all became
+   * permanent orphans. Now we retire the conversation. A worker still
+   * running/waiting is left alone so in-flight work isn't destroyed.
+   */
+  async onTopicDeleted(conv: ConvKey): Promise<void> {
+    const s = this.h.st.peek(conv);
+    if (!s) return; // already gone (deleted twice, or never tracked)
+    const w = s.worker;
+    if (w && (w.status === "running" || w.status === "waiting")) {
+      log(`topic deleted for running worker ${w.name} (${conv}) — keeping session+worktree for in-flight work`);
+      return;
+    }
+    log(`topic deleted for ${conv} — retiring (worker=${w?.name ?? "none"}, session=${s.sessionID ?? "none"}, worktree=${w?.worktree?.branch ?? "none"})`);
+    await this.purgeConv(conv);
+  }
+
+  /**
+    * The user confirmed a /prune: delete each listed topic (best-effort, count
+    * failures), retire its OpenCode session, and clear its state entry. A worker
+    * that started running again since the list was shown is skipped.
+    */
+   private async handlePruneCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
     const id = (cb.data ?? "").split(":")[1];
     const p = this.prunePending.get(id);
     if (!p || p.chat !== chatOf(conv)) {
@@ -964,8 +1039,7 @@ export class Orchestrator {
       } catch (e) {
         warn("deleteForumTopic:", (e as Error)?.message);
       }
-      if (s?.sessionID) await this.h.oc.removeSession(s.sessionID).catch(() => {});
-      this.h.st.clear(k);
+      await this.purgeConv(k); // worktree + session + state (was leaking the worktree before)
       ok++;
     }
     await this.h.tg.answerCallbackQuery(cb.id);
