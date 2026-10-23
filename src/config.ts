@@ -65,6 +65,14 @@ export interface Config {
   bridgePort: number;
   /** Close a worker's topic when the worker finishes (the user reopens it by messaging in it). */
   autoClose: boolean;
+  /** Nudge the user to reboot the machine when uptime passes the threshold (kernel updates). */
+  uptimeMonitor: boolean;
+  /** Reboot the machine (with confirmation) when uptime reaches this many days. */
+  uptimeThresholdDays: number;
+  /** After a snooze, how many days before the reboot reminder fires again. */
+  uptimeRemindIntervalDays: number;
+  /** Delay (ms) between tapping "confirm reboot" and the actual reboot, so the message gets delivered. */
+  rebootDelayMs: number;
   /**
    * Auto-respawn a worker that died from context overflow (a fresh session in
    * the SAME directory/worktree, handed the original task + git evidence).
@@ -129,6 +137,10 @@ export function loadConfig(root: string): Config {
     worktreeMode: parseWorktreeMode(process.env.OPENCODE_TG_WORKTREE),
     bridgePort: parseIntSetting("OPENCODE_TG_BRIDGE_PORT", 0, 0),
     autoClose: process.env.OPENCODE_TG_AUTO_CLOSE !== "0",
+    uptimeMonitor: process.env.OPENCODE_TG_UPTIME_MONITOR !== "0",
+    uptimeThresholdDays: parseIntSetting("OPENCODE_TG_UPTIME_THRESHOLD_DAYS", 30, 1),
+    uptimeRemindIntervalDays: parseIntSetting("OPENCODE_TG_UPTIME_REMIND_INTERVAL_DAYS", 3, 1),
+    rebootDelayMs: parseIntSetting("OPENCODE_TG_REBOOT_DELAY_MS", 15000, 1000),
     recoverOverflow: process.env.OPENCODE_TG_RECOVER_OVERFLOW === "1" || process.env.OPENCODE_TG_RECOVER_OVERFLOW === "true",
     dnsHeal: process.env.OPENCODE_TG_DNS_HEAL !== "0",
     dnsStaleIp: process.env.OPENCODE_TG_DNS_STALE_IP?.trim() ?? "",
