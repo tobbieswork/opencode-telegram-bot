@@ -50,5 +50,12 @@ const good = loadConfig(process.cwd());
 check("remindMax valid respected (6)", good.remindMax === 6, String(good.remindMax));
 check("remindFactor valid respected (3)", good.remindFactor === 3, String(good.remindFactor));
 
+// recoverOverflow defaults ON (like autoClose), and is OFF only on an explicit "0".
+check("recoverOverflow default ON", empty.recoverOverflow === true, String(empty.recoverOverflow));
+process.env.OPENCODE_TG_RECOVER_OVERFLOW = "0";
+const off = loadConfig(process.cwd());
+check("recoverOverflow OFF on =0", off.recoverOverflow === false, String(off.recoverOverflow));
+delete process.env.OPENCODE_TG_RECOVER_OVERFLOW;
+
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

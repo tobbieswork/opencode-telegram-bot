@@ -2,14 +2,15 @@ import { mkdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Telegram, CallbackQuery, TOPIC_COLORS } from "./telegram.js";
-import { OpenCodeCtl } from "./opencode.js";
+import { OpenCodeCtl, userText } from "./opencode.js";
 import { StateManager, ChatState, WorkerInfo, WorkerStatus } from "./state.js";
 import { Config } from "./config.js";
 import { ConvKey, chatOf, convKey, parseConv } from "./conv.js";
 import { McpBridge, BridgeTool } from "./mcp-bridge.js";
-import { addWorktree, diffSummary, gitRoot, mergeWorktree, removeWorktree } from "./worktree.js";
+import { addWorktree, diffSummary, gitRoot, gitStatusBrief, mergeWorktree, removeWorktree } from "./worktree.js";
 import { listDirs } from "./fsbrowser.js";
 import { selectPruneable, selectFinishedWorkers, WorkerConv } from "./prune.js";
+import { buildHandoffPrompt, followUpsOf, respawnName, respawnNotice, shouldRespawnWorker } from "./recovery.js";
 import { esc, trunc, timeAgo, stripTags } from "./format.js";
 import { log, warn } from "./logger.js";
 
@@ -109,6 +110,13 @@ interface SpawnSpec {
   agent?: string;
   writes?: boolean;
   spawnedBy: "user" | "manager";
+  /**
+   * When `false`, skip git worktree isolation entirely and run the worker in the
+   * given directory as-is. Used for overflow respawns, which must stay in the
+   * SAME worktree/directory as the dead worker (a fresh worktree cut from HEAD
+   * would lose its uncommitted work).
+   */
+  isolate?: boolean;
 }
 
 /** A Manager action waiting for the user's ✅ (confirm mode). */
@@ -552,10 +560,11 @@ export class Orchestrator {
     const writes = spec.writes ?? agent === "build";
 
     // Isolation: a writer that would share a repo checkout with another busy
-    // writer gets its own worktree + branch instead.
+    // writer gets its own worktree + branch instead. A respawn (isolate === false)
+    // skips this entirely — it must reuse the dead worker's directory/worktree as-is.
     let worktree: WorkerInfo["worktree"];
     let repoRoot: string | undefined;
-    if (writes && this.h.cfg.worktreeMode !== "off") {
+    if (spec.isolate !== false && writes && this.h.cfg.worktreeMode !== "off") {
       repoRoot = await gitRoot(directory);
       if (repoRoot) {
         const shared = this.workersOf(chat).some(
@@ -713,20 +722,108 @@ export class Orchestrator {
       }
       const tail = reply ? stripTags(reply.text).trim().slice(-1500) : error ? `error: ${error}` : "(no text reply)";
       this.setStatus(conv, status, tail);
+      // Context-overflow recovery: a worker that died because it outgrew the
+      // model's context is respawned in a FRESH session in the SAME directory
+      // (same worktree), handed its original task + git evidence. Bounded to one
+      // respawn per original task; off via cfg.recoverOverflow.
+      let respawnedAs: string | undefined;
+      if (
+        status === "failed" &&
+        shouldRespawnWorker({
+          status,
+          error,
+          respawnedFrom: w.respawnedFrom,
+          hasTask: !!w.task,
+          enabled: this.h.cfg.recoverOverflow,
+        })
+      ) {
+        respawnedAs = await this.respawnOverflow(conv, w, tail, error);
+      }
       if (w.worktree && status === "done") {
         await this.h.sendHtml(conv, this.worktreeText(w), { reply_markup: this.worktreeKeyboard(w) }).catch(() => {});
       }
       if (this.h.st.peek(chatOf(conv))?.manager) {
-        this.queueReport(chatOf(conv), `[worker ${w.name}] ${status.toUpperCase()}\n${tail}`);
+        this.queueReport(
+          chatOf(conv),
+          respawnedAs
+            ? `[worker ${w.name}] FAILED (context overflow) → respawned as ${respawnedAs} — continuing in the same worktree; the new worker will report on its own.`
+            : `[worker ${w.name}] ${status.toUpperCase()}\n${tail}`,
+        );
       }
       // Close the topic once the worker is finished (done/failed) so the forum
-      // doesn't fill with dead topics. The user reopens it just by messaging in it.
-      if (this.h.cfg.autoClose && (status === "done" || status === "failed")) {
+      // doesn't fill with dead topics. The user reopens it just by messaging in
+      // it. A worker respawned for overflow stays OPEN (❌) so the user can read
+      // why it died and follow the new one; /prune cleans it up later.
+      if (this.h.cfg.autoClose && (status === "done" || status === "failed") && !respawnedAs) {
         void this.h.tg.closeForumTopic(conv).catch(() => {});
       }
     } finally {
       this.finishing.delete(conv);
     }
+  }
+
+  /**
+   * Spawn a replacement for a worker that died from context overflow: a FRESH
+   * session in the SAME directory (same worktree, so all on-disk work carries
+   * over), handed the original task + follow-ups + git evidence. Returns the new
+   * worker's name, or undefined when it couldn't be spawned (the dead worker then
+   * simply stays ❌ — the safe, pre-existing behavior).
+   */
+  private async respawnOverflow(conv: ConvKey, w: WorkerInfo, tail: string, error?: string): Promise<string | undefined> {
+    const s = this.h.st.get(conv);
+    if (!s.directory) return undefined; // nowhere to place the replacement
+    // Follow-ups: the user messages of the dead session (manager + direct), in
+    // chronological order; the first is the spawn prompt (dropped by followUpsOf).
+    // message.list is newest-first, so reverse to chronological.
+    let followUps: string[] = [];
+    if (s.sessionID) {
+      const msgs = ((await this.h.oc.listMessages(s.sessionID, 50).catch(() => [] as any[])) as any[]) ?? [];
+      followUps = followUpsOf(
+        msgs
+          .filter((m) => m?.type === "user")
+          .map((m) => ({ text: userText(m) }))
+          .reverse(),
+      );
+    }
+    // Git evidence: diffSummary for a worktree worker, gitStatusBrief otherwise.
+    const gitEvidence = w.worktree
+      ? await diffSummary(w.worktree).catch(() => "")
+      : await gitStatusBrief(s.directory);
+    const name2 = respawnName(w.name);
+    // The full handoff prompt: the usual worker preamble (headless contract) +
+    // the five handoff sections.
+    const task = `${workerPreamble(name2)}\n\n${buildHandoffPrompt({
+      originalTask: w.task ?? "",
+      followUps,
+      lastWorkerText: tail,
+      directory: s.directory,
+      worktree: w.worktree ? { branch: w.worktree.branch, base: w.worktree.base } : undefined,
+      gitEvidence,
+      error,
+    })}`;
+    // The single user-facing notice in the dead topic (sent before we try to spawn).
+    await this.h.sendHtml(conv, respawnNotice(w.name, name2)).catch(() => {});
+    let r: { conv: ConvKey; worker: WorkerInfo };
+    try {
+      r = await this.spawn(chatOf(conv), {
+        name: name2,
+        directory: s.directory,
+        task,
+        agent: s.agent,
+        writes: w.writes,
+        spawnedBy: "manager",
+        isolate: false, // reuse the dead worker's directory/worktree as-is
+      });
+    } catch (e) {
+      await this.h.sendHtml(conv, `⚠️ Không tự tạo worker thay thế được: ${esc((e as Error).message)}`).catch(() => {});
+      return undefined;
+    }
+    // Attach lineage + carry the worktree/repoRoot so /wt (diff/merge/remove)
+    // keeps operating on the correct branch in the new topic.
+    this.h.st.set(r.conv, {
+      worker: { ...this.h.st.get(r.conv).worker!, worktree: w.worktree, repoRoot: w.repoRoot, respawnedFrom: w.name },
+    });
+    return name2;
   }
 
   // ── Manager ───────────────────────────────────────────────────────────────

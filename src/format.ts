@@ -27,6 +27,15 @@ const CONTEXT_OVERFLOW_RE =
   /context (length|window|limit|size)|maximum context|prompt is too long|input length|too many tokens/i;
 
 /**
+ * Shared predicate: is this error text a *context-overflow* error (the model's
+ * context was exceeded)? Exported so worker auto-recovery can reuse the exact
+ * same classification instead of keeping a second copy of the regex.
+ */
+export function isOverflowError(text: string): boolean {
+  return CONTEXT_OVERFLOW_RE.test(text);
+}
+
+/**
  * A short, actionable Telegram-HTML message for a failed turn. A failed turn
  * almost always means the provider rejected the request. The raw error comes
  * from the newest assistant / idle / compaction message's `.error` field (the
@@ -51,7 +60,7 @@ export function formatTurnFailure(
     const detail = raw ? `\n<i>${esc(trunc(raw, 200))}</i>` : "";
     return `🚫 Đã hết hạn mức sử dụng của provider/model — chờ đến khi hạn mức được reset hoặc đổi model bằng /model.${detail}`;
   }
-  if (CONTEXT_OVERFLOW_RE.test(text)) {
+  if (isOverflowError(text)) {
     return (
       "⚠️ <b>Session đã đầy context</b> — vượt giới hạn token của model nên không chạy tiếp được.\n" +
       "Gõ <code>/clear</code> để bắt đầu phiên mới."

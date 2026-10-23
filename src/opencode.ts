@@ -110,6 +110,19 @@ export function assistantText(m: any): string {
 }
 
 /**
+ * Join the text of a *user* message. User messages carry their text either as a
+ * plain `m.text` string or (less commonly) as text parts in `m.content` — handle
+ * both so follow-up extraction works regardless of the server's exact shape.
+ */
+export function userText(m: any): string {
+  if (typeof m?.text === "string") return m.text;
+  return ((m?.content ?? []) as any[])
+    .filter((c: any) => c?.type === "text")
+    .map((c: any) => c.text)
+    .join("\n");
+}
+
+/**
  * True when an error is a *network-level* fetch failure — connection refused,
  * reset, timeout, DNS, or the undici "fetch failed" wrapper. These are
  * transient blips that are safe to retry. They surface as a `ClientError` with

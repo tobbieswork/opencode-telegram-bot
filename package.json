@@ -18,7 +18,8 @@
     "test:continue": "tsx scripts/test-continue.ts",
     "test:prune": "tsx scripts/test-prune.ts",
     "test:config": "tsx scripts/test-config.ts",
-    "test:unit": "npm run test:format && npm run test:fsbrowser && npm run test:state && npm run test:multi && npm run test:activity && npm run test:reminders && npm run test:prune && npm run test:config && npm run test:continue",
+    "test:recovery": "tsx scripts/test-recovery.ts",
+    "test:unit": "npm run test:format && npm run test:fsbrowser && npm run test:state && npm run test:multi && npm run test:activity && npm run test:reminders && npm run test:prune && npm run test:config && npm run test:continue && npm run test:recovery",
     "typecheck": "tsc --noEmit",
     "test:multi": "tsx scripts/test-multi.ts",
     "smoke:multi": "tsx scripts/smoke-multi.ts"

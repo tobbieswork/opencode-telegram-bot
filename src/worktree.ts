@@ -60,6 +60,29 @@ export async function diffSummary(wt: { root: string; base: string }): Promise<s
 }
 
 /**
+ * A brief snapshot of a working directory's git state for a worker that does
+ * NOT run in its own worktree: the diffstat, the changed/untracked files, and
+ * the last commit. Best-effort — returns "" when the directory isn't a git repo
+ * (so respawning a non-repo worker degrades gracefully to "no evidence").
+ */
+export async function gitStatusBrief(dir: string): Promise<string> {
+  if (!dir) return "";
+  const [stat, porcelain, last] = await Promise.all([
+    git(dir, ["diff", "--stat"]).catch(() => ""),
+    git(dir, ["status", "--porcelain"]).catch(() => ""),
+    git(dir, ["log", "-1", "--oneline"]).catch(() => ""),
+  ]);
+  if (!stat && !porcelain && !last) return ""; // not a repo (every command failed)
+  const lines: string[] = [stat || "(no uncommitted diff)"];
+  if (porcelain) {
+    const files = porcelain.split("\n");
+    lines.push(`changed: ${files.slice(0, 15).join(", ")}${files.length > 15 ? ` (+${files.length - 15})` : ""}`);
+  }
+  if (last) lines.push(`last: ${last}`);
+  return lines.join("\n");
+}
+
+/**
  * Merge a worker's branch back into its base in the main checkout. Refuses
  * unless the main checkout is clean and on the base branch; commits whatever
  * the worker left uncommitted first; aborts cleanly on conflict.
