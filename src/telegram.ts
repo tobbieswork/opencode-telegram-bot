@@ -1,5 +1,19 @@
+import { exec as execCb } from "node:child_process";
 import { log, warn, error } from "./logger.js";
 import { ConvKey, parseConv } from "./conv.js";
+import {
+  DnsHealConfig,
+  HealState,
+  DNS_HEAL_CMD,
+  DNS_PROBE_CMD,
+  freshHealState,
+  recordNetworkFailure,
+  recordSuccess,
+  shouldHeal,
+  startHeal,
+  finishHeal,
+  probeShowsStaleDns,
+} from "./dns-heal.js";
 
 export type Message = {
   message_id?: number;
@@ -38,6 +52,30 @@ export type Update = {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * Run a shell command and capture its exit code + combined output. Never throws:
+ * a missing command or timeout resolves to a non-zero code.
+ */
+function execCapture(cmd: string, timeoutMs = 10_000): Promise<{ code: number; out: string }> {
+  return new Promise((res) => {
+    execCb(cmd, { timeout: timeoutMs, maxBuffer: 1_048_576 }, (err, stdout, stderr) => {
+      const code = !err ? 0 : typeof (err as any).code === "number" ? (err as any).code : -1;
+      res({ code, out: `${stdout ?? ""}${stderr ?? ""}`.trim() });
+    });
+  });
+}
+
+/**
+ * Options for {@link Telegram.poll}. All optional — existing call sites keep working.
+ */
+export interface PollOptions {
+  /**
+   * Called once per DNS-heal incident, after the heal command finishes, so the
+   * caller can inform the user. Best-effort: a rejection is logged, never thrown.
+   */
+  onDnsHeal?: (info: { failures: number; healNumber: number }) => void | Promise<void>;
+}
+
+/**
  * Where to send: a conversation key (`chat` or `chat:topic`) or a bare chat id.
  * Expands to `chat_id` plus `message_thread_id` when it names a topic.
  */
@@ -57,8 +95,10 @@ export class Telegram {
   private offset = 0;
   private stopped = false;
   private abort = new AbortController();
+  private healState: HealState | null = null;
+  private onDnsHeal?: PollOptions["onDnsHeal"];
 
-  constructor(private token: string) {}
+  constructor(private token: string, private healCfg?: DnsHealConfig) {}
 
   stop(): void {
     this.stopped = true;
@@ -80,7 +120,11 @@ export class Telegram {
       });
     } catch (e) {
       if (signal?.aborted || (e as Error)?.name === "AbortError") throw e;
-      throw new Error(`Network error calling ${method}: ${(e as Error).message}`);
+      // Network-level failure (undici `fetch failed`, ECONNRESET, …) — as opposed to
+      // a Telegram HTTP error response, which means the network itself is working.
+      const ne: any = new Error(`Network error calling ${method}: ${(e as Error).message}`);
+      ne.network = true;
+      throw ne;
     }
     const json: any = await res.json().catch(() => null);
     if (!json?.ok) {
@@ -127,6 +171,20 @@ export class Telegram {
       ...opts,
     });
     return res?.message_id ?? -1;
+  }
+
+  /**
+   * Send a final model reply as a native rich message (Telegram Bot API 10.1+):
+   * `markdown` is parsed server-side as GFM, so no manual HTML conversion and a
+   * 32 768-char limit instead of 4 096. Mirrors sendMessage's dest() chat_id +
+   * message_thread_id split and its void-on-resolve return style.
+   */
+  async sendRich(to: ConvKey | number, markdown: string, opts: { reply_markup?: unknown } = {}): Promise<void> {
+    await this.api("sendRichMessage", {
+      ...dest(to),
+      rich_message: { markdown },
+      ...(opts.reply_markup ? { reply_markup: opts.reply_markup } : {}),
+    });
   }
 
   /**
@@ -239,8 +297,12 @@ export class Telegram {
    * awaited so it should return quickly for long-running work (spawn it,
    * don't block here). Retries with backoff on transient errors, honors 429.
    */
-  async poll(handler: (u: Update) => Promise<void> | void): Promise<void> {
+  async poll(handler: (u: Update) => Promise<void> | void, opts: PollOptions = {}): Promise<void> {
     log("Telegram polling started");
+    if (this.healCfg) {
+      this.healState = freshHealState();
+      this.onDnsHeal = opts.onDnsHeal;
+    }
     while (!this.stopped) {
       let updates: Update[] = [];
       try {
@@ -250,10 +312,23 @@ export class Telegram {
             timeout: 30,
             allowed_updates: ["message", "callback_query"],
           }, this.abort.signal)) ?? [];
+        if (this.healState) recordSuccess(this.healState);
       } catch (e) {
         if (this.stopped) break;
         const err = e as any;
         if (err?.name === "AbortError") break;
+        // Track network-level failures for the DNS self-heal (see src/dns-heal.ts).
+        // A Telegram HTTP error (4xx/5xx, incl. 429) is a successful round-trip,
+        // so it resets the failure streak instead.
+        if (this.healCfg && this.healState) {
+          const networkish = err?.network === true || /fetch failed/i.test(err?.message ?? "");
+          if (networkish) {
+            recordNetworkFailure(this.healState, Date.now());
+            if (shouldHeal(this.healState, Date.now(), this.healCfg)) void this.runDnsHeal();
+          } else {
+            recordSuccess(this.healState);
+          }
+        }
         if (err?.code === 401) {
           error("Telegram returned 401 - bad bot token. Stopping.");
           this.stopped = true;
@@ -279,5 +354,54 @@ export class Telegram {
       }
     }
     log("Telegram polling stopped");
+  }
+
+  /**
+   * Restart systemd-resolved to drop a stale VPN DNS server (see src/dns-heal.ts).
+   * Fire-and-forget: the polling loop keeps retrying while this runs. At most one
+   * heal is ever in flight (HealState.healInFlight) and heals are rate-limited by
+   * the cooldown, so it cannot storm. Never throws.
+   */
+  private async runDnsHeal(): Promise<void> {
+    const st = this.healState;
+    const cfg = this.healCfg;
+    if (!st || !cfg) return;
+    const failures = st.consecutiveFailures;
+    startHeal(st, Date.now());
+    let restarted = false;
+    log(`DNS heal: ${failures} fetch failures in a row (heal check #${st.healCount})`);
+    try {
+      // Read-only probe first: restart ONLY if the stale VPN DNS is really still
+      // configured. Without that proof this is an ordinary outage (Telegram or
+      // the internet is down) and restarting systemd-resolved would not help.
+      if ((await execCapture("command -v resolvectl")).code !== 0) {
+        log("DNS heal: resolvectl not found — skipping (cannot verify stale DNS)");
+        return;
+      }
+      const probe = await execCapture(DNS_PROBE_CMD);
+      if (!probeShowsStaleDns(probe.out, cfg.staleIp)) {
+        log("DNS heal: no stale VPN DNS detected — not restarting systemd-resolved");
+        return;
+      }
+      log("DNS heal: stale VPN DNS still configured — restarting systemd-resolved");
+      const res = await execCapture(DNS_HEAL_CMD);
+      restarted = res.code === 0;
+      log(`DNS heal: ${DNS_HEAL_CMD} → exit ${res.code}${res.code === 0 ? "" : ` (${(res.out.split("\n")[0] ?? "").slice(0, 200)})`}`);
+    } catch (e) {
+      log("DNS heal: command failed:", (e as Error)?.message ?? e);
+    } finally {
+      finishHeal(st, Date.now());
+      // Surface ONE user notice per ACTUAL restart, after the heal finished so the
+      // network has a chance to be back when the message is sent (best-effort).
+      if (restarted && this.onDnsHeal) {
+        try {
+          void Promise.resolve(this.onDnsHeal({ failures, healNumber: st.healCount })).catch((e) =>
+            warn("DNS heal notice failed:", (e as Error)?.message ?? e),
+          );
+        } catch (e) {
+          warn("DNS heal notice failed:", (e as Error)?.message ?? e);
+        }
+      }
+    }
   }
 }

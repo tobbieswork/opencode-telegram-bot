@@ -23,18 +23,31 @@ const RATE_LIMIT_RE = /rate ?limit|per (minute|hour|day)|too many requests|reque
 const USAGE_CAP_RE = /usage limit|quota|limit reached|insufficient (credit|balance|fund)|out of credit|billing/i;
 
 /** The model's CONTEXT was exceeded — fixable by starting a fresh session. */
-const CONTEXT_OVERFLOW_RE =
-  /context (length|window|limit|size)|maximum context|prompt is too long|input length|too many tokens/i;
+const CONTEXT_OVERFLOW_RE = /context (length|window|limit|size)|maximum context|prompt is too long|input length/i;
+/** Weaker overflow wording ("too many tokens"): also used by quota errors, so a cap word vetoes it. */
+const WEAK_OVERFLOW_RE = /too many tokens/i;
+
+export type FailureKind = "rate-limit" | "overflow" | "usage-cap";
 
 /**
- * Shared predicate: is this error text a *context-overflow* error (the model's
- * context was exceeded)? Exported so worker auto-recovery uses the exact same
- * classification as formatTurnFailure — INCLUDING its precedence: a rate limit or
- * usage cap wins over overflow (e.g. "context limit reached" is a cap), so what
- * the user is told and what the bot does (auto-respawn) can never disagree.
+ * Classify a provider error text. ONE classifier for both what the user is told
+ * (formatTurnFailure) and what the bot does (worker auto-respawn), so the two can
+ * never disagree. Precedence: rate limit > context overflow > usage cap.
+ * Overflow beats the cap because USAGE_CAP_RE is broad ("limit reached") and a
+ * "context limit reached" error must say /clear, not "switch model"; only the
+ * weak "too many tokens" wording yields to a cap word (quota/billing…).
  */
+export function classifyFailure(text: string): FailureKind | undefined {
+  if (RATE_LIMIT_RE.test(text)) return "rate-limit";
+  if (CONTEXT_OVERFLOW_RE.test(text)) return "overflow";
+  if (USAGE_CAP_RE.test(text)) return "usage-cap";
+  if (WEAK_OVERFLOW_RE.test(text)) return "overflow";
+  return undefined;
+}
+
+/** Is this error text a *context-overflow* error? Shared with worker auto-recovery. */
 export function isOverflowError(text: string): boolean {
-  return !RATE_LIMIT_RE.test(text) && !USAGE_CAP_RE.test(text) && CONTEXT_OVERFLOW_RE.test(text);
+  return classifyFailure(text) === "overflow";
 }
 
 /**
@@ -52,21 +65,18 @@ export function formatTurnFailure(
   const secs = (elapsedMs / 1000).toFixed(1);
   const raw = (error?.message ?? "").trim();
   const text = `${error?.type ?? ""}\n${raw}`;
+  const detail = raw ? `\n<i>${esc(trunc(raw, 200))}</i>` : "";
   // A rate/usage cap is not a full context — tell the user to wait, not /clear.
-  if (RATE_LIMIT_RE.test(text)) {
-    const detail = raw ? `\n<i>${esc(trunc(raw, 200))}</i>` : "";
-    return `⏳ Provider đang giới hạn tốc độ (rate limit) — không phải lỗi context, chờ vài giây rồi thử lại.${detail}`;
-  }
-  // Checked after RATE_LIMIT_RE so "usage limit … per minute" stays a rate limit.
-  if (USAGE_CAP_RE.test(text)) {
-    const detail = raw ? `\n<i>${esc(trunc(raw, 200))}</i>` : "";
-    return `🚫 Đã hết hạn mức sử dụng của provider/model — chờ đến khi hạn mức được reset hoặc đổi model bằng /model.${detail}`;
-  }
-  if (isOverflowError(text)) {
-    return (
-      "⚠️ <b>Session đã đầy context</b> — vượt giới hạn token của model nên không chạy tiếp được.\n" +
-      "Gõ <code>/clear</code> để bắt đầu phiên mới."
-    );
+  switch (classifyFailure(text)) {
+    case "rate-limit":
+      return `⏳ Provider đang giới hạn tốc độ (rate limit) — không phải lỗi context, chờ vài giây rồi thử lại.${detail}`;
+    case "overflow":
+      return (
+        "⚠️ <b>Session đã đầy context</b> — vượt giới hạn token của model nên không chạy tiếp được.\n" +
+        "Gõ <code>/clear</code> để bắt đầu phiên mới."
+      );
+    case "usage-cap":
+      return `🚫 Đã hết hạn mức sử dụng của provider/model — chờ đến khi hạn mức được reset hoặc đổi model bằng /model.${detail}`;
   }
   if (raw) {
     const type = error?.type ? ` <code>${esc(error.type)}</code>` : "";
