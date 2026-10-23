@@ -65,6 +65,14 @@ export interface Config {
   bridgePort: number;
   /** Close a worker's topic when the worker finishes (the user reopens it by messaging in it). */
   autoClose: boolean;
+  /** Self-heal stale VPN DNS: restart systemd-resolved after repeated fetch failures. */
+  dnsHeal: boolean;
+  /** The VPN's DNS server IP that lingers after an unclean VPN stop (empty = heal stays off). */
+  dnsStaleIp: string;
+  /** Consecutive network failures before the DNS heal is allowed to run. */
+  dnsHealMinFailures: number;
+  /** Minimum gap between two DNS heals, ms. */
+  dnsHealCooldownMs: number;
   /** Send final model replies as native rich Markdown (server-side GFM) instead of hand-rolled HTML. */
   richReplies: boolean;
 }
@@ -114,6 +122,10 @@ export function loadConfig(root: string): Config {
     worktreeMode: parseWorktreeMode(process.env.OPENCODE_TG_WORKTREE),
     bridgePort: parseIntSetting("OPENCODE_TG_BRIDGE_PORT", 0, 0),
     autoClose: process.env.OPENCODE_TG_AUTO_CLOSE !== "0",
+    dnsHeal: process.env.OPENCODE_TG_DNS_HEAL !== "0",
+    dnsStaleIp: process.env.OPENCODE_TG_DNS_STALE_IP?.trim() ?? "",
+    dnsHealMinFailures: parseIntSetting("OPENCODE_TG_DNS_HEAL_MIN_FAILURES", 3, 1),
+    dnsHealCooldownMs: parseIntSetting("OPENCODE_TG_DNS_HEAL_COOLDOWN_MS", 10 * 60_000, 1000),
     // Default OFF: only an explicit "1"/"true" enables rich (server-side GFM) replies.
     richReplies: process.env.OPENCODE_TG_RICH === "1" || process.env.OPENCODE_TG_RICH === "true",
   };
