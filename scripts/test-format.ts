@@ -5,7 +5,7 @@
  *
  * Run:  npx tsx scripts/test-format.ts
  */
-import { mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure } from "../src/format.js";
+import { mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure, classifyFailure, isOverflowError } from "../src/format.js";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: string): void {
@@ -271,6 +271,23 @@ const show = (label: string, units: string[]) => {
     return false;
   }).join("\n"));
   check("invariant: all fit", units.every((u) => u.length <= 120));
+}
+
+// ── classifyFailure: one precedence for what we tell the user and what we do ──
+{
+  check("classify: rate limit", classifyFailure("Rate limit exceeded") === "rate-limit");
+  check("classify: usage cap", classifyFailure("You exceeded your current quota") === "usage-cap");
+  check("classify: real overflow string", classifyFailure("Requested token count exceeds the model's maximum context length of 160000 tokens") === "overflow");
+  check("classify: 'context limit reached' is overflow, not a cap", classifyFailure("context limit reached") === "overflow");
+  check("classify: overflow wording mentioning quota stays overflow", classifyFailure("Context window limit reached, input exceeds quota") === "overflow");
+  check("classify: weak 'too many tokens' + quota → cap", classifyFailure("insufficient quota: too many tokens") === "usage-cap");
+  check("classify: weak 'too many tokens' alone → overflow", classifyFailure("You have provided too many tokens") === "overflow");
+  check("classify: 'too many tokens per minute' → rate limit", classifyFailure("too many tokens per minute") === "rate-limit");
+  check("classify: 'usage limit … per minute' stays rate limit", classifyFailure("usage limit hit, 50 per minute") === "rate-limit");
+  check("classify: unknown → undefined", classifyFailure("Something went wrong") === undefined);
+  check("isOverflowError agrees", isOverflowError("context limit reached") === true && isOverflowError("monthly usage cap quota") === false);
+  const capMsg = formatTurnFailure({ message: "context limit reached" }, 1000);
+  check("formatTurnFailure: 'context limit reached' tells the user to /clear", capMsg.includes("/clear") && !capMsg.includes("hạn mức"));
 }
 
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);
