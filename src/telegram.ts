@@ -6,7 +6,6 @@ import {
   HealState,
   DNS_HEAL_CMD,
   DNS_PROBE_CMD,
-  STALE_VPN_DNS,
   freshHealState,
   recordNetworkFailure,
   recordSuccess,
@@ -355,24 +354,32 @@ export class Telegram {
     if (!st || !cfg) return;
     const failures = st.consecutiveFailures;
     startHeal(st, Date.now());
-    log(`DNS heal: restarting systemd-resolved after ${failures} fetch failures (heal #${st.healCount})`);
+    let restarted = false;
+    log(`DNS heal: ${failures} fetch failures in a row (heal check #${st.healCount})`);
     try {
-      // Read-only probe first: is the stale VPN DNS actually still configured?
-      if ((await execCapture("command -v resolvectl")).code === 0) {
-        const probe = await execCapture(DNS_PROBE_CMD);
-        log(
-          `DNS heal: ${probeShowsStaleDns(probe.out) ? `STALE VPN DNS ${STALE_VPN_DNS} still configured` : "no stale VPN DNS detected"}`,
-        );
+      // Read-only probe first: restart ONLY if the stale VPN DNS is really still
+      // configured. Without that proof this is an ordinary outage (Telegram or
+      // the internet is down) and restarting systemd-resolved would not help.
+      if ((await execCapture("command -v resolvectl")).code !== 0) {
+        log("DNS heal: resolvectl not found — skipping (cannot verify stale DNS)");
+        return;
       }
+      const probe = await execCapture(DNS_PROBE_CMD);
+      if (!probeShowsStaleDns(probe.out, cfg.staleIp)) {
+        log("DNS heal: no stale VPN DNS detected — not restarting systemd-resolved");
+        return;
+      }
+      log("DNS heal: stale VPN DNS still configured — restarting systemd-resolved");
       const res = await execCapture(DNS_HEAL_CMD);
+      restarted = res.code === 0;
       log(`DNS heal: ${DNS_HEAL_CMD} → exit ${res.code}${res.code === 0 ? "" : ` (${(res.out.split("\n")[0] ?? "").slice(0, 200)})`}`);
     } catch (e) {
       log("DNS heal: command failed:", (e as Error)?.message ?? e);
     } finally {
       finishHeal(st, Date.now());
-      // Surface ONE user notice per incident, after the heal finished so the
+      // Surface ONE user notice per ACTUAL restart, after the heal finished so the
       // network has a chance to be back when the message is sent (best-effort).
-      if (this.onDnsHeal) {
+      if (restarted && this.onDnsHeal) {
         try {
           void Promise.resolve(this.onDnsHeal({ failures, healNumber: st.healCount })).catch((e) =>
             warn("DNS heal notice failed:", (e as Error)?.message ?? e),

@@ -3,7 +3,7 @@
  *
  * Failure mode this fixes: the box runs OpenVPN; when the VPN session dies
  * uncleanly, systemd-resolved keeps the VPN's internal DNS server
- * (172.16.254.9) as a live resolver. Every lookup then times out (~15s) and
+ * (its IP is configured via OPENCODE_TG_DNS_STALE_IP, not hardcoded) as a live resolver. Every lookup then times out (~15s) and
  * undici throws `fetch failed` from getUpdates in a tight loop, even though
  * the local OpenCode service (127.0.0.1) is fine. The working recovery is
  * `sudo -n systemctl restart systemd-resolved` (NOPASSWD for exactly that
@@ -18,12 +18,16 @@
 export const DNS_PROBE_CMD = "resolvectl status";
 /** The fix: restart systemd-resolved so it drops the stale VPN DNS server. */
 export const DNS_HEAL_CMD = "sudo -n systemctl restart systemd-resolved";
-/** The VPN's internal DNS server that lingers after an unclean VPN stop. */
-export const STALE_VPN_DNS = "172.16.254.9";
 
 export interface DnsHealConfig {
-  /** Master switch (OPENCODE_TG_DNS_HEAL). */
+  /** Master switch (OPENCODE_TG_DNS_HEAL). Also off when `staleIp` is empty. */
   enabled: boolean;
+  /**
+   * The VPN's internal DNS server that lingers after an unclean VPN stop
+   * (OPENCODE_TG_DNS_STALE_IP). The resolver is restarted ONLY when `resolvectl`
+   * still lists it — so an ordinary internet outage never restarts DNS.
+   */
+  staleIp: string;
   /** Consecutive network failures required before a heal is allowed. */
   minFailures: number;
   /** Minimum gap between two heals, ms (OPENCODE_TG_DNS_HEAL_COOLDOWN_MS). */
@@ -84,6 +88,8 @@ export function shouldHeal(state: HealState, now: number, cfg: DnsHealConfig): b
 }
 
 /** Parse `resolvectl status` output: true when the stale VPN DNS server is still listed. */
-export function probeShowsStaleDns(output: string): boolean {
-  return output.includes(STALE_VPN_DNS);
+export function probeShowsStaleDns(output: string, staleIp: string): boolean {
+  if (!staleIp) return false;
+  // Match whole tokens so "10.0.0.1" doesn't match "10.0.0.12".
+  return output.split(/[\s,]+/).includes(staleIp);
 }

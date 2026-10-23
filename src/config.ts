@@ -67,6 +67,8 @@ export interface Config {
   autoClose: boolean;
   /** Self-heal stale VPN DNS: restart systemd-resolved after repeated fetch failures. */
   dnsHeal: boolean;
+  /** The VPN's DNS server IP that lingers after an unclean VPN stop (empty = heal stays off). */
+  dnsStaleIp: string;
   /** Consecutive network failures before the DNS heal is allowed to run. */
   dnsHealMinFailures: number;
   /** Minimum gap between two DNS heals, ms. */
@@ -119,6 +121,7 @@ export function loadConfig(root: string): Config {
     bridgePort: parseIntSetting("OPENCODE_TG_BRIDGE_PORT", 0, 0),
     autoClose: process.env.OPENCODE_TG_AUTO_CLOSE !== "0",
     dnsHeal: process.env.OPENCODE_TG_DNS_HEAL !== "0",
+    dnsStaleIp: process.env.OPENCODE_TG_DNS_STALE_IP?.trim() ?? "",
     dnsHealMinFailures: parseIntSetting("OPENCODE_TG_DNS_HEAL_MIN_FAILURES", 3, 1),
     dnsHealCooldownMs: parseIntSetting("OPENCODE_TG_DNS_HEAL_COOLDOWN_MS", 10 * 60_000, 1000),
   };

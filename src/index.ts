@@ -20,7 +20,8 @@ async function main(): Promise<void> {
   log(`Connected to OpenCode ${connected.version ?? "?"} @ ${connected.url}`);
 
   const tg = new Telegram(cfg.telegramToken, {
-    enabled: cfg.dnsHeal,
+    enabled: cfg.dnsHeal && cfg.dnsStaleIp !== "",
+    staleIp: cfg.dnsStaleIp,
     minFailures: cfg.dnsHealMinFailures,
     cooldownMs: cfg.dnsHealCooldownMs,
   });

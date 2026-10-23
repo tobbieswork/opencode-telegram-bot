@@ -11,7 +11,6 @@ import {
   HealState,
   DNS_HEAL_CMD,
   DNS_PROBE_CMD,
-  STALE_VPN_DNS,
   freshHealState,
   recordNetworkFailure,
   recordSuccess,
@@ -31,7 +30,8 @@ function check(name: string, cond: boolean, detail?: string): void {
 }
 
 const MIN = 60_000;
-const cfg: DnsHealConfig = { enabled: true, minFailures: 3, cooldownMs: 10 * MIN };
+const STALE = "192.0.2.53"; // sample/demo address (TEST-NET-1), not a real server
+const cfg: DnsHealConfig = { enabled: true, staleIp: STALE, minFailures: 3, cooldownMs: 10 * MIN };
 const T = 1_000_000_000; // arbitrary "now"
 
 /** A state with `n` consecutive failures (no heal yet). */
@@ -45,7 +45,6 @@ function failed(n: number): HealState {
 {
   check("heal cmd is the sudo -n systemctl restart", DNS_HEAL_CMD === "sudo -n systemctl restart systemd-resolved");
   check("probe cmd is the read-only resolvectl status", DNS_PROBE_CMD === "resolvectl status");
-  check("stale VPN DNS is the box's VPN server", STALE_VPN_DNS === "172.16.254.9");
 }
 
 // ── fresh state: nothing to heal ────────────────────────────────────────────
@@ -138,8 +137,8 @@ function failed(n: number): HealState {
 Global
         Protocols: -LLMNR -mDNS -DNSSD -DNSOverTLS DNSSEC=no+support
          Resolvconf: /etc/resolv.conf
-Current DNS Servers: 172.16.254.9 8.8.8.8
-       DNS Servers: 172.16.254.9 8.8.8.8
+Current DNS Servers: 192.0.2.53 8.8.8.8
+       DNS Servers: 192.0.2.53 8.8.8.8
 `;
   const clean = `
 Global
@@ -147,9 +146,11 @@ Global
          Resolvconf: /etc/resolv.conf
 Current DNS Servers: 8.8.8.8 1.1.1.1
 `;
-  check("probe: stale server listed → true", probeShowsStaleDns(withStale) === true);
-  check("probe: only public servers → false", probeShowsStaleDns(clean) === false);
-  check("probe: empty output → false", probeShowsStaleDns("") === false);
+  check("probe: stale server listed → true", probeShowsStaleDns(withStale, STALE) === true);
+  check("probe: only public servers → false", probeShowsStaleDns(clean, STALE) === false);
+  check("probe: empty output → false", probeShowsStaleDns("", STALE) === false);
+  check("probe: empty staleIp never matches", probeShowsStaleDns(withStale, "") === false);
+  check("probe: IP prefix does not match a longer IP", probeShowsStaleDns("Current DNS Servers: 192.0.2.530 8.8.8.8", STALE) === false);
 }
 
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);
