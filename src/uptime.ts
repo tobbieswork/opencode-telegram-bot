@@ -18,8 +18,23 @@ export const DEFAULT_UPTIME_THRESHOLD_DAYS = 30;
 export const DEFAULT_REMIND_INTERVAL_DAYS = 3;
 /** Grace period before the actual reboot so the "rebooting…" message gets delivered. */
 export const DEFAULT_REBOOT_DELAY_MS = 15_000;
-/** The exact command the NOPASSWD sudoers entry permits (run under `sudo -n`). */
-export const REBOOT_CMD = ["systemctl", "reboot"];
+/** Max token age the wrapper accepts (ms). */
+export const REBOOT_TOKEN_TTL_MS = 10_000;
+/** The wrapper binary (NOPASSWD sudoers permits this, NOT `systemctl reboot`). */
+export const SAFE_REBOOT_BIN = "/usr/local/sbin/safe-reboot";
+/**
+ * One-shot token file, under the bot user's state dir (NOT in the repo): the
+ * bot mints a fresh token here milliseconds before firing; the wrapper
+ * (running as root) checks arg == file token and age < TTL, then burns it.
+ * Kept in sync with TOKEN_FILE in /usr/local/sbin/safe-reboot.
+ */
+export function rebootTokenFile(homeDir: string): string {
+  return `${homeDir}/.local/state/opencode-bot/reboot-token`;
+}
+/** Token file content: one line "<hex-token> <epoch-ms>" (wrapper parses this). */
+export function buildTokenLine(token: string, nowMs: number): string {
+  return `${token} ${nowMs}\n`;
+}
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 

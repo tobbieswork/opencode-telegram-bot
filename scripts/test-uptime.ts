@@ -7,7 +7,7 @@
  *
  * Run:  npx tsx scripts/test-uptime.ts
  */
-import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay } from "../src/uptime.js";
+import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, buildTokenLine, REBOOT_TOKEN_TTL_MS } from "../src/uptime.js";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: string): void {
@@ -47,6 +47,10 @@ check("days only (0 hours)", formatUptimeHuman(5 * 86400) === "5 ngày", formatU
 check("hours only", formatUptimeHuman(7 * 3600 + 120) === "7 giờ", formatUptimeHuman(7 * 3600 + 120));
 check("minutes (floored to ≥1)", formatUptimeHuman(720) === "12 phút", formatUptimeHuman(720));
 check("tiny seconds → 1 phút (no '0')", formatUptimeHuman(30) === "1 phút", formatUptimeHuman(30));
+
+// ── token file format (single line, matches the safe-reboot wrapper) ────────
+check("buildTokenLine shape", buildTokenLine("abc123", 1000) === "abc123 1000\n", JSON.stringify(buildTokenLine("abc123", 1000)));
+check("token TTL is 10s", REBOOT_TOKEN_TTL_MS === 10000, String(REBOOT_TOKEN_TTL_MS));
 
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

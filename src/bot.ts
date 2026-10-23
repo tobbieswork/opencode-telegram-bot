@@ -1,6 +1,8 @@
-import { isAbsolute, resolve } from "node:path";
-import { existsSync, statSync, readFileSync } from "node:fs";
+import { isAbsolute, resolve, dirname } from "node:path";
+import { existsSync, statSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { execFile } from "node:child_process";
+import { homedir } from "node:os";
+import { randomBytes } from "node:crypto";
 import { Telegram, Update, CallbackQuery, Message } from "./telegram.js";
 import { OpenCodeCtl, newMessageID, assistantText, ModelInfo, SessionBrief } from "./opencode.js";
 import { StateManager, ChatState, MACHINE_STATE_KEY } from "./state.js";
@@ -10,7 +12,7 @@ import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure } from "./format.js";
 import { firstReminderAt, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
 import { CONTINUE_PROMPT, CONTINUE_BUTTON_LABEL, shouldOfferContinue, continueCallbackData, parseContinueData, alreadyOfferedContinue } from "./continue.js";
-import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, REBOOT_CMD } from "./uptime.js";
+import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, SAFE_REBOOT_BIN, rebootTokenFile, buildTokenLine } from "./uptime.js";
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
 import { log, warn, error } from "./logger.js";
@@ -310,13 +312,29 @@ export class Bot {
     if (action === "go") {
       await this.tg.answerCallbackQuery(cb.id);
       if (messageId !== undefined) await this.tg.editMessageReplyMarkup(conv, messageId, {}).catch(() => {});
+      if (!existsSync(SAFE_REBOOT_BIN)) {
+        await this.tg.sendMessage(conv, "⚠️ Wrapper <b>safe-reboot</b> chưa được cài trên máy. Chạy khối sudo trong PR #11 trước.").catch(() => {});
+        return;
+      }
+      // Arm: mint a fresh single-use token (the wrapper, as root, checks it).
+      const token = randomBytes(16).toString("hex");
+      const tokenFile = rebootTokenFile(homedir());
+      try {
+        mkdirSync(dirname(tokenFile), { recursive: true });
+        writeFileSync(tokenFile, buildTokenLine(token, Date.now()), { mode: 0o600 });
+      } catch (e) {
+        error("reboot arm failed:", (e as Error)?.message ?? e);
+        await this.tg.sendMessage(conv, "⚠️ Không tạo được token reboot — xem log bot.").catch(() => {});
+        return;
+      }
       const secs = Math.round(this.cfg.rebootDelayMs / 1000);
       await this.tg.sendMessage(conv, `🔄 <b>Đang reboot máy trong ~${secs} giây…</b>\nBot sẽ tự chạy lại sau khi máy lên (linger).`).catch(() => {});
-      // Fire the reboot after the delay so the message above gets delivered. The
-      // process will die shortly after; systemd's Restart + linger bring it back.
+      // Fire after the delay so the message above gets delivered. The wrapper
+      // reboots only because the token it was given is fresh and single-use;
+      // a stray `systemctl reboot` (or a stale token) is refused and logged.
       setTimeout(() => {
-        execFile("sudo", ["-n", ...REBOOT_CMD], (err) => {
-          if (err) error("reboot failed:", err.message);
+        execFile("sudo", ["-n", SAFE_REBOOT_BIN, token], (err) => {
+          if (err) error("reboot denied/failed:", err.message);
         });
       }, this.cfg.rebootDelayMs).unref?.();
       return;
