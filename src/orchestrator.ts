@@ -10,7 +10,7 @@ import { McpBridge, BridgeTool } from "./mcp-bridge.js";
 import { addWorktree, diffSummary, gitRoot, gitStatusBrief, mergeWorktree, removeWorktree } from "./worktree.js";
 import { listDirs } from "./fsbrowser.js";
 import { selectPruneable, selectFinishedWorkers, WorkerConv } from "./prune.js";
-import { buildHandoffPrompt, followUpsOf, respawnName, respawnNotice, shouldRespawnWorker } from "./recovery.js";
+import { buildHandoffPrompt, followUpsFromMessages, respawnName, respawnNotice, shouldRespawnWorker } from "./recovery.js";
 import { esc, trunc, timeAgo, stripTags } from "./format.js";
 import { log, warn } from "./logger.js";
 
@@ -772,18 +772,14 @@ export class Orchestrator {
   private async respawnOverflow(conv: ConvKey, w: WorkerInfo, tail: string, error?: string): Promise<string | undefined> {
     const s = this.h.st.get(conv);
     if (!s.directory) return undefined; // nowhere to place the replacement
-    // Follow-ups: the user messages of the dead session (manager + direct), in
-    // chronological order; the first is the spawn prompt (dropped by followUpsOf).
-    // message.list is newest-first, so reverse to chronological.
+    // Follow-ups: the user messages of the dead session (manager + direct). Read
+    // the WHOLE session and sort by time: a session that overflowed has far more
+    // than 50 messages, and in a truncated list the oldest message is not the
+    // spawn prompt (a real follow-up would be dropped instead).
     let followUps: string[] = [];
     if (s.sessionID) {
-      const msgs = ((await this.h.oc.listMessages(s.sessionID, 50).catch(() => [] as any[])) as any[]) ?? [];
-      followUps = followUpsOf(
-        msgs
-          .filter((m) => m?.type === "user")
-          .map((m) => ({ text: userText(m) }))
-          .reverse(),
-      );
+      const msgs = ((await this.h.oc.listMessages(s.sessionID).catch(() => [] as any[])) as any[]) ?? [];
+      followUps = followUpsFromMessages(msgs, userText);
     }
     // Git evidence: diffSummary for a worktree worker, gitStatusBrief otherwise.
     const gitEvidence = w.worktree
@@ -811,7 +807,7 @@ export class Orchestrator {
         task,
         agent: s.agent,
         writes: w.writes,
-        spawnedBy: "manager",
+        spawnedBy: w.spawnedBy, // the replacement keeps the dead worker's origin (user vs manager)
         isolate: false, // reuse the dead worker's directory/worktree as-is
       });
     } catch (e) {

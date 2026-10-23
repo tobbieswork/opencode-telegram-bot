@@ -50,7 +50,7 @@ Hiện regex này chỉ dùng cho `formatTurnFailure()` (đường interactive).
 | Piece | Nguồn runtime | Ghi chú |
 |---|---|---|
 | Original task | `WorkerInfo.task` (state.json) | chỉ set lúc spawn; **follow-up KHÔNG được lưu** vào WorkerInfo |
-| Follow-ups (lệnh giữa chừng) | `oc.listMessages(sid, 50)` → messages `type === "user"`, bỏ message đầu (spawn prompt) | gồm cả follow-up của Manager lẫn user nhắn thẳng vào topic |
+| Follow-ups (lệnh giữa chừng) | `oc.listMessages(sid)` (TOÀN BỘ session, không `limit`) → messages `type === "user"`, sort theo `time.created`, bỏ message đầu (spawn prompt) — `followUpsFromMessages` | gồm cả follow-up của Manager lẫn user nhắn thẳng vào topic |
 | Text cuối của worker | `oc.latestReply(sid, 0, {lastTurn:true})` | `onWorkerFinished` đã fetch (biến `tail`) |
 | Working directory | `ChatState.directory` | với worker có worktree: đúng thư mục worktree (chứa toàn bộ state on-disk) |
 | Worktree | `WorkerInfo.worktree {root, branch, base}` + `WorkerInfo.repoRoot` | branch `tg/<name>-<id>` giữ commit; **uncommitted changes nằm on-disk** trong worktree dir |
@@ -187,7 +187,7 @@ Test: `scripts/test-recovery.ts` (pattern của test-continue.ts), vào `test:un
 |---|---|
 | `src/format.ts` | Export predicate overflow (vd `export function isOverflowError(text: string): boolean` bọc `CONTEXT_OVERFLOW_RE`); `formatTurnFailure` gọi nó (không đổi hành vi) |
 | `src/state.ts` | `WorkerInfo.respawnedFrom?: string` — additive, backward-compat với state.json cũ |
-| `src/config.ts` | `recoverOverflow: process.env.OPENCODE_TG_RECOVER_OVERFLOW !== "0"` (default ON, cùng convention với `autoClose`); test trong test-config |
+| `src/config.ts` | `recoverOverflow: process.env.OPENCODE_TG_RECOVER_OVERFLOW === "1" \|\| === "true"` (**default OFF** — tự tốn token và chạy agent ghi file không cần duyệt; phải bật tường minh); test trong test-config |
 | `src/worktree.ts` | `export async function gitStatusBrief(dir: string): Promise<string>` — `status --porcelain` + `diff --stat` + `log -1 --oneline`, best-effort (trả `""` nếu không phải repo) |
 | `src/opencode.ts` | `export function userText(m: any): string` cạnh `assistantText` (đọc text parts của user message) |
 | `src/orchestrator.ts` | (a) `SpawnSpec.isolate?: boolean`; (b) `spawnReserved`: `isolate === false` → skip khối worktree (dòng 556-570); (c) hook trong `onWorkerFinished`; (d) private `respawnOverflow(conv, error)` |
@@ -219,7 +219,7 @@ if (cfg.autoClose && (status === "done" || status === "failed") && !respawned) {
 
 ```
 1. s = st.get(conv)
-2. followUps = userText(...) các user messages từ oc.listMessages(s.sessionID, 50), bỏ cái đầu
+2. followUps = `followUpsFromMessages(oc.listMessages(s.sessionID), userText)` (toàn bộ session, sort theo thời gian, bỏ cái đầu)
 3. gitEvidence = w.worktree ? await diffSummary(w.worktree)
                             : await gitStatusBrief(s.directory)
 4. name2 = respawnName(w.name)
@@ -254,7 +254,7 @@ Lưu ý wiring:
 
 ## 4. Risks
 
-1. **Chi phí respawn.** Mỗi lần respawn = 1 session mới đọc lại codebase từ đầu + prompt handoff (2–6K tokens). Bounded: **tối đa 1 lần per original task** (`respawnedFrom` persisted). So với baseline manual (manager đọc git status, soạn handoff, spawn — cùng chi phí token nhưng thêm round-trip người/manager, dễ sót context), auto-respawn không bao giờ tệ hơn, thường tốt hơn. Có `OPENCODE_TG_RECOVER_OVERFLOW=0` để tắt hẳn.
+1. **Chi phí respawn.** Mỗi lần respawn = 1 session mới đọc lại codebase từ đầu + prompt handoff (2–6K tokens). Bounded: **tối đa 1 lần per original task** (`respawnedFrom` persisted). So với baseline manual (manager đọc git status, soạn handoff, spawn — cùng chi phí token nhưng thêm round-trip người/manager, dễ sót context), auto-respawn không bao giờ tệ hơn, thường tốt hơn. Mặc định TẮT; bật bằng `OPENCODE_TG_RECOVER_OVERFLOW=1`.
 2. **Infinite loop.** Chặn bằng `respawnedFrom` (persisted → sống qua restart) + `shouldRespawnWorker` pure đã test. Các vòng lặp tiềm tàng khác đã có sẵn: `finishing` Set (double turn-end), `DISPATCH_BUDGET` (manager), name collision → `spawn()` throw (bước 7 catch). Respawn-2 chết lần 2 → failed thường, **không** có worker thứ 3 — tính năng được test riêng trong test-recovery.ts.
 3. **Worker chết mid-edit (dirty worktree).** Uncommitted changes **không mất** (nằm on-disk trong worktree dir, session mới kế thừa). Rủi ro còn lại: file cắt nửa → prompt có rule #2 (fix hoặc `git checkout -- <file>` trước khi tiếp). Worker **không có repo** thì không có safety net revert — chấp nhận (vẫn tốt hơn manual). Worktree mode "always" đã được xử lý bằng `isolate: false` (mục 2.3) — đây là rủi ro lớn nhất đã né được bằng thiết kế.
 4. **UX Telegram.** User thấy: (a) **1 dòng** trong topic cũ ("⚠️ đầy context — đã tạo name-2…"), (b) topic mới name-2 với intro + task handoff (spawn flow hiện có), (c) 1 report trong main chat qua `queueReport` (đã debounce 4s, batched). Không có storm: dead topic giữ mở ❌ (không close ngay) nhưng không phát sinh thêm thông báo; `/prune` dọn.
@@ -267,7 +267,7 @@ Lưu ý wiring:
 
 1. **Unit** (`npm run test:unit` + `npm run typecheck`): test-recovery.ts phủ (a) `isOverflowError` với string litellm thật `"Requested token count exceeds the model's maximum context length of 160000 tokens"` → true; rate-limit/usage-cap string → false; undefined → false. (b) Bảng decision `shouldRespawnWorker`: mọi tổ hợp của {status, error, respawnedFrom, hasTask, enabled} — đặc biệt respawnedFrom set → false dù còn lại đúng. (c) `respawnName`: normal, >24 char clamp, hợp lệ NAME_RE. (d) `buildHandoffPrompt`: đủ 5 section, truncate đúng cap, omit follow-ups khi rỗng. (e) `followUpsOf`: bỏ message đầu, drop empty.
 2. **E2E manual** (sau khi implement): spawn worker (manager, agent build, repo có worktree) với task đủ lớn để overflow 160K → quan sát: ① 1 dòng notice trong topic cũ; ② topic `name-2` mới đang chạy **cùng worktree/branch** (`/wt` trong topic mới vẫn hiện đúng branch cũ); ③ worker cũ ❌, worker mới 🟢 trong `/board`; ④ `state.json` của topic mới có `respawnedFrom: "<cũ>"`; ⑤ report trong main chat; ⑥ **cố tình làm worker name-2 overflow lần 2** (gửi task khổng lồ tiếp) → ❌ thường, **không** có worker thứ 3.
-3. **Không regression:** failure không-phải-overflow (rate limit) vẫn hiển thị như cũ, không respawn; worker `stopped` không respawn; `OPENCODE_TG_RECOVER_OVERFLOW=0` tắt toàn bộ.
+3. **Không regression:** failure không-phải-overflow (rate limit) vẫn hiển thị như cũ, không respawn; worker `stopped` không respawn; mặc định (không đặt biến) không respawn; `=1` mới bật.
 4. **Known limitation (ghi nhận, không block):** heal path (post-restart) không auto-respawn — cần v1.1 với message-scan fallback.
 
 ### Estimated size: **M** (~350–450 dòng kể cả test)

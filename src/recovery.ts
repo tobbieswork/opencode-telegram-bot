@@ -146,6 +146,24 @@ export function buildHandoffPrompt(p: HandoffParts): string {
 }
 
 /**
+ * Follow-ups from RAW session messages, in any order: keep the user messages,
+ * sort them oldest-first by `time.created` (the server's list order is not
+ * guaranteed — cmdHistory sorts too), then drop the first (the spawn prompt).
+ * The caller must pass the WHOLE session (no `limit`): in a truncated list the
+ * oldest message is not the spawn prompt, and a real follow-up would be dropped.
+ */
+export function followUpsFromMessages(
+  msgs: { type?: string; time?: { created?: number } }[],
+  textOf: (m: any) => string,
+): string[] {
+  const users = msgs
+    .filter((m) => m?.type === "user")
+    .sort((a, b) => (a.time?.created ?? 0) - (b.time?.created ?? 0))
+    .map((m) => ({ text: textOf(m) }));
+  return followUpsOf(users);
+}
+
+/**
  * Extract the follow-up instructions from a worker's user messages, given in
  * CHRONOLOGICAL order (oldest first): the first message is the spawn prompt
  * (dropped), the rest are the follow-ups. Empty texts are dropped.

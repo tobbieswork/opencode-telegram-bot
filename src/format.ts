@@ -28,11 +28,13 @@ const CONTEXT_OVERFLOW_RE =
 
 /**
  * Shared predicate: is this error text a *context-overflow* error (the model's
- * context was exceeded)? Exported so worker auto-recovery can reuse the exact
- * same classification instead of keeping a second copy of the regex.
+ * context was exceeded)? Exported so worker auto-recovery uses the exact same
+ * classification as formatTurnFailure — INCLUDING its precedence: a rate limit or
+ * usage cap wins over overflow (e.g. "context limit reached" is a cap), so what
+ * the user is told and what the bot does (auto-respawn) can never disagree.
  */
 export function isOverflowError(text: string): boolean {
-  return CONTEXT_OVERFLOW_RE.test(text);
+  return !RATE_LIMIT_RE.test(text) && !USAGE_CAP_RE.test(text) && CONTEXT_OVERFLOW_RE.test(text);
 }
 
 /**

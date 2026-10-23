@@ -13,6 +13,7 @@ import {
   respawnNotice,
   buildHandoffPrompt,
   followUpsOf,
+  followUpsFromMessages,
   FOLLOW_UPS_MAX,
   EVIDENCE_MAX,
   LAST_TEXT_MAX,
@@ -47,6 +48,9 @@ const OVF = "Requested token count exceeds the model's maximum context length of
   check("billing error → false", isOverflowError("billing error: insufficient credit") === false);
   check("generic failure → false", isOverflowError("Something went wrong upstream") === false);
   check("empty string → false", isOverflowError("") === false);
+  // Same precedence as formatTurnFailure: cap/rate-limit wins over overflow.
+  check("'context limit reached' (usage cap wins) → false", isOverflowError("context limit reached") === false);
+  check("overflow wording + 'per minute' (rate limit wins) → false", isOverflowError("too many tokens per minute") === false);
   check("undefined → false", isOverflowError(undefined) === false);
 }
 
@@ -156,6 +160,22 @@ const OVF = "Requested token count exceeds the model's maximum context length of
   check("drops empty/whitespace follow-ups", JSON.stringify(b) === JSON.stringify(["f1"]), JSON.stringify(b));
   check("only the spawn prompt → empty", JSON.stringify(followUpsOf([{ text: "spawn" }])) === JSON.stringify([]));
   check("no messages → empty", JSON.stringify(followUpsOf([])) === JSON.stringify([]));
+}
+
+// ── followUpsFromMessages: whole session, any order ──────────────────────────
+{
+  const u = (t: string, created: number) => ({ type: "user", time: { created }, text: t });
+  const a = (created: number) => ({ type: "assistant", time: { created }, text: "x" });
+  const textOf = (m: any) => m.text as string;
+  // Newest-first (as the server may return it) must give the same answer as oldest-first.
+  const chrono = [u("spawn prompt", 1), a(2), u("fu1", 3), a(4), u("fu2", 5)];
+  const newestFirst = [...chrono].reverse();
+  const want = JSON.stringify(["fu1", "fu2"]);
+  check("follow-ups: chronological input", JSON.stringify(followUpsFromMessages(chrono, textOf)) === want);
+  check("follow-ups: newest-first input", JSON.stringify(followUpsFromMessages(newestFirst, textOf)) === want);
+  check("follow-ups: shuffled input", JSON.stringify(followUpsFromMessages([chrono[3], chrono[0], chrono[4], chrono[2], chrono[1]], textOf)) === want);
+  check("follow-ups: assistant messages ignored; only spawn prompt → none", followUpsFromMessages([a(1), u("spawn", 2), a(3)], textOf).length === 0);
+  check("follow-ups: empty session → none", followUpsFromMessages([], textOf).length === 0);
 }
 
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);

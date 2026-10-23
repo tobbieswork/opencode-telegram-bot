@@ -68,7 +68,8 @@ export interface Config {
   /**
    * Auto-respawn a worker that died from context overflow (a fresh session in
    * the SAME directory/worktree, handed the original task + git evidence).
-   * Bounded to one respawn per original task; off via OPENCODE_TG_RECOVER_OVERFLOW=0.
+   * Bounded to one respawn per original task. Default OFF (it spends tokens and runs
+   * a write agent unattended): enable with OPENCODE_TG_RECOVER_OVERFLOW=1.
    */
   recoverOverflow: boolean;
 }
@@ -118,7 +119,7 @@ export function loadConfig(root: string): Config {
     worktreeMode: parseWorktreeMode(process.env.OPENCODE_TG_WORKTREE),
     bridgePort: parseIntSetting("OPENCODE_TG_BRIDGE_PORT", 0, 0),
     autoClose: process.env.OPENCODE_TG_AUTO_CLOSE !== "0",
-    recoverOverflow: process.env.OPENCODE_TG_RECOVER_OVERFLOW !== "0",
+    recoverOverflow: process.env.OPENCODE_TG_RECOVER_OVERFLOW === "1" || process.env.OPENCODE_TG_RECOVER_OVERFLOW === "true",
   };
   const agent = process.env.OPENCODE_DEFAULT_AGENT?.trim();
   if (agent) cfg.defaultAgent = agent;
