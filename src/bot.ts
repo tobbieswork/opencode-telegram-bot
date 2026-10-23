@@ -1,14 +1,16 @@
 import { isAbsolute, resolve } from "node:path";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, statSync, readFileSync } from "node:fs";
+import { execFile } from "node:child_process";
 import { Telegram, Update, CallbackQuery, Message } from "./telegram.js";
 import { OpenCodeCtl, newMessageID, assistantText, ModelInfo, SessionBrief } from "./opencode.js";
-import { StateManager, ChatState } from "./state.js";
+import { StateManager, ChatState, MACHINE_STATE_KEY } from "./state.js";
 import { ConvKey, convKey, chatOf } from "./conv.js";
 import { Orchestrator } from "./orchestrator.js";
 import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure } from "./format.js";
 import { firstReminderAt, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
 import { CONTINUE_PROMPT, CONTINUE_BUTTON_LABEL, shouldOfferContinue, continueCallbackData, parseContinueData, alreadyOfferedContinue } from "./continue.js";
+import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, REBOOT_CMD } from "./uptime.js";
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
 import { log, warn, error } from "./logger.js";
@@ -147,6 +149,7 @@ export class Bot {
    * Exponential backoff — see cfg.remind*.
    */
   private reminders = new Map<string, ReturnType<typeof setTimeout>>();
+  private uptimeTimer?: ReturnType<typeof setInterval>;
   /** Sessions from which we already stripped the language instruction this process (when the toggle is off), so we don't call removeInstruction every prompt. */
   private languageRemoved = new Set<string>();
   /** The self-editing "agent is doing…" line per conv: message id + current label. */
@@ -193,6 +196,132 @@ export class Bot {
     void this.orch.closeFinishedTopicsAtStartup().catch((e) => warn("startup topic close:", e?.message));
     // Register the Telegram /command autocomplete menu (cosmetic, best-effort).
     this.registerCommands();
+    // Nudge the user to reboot the machine when uptime passes the threshold
+    // (kernel updates only apply after a reboot). Runs once now, then hourly.
+    this.startUptimeMonitor();
+  }
+
+  // ── Uptime monitor + reboot ─────────────────────────────────────────────────
+  /**
+   * Kick off the machine-uptime watcher: check now, then re-check hourly. The
+   * box runs 24/7 for the bot, but kernel security updates only take effect
+   * after a reboot, so once uptime passes the threshold we nudge the user to
+   * reboot (with a two-step-confirmed button — see note #4's operational rule).
+   */
+  private startUptimeMonitor(): void {
+    if (!this.cfg.uptimeMonitor) return;
+    void this.checkUptimeAndRemind();
+    this.uptimeTimer = setInterval(() => void this.checkUptimeAndRemind(), 6 * 3600 * 1000);
+    this.uptimeTimer.unref?.();
+  }
+
+  /**
+   * Read /proc/uptime and, if we've crossed the reboot threshold and haven't
+   * reminded within the snooze interval, send the reminder with a reboot button.
+   * Never throws: a read/parse/send failure just means no reminder this tick.
+   */
+  private async checkUptimeAndRemind(): Promise<void> {
+    let uptimeSec: number | undefined;
+    try {
+      uptimeSec = parseProcUptime(readFileSync("/proc/uptime", "utf8"));
+    } catch {
+      return; // non-Linux / unreadable — silently skip (not fatal to the bot)
+    }
+    if (uptimeSec === undefined) return;
+    const machine = this.st.peek(MACHINE_STATE_KEY) ?? {};
+    const now = Date.now();
+    const should = shouldRemindAboutReboot({
+      uptimeSec,
+      lastReminderMs: machine.lastRebootReminderMs,
+      now,
+      thresholdMs: msPerDay(this.cfg.uptimeThresholdDays),
+      remindIntervalMs: msPerDay(this.cfg.uptimeRemindIntervalDays),
+    });
+    if (!should) return;
+    // Record the reminder BEFORE sending so a send failure or a rapid second
+    // tick can't double-fire; the snooze interval still re-arms it later.
+    this.st.set(MACHINE_STATE_KEY, { lastRebootReminderMs: now });
+    const chat = this.cfg.allowedUserIds[0];
+    if (!chat) return;
+    const kb: Keyboard = {
+      inline_keyboard: [
+        [
+          { text: "🔄 Reboot máy ngay", callback_data: "reboot:ask" },
+          { text: "🔕 Nhắc lại sau", callback_data: "reboot:snooze" },
+        ],
+      ],
+    };
+    const text =
+      `⏳ Máy đã chạy liên tục <b>${formatUptimeHuman(uptimeSec)}</b>. ` +
+      `Kernel security updates chỉ áp dụng sau reboot — nên reboot định kỳ ~${this.cfg.uptimeThresholdDays} ngày. ` +
+      `Bấm nút để reboot (xác nhận 2 bước) hoặc chọn nhắc lại sau.`;
+    await this.tg.sendMessage(chat, text, { reply_markup: kb }).catch((e) => warn("uptime reminder:", e?.message ?? e));
+  }
+
+  /** The two-step confirmation message + keyboard for an actual reboot. */
+  private async sendRebootConfirm(conv: ConvKey): Promise<void> {
+    const kb: Keyboard = {
+      inline_keyboard: [
+        [
+          { text: "✅ Xác nhận reboot", callback_data: "reboot:go" },
+          { text: "❌ Huỷ", callback_data: "reboot:cancel" },
+        ],
+      ],
+    };
+    const secs = Math.round(this.cfg.rebootDelayMs / 1000);
+    const text =
+      `⚠️ <b>Chắc reboot máy không?</b>\n` +
+      `Máy sẽ khởi động lại trong ~${secs} giây; bot + OpenCode sẽ tắt và tự chạy lại sau (linger). ` +
+      `Bấm <b>Xác nhận</b> nếu bạn chắc chắn, hoặc <b>Huỷ</b>.`;
+    await this.tg.sendMessage(conv, text, { reply_markup: kb });
+  }
+
+  /** /reboot — manually start the two-step reboot flow (no confirmation gate yet). */
+  private async cmdReboot(conv: ConvKey): Promise<void> {
+    await this.sendRebootConfirm(conv);
+  }
+
+  /**
+   * Reboot callback flow (two explicit taps required — this reboots the box):
+   *   reboot:ask     (from the uptime reminder) → show the confirmation
+   *   reboot:go      (from the confirmation)   → confirm, then reboot after the delay
+   *   reboot:cancel  → abort
+   *   reboot:snooze  (from the uptime reminder)→ re-arm the snooze interval
+   */
+  private async handleRebootCallback(cb: CallbackQuery, conv: ConvKey, messageId: number | undefined): Promise<void> {
+    const action = (cb.data ?? "").slice("reboot:".length);
+    if (action === "snooze") {
+      this.st.set(MACHINE_STATE_KEY, { lastRebootReminderMs: Date.now() });
+      await this.tg.answerCallbackQuery(cb.id, "OK, sẽ nhắc lại sau.");
+      if (messageId !== undefined) await this.tg.editMessageReplyMarkup(conv, messageId, {}).catch(() => {});
+      return;
+    }
+    if (action === "ask") {
+      await this.tg.answerCallbackQuery(cb.id);
+      if (messageId !== undefined) await this.tg.editMessageReplyMarkup(conv, messageId, {}).catch(() => {});
+      await this.sendRebootConfirm(conv);
+      return;
+    }
+    if (action === "cancel") {
+      await this.tg.answerCallbackQuery(cb.id, "Đã huỷ.");
+      if (messageId !== undefined) await this.tg.editMessageReplyMarkup(conv, messageId, {}).catch(() => {});
+      return;
+    }
+    if (action === "go") {
+      await this.tg.answerCallbackQuery(cb.id);
+      if (messageId !== undefined) await this.tg.editMessageReplyMarkup(conv, messageId, {}).catch(() => {});
+      const secs = Math.round(this.cfg.rebootDelayMs / 1000);
+      await this.tg.sendMessage(conv, `🔄 <b>Đang reboot máy trong ~${secs} giây…</b>\nBot sẽ tự chạy lại sau khi máy lên (linger).`).catch(() => {});
+      // Fire the reboot after the delay so the message above gets delivered. The
+      // process will die shortly after; systemd's Restart + linger bring it back.
+      setTimeout(() => {
+        execFile("sudo", ["-n", ...REBOOT_CMD], (err) => {
+          if (err) error("reboot failed:", err.message);
+        });
+      }, this.cfg.rebootDelayMs).unref?.();
+      return;
+    }
+    await this.tg.answerCallbackQuery(cb.id);
   }
 
   /**
@@ -871,6 +1000,7 @@ export class Bot {
         c("model", "Đặt model (cần id)"),
         c("variants", "Đặt reasoning variant (vd: xhigh)"),
         c("stop", "Dừng task đang chạy"),
+        c("reboot", "Reboot máy (2 bước xác nhận)"),
         c("status", "Trạng thái kết nối"),
         c("context", "Ảnh chụp phiên hiện tại (usage + files)"),
         c("history", "Xem tin nhắn gần đây"),
@@ -1152,6 +1282,10 @@ export class Bot {
       await this.handleContinueCallback(cb, conv, messageId);
       return;
     }
+    if (data.startsWith("reboot:")) {
+      await this.handleRebootCallback(cb, conv, messageId);
+      return;
+    }
     if (data.startsWith("use:")) {
       await this.handleUseCallback(cb, conv, messageId);
       return;
@@ -1310,6 +1444,9 @@ export class Bot {
           break;
         case "stop":
           await this.cmdStop(conv, state);
+          break;
+        case "reboot":
+          await this.cmdReboot(conv);
           break;
         case "status":
           await this.cmdStatus(conv, state);

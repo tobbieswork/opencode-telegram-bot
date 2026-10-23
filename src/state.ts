@@ -87,9 +87,24 @@ export interface ChatState {
   manager?: boolean;
   /** Manager dispatch without asking (top-level conversation only). */
   auto?: boolean;
+  /**
+   * MACHINE-WIDE (only ever written on the reserved MACHINE_STATE_KEY entry):
+   * when we last sent the reboot reminder, in epoch ms. Drives the snooze
+   * interval so a /stop-able reminder doesn't re-fire every check while the
+   * box keeps running.
+   */
+  lastRebootReminderMs?: number;
 }
 
 export type StateMap = Record<string, ChatState>;
+
+/**
+ * Reserved state key holding MACHINE-WIDE (not per-conversation) bookkeeping.
+ * It is deliberately not a real conversation: chatOf("__machine__") matches no
+ * chat, so it is invisible to per-chat sweeps (convsOfChat, the orphan sweep),
+ * and it has no sessionID, so the session index skips it.
+ */
+export const MACHINE_STATE_KEY = "__machine__";
 
 /**
  * Tiny JSON-backed store mapping a conversation (chat or chat:topic) to its
