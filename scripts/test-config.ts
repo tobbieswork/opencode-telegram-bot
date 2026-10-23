@@ -50,6 +50,14 @@ const good = loadConfig(process.cwd());
 check("remindMax valid respected (6)", good.remindMax === 6, String(good.remindMax));
 check("remindFactor valid respected (3)", good.remindFactor === 3, String(good.remindFactor));
 
+// recoverOverflow defaults OFF (auto-spend + unattended write agent); ON only on an explicit "1"/"true".
+check("recoverOverflow default OFF", empty.recoverOverflow === false, String(empty.recoverOverflow));
+process.env.OPENCODE_TG_RECOVER_OVERFLOW = "1";
+check("recoverOverflow ON on =1", loadConfig(process.cwd()).recoverOverflow === true);
+process.env.OPENCODE_TG_RECOVER_OVERFLOW = "0";
+const off = loadConfig(process.cwd());
+check("recoverOverflow OFF on =0", off.recoverOverflow === false, String(off.recoverOverflow));
+delete process.env.OPENCODE_TG_RECOVER_OVERFLOW;
 // richReplies is default-OFF; only an explicit "1"/"true" enables it.
 delete process.env.OPENCODE_TG_RICH;
 check("richReplies unset → false (default off)", loadConfig(process.cwd()).richReplies === false);

@@ -65,6 +65,13 @@ export interface Config {
   bridgePort: number;
   /** Close a worker's topic when the worker finishes (the user reopens it by messaging in it). */
   autoClose: boolean;
+  /**
+   * Auto-respawn a worker that died from context overflow (a fresh session in
+   * the SAME directory/worktree, handed the original task + git evidence).
+   * Bounded to one respawn per original task. Default OFF (it spends tokens and runs
+   * a write agent unattended): enable with OPENCODE_TG_RECOVER_OVERFLOW=1.
+   */
+  recoverOverflow: boolean;
   /** Self-heal stale VPN DNS: restart systemd-resolved after repeated fetch failures. */
   dnsHeal: boolean;
   /** The VPN's DNS server IP that lingers after an unclean VPN stop (empty = heal stays off). */
@@ -122,6 +129,7 @@ export function loadConfig(root: string): Config {
     worktreeMode: parseWorktreeMode(process.env.OPENCODE_TG_WORKTREE),
     bridgePort: parseIntSetting("OPENCODE_TG_BRIDGE_PORT", 0, 0),
     autoClose: process.env.OPENCODE_TG_AUTO_CLOSE !== "0",
+    recoverOverflow: process.env.OPENCODE_TG_RECOVER_OVERFLOW === "1" || process.env.OPENCODE_TG_RECOVER_OVERFLOW === "true",
     dnsHeal: process.env.OPENCODE_TG_DNS_HEAL !== "0",
     dnsStaleIp: process.env.OPENCODE_TG_DNS_STALE_IP?.trim() ?? "",
     dnsHealMinFailures: parseIntSetting("OPENCODE_TG_DNS_HEAL_MIN_FAILURES", 3, 1),

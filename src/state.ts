@@ -27,6 +27,12 @@ export interface WorkerInfo {
   updatedAt: number;
   /** Short tail of the last reply, fed back to the Manager. */
   lastResult?: string;
+  /**
+   * Set when this worker was AUTO-RESPAWNED after its predecessor died from
+   * context overflow — the predecessor's name. Persisted (survives a restart) so
+   * the one-respawn-per-task budget is never exceeded, and shown for lineage.
+   */
+  respawnedFrom?: string;
 }
 
 /**
