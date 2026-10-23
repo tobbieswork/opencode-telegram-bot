@@ -73,6 +73,23 @@ export interface Config {
   uptimeRemindIntervalDays: number;
   /** Delay (ms) between tapping "confirm reboot" and the actual reboot, so the message gets delivered. */
   rebootDelayMs: number;
+  /**
+   * Auto-respawn a worker that died from context overflow (a fresh session in
+   * the SAME directory/worktree, handed the original task + git evidence).
+   * Bounded to one respawn per original task. Default OFF (it spends tokens and runs
+   * a write agent unattended): enable with OPENCODE_TG_RECOVER_OVERFLOW=1.
+   */
+  recoverOverflow: boolean;
+  /** Self-heal stale VPN DNS: restart systemd-resolved after repeated fetch failures. */
+  dnsHeal: boolean;
+  /** The VPN's DNS server IP that lingers after an unclean VPN stop (empty = heal stays off). */
+  dnsStaleIp: string;
+  /** Consecutive network failures before the DNS heal is allowed to run. */
+  dnsHealMinFailures: number;
+  /** Minimum gap between two DNS heals, ms. */
+  dnsHealCooldownMs: number;
+  /** Send final model replies as native rich Markdown (server-side GFM) instead of hand-rolled HTML. */
+  richReplies: boolean;
 }
 
 export function loadConfig(root: string): Config {
@@ -124,6 +141,13 @@ export function loadConfig(root: string): Config {
     uptimeThresholdDays: parseIntSetting("OPENCODE_TG_UPTIME_THRESHOLD_DAYS", 30, 1),
     uptimeRemindIntervalDays: parseIntSetting("OPENCODE_TG_UPTIME_REMIND_INTERVAL_DAYS", 3, 1),
     rebootDelayMs: parseIntSetting("OPENCODE_TG_REBOOT_DELAY_MS", 15000, 1000),
+    recoverOverflow: process.env.OPENCODE_TG_RECOVER_OVERFLOW === "1" || process.env.OPENCODE_TG_RECOVER_OVERFLOW === "true",
+    dnsHeal: process.env.OPENCODE_TG_DNS_HEAL !== "0",
+    dnsStaleIp: process.env.OPENCODE_TG_DNS_STALE_IP?.trim() ?? "",
+    dnsHealMinFailures: parseIntSetting("OPENCODE_TG_DNS_HEAL_MIN_FAILURES", 3, 1),
+    dnsHealCooldownMs: parseIntSetting("OPENCODE_TG_DNS_HEAL_COOLDOWN_MS", 10 * 60_000, 1000),
+    // Default OFF: only an explicit "1"/"true" enables rich (server-side GFM) replies.
+    richReplies: process.env.OPENCODE_TG_RICH === "1" || process.env.OPENCODE_TG_RICH === "true",
   };
   const agent = process.env.OPENCODE_DEFAULT_AGENT?.trim();
   if (agent) cfg.defaultAgent = agent;

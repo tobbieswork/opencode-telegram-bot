@@ -75,6 +75,19 @@ process.env.OPENCODE_TG_REBOOT_DELAY_MS = "100"; // below min 1000
 const uptimeBad = loadConfig(process.cwd());
 check("uptimeThresholdDays NaN → default 30", uptimeBad.uptimeThresholdDays === 30, String(uptimeBad.uptimeThresholdDays));
 check("rebootDelayMs below min → default 15000", uptimeBad.rebootDelayMs === 15000, String(uptimeBad.rebootDelayMs));
+// recoverOverflow defaults OFF (auto-spend + unattended write agent); ON only on an explicit "1"/"true".
+check("recoverOverflow default OFF", empty.recoverOverflow === false, String(empty.recoverOverflow));
+process.env.OPENCODE_TG_RECOVER_OVERFLOW = "1";
+check("recoverOverflow ON on =1", loadConfig(process.cwd()).recoverOverflow === true);
+process.env.OPENCODE_TG_RECOVER_OVERFLOW = "0";
+const off = loadConfig(process.cwd());
+check("recoverOverflow OFF on =0", off.recoverOverflow === false, String(off.recoverOverflow));
+delete process.env.OPENCODE_TG_RECOVER_OVERFLOW;
+// richReplies is default-OFF; only an explicit "1"/"true" enables it.
+delete process.env.OPENCODE_TG_RICH;
+check("richReplies unset → false (default off)", loadConfig(process.cwd()).richReplies === false);
+process.env.OPENCODE_TG_RICH = "1";
+check('richReplies "1" → true', loadConfig(process.cwd()).richReplies === true);
 
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

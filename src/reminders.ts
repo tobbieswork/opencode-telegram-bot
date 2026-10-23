@@ -1,6 +1,6 @@
 /**
  * Pure helpers for the pending-prompt reminder schedule (used by the Bot in
- * bot.ts). The backoff is EXPOENTIAL: the gap before each reminder keeps
+ * bot.ts). The backoff is EXPONENTIAL: the gap before each reminder keeps
  * growing (`baseMs * factor^n`), so we nudge more gently over time. This is
  * deliberately NOT a fixed interval — each wait is longer than the last.
  */
@@ -20,6 +20,24 @@ export function clampTimerDelay(ms: number): number {
 /** When (ms epoch) a freshly-shown prompt should get its first reminder. */
 export function firstReminderAt(baseMs: number, now: number): number {
   return now + clampTimerDelay(baseMs); // baseMs * factor^0
+}
+
+/**
+ * The schedule to store when a prompt is (re)registered. A prompt that is
+ * already persisted (same id and kind — e.g. re-registered by reconcile() after
+ * a restart) KEEPS its schedule, so a restart doesn't reset the backoff or hand
+ * an exhausted prompt a fresh budget; a new prompt starts at the first reminder.
+ */
+export function scheduleForRegistration(
+  existing: { kind: string; firstShownAt: number; remindersSent: number; nextReminderAt: number } | undefined,
+  kind: string,
+  baseMs: number,
+  now: number,
+): { firstShownAt: number; remindersSent: number; nextReminderAt: number } {
+  if (existing && existing.kind === kind) {
+    return { firstShownAt: existing.firstShownAt, remindersSent: existing.remindersSent, nextReminderAt: existing.nextReminderAt };
+  }
+  return { firstShownAt: now, remindersSent: 0, nextReminderAt: firstReminderAt(baseMs, now) };
 }
 
 /** The gap (ms) before the next reminder, once `sent` reminders have already fired. */
@@ -57,7 +75,7 @@ export function reminderBudgetExhausted(remindersSent: number, max: number): boo
  * when the prompt is no longer the same one (cancelled/answered/overwritten, so
  * `current` is gone or its `firstShownAt` changed) — the caller must NOT advance
  * or re-arm then. This is what keeps a fired reminder from nudging a prompt that
- * was settled or replaced while the send was in flight (the review's race).
+ * was settled or replaced while the send was in flight (a reminder racing an answer).
  */
 export function nextScheduleAfterReminder(
   captured: { firstShownAt: number; remindersSent: number },
