@@ -7,7 +7,7 @@
  *
  * Run:  npx tsx scripts/test-uptime.ts
  */
-import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, buildTokenLine, REBOOT_TOKEN_TTL_MS } from "../src/uptime.js";
+import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, buildTokenLine, REBOOT_TOKEN_TTL_MS, rebootGoData, isRebootConfirmFresh, REBOOT_CONFIRM_TTL_MS } from "../src/uptime.js";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: string): void {
@@ -51,6 +51,16 @@ check("tiny seconds → 1 phút (no '0')", formatUptimeHuman(30) === "1 phút", 
 // ── token file format (single line, matches the safe-reboot wrapper) ────────
 check("buildTokenLine shape", buildTokenLine("abc123", 1000) === "abc123 1000\n", JSON.stringify(buildTokenLine("abc123", 1000)));
 check("token TTL is 10s", REBOOT_TOKEN_TTL_MS === 10000, String(REBOOT_TOKEN_TTL_MS));
+
+// ── confirm-button expiry (an old "Xác nhận reboot" must not reboot the box) ──
+const t0 = 1_000_000_000_000;
+check("confirm fresh right after issue", isRebootConfirmFresh(rebootGoData(t0), t0 + 1000));
+check("confirm stale after TTL", !isRebootConfirmFresh(rebootGoData(t0), t0 + REBOOT_CONFIRM_TTL_MS));
+check("confirm stale after days", !isRebootConfirmFresh(rebootGoData(t0), t0 + 3 * 86_400_000));
+check("legacy button without timestamp → stale", !isRebootConfirmFresh("reboot:go", t0));
+check("garbled timestamp → stale", !isRebootConfirmFresh("reboot:go:abc", t0));
+check("timestamp from the future → stale", !isRebootConfirmFresh(rebootGoData(t0 + 5000), t0));
+check("confirm callback_data fits Telegram's 64 bytes", Buffer.byteLength(rebootGoData(t0)) <= 64);
 
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

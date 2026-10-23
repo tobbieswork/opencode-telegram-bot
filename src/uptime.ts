@@ -18,6 +18,8 @@ export const DEFAULT_UPTIME_THRESHOLD_DAYS = 30;
 export const DEFAULT_REMIND_INTERVAL_DAYS = 3;
 /** Grace period before the actual reboot so the "rebooting…" message gets delivered. */
 export const DEFAULT_REBOOT_DELAY_MS = 15_000;
+/** How long a "Xác nhận reboot" message stays valid (ms) — an old confirm must not reboot the box. */
+export const REBOOT_CONFIRM_TTL_MS = 2 * 60_000;
 /** Max token age the wrapper accepts (ms). */
 export const REBOOT_TOKEN_TTL_MS = 10_000;
 /** The wrapper binary (NOPASSWD sudoers permits this, NOT `systemctl reboot`). */
@@ -34,6 +36,22 @@ export function rebootTokenFile(homeDir: string): string {
 /** Token file content: one line "<hex-token> <epoch-ms>" (wrapper parses this). */
 export function buildTokenLine(token: string, nowMs: number): string {
   return `${token} ${nowMs}\n`;
+}
+
+/** callback_data for the confirm button: carries when the confirmation was issued. */
+export function rebootGoData(nowMs: number): string {
+  return `reboot:go:${nowMs}`;
+}
+
+/**
+ * Is a `reboot:go[:<issuedMs>]` tap still within the confirm TTL? A button with
+ * no/garbled timestamp (e.g. sent by an older bot version) is treated as stale.
+ */
+export function isRebootConfirmFresh(data: string | undefined, nowMs: number): boolean {
+  const issued = Number((data ?? "").split(":")[2]);
+  if (!Number.isFinite(issued) || issued <= 0) return false;
+  const age = nowMs - issued;
+  return age >= 0 && age < REBOOT_CONFIRM_TTL_MS;
 }
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;

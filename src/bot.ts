@@ -12,7 +12,7 @@ import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure } from "./format.js";
 import { firstReminderAt, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
 import { CONTINUE_PROMPT, CONTINUE_BUTTON_LABEL, shouldOfferContinue, continueCallbackData, parseContinueData, alreadyOfferedContinue } from "./continue.js";
-import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, SAFE_REBOOT_BIN, rebootTokenFile, buildTokenLine } from "./uptime.js";
+import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, SAFE_REBOOT_BIN, rebootTokenFile, buildTokenLine, rebootGoData, isRebootConfirmFresh } from "./uptime.js";
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
 import { log, warn, error } from "./logger.js";
@@ -152,6 +152,8 @@ export class Bot {
    */
   private reminders = new Map<string, ReturnType<typeof setTimeout>>();
   private uptimeTimer?: ReturnType<typeof setInterval>;
+  /** A reboot is already armed (token minted, timer pending) — ignores a double-tap on "Xác nhận". */
+  private rebootArmed = false;
   /** Sessions from which we already stripped the language instruction this process (when the toggle is off), so we don't call removeInstruction every prompt. */
   private languageRemoved = new Set<string>();
   /** The self-editing "agent is doing…" line per conv: message id + current label. */
@@ -199,13 +201,13 @@ export class Bot {
     // Register the Telegram /command autocomplete menu (cosmetic, best-effort).
     this.registerCommands();
     // Nudge the user to reboot the machine when uptime passes the threshold
-    // (kernel updates only apply after a reboot). Runs once now, then hourly.
+    // (kernel updates only apply after a reboot). Runs once now, then every 6 hours.
     this.startUptimeMonitor();
   }
 
   // ── Uptime monitor + reboot ─────────────────────────────────────────────────
   /**
-   * Kick off the machine-uptime watcher: check now, then re-check hourly. The
+   * Kick off the machine-uptime watcher: check now, then re-check every 6 hours. The
    * box runs 24/7 for the bot, but kernel security updates only take effect
    * after a reboot, so once uptime passes the threshold we nudge the user to
    * reboot (with a two-step-confirmed button — see note #4's operational rule).
@@ -265,7 +267,7 @@ export class Bot {
     const kb: Keyboard = {
       inline_keyboard: [
         [
-          { text: "✅ Xác nhận reboot", callback_data: "reboot:go" },
+          { text: "✅ Xác nhận reboot", callback_data: rebootGoData(Date.now()) },
           { text: "❌ Huỷ", callback_data: "reboot:cancel" },
         ],
       ],
@@ -291,7 +293,7 @@ export class Bot {
    *   reboot:snooze  (from the uptime reminder)→ re-arm the snooze interval
    */
   private async handleRebootCallback(cb: CallbackQuery, conv: ConvKey, messageId: number | undefined): Promise<void> {
-    const action = (cb.data ?? "").slice("reboot:".length);
+    const action = (cb.data ?? "").slice("reboot:".length).split(":")[0];
     if (action === "snooze") {
       this.st.set(MACHINE_STATE_KEY, { lastRebootReminderMs: Date.now() });
       await this.tg.answerCallbackQuery(cb.id, "OK, sẽ nhắc lại sau.");
@@ -312,28 +314,37 @@ export class Bot {
     if (action === "go") {
       await this.tg.answerCallbackQuery(cb.id);
       if (messageId !== undefined) await this.tg.editMessageReplyMarkup(conv, messageId, {}).catch(() => {});
+      if (!isRebootConfirmFresh(cb.data, Date.now())) {
+        await this.tg.sendMessage(conv, "⌛ Xác nhận reboot đã hết hạn — gửi /reboot để xác nhận lại.").catch(() => {});
+        return;
+      }
+      if (this.rebootArmed) return; // double-tap: one reboot is already pending
       if (!existsSync(SAFE_REBOOT_BIN)) {
         await this.tg.sendMessage(conv, "⚠️ Wrapper <b>safe-reboot</b> chưa được cài trên máy. Chạy khối sudo trong PR #11 trước.").catch(() => {});
         return;
       }
-      // Arm: mint a fresh single-use token (the wrapper, as root, checks it).
-      const token = randomBytes(16).toString("hex");
-      const tokenFile = rebootTokenFile(homedir());
-      try {
-        mkdirSync(dirname(tokenFile), { recursive: true });
-        writeFileSync(tokenFile, buildTokenLine(token, Date.now()), { mode: 0o600 });
-      } catch (e) {
-        error("reboot arm failed:", (e as Error)?.message ?? e);
-        await this.tg.sendMessage(conv, "⚠️ Không tạo được token reboot — xem log bot.").catch(() => {});
-        return;
-      }
+      this.rebootArmed = true;
       const secs = Math.round(this.cfg.rebootDelayMs / 1000);
       await this.tg.sendMessage(conv, `🔄 <b>Đang reboot máy trong ~${secs} giây…</b>\nBot sẽ tự chạy lại sau khi máy lên (linger).`).catch(() => {});
-      // Fire after the delay so the message above gets delivered. The wrapper
-      // reboots only because the token it was given is fresh and single-use;
-      // a stray `systemctl reboot` (or a stale token) is refused and logged.
+      // Fire after the delay so the message above gets delivered. The token is
+      // minted INSIDE the timer, right before the wrapper runs: the wrapper
+      // rejects tokens older than REBOOT_TOKEN_TTL_MS, and rebootDelayMs
+      // (default 15 s) is longer than that, so minting it earlier would always
+      // be refused as stale. A stray `systemctl reboot` is refused regardless.
       setTimeout(() => {
+        const token = randomBytes(16).toString("hex");
+        const tokenFile = rebootTokenFile(homedir());
+        try {
+          mkdirSync(dirname(tokenFile), { recursive: true });
+          writeFileSync(tokenFile, buildTokenLine(token, Date.now()), { mode: 0o600 });
+        } catch (e) {
+          this.rebootArmed = false;
+          error("reboot arm failed:", (e as Error)?.message ?? e);
+          void this.tg.sendMessage(conv, "⚠️ Không tạo được token reboot — xem log bot.").catch(() => {});
+          return;
+        }
         execFile("sudo", ["-n", SAFE_REBOOT_BIN, token], (err) => {
+          this.rebootArmed = false; // only reached if the box did NOT go down
           if (err) error("reboot denied/failed:", err.message);
         });
       }, this.cfg.rebootDelayMs).unref?.();
