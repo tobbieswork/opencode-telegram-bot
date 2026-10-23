@@ -10,6 +10,15 @@ export type Message = {
   message_thread_id?: number;
   is_topic_message?: boolean;
   forum_topic_created?: { name: string };
+  /** Caption on media (photo/sticker/video/voice/document); counts as text. */
+  caption?: string;
+  sticker?: { file_id?: string; type?: string };
+  photo?: Record<string, unknown>[];
+  video?: Record<string, unknown>;
+  voice?: Record<string, unknown>;
+  audio?: Record<string, unknown>;
+  document?: Record<string, unknown>;
+  animation?: Record<string, unknown>;
 };
 
 export type CallbackQuery = {
@@ -88,6 +97,11 @@ export class Telegram {
     return this.api("getMe");
   }
 
+  /** Register the /command autocomplete menu shown while the user types "/". */
+  setMyCommands(commands: Array<{ command: string; description: string }>): Promise<void> {
+    return this.api("setMyCommands", { commands });
+  }
+
   /** Fire-and-forget typing indicator. */
   sendChatAction(to: ConvKey | number, action = "typing"): void {
     void this.api("sendChatAction", { ...dest(to), action }).catch(() => {});
@@ -132,6 +146,25 @@ export class Telegram {
         text,
         parse_mode: "HTML",
         disable_web_page_preview: true,
+        ...opts,
+      });
+    } catch (e) {
+      // 400 = "message is not modified" (nothing changed) — harmless.
+      if ((e as any)?.code === 400) return;
+      throw e;
+    }
+  }
+
+  /**
+   * Remove (or replace) an inline keyboard on a message, keeping its text — used
+   * to take the "⏯ Chạy tiếp" button off a failure message after it is tapped,
+   * so the one-shot button can't be clicked again or go stale after a /new.
+   */
+  async editMessageReplyMarkup(to: ConvKey | number, messageId: number, opts: Record<string, unknown> = {}): Promise<void> {
+    try {
+      await this.api("editMessageReplyMarkup", {
+        chat_id: parseConv(to).chatId,
+        message_id: messageId,
         ...opts,
       });
     } catch (e) {
@@ -186,6 +219,13 @@ export class Telegram {
     const { chatId, threadId } = parseConv(to);
     if (!threadId) return;
     await this.api("closeForumTopic", { chat_id: chatId, message_thread_id: threadId }).catch(() => {});
+  }
+
+  /** Reopen a closed topic. A no-op if it is already open, so it is safe to call often. */
+  async openForumTopic(to: ConvKey): Promise<void> {
+    const { chatId, threadId } = parseConv(to);
+    if (!threadId) return;
+    await this.api("openForumTopic", { chat_id: chatId, message_thread_id: threadId }).catch(() => {});
   }
 
   async deleteForumTopic(to: ConvKey): Promise<void> {

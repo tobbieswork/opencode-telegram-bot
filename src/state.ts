@@ -74,6 +74,13 @@ export interface ChatState {
   pendingPrompts?: Record<string, PendingPrompt>;
   /** time.created of the last assistant reply already relayed to Telegram (drives orphan recovery). */
   lastRelayedTime?: number;
+  /**
+   * The turn id (prompt message id) we last offered the "⏯ Chạy tiếp" button
+   * for in this conv, so the same failed turn never gets the button twice. A
+   * fresh turn has a fresh id, so it self-invalidates — no explicit clearing
+   * needed on /new, /use, or /stop.
+   */
+  continueOfferedTurn?: string;
   /** Present when this conversation is a worker topic. */
   worker?: WorkerInfo;
   /** True when this conversation's session is the Manager agent. */

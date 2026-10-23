@@ -212,7 +212,18 @@ export class OpenCodeCtl {
       try {
         ep = await Service.discover();
       } catch {
+        ep = undefined;
+      }
+      // discover() resolves to undefined (it does not throw) when the
+      // registered service is not running. Fall back to ensure(), which
+      // spawns `opencode serve --service` when missing and waits (up to
+      // ~2 min) for it to become ready — this is what brings the bot back
+      // after a machine reboot without any manual intervention.
+      if (!ep) {
         ep = await Service.ensure();
+      }
+      if (!ep) {
+        throw new Error("OpenCode service unavailable: discover() and ensure() both returned no endpoint");
       }
       url = ep.url;
       headers = Service.headers(ep) as Record<string, string>;
@@ -284,6 +295,12 @@ export class OpenCodeCtl {
     const id = unwrap<any>(s)?.id ?? s?.id;
     if (!id) throw new Error("Failed to create session (no id returned).");
     return id as string;
+  }
+
+  /** Delete a session on the server (used by /prune to retire a finished worker's session). */
+  async removeSession(sessionID: string): Promise<void> {
+    this.ensureClient();
+    await retryTransient(() => this.client.session.remove({ sessionID }));
   }
 
   async setModel(sessionID: string, model: { id: string; providerID: string; variant?: string }): Promise<void> {

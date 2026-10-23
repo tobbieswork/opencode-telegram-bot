@@ -9,6 +9,7 @@ import { ConvKey, chatOf, convKey, parseConv } from "./conv.js";
 import { McpBridge, BridgeTool } from "./mcp-bridge.js";
 import { addWorktree, diffSummary, gitRoot, mergeWorktree, removeWorktree } from "./worktree.js";
 import { listDirs } from "./fsbrowser.js";
+import { selectPruneable, selectFinishedWorkers, WorkerConv } from "./prune.js";
 import { esc, trunc, timeAgo, stripTags } from "./format.js";
 import { log, warn } from "./logger.js";
 
@@ -128,6 +129,8 @@ interface Approval {
 export class Orchestrator {
   private bridge?: McpBridge;
   private approvals = new Map<string, Approval>();
+  /** Pending /prune confirmations: id → which convs to delete when the user taps "Xoá". */
+  private prunePending = new Map<string, { chat: ConvKey; convs: ConvKey[] }>();
   private reports = new Map<ConvKey, string[]>();
   private reportTimers = new Map<ConvKey, ReturnType<typeof setTimeout>>();
   /** Remaining Manager dispatches per chat until the user speaks again. */
@@ -181,6 +184,31 @@ export class Orchestrator {
       const status: WorkerStatus = state.outcome === "succeeded" ? "done" : state.outcome === "failed" ? "failed" : "stopped";
       log(`[chat ${chatOf(conv)}] worker ${w.name} ended while unobserved — ${status}`);
       await this.onWorkerFinished(conv, status);
+    }
+  }
+
+  /**
+   * Retroactive auto-close at startup: a worker that finished before auto-close
+   * existed (or while the service was down/restarting) never got its topic
+   * closed and now sits open forever. Close the topic of every finished worker
+   * (done/failed/stopped); closing an already-closed topic is a no-op, so this
+   * is safe to re-run on every restart. Best-effort — it never fails startup.
+   * Returns the number of topics attempted.
+   */
+  async closeFinishedTopicsAtStartup(): Promise<number> {
+    if (!this.h.cfg.autoClose) return 0;
+    try {
+      const items: WorkerConv[] = [];
+      for (const [conv, s] of Object.entries(this.h.st.all())) {
+        if (s.worker) items.push({ conv, status: s.worker.status });
+      }
+      const targets = selectFinishedWorkers(items);
+      for (const conv of targets) await this.h.tg.closeForumTopic(conv).catch(() => {});
+      if (targets.length) log(`startup: retroactively closed ${targets.length} finished worker topics`);
+      return targets.length;
+    } catch (e) {
+      warn("startup topic close:", e instanceof Error ? e.message : String(e));
+      return 0;
     }
   }
 
@@ -244,6 +272,9 @@ export class Orchestrator {
       case "/wt":
         await this.cmdWorktree(conv);
         return true;
+      case "/prune":
+        await this.cmdPrune(conv, arg);
+        return true;
       default:
         return false;
     }
@@ -286,14 +317,57 @@ export class Orchestrator {
     await this.h.sendHtml(conv, `${head}\n\n${lines.join("\n")}\n\n<i>/kill &lt;tên&gt; để dừng · /stopall dừng tất cả</i>`);
   }
 
+  /**
+   * `/kill [tên]` — stop a worker. Without a valid target (and not inside a
+   * worker's own topic) the user gets a button picker of the chat's workers.
+   */
   private async cmdKill(conv: ConvKey, arg: string): Promise<void> {
-    const target = arg ? this.h.st.findWorker(conv, arg.trim())?.[0] : this.h.st.peek(conv)?.worker ? conv : undefined;
-    if (!target) {
-      await this.h.sendHtml(conv, arg ? `❌ Không có worker <code>${esc(arg)}</code>.` : "Usage: <code>/kill &lt;tên&gt;</code> (hoặc gõ /kill trong topic của worker)");
+    const name = arg.trim();
+    const target = name ? this.h.st.findWorker(conv, name)?.[0] : this.h.st.peek(conv)?.worker ? conv : undefined;
+    if (target) {
+      const msg = await this.stopWorker(target, true);
+      await this.h.sendHtml(conv, msg);
       return;
     }
-    const msg = await this.stopWorker(target, true);
-    await this.h.sendHtml(conv, msg);
+    await this.showKillPicker(conv, name ? `❌ Không có worker <code>${esc(name)}</code>` : undefined);
+  }
+
+  /** The /kill picker card: one stop-button per worker + a hint line. */
+  private async showKillPicker(conv: ConvKey, errorNote?: string): Promise<void> {
+    const workers = this.workersOf(conv).map(([, s]) => s.worker!);
+    if (!workers.length) {
+      await this.h.sendHtml(conv, "Không có worker nào — /spawn để tạo.");
+      return;
+    }
+    const rows: Btn[][] = workers.map((w) => [{ text: `${ICON[w.status]} ${w.name}`, callback_data: `kill:${w.name}` }]);
+    rows.push([{ text: "❌ Đóng", callback_data: "kill:close" }]);
+    await this.h.sendHtml(
+      conv,
+      [errorNote ?? "❓ <b>/kill</b> cần tên worker", "Bấm để dừng worker:", "Hoặc gửi: <code>/kill &lt;tên&gt;</code>"].join("\n"),
+      { reply_markup: { inline_keyboard: rows } },
+    );
+  }
+
+  /**
+   * Handle a tap on the /kill picker (data = `kill:<name|close>`). Public because
+   * it is dispatched from Bot.handleCallback, like the other orchestrator callbacks.
+   */
+  async handleKillCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+    const name = (cb.data ?? "").slice("kill:".length);
+    if (name === "close") {
+      await this.h.tg.answerCallbackQuery(cb.id);
+      if (messageId) await this.h.tg.deleteMessage(conv, messageId).catch(() => {});
+      return;
+    }
+    const found = this.h.st.findWorker(chatOf(conv), name);
+    if (!found) {
+      await this.h.tg.answerCallbackQuery(cb.id, "Worker không còn tồn tại.");
+      if (messageId) await this.h.tg.editMessageText(conv, messageId, "⌛ Worker không còn tồn tại — /board để xem lại.").catch(() => {});
+      return;
+    }
+    await this.h.tg.answerCallbackQuery(cb.id, `Dừng ${name}`);
+    const msg = await this.stopWorker(found[0], true);
+    if (messageId) await this.h.tg.editMessageText(conv, messageId, msg).catch(() => {});
   }
 
   private async cmdStopAll(conv: ConvKey): Promise<void> {
@@ -368,6 +442,40 @@ export class Orchestrator {
       return;
     }
     await this.h.sendHtml(conv, this.worktreeText(w), { reply_markup: this.worktreeKeyboard(w) });
+  }
+
+  /**
+   * `/prune [số_ngày]` — offer to delete finished worker topics that haven't
+   * been touched for N days (default 7). The user confirms with a button
+   * before anything is deleted; the list card stays valid until tapped.
+   */
+  private async cmdPrune(conv: ConvKey, arg: string): Promise<void> {
+    const chat = chatOf(conv);
+    if (conv !== chat) {
+      await this.h.sendHtml(conv, "ℹ️ Dùng /prune ở khung chat chính (General), không phải trong topic.");
+      return;
+    }
+    const n = parseInt(arg, 10);
+    const days = Number.isInteger(n) && n > 0 ? n : 7;
+    const now = Date.now();
+    const items = this.workersOf(chat).map(([k, s]) => ({ conv: k, status: s.worker!.status, updatedAt: s.worker!.updatedAt }));
+    const convs = selectPruneable(items, now, days * 86_400_000);
+    if (!convs.length) {
+      await this.h.sendHtml(conv, "Không có topic worker cũ nào để dọn.");
+      return;
+    }
+    const id = randomBytes(5).toString("hex");
+    this.prunePending.set(id, { chat, convs });
+    const lines = [`🧹 <b>Dọn ${convs.length} topic</b> cũ hơn ${days} ngày:`];
+    for (const k of convs) {
+      const w = this.h.st.peek(k)?.worker;
+      if (!w) continue;
+      lines.push(`${ICON[w.status]} <b>${esc(w.name)}</b> · ${w.status} · ${timeAgo(w.updatedAt)}`);
+    }
+    lines.push("", "<i>Bấm Xoá để xoá topic + state + session (không ảnh hưởng worker đang chạy).</i>");
+    await this.h.sendHtml(conv, lines.join("\n"), {
+      reply_markup: { inline_keyboard: [[{ text: "🗑 Xoá", callback_data: `prune:${id}` }]] },
+    });
   }
 
   // ── workers ───────────────────────────────────────────────────────────────
@@ -611,6 +719,11 @@ export class Orchestrator {
       if (this.h.st.peek(chatOf(conv))?.manager) {
         this.queueReport(chatOf(conv), `[worker ${w.name}] ${status.toUpperCase()}\n${tail}`);
       }
+      // Close the topic once the worker is finished (done/failed) so the forum
+      // doesn't fill with dead topics. The user reopens it just by messaging in it.
+      if (this.h.cfg.autoClose && (status === "done" || status === "failed")) {
+        void this.h.tg.closeForumTopic(conv).catch(() => {});
+      }
     } finally {
       this.finishing.delete(conv);
     }
@@ -711,7 +824,7 @@ export class Orchestrator {
   }
 
   // ── callbacks ─────────────────────────────────────────────────────────────
-  /** Returns true when the button was one of ours (`ap:` approvals, `wt:` worktree actions). */
+  /** Returns true when the button was one of ours (`ap:` approvals, `wt:` worktree actions, `prune:` deletes). */
   async handleCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<boolean> {
     const data = cb.data ?? "";
     if (data.startsWith("ap:")) {
@@ -722,7 +835,50 @@ export class Orchestrator {
       await this.handleWorktreeCallback(cb, conv, messageId);
       return true;
     }
+    if (data.startsWith("prune:")) {
+      await this.handlePruneCallback(cb, conv, messageId);
+      return true;
+    }
     return false;
+  }
+
+  /**
+   * The user confirmed a /prune: delete each listed topic (best-effort, count
+   * failures), retire its OpenCode session, and clear its state entry. A worker
+   * that started running again since the list was shown is skipped.
+   */
+  private async handlePruneCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+    const id = (cb.data ?? "").split(":")[1];
+    const p = this.prunePending.get(id);
+    if (!p || p.chat !== chatOf(conv)) {
+      await this.h.tg.answerCallbackQuery(cb.id, "Yêu cầu này đã hết hạn.");
+      if (messageId) await this.h.tg.editMessageText(conv, messageId, "⌛ Yêu cầu này đã hết hạn (bot đã khởi động lại hoặc đã xử lý).").catch(() => {});
+      return;
+    }
+    this.prunePending.delete(id);
+    let ok = 0;
+    let skipped = 0;
+    for (const k of p.convs) {
+      const s = this.h.st.peek(k);
+      const w = s?.worker;
+      // It may have started a new turn since the list was shown — never delete a busy worker.
+      if (w && (w.status === "running" || w.status === "waiting")) {
+        skipped++;
+        continue;
+      }
+      try {
+        await this.h.tg.deleteForumTopic(k);
+      } catch (e) {
+        warn("deleteForumTopic:", (e as Error)?.message);
+      }
+      if (s?.sessionID) await this.h.oc.removeSession(s.sessionID).catch(() => {});
+      this.h.st.clear(k);
+      ok++;
+    }
+    await this.h.tg.answerCallbackQuery(cb.id);
+    const msg = `🧹 Đã xoá ${ok}/${p.convs.length} topic${skipped ? ` · bỏ qua ${skipped} (đang chạy)` : ""}.`;
+    if (messageId) await this.h.tg.editMessageText(conv, messageId, msg).catch(() => {});
+    else await this.h.sendHtml(conv, msg).catch(() => {});
   }
 
   private async handleApprovalCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {

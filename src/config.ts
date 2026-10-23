@@ -39,6 +39,8 @@ export interface Config {
   guideQuestions: boolean;
   /** Set a per-session "reply in the user's language" instruction (stops CJK leaks); off removes it. */
   guideLanguage: boolean;
+  /** Show a live "agent is doing…" activity line while a turn runs. */
+  activity: boolean;
   /** Remind the user about a pending question-form / permission they haven't answered. */
   remind: boolean;
   /** Base delay (ms) before the FIRST reminder for a pending form/permission. */
@@ -61,6 +63,8 @@ export interface Config {
   worktreeMode: "auto" | "always" | "off";
   /** Port of the Manager's local MCP bridge (0 = pick a free one). */
   bridgePort: number;
+  /** Close a worker's topic when the worker finishes (the user reopens it by messaging in it). */
+  autoClose: boolean;
 }
 
 export function loadConfig(root: string): Config {
@@ -94,6 +98,7 @@ export function loadConfig(root: string): Config {
     replyMaxLen: Math.max(500, Number(process.env.TELEGRAM_REPLY_MAX_LEN?.trim() || 4000)),
     guideQuestions: process.env.OPENCODE_TG_GUIDE !== "0",
     guideLanguage: process.env.OPENCODE_TG_LANGUAGE !== "0",
+    activity: process.env.OPENCODE_TG_ACTIVITY !== "0",
     remind: process.env.OPENCODE_TG_REMIND !== "0",
     // parseIntSetting/parseFloatSetting guard against a non-numeric env value (e.g.
     // OPENCODE_TG_REMIND_MAX=abc) yielding NaN, which would make the backoff fire ~every ms.
@@ -106,6 +111,7 @@ export function loadConfig(root: string): Config {
     maxWorkers: parseIntSetting("OPENCODE_TG_MAX_WORKERS", 5, 1),
     worktreeMode: parseWorktreeMode(process.env.OPENCODE_TG_WORKTREE),
     bridgePort: parseIntSetting("OPENCODE_TG_BRIDGE_PORT", 0, 0),
+    autoClose: process.env.OPENCODE_TG_AUTO_CLOSE !== "0",
   };
   const agent = process.env.OPENCODE_DEFAULT_AGENT?.trim();
   if (agent) cfg.defaultAgent = agent;
