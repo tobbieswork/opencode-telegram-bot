@@ -50,5 +50,11 @@ const good = loadConfig(process.cwd());
 check("remindMax valid respected (6)", good.remindMax === 6, String(good.remindMax));
 check("remindFactor valid respected (3)", good.remindFactor === 3, String(good.remindFactor));
 
+// richReplies is default-OFF; only an explicit "1"/"true" enables it.
+delete process.env.OPENCODE_TG_RICH;
+check("richReplies unset → false (default off)", loadConfig(process.cwd()).richReplies === false);
+process.env.OPENCODE_TG_RICH = "1";
+check('richReplies "1" → true', loadConfig(process.cwd()).richReplies === true);
+
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

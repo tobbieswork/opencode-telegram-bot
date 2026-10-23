@@ -65,6 +65,8 @@ export interface Config {
   bridgePort: number;
   /** Close a worker's topic when the worker finishes (the user reopens it by messaging in it). */
   autoClose: boolean;
+  /** Send final model replies as native rich Markdown (server-side GFM) instead of hand-rolled HTML. */
+  richReplies: boolean;
 }
 
 export function loadConfig(root: string): Config {
@@ -112,6 +114,8 @@ export function loadConfig(root: string): Config {
     worktreeMode: parseWorktreeMode(process.env.OPENCODE_TG_WORKTREE),
     bridgePort: parseIntSetting("OPENCODE_TG_BRIDGE_PORT", 0, 0),
     autoClose: process.env.OPENCODE_TG_AUTO_CLOSE !== "0",
+    // Default OFF: only an explicit "1"/"true" enables rich (server-side GFM) replies.
+    richReplies: process.env.OPENCODE_TG_RICH === "1" || process.env.OPENCODE_TG_RICH === "true",
   };
   const agent = process.env.OPENCODE_DEFAULT_AGENT?.trim();
   if (agent) cfg.defaultAgent = agent;

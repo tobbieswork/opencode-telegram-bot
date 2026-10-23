@@ -7,6 +7,7 @@ import { ConvKey, convKey, chatOf } from "./conv.js";
 import { Orchestrator } from "./orchestrator.js";
 import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure } from "./format.js";
+import { richMarkdownChunks } from "./rich.js";
 import { firstReminderAt, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
 import { CONTINUE_PROMPT, CONTINUE_BUTTON_LABEL, shouldOfferContinue, continueCallbackData, parseContinueData, alreadyOfferedContinue } from "./continue.js";
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
@@ -363,10 +364,29 @@ export class Bot {
       await this.tg.sendMessage(conv, chunks[i], i === chunks.length - 1 ? opts : {});
     }
   }
-  /** Send a long model reply: render its Markdown as Telegram HTML, then chunk. */
+  /** Send a long model reply.
+   * With `richReplies` on, send the raw Markdown as native rich (server-side
+   * GFM, ~32 768-char limit) — one message unless it is a rare >30k tail — and
+   * fall back to HTML per-message on error. Otherwise hand-render Markdown as
+   * Telegram HTML (4 096-char limit). The quiet meta footer is a separate
+   * message (see runPrompt) and is unaffected here. */
   private async sendReply(conv: ConvKey, text: string): Promise<void> {
     const clean = stripTags(text ?? "");
     if (!clean) return;
+    if (this.cfg.richReplies) {
+      for (const c of richMarkdownChunks(clean)) {
+        try {
+          await this.tg.sendRich(conv, c);
+        } catch (e) {
+          // Per-message graceful fallback: retry THIS chunk through the existing
+          // HTML path (mdToHtmlChunks + sendMessage) so a rich parse/method error
+          // costs only this message, never a lost reply.
+          warn(`sendRich failed (${(e as Error)?.message ?? e}) — falling back to HTML for one chunk`);
+          for (const h of mdToHtmlChunks(c, this.cfg.replyMaxLen)) await this.tg.sendMessage(conv, h);
+        }
+      }
+      return;
+    }
     for (const c of mdToHtmlChunks(clean, this.cfg.replyMaxLen)) await this.tg.sendMessage(conv, c);
   }
 
