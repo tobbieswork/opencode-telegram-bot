@@ -113,10 +113,29 @@ export async function mergeWorktree(
 }
 
 /**
- * Remove a worker's worktree. The branch is deleted only if it is fully
- * merged (`branch -d`), so unmerged work is never lost.
+ * Remove a worker's worktree. Uncommitted work is COMMITTED to the worker
+ * branch first (the same safeguard mergeWorktree applies), so --force never
+ * destroys it; the branch is then deleted only if fully merged (`branch -d`),
+ * so the committed work survives either way — at least until the branch is
+ * merged, and recoverable from it until then.
+ *
+ * The preservation commit runs with `--no-verify` and a fixed identity so it
+ * can't be blocked by a missing git identity or a failing pre-commit hook —
+ * the explicit "Xoá thật" path (wt:rmok) used to reach no commit step at all,
+ * so a commit failure here is new and must not silently swallow the worktree.
+ * If it does fail, the error propagates to the caller (who reports it to the
+ * user). Note: `add -A` also stages UNTRACKED files (as in mergeWorktree) —
+ * intended, so nothing in the worktree is lost whatever its git status.
  */
 export async function removeWorktree(repoRoot: string, wt: { root: string; branch: string }): Promise<string> {
+  if (await git(wt.root, ["status", "--porcelain"])) {
+    await git(wt.root, ["add", "-A"]);
+    await git(wt.root, [
+      "-c", "user.name=Qwen3.8-27B (OpenCode)",
+      "-c", "user.email=qwen38-27b-noreply@opencode.local",
+      "commit", "--no-verify", "-m", "tg: preserve uncommitted work before worktree removal",
+    ]);
+  }
   await git(repoRoot, ["worktree", "remove", "--force", wt.root]);
   const kept = await git(repoRoot, ["branch", "-d", wt.branch]).then(
     () => false,

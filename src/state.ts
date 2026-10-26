@@ -89,6 +89,17 @@ export interface ChatState {
   continueOfferedTurn?: string;
   /** Present when this conversation is a worker topic. */
   worker?: WorkerInfo;
+  /**
+   * True when this conversation's Telegram topic was deleted in the UI and its
+   * purge is still pending — the worker was running/waiting so the purge was
+   * deferred (see Orchestrator.onTopicDeleted / pendingTopicDelete), or a purge
+   * attempt failed. PERSISTED (survives a restart): the in-memory
+   * `pendingTopicDelete` flag is lost on restart, so this marker is what the
+   * startup sweep (Orchestrator.reapPendingTopicDeletes) uses to re-purge the
+   * conv. Cleared automatically when the purge succeeds (purgeConv clears the
+   * whole entry). Not a live state — it only means "purge this when safe".
+   */
+  topicDeletedPending?: boolean;
   /** True when this conversation's session is the Manager agent. */
   manager?: boolean;
   /** Manager dispatch without asking (top-level conversation only). */

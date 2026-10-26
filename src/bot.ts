@@ -183,7 +183,30 @@ export class Bot {
       sendHtml: (conv, html, opts) => this.sendHtml(conv, html, opts),
       applyModelAndVariant: (sid, state) => this.applyModelAndVariant(sid, state),
       startTyping: (conv) => this.startTyping(conv),
+      onTopicGone: async (conv) => {
+        // The topic is gone and the conv is being purged NOW (not the deferred
+        // running-worker case, where the worker is allowed to finish). Fully stop
+        // any in-flight turn for a normal/manager topic — typing, the self-editing
+        // activity line, the inflight AbortController, the manager-busy flag, and a
+        // server-side interrupt — so nothing keeps sending into the dead topic and
+        // re-failing. Then cancel its reminder nudges.
+        await this.stopCurrent(conv, true);
+        // stopCurrent's server interrupt requires an inflight AbortController —
+        // manager turns are fire-and-forget and never have one, so interrupt
+        // explicitly (no-op if the session is idle). Without this, deleting a
+        // manager topic mid-turn leaves the server-side prompt running (tokens
+        // burned) even though removeSession then retires the session.
+        const sid = this.st.peek(conv)?.sessionID;
+        if (sid) await this.oc.interrupt(sid).catch((e) => warn("interrupt:", e?.message));
+        this.cancelAllReminders(conv);
+      },
     });
+    // A forum topic deleted in the UI sends no Telegram event (Bot API 10.3 has
+    // none) — the only signal is a send into it failing with "message thread
+    // not found". Retire the conversation (state/session/worktree) on first hit.
+    this.tg.onThreadNotFound = (chatId, threadId) => {
+      void this.orch.onTopicDeleted(convKey(chatId, threadId)).catch((e) => warn("onTopicDeleted:", (e as Error)?.message ?? e));
+    };
   }
 
   /** Begin relaying OpenCode question forms to Telegram. Called once from index.ts. */
@@ -991,6 +1014,7 @@ export class Bot {
   private async stopCurrent(conv: ConvKey, interrupt = false): Promise<void> {
     this.stopTyping(conv);
     this.clearActivity(conv);
+    this.orch.clearManagerBusy(conv); // /new, /clear, /stop all drop the manager's session — never let a late terminal event wedge the flag
     const ac = this.inflight.get(conv);
     if (ac) ac.abort();
     const sid = this.st.peek(conv)?.sessionID;
