@@ -28,8 +28,9 @@
     "test:notes": "tsx scripts/test-notes.ts",
     "test:stream": "tsx scripts/test-stream.ts",
     "test:pr-watch": "tsx scripts/test-pr-watch.ts",
+    "test:commands": "tsx scripts/test-commands.ts",
     "test:reactions": "tsx scripts/test-reactions.ts",
-    "test:unit": "npm run test:format && npm run test:fsbrowser && npm run test:state && npm run test:multi && npm run test:activity && npm run test:reminders && npm run test:prune && npm run test:config && npm run test:rich && npm run test:stream && npm run test:continue && npm run test:dns-heal && npm run test:recovery && npm run test:topic-delete && npm run test:uptime && npm run test:usage && npm run test:notes && npm run test:pr-watch && npm run test:reactions",
+    "test:unit": "npm run test:format && npm run test:fsbrowser && npm run test:state && npm run test:multi && npm run test:activity && npm run test:reminders && npm run test:prune && npm run test:config && npm run test:rich && npm run test:stream && npm run test:continue && npm run test:dns-heal && npm run test:recovery && npm run test:topic-delete && npm run test:uptime && npm run test:usage && npm run test:notes && npm run test:pr-watch && npm run test:reactions && npm run test:commands",
     "typecheck": "tsc --noEmit",
     "test:multi": "tsx scripts/test-multi.ts",
     "smoke:multi": "tsx scripts/smoke-multi.ts"

@@ -33,6 +33,7 @@ import { PrSnapshot, PrState, diffSnapshots, renderEvent } from "./pr-watch.js";
 import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, SAFE_REBOOT_BIN, rebootTokenFile, buildTokenLine, rebootGoData, isRebootConfirmFresh } from "./uptime.js";
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
 import { DraftState, DraftAction, onTextDelta, onToolStart, isDmConv, EDIT_BUDGET } from "./stream.js";
+import { myCommands, helpText, commandGrid } from "./commands.js";
 import { UsageRow, formatUsageReport } from "./usage.js";
 import { appendNote, dropNotes, noteEntryText, prepareNotes, showNotes } from "./notes.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
@@ -1614,102 +1615,16 @@ export class Bot {
   }
 
   // ── commands ─────────────────────────────────────────────────────────────
+  // The autocomplete menu, the /help card, and the button grid are all
+  // rendered from the shared catalog (src/commands.ts) so they cannot drift
+  // apart (drift cost us two follow-up fixes: /agents, /reboot).
   private async cmdHelp(conv: ConvKey): Promise<void> {
-    const txt = [
-      "<b>OpenCode Remote</b> — drive your OpenCode agent from Telegram.",
-      "",
-      "Just send me a message and I'll run it in OpenCode and reply with the result.",
-      "",
-      "<b>Sessions</b>",
-      "/new — start a fresh session in the current directory",
-      "/ls — list recent sessions",
-      "/use &lt;id&gt; — switch to a session",
-      "/dir [path] — show / set the working directory",
-      "/browse [path] — duyệt thư mục bằng nút bấm và mở OpenCode tại đó",
-      "",
-        "<b>Mode &amp; model/agent</b>",
-        "/mode — chọn mode bằng nút: build / plan / general / explore",
-        "/models — list models · /model &lt;id&gt; — set model",
-        "/variants — list/set reasoning variant (default xhigh)",
-        "/agents — list agents · /agent &lt;id&gt; — set agent",
-       "",
-      "<b>Câu hỏi (questions)</b>",
-      "Khi OpenCode cần hỏi bạn, chọn đáp án bằng nút bấm hoặc tự gõ.",
-      "",
-       "<b>Nhiều session (topic) &amp; Manager</b>",
-       "/spawn &lt;tên&gt; [dir] — tạo worker: topic + session riêng",
-       "/board — trạng thái mọi worker · /kill [tên] — dừng worker · /stopall",
-       "/manager on|off — Manager nhận việc ở chat chính và giao cho worker",
-       "/auto on|off — Manager tự giao việc hay chờ bạn duyệt",
-        "/wt — trong topic worker: diff / merge / xoá git worktree",
-        "/prune [số_ngày] — dọn topic worker đã xong (mặc định >7 ngày)",
-       "",
-       "<b>Control</b>",
-        "/stop — interrupt the running task",
-        "/note [ghi chú] — ghi lại thông tin khi agent đang bận (agent đọc ở lượt tiếp theo)",
-        "/context — photo of the current session (usage + files touched)",
-        "/usage — context pressure per session (current vs window, near-limit warnings)",
-        "/history — show recent messages",
-       "/status — what I'm connected to",
-       "/clear — reset this chat's state",
-       "",
-       "Bấm một nút bên dưới để chạy lệnh ngay:",
-     ].join("\n");
-    await this.sendHtml(conv, txt, { reply_markup: this.commandMenu() });
+    await this.sendHtml(conv, helpText(), { reply_markup: commandGrid() });
   }
 
   /** Register the Telegram /command menu (autocomplete) — cosmetic, best-effort. */
   private registerCommands(): void {
-    const c = (command: string, description: string) => ({ command, description });
-    void this.tg
-      .setMyCommands([
-        c("help", "Trợ giúp — danh sách lệnh + nút bấm"),
-        c("new", "Bắt đầu phiên làm việc mới"),
-        c("ls", "Liệt kê phiên gần đây"),
-        c("use", "Chuyển sang một phiên (cần id)"),
-        c("dir", "Xem/đặt thư mục làm việc"),
-        c("browse", "Duyệt thư mục bằng nút bấm"),
-        c("mode", "Chọn mode: build / plan / general / explore"),
-        c("models", "Liệt kê model khả dụng"),
-        c("model", "Đặt model (cần id)"),
-        c("agents", "Liệt kê agent khả dụng"),
-        c("agent", "Đặt agent cho phiên này (cần id)"),
-        c("variants", "Đặt reasoning variant (vd: xhigh)"),
-        c("stop", "Dừng task đang chạy"),
-        c("reboot", "Reboot máy (2 bước xác nhận)"),
-        c("status", "Trạng thái kết nối"),
-        c("context", "Ảnh chụp phiên hiện tại (usage + files)"),
-        c("usage", "Mức dùng context theo session (cảnh báo gần tràn)"),
-        c("note", "Ghi chú khi agent bận (không text = xem ghi chú)"),
-        c("history", "Xem tin nhắn gần đây"),
-        c("clear", "Xoá state của chat này"),
-        c("spawn", "Tạo worker (topic + session riêng)"),
-        c("board", "Trạng thái mọi worker"),
-        c("kill", "Dừng một worker (cần tên)"),
-        c("stopall", "Dừng mọi worker"),
-        c("manager", "Bật/tắt Manager (on|off)"),
-        c("auto", "Manager tự giao việc hay chờ duyệt (on|off)"),
-        c("wt", "Worktree: diff / merge / xoá (trong topic worker)"),
-        c("prune", "Dọn topic worker đã xong (mặc định >7 ngày)"),
-      ])
-      .catch((e) => warn("setMyCommands:", e?.message));
-  }
-
-  /** The tappable command list shown under /help — one button per command. */
-  private commandMenu(): Keyboard {
-    const b = (text: string, cmd: string): Btn => ({ text, callback_data: cmd });
-    return {
-      inline_keyboard: [
-        [b("🆕 Session mới", "cmd:new"), b("📄 Sessions", "cmd:ls")],
-        [b("📍 Thư mục", "cmd:dir"), b("📁 Duyệt", "cmd:browse")],
-        [b("🎛 Mode", "cmd:mode"), b("🤖 Models", "cmd:models")],
-        [b("🎚 Variants", "cmd:variants"), b("📊 Trạng thái", "cmd:status")],
-        [b("📋 Context", "cmd:context"), b("📊 Usage", "cmd:usage")],
-        [b("📜 Lịch sử", "cmd:history"), b("⏹ Dừng", "cmd:stop")],
-        [b("🧹 Xoá state", "cmd:clear")],
-        [b("📖 Help", "cmd:help")],
-      ],
-    };
+    void this.tg.setMyCommands(myCommands()).catch((e) => warn("setMyCommands:", e?.message));
   }
 
   private async cmdNew(conv: ConvKey, state: ChatState): Promise<void> {
