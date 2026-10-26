@@ -1136,7 +1136,7 @@ export class Bot {
       case "/ctx":
         return this.cmdContext(conv, state);
       case "/usage":
-        return this.cmdUsage(conv);
+        return this.cmdUsage(conv, arg);
       case "/history":
         return this.cmdHistory(conv, state);
       case "/clear":
@@ -1444,6 +1444,7 @@ export class Bot {
         c("status", "Trạng thái kết nối"),
         c("context", "Ảnh chụp phiên hiện tại (usage + files)"),
         c("usage", "Mức dùng context theo session (cảnh báo gần tràn)"),
+        c("note", "Ghi chú khi agent bận (không text = xem ghi chú)"),
         c("history", "Xem tin nhắn gần đây"),
         c("clear", "Xoá state của chat này"),
         c("spawn", "Tạo worker (topic + session riêng)"),
@@ -2501,7 +2502,8 @@ export class Bot {
    * the calls — so the cap still applies post-fetch, but the fetch itself is
    * already bounded by dedup + pool + the small number of tracked sessions.)
    */
-  private async cmdUsage(conv: ConvKey): Promise<void> {
+  private async cmdUsage(conv: ConvKey, arg = ""): Promise<void> {
+    const all = /\s--all\b/.test(arg);
     const models = await this.oc.listModels().catch(() => [] as ModelInfo[]);
     const entries = Object.entries(this.st.all()).filter(
       ([k, s]) => typeof s.sessionID === "string" && k !== MACHINE_STATE_KEY,
@@ -2537,14 +2539,16 @@ export class Bot {
             ? (models.find((m) => m.id === model.id && m.providerID === model.providerID) ??
                models.find((m) => m.id === model.id))?.contextLimit
             : undefined,
-          cumInput: (sess as any)?.tokens?.input ?? 0,
-          cumOutput: (sess as any)?.tokens?.output ?? 0,
-        };
+           cumInput: (sess as any)?.tokens?.input ?? 0,
+           cumOutput: (sess as any)?.tokens?.output ?? 0,
+           // Liveness signal (session.time.updated) — already fetched above, zero extra calls.
+           updated: typeof (sess as any)?.time?.updated === "number" ? (sess as any).time.updated : undefined,
+         };
       }
     };
     // At most 4 sessions in flight, regardless of how many are tracked.
     await Promise.all(Array.from({ length: Math.min(4, sids.length) }, () => fetchRow()));
-    await this.sendHtml(conv, formatUsageReport(rows, esc, { warnPct: this.cfg.usageWarnPct, maxRows: this.cfg.usageMaxRows }).join("\n"));
+    await this.sendHtml(conv, formatUsageReport(rows, esc, { warnPct: this.cfg.usageWarnPct, maxRows: this.cfg.usageMaxRows, activeHours: this.cfg.usageActiveHours, all }).join("\n"));
   }
 
   private async cmdHistory(conv: ConvKey, state: ChatState): Promise<void> {

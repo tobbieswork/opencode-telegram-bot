@@ -6,7 +6,7 @@
  *
  * Run:  npx tsx scripts/test-usage.ts
  */
-import { UsageRow, pctOf, fmtTok, sortUsage, formatUsageReport, newestAssistantInfo } from "../src/usage.js";
+import { UsageRow, pctOf, fmtTok, sortUsage, formatUsageReport, newestAssistantInfo, isActive } from "../src/usage.js";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: string): void {
@@ -132,7 +132,8 @@ const row = (over: Partial<UsageRow> & { label: string }): UsageRow => ({
   ];
   const out = formatUsageReport(rows, esc).join("\n");
   check("header counts all", out.includes("2 session"), out);
-  check("warn count in header", out.includes("⚠️ 1 trên 80%"), out);
+  check("header shows active count", out.includes("2 active"), out);
+  check("no dead marker in header when all active", !out.split("\n")[0].includes("💤"), out);
   check("worst row first", out.indexOf("danger") < out.indexOf("quiet"), out);
   check("warn mark on ≥80 row", /⚠️ <b>danger<\/b>/.test(out), out);
   check("pct rendered", out.includes("(85%)"), out);
@@ -150,18 +151,70 @@ const row = (over: Partial<UsageRow> & { label: string }): UsageRow => ({
   check("unknown limit → dash", noLimit.includes("50K/—"), noLimit);
   check("unknown limit → no warn", !noLimit.includes("⚠️"), noLimit);
 
-  // warning threshold is configurable (10% catches both rows)
+  // warning threshold is configurable (10% marks both rows)
   const strict = formatUsageReport(rows, esc, { warnPct: 10 }).join("\n");
-  check("custom warnPct", strict.includes("⚠️ 2 trên 10%"), strict);
+  const strictMarks = (strict.match(/⚠️ <b>/g) ?? []).length;
+  check("custom warnPct marks both rows", strictMarks === 2, strict);
 
   // maxRows caps the listing and counts the hidden rest
   const many = Array.from({ length: 15 }, (_, i) =>
     row({ label: `s${i}`, current: 10_000 + i, limit: 200_000, cumInput: 1_000_000 * (15 - i) }),
   );
   const capped = formatUsageReport(many, esc, { maxRows: 5 }).join("\n");
-  check("cap counts hidden", capped.includes("… +10 session khác"), capped);
+  check("cap counts hidden", capped.includes("… +10 active khác"), capped);
   const listed = capped.split("\n").filter((l) => /<b>s\d+<\/b> ·/.test(l)).length;
   check("cap limits rows", listed === 5, `listed ${listed}`);
+}
+
+// ── liveness: active-first ordering, dead collapse, --all, fail-open ────────
+{
+  const NOW = 1_000_000_000_000;
+  const H = 3600_000;
+  const fresh = { updated: NOW - 1 * H }; // 1h ago → active
+  const stale = { updated: NOW - 90 * H }; // 90h ago → dead
+
+  // isActive: boundary + fail-open
+  check("isActive within window", isActive(NOW - 23 * H, NOW, 24) === true);
+  check("isActive at boundary (exactly 24h) → dead", isActive(NOW - 24 * H, NOW, 24) === false);
+  check("isActive unknown updated fails OPEN", isActive(undefined, NOW, 24) === true);
+
+  // A dead session with HIGHER pressure must not outrank a live one.
+  const rows = [
+    row({ label: "dead-high", current: 180_000, limit: 200_000, ...stale }), // 90% but dead
+    row({ label: "live-low", current: 60_000, limit: 200_000, ...fresh }), // 30% but live
+  ];
+  const out = formatUsageReport(rows, esc, { now: NOW }).join("\n");
+  check("live row listed, dead collapsed", out.includes("<b>live-low</b>") && !out.includes("<b>dead-high</b>"), out);
+  check("dead collapse line present", out.includes("1 session 24h+"), out);
+  check("collapse shows the dead session's ctx", out.includes("180K/200K (90%)"), out);
+  check("collapse offers --all", out.includes("/usage --all"), out);
+  check("header counts active + dead", out.includes("2 session · 1 active · 1 💤"), out);
+
+  // --all lists the dead row too, with the 💤 prefix, no cap interaction
+  const all = formatUsageReport(rows, esc, { now: NOW, all: true }).join("\n");
+  check("--all lists dead row", all.includes("<b>dead-high</b>"), all);
+  check("--all prefixes dead row with 💤", /💤 (?:⚠️ )?<b>dead-high<\/b>/.test(all), all);
+  check("--all has no collapse line", !all.includes("session 24h+"), all);
+
+  // maxRows still caps ACTIVE rows only; dead stay collapsed
+  const manyActive = Array.from({ length: 8 }, (_, i) =>
+    row({ label: `a${i}`, current: 10_000 + i, limit: 200_000, ...fresh }),
+  );
+  const mixed = formatUsageReport([...manyActive, row({ label: "dead1", current: 150_000, limit: 200_000, ...stale })], esc, { now: NOW, maxRows: 5 }).join("\n");
+  const listedActive = (mixed.match(/<b>a\d+<\/b> ·/g) ?? []).length;
+  check("cap applies to active rows", listedActive === 5, mixed);
+  check("hidden active counted", mixed.includes("… +3 active khác"), mixed);
+  check("dead still one line despite cap", (mixed.match(/session 24h+/g) ?? []).length === 1, mixed);
+
+  // all rows dead → header 0 active, one collapse line, nothing listed
+  const allDead = formatUsageReport(
+    [row({ label: "d1", current: 50_000, limit: 200_000, ...stale }), row({ label: "d2", current: 90_000, limit: 200_000, ...stale })],
+    esc,
+    { now: NOW },
+  ).join("\n");
+  check("all dead → 0 active in header", allDead.includes("0 active"), allDead);
+  check("all dead → collapse shows largest (90K)", allDead.includes("90K/200K (45%)"), allDead);
+  check("all dead → no per-row listing", !allDead.includes("<b>d1</b>"), allDead);
 }
 
 if (failures > 0) {

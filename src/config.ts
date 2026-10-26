@@ -100,6 +100,8 @@ export interface Config {
   usageWarnPct: number;
   /** /usage: maximum number of per-session rows to render (the rest are counted, not listed). */
   usageMaxRows: number;
+  /** /usage: a session untouched for this many hours is shown as "dead" (collapsed). */
+  usageActiveHours: number;
   /**
    * Watch the configured GitHub repo for PR activity (merged / new review
    * comments / CI status / reviews) and post ONE line to the main chat per
@@ -173,6 +175,7 @@ export function loadConfig(root: string): Config {
     stream: process.env.OPENCODE_TG_STREAM === "1" || process.env.OPENCODE_TG_STREAM === "true",
     usageWarnPct: parseIntSetting("OPENCODE_TG_USAGE_WARN_PCT", 80, 1),
     usageMaxRows: parseIntSetting("OPENCODE_TG_USAGE_MAX_ROWS", 10, 1),
+    usageActiveHours: parseIntSetting("OPENCODE_TG_USAGE_ACTIVE_HOURS", 24, 1),
     prWatch: process.env.OPENCODE_TG_PR_WATCH === "1" || process.env.OPENCODE_TG_PR_WATCH === "true",
     prWatchRepo: process.env.OPENCODE_TG_PR_WATCH_REPO?.trim() ?? "",
     prWatchIntervalMs: parseIntSetting("OPENCODE_TG_PR_WATCH_INTERVAL_MS", 5 * 60_000, 60_000),
