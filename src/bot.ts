@@ -191,6 +191,13 @@ export class Bot {
         // server-side interrupt — so nothing keeps sending into the dead topic and
         // re-failing. Then cancel its reminder nudges.
         await this.stopCurrent(conv, true);
+        // stopCurrent's server interrupt requires an inflight AbortController —
+        // manager turns are fire-and-forget and never have one, so interrupt
+        // explicitly (no-op if the session is idle). Without this, deleting a
+        // manager topic mid-turn leaves the server-side prompt running (tokens
+        // burned) even though removeSession then retires the session.
+        const sid = this.st.peek(conv)?.sessionID;
+        if (sid) await this.oc.interrupt(sid).catch((e) => warn("interrupt:", e?.message));
         this.cancelAllReminders(conv);
       },
     });
