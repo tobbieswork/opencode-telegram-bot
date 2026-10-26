@@ -114,7 +114,7 @@ export interface Config {
   /** Poll interval for the PR watcher, ms (floor 60s). */
   prWatchIntervalMs: number;
   /**
-   * Telegram reaction UX: the user reacts to indexed messages (🚀 spawn a
+   * Telegram reaction UX: the user reacts to indexed messages (🔥 spawn a
    * worker, 👍 approve / 👎 reject a worker's DONE report) and the bot itself
    * reacts (🤔 on a new prompt, 🎉 on a worker done, 👎 on a failed turn).
    * Default OFF: enable with OPENCODE_TG_REACT=1 (needs "message_reaction"

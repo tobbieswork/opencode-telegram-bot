@@ -6,7 +6,7 @@
  */
 
 /** Emojis with a wired-up action; anything else is a no-op. */
-export const REACTION_SPAWN = "🚀";
+export const REACTION_SPAWN = "🔥";
 export const REACTION_APPROVE = "👍";
 export const REACTION_REJECT = "👎";
 /** Bot body language (the bot reacting, never an action). */
@@ -29,7 +29,7 @@ export function classifyAction(emoji: string): ReactionAction | null {
 export const REACT_INDEX_CAP = 500;
 /** Cap on the (message,emoji) reacted-once set. */
 export const REACTED_CAP = 500;
-/** Max stored text per index entry (the 🚀 spawn takes the stored text). */
+/** Max stored text per index entry (the 🔥 spawn takes the stored text). */
 export const REACT_TEXT_MAX = 4000;
 
 /**
@@ -108,7 +108,7 @@ export function decideApprove(purpose: string | undefined, workerBusy: boolean):
 }
 
 /**
- * A valid worker name for a 🚀 spawn, derived from the message text:
+ * A valid worker name for a 🔥 spawn, derived from the message text:
  * lower-cased, non-alphanumerics collapsed to dashes, max 24 chars — shaped
  * to the orchestrator's NAME_RE (`[a-z0-9][a-z0-9-]{0,23}`). Unicode (e.g.
  * Vietnamese) collapses to the ASCII letters it contains. Falls back to
@@ -127,7 +127,7 @@ export function spawnNameFromText(text: string, fallback = "task"): string {
 }
 
 /**
- * Pick a unique worker name for a 🚀 spawn: the base name, or `<base>-2`,
+ * Pick a unique worker name for a 🔥 spawn: the base name, or `<base>-2`,
  * `<base>-3`, … The base is truncated so the suffixed name stays within the
  * 24-char NAME_RE limit (mirroring recovery.ts' respawnName truncation).
  * Returns undefined when every candidate up to `-9` is taken.

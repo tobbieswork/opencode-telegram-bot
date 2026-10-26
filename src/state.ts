@@ -26,7 +26,7 @@ export interface MsgIndexEntry {
   purpose: MsgPurpose;
   /** Set when purpose is "worker-done": the worker's conv (the topic to approve/reject). */
   workerConv?: string;
-  /** The message text, truncated (the 🚀 spawn turns the stored text into a task). */
+  /** The message text, truncated (the 🔥 spawn turns the stored text into a task). */
   text: string;
   /** When it was indexed, ms epoch (drives pruning: oldest dropped first). */
   ts: number;
