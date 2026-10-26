@@ -21,8 +21,6 @@ import {
   alreadyReacted,
   pruneIndex,
   pruneReacted,
-  spawnNameFromText,
-  uniqueSpawnName,
   REACT_INDEX_CAP,
   REACTED_CAP,
   REACT_TEXT_MAX,
@@ -913,10 +911,12 @@ export class Bot {
   }
 
   /**
-   * 🔥 on an indexed message (any conv, bot or user text): spawn a worker from
-   * the stored text. The text is the task; the name is derived from it (with
-   * the existing spawn naming for uniqueness). One short line lands in the
-   * chat's General conversation.
+   * 🔥 on an indexed message (any conv, bot or user text): ask the MANAGER to
+   * spawn a worker for it. The Manager gets the message text as a "[Bot event]"
+   * (the same queueReport → notifyManager path as worker reports / 👎 rejects)
+   * and crafts the task itself — it has the full conversation context a worker
+   * would lack, and picks the name, directory and agent. One short ack line
+   * lands in the conversation; the Manager reports the spawn back.
    *
    * Guard: a 🔥 on a USER message is never a spawn (decideSpawn →
    * "already-processed") — that message already went through a turn, so
@@ -933,26 +933,12 @@ export class Bot {
     const text = entry.text.trim();
     if (text.length < 8) return; // too short to be a task
     const chat = chatOf(entry.conv);
-    const name = uniqueSpawnName(spawnNameFromText(text), (n) => !!this.st.findWorker(chat, n));
-    if (!name) {
-      await this.tg.sendMessage(chat, "⚠️ Không tạo được worker từ phản ứng: hết tên khả dụng.").catch(() => {});
+    if (!this.orch.isManagerConv(chat)) {
+      await this.tg.sendMessage(chat, "⚠️ 🔥 cần Manager đang bật (/manager on) để soạn task cho worker.").catch(() => {});
       return;
     }
-    const task = `Task (delegated by user 🔥 on a message):\n\n${text}`;
-    let r: { conv: ConvKey; worker: { name: string } };
-    try {
-      r = await this.orch.spawn(chat, {
-        name,
-        directory: this.cfg.opencodeDirectory,
-        task,
-        agent: "build",
-        spawnedBy: "user",
-      });
-    } catch (e) {
-      await this.tg.sendMessage(chat, `⚠️ Không tạo được worker từ phản ứng: ${esc((e as Error).message)}`).catch(() => {});
-      return;
-    }
-    await this.tg.sendMessage(chat, `🔥 Worker <b>${esc(r.worker.name)}</b> — ${esc(trunc(text, 60))}`).catch(() => {});
+    await this.tg.sendMessage(chat, "📝 Đã nhận — Manager sẽ soạn task và spawn worker trong giây lát…").catch(() => {});
+    this.orch.relaySpawnRequest(entry.conv, text);
   }
 
   /**
