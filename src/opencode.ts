@@ -1,5 +1,6 @@
 import { OpenCode } from "@opencode/client";
 import { Service } from "@opencode/client/service";
+import { newestAssistantInfo, AssistantInfo } from "./usage.js";
 import { existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
@@ -349,38 +350,32 @@ export class OpenCodeCtl {
   }
 
   /**
+   * Model + current context of the session's newest LLM step, from ONE
+   * `message.list` call (capped at 20). Delegates to `newestAssistantInfo()`,
+   * which sorts by `time.created` and therefore does not depend on the API's
+   * list order. On 2.1.x the list comes back newest-first (verified live with
+   * scripts/probe-usage.ts, 2026-10-26), but that ordering is not a stable
+   * contract — position-based scans have bitten us before, so the sort stays.
+   *
+   * Token accounting (live shape: `tokens: {input, output, reasoning,
+   * cache: {read, write}}`): the prompt sent to the model is
+   * `input + cache.read + cache.write` — `input` is the non-cached part,
+   * `cache.read` the part served from the provider's cache, `cache.write` the
+   * part just written into it. All three count against the context window.
+   * (`reasoning` is an OUTPUT token, not prompt, so it is excluded.)
+   */
+  async latestAssistantInfo(sessionID: string): Promise<AssistantInfo> {
+    const msgs = ((await this.listMessages(sessionID, 20).catch(() => [])) as any[]) ?? [];
+    return newestAssistantInfo(msgs);
+  }
+
+  /**
    * The model actually used by the newest assistant message. The session object
    * carries no model field, so this is the only way to observe which model the
    * session is running on (explicitly set or server-resolved default).
    */
   async getSessionModel(sessionID: string): Promise<{ id: string; providerID: string } | undefined> {
-    const msgs = ((await this.listMessages(sessionID, 10).catch(() => [])) as any[]) ?? [];
-    for (const m of msgs) {
-      if (m?.type === "assistant" && m.model?.id) {
-        return { id: m.model.id, providerID: m.model.providerID ?? "?" };
-      }
-    }
-    return undefined;
-  }
-
-  /**
-   * The context size of the newest LLM step (input + cache-read tokens) — the
-   * number that actually decides overflow, unlike the session's CUMULATIVE
-   * tokens. Scans the newest messages backwards for the first assistant turn
-   * that carries token stats. `message.list` items carry tokens under
-   * `info.tokens` on 2.1.x; `tokens` is kept as a fallback for older shapes.
-   */
-  async lastAssistantContext(sessionID: string): Promise<number | undefined> {
-    const msgs = ((await this.listMessages(sessionID, 20).catch(() => [])) as any[]) ?? [];
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      const m = msgs[i];
-      const isAssistant = m?.type === "assistant" || m?.role === "assistant";
-      if (!isAssistant) continue;
-      const t = m.info?.tokens ?? m.tokens;
-      const n = (typeof t?.input === "number" ? t.input : 0) + (typeof t?.cache?.read === "number" ? t.cache.read : 0);
-      if (n > 0) return n;
-    }
-    return undefined;
+    return (await this.latestAssistantInfo(sessionID)).model;
   }
 
   /**

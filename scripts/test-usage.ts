@@ -6,7 +6,7 @@
  *
  * Run:  npx tsx scripts/test-usage.ts
  */
-import { UsageRow, pctOf, fmtTok, sortUsage, formatUsageReport } from "../src/usage.js";
+import { UsageRow, pctOf, fmtTok, sortUsage, formatUsageReport, newestAssistantInfo } from "../src/usage.js";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: string): void {
@@ -46,6 +46,55 @@ const row = (over: Partial<UsageRow> & { label: string }): UsageRow => ({
   check("fmtTok 0", fmtTok(0) === "0");
   check("fmtTok NaN-guard", fmtTok(Number.NaN) === "0");
   check("fmtTok negative-guard", fmtTok(-5) === "0");
+  // K→M boundary: round before choosing the unit (999 950 is "1M", not "1000K")
+  check("fmtTok K→M boundary -1", fmtTok(999_949) === "999.9K", fmtTok(999_949));
+  check("fmtTok K→M boundary", fmtTok(999_950) === "1M", fmtTok(999_950));
+  check("fmtTok just under M", fmtTok(999_999) === "1M", fmtTok(999_999));
+}
+
+// ── newestAssistantInfo: order-independent scan of message.list ─────────────
+{
+  // Two assistant steps with DIFFERENT token sums, an in-flight newest step
+  // (no tokens yet), and a user message in between. The answer must be the
+  // NEWEST COMPLETED step's prompt (100 + 200 = 300), never the older one's
+  // (900 + 800 = 1700) — so this test fails on any direction-dependent scan.
+  const newestFirst = [
+    { id: "m4", type: "assistant", time: { created: 4000 }, model: { id: "mod", providerID: "p" } },
+    { id: "m3", type: "assistant", time: { created: 3000 }, model: { id: "mod", providerID: "p" },
+      tokens: { input: 100, output: 10, cache: { read: 200, write: 0 } } },
+    { id: "m2", type: "user", time: { created: 2500 }, text: "hi" },
+    { id: "m1", type: "assistant", time: { created: 1000 }, model: { id: "mod", providerID: "p" },
+      tokens: { input: 900, output: 50, cache: { read: 800, write: 0 } } },
+  ];
+  const a = newestAssistantInfo(newestFirst);
+  const b = newestAssistantInfo([...newestFirst].reverse());
+  check("newest-first: newest completed step's context", a.context === 300, `got ${a.context}`);
+  check("model from newest assistant", a.model?.id === "mod" && a.model?.providerID === "p");
+  check("oldest-first gives the SAME result (order-independent)",
+    b.context === a.context && b.model?.id === a.model?.id, `got ${JSON.stringify(b)} vs ${JSON.stringify(a)}`);
+  // in-flight newest assistant (no tokens) is skipped for context but still
+  // carries the model
+  check("in-flight step skipped for context, model kept", a.context === 300 && a.model?.id === "mod");
+
+  // context = input + cache.read + cache.write: a turn that just BUILT the
+  // cache has a small input and a large cache.write — all of it is prompt.
+  const writeHeavy = [
+    { id: "w1", type: "assistant", time: { created: 1000 }, model: { id: "mod", providerID: "p" },
+      tokens: { input: 50, output: 10, cache: { read: 0, write: 120_000 } } },
+  ];
+  const w = newestAssistantInfo(writeHeavy);
+  check("context includes cache.write (50 + 0 + 120000)", w.context === 120_050, `got ${w.context}`);
+
+  // the info-wrapped message shape (older clients) resolves identically
+  const wrapped = [
+    { id: "x1", info: { type: "assistant", time: { created: 1000 }, model: { id: "mod", providerID: "p" },
+      tokens: { input: 50, output: 10, cache: { read: 0, write: 120_000 } } } },
+  ];
+  check("info-wrapped shape gives the same result", newestAssistantInfo(wrapped).context === 120_050);
+
+  // no assistant messages → empty result, no crash
+  const none = newestAssistantInfo([{ id: "u1", type: "user", time: { created: 1 }, text: "hi" }]);
+  check("no assistant → undefined model+context", none.model === undefined && none.context === undefined);
 }
 
 // ── sortUsage: worst pressure first, unknowns last, then cum desc ───────────

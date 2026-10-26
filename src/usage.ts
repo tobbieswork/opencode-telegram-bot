@@ -86,9 +86,10 @@ export function pctOf(current?: number, limit?: number): number | undefined {
 /** Compact token notation: 980 → "980", 12345 → "12.3K", 2400000 → "2.4M". */
 export function fmtTok(n: number): string {
   if (!Number.isFinite(n) || n < 0) return "0";
-  // Round BEFORE choosing the unit: 999 950 is closer to 1M than to 1000K,
-  // and toFixed(1) of 999.95 would otherwise print "1000K".
-  if (n >= 999_500) return trimTrailing((n / 1_000_000).toFixed(1)) + "M";
+  // Round BEFORE choosing the unit: switch to M exactly when the one-decimal
+  // K form would overflow to "1000K" (999 950 → 1.0M), so the output is never
+  // an out-of-range unit like "1000K" or a value rounded away from its unit.
+  if (n >= 999_950) return trimTrailing((n / 1_000_000).toFixed(1)) + "M";
   if (n >= 1_000) return trimTrailing((n / 1_000).toFixed(1)) + "K";
   return String(Math.round(n));
 }

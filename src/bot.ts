@@ -1075,7 +1075,7 @@ export class Bot {
         "/prune [số_ngày] — dọn topic worker đã xong (mặc định >7 ngày)",
        "",
        "<b>Control</b>",
-         "/stop — interrupt the running task",
+        "/stop — interrupt the running task",
         "/context — photo of the current session (usage + files touched)",
         "/usage — context pressure per session (current vs window, near-limit warnings)",
         "/history — show recent messages",
@@ -2113,40 +2113,60 @@ export class Bot {
    * /usage — context pressure across every session this bot tracks (manager,
    * workers, regular chats): current context vs the model's window, plus the
    * cumulative totals. The answer to "which session is about to overflow?"
+   *
+   * REST budget: exactly 2 calls per UNIQUE session — session.get (cumulative
+   * tokens) and one message.list (model + current context). Convs that share a
+   * session (reattach) are deduped by session id BEFORE any call is made, and
+   * the calls run through a small worker pool so many tracked sessions can't
+   * fan out into an unbounded burst. (maxRows can't be applied before the
+   * fetch: the rows are sorted BY context pressure, which only exists after
+   * the calls — so the cap still applies post-fetch, but the fetch itself is
+   * already bounded by dedup + pool + the small number of tracked sessions.)
    */
   private async cmdUsage(conv: ConvKey): Promise<void> {
     const models = await this.oc.listModels().catch(() => [] as ModelInfo[]);
     const entries = Object.entries(this.st.all()).filter(
       ([k, s]) => typeof s.sessionID === "string" && k !== MACHINE_STATE_KEY,
     );
-    const rows = (await Promise.all(
-      entries.map(async ([key, s]): Promise<UsageRow> => {
-        const sid = s.sessionID as string;
-        const [chatId, topicId] = key.split(":");
-        const label = s.worker?.name ?? (s.manager ? "manager" : topicId ? `#topic ${topicId}` : chatId);
-        const [sess, model, current] = await Promise.all([
+    // Several convs can point at one session (reattach): dedup BEFORE calling
+    // the API so a shared session costs one fetch, not one per conv.
+    const bySid = new Map<string, string>();
+    for (const [key, s] of entries) {
+      const sid = s.sessionID as string;
+      if (bySid.has(sid)) continue;
+      const [chatId, topicId] = key.split(":");
+      const label = s.worker?.name ?? (s.manager ? "manager" : topicId ? `#topic ${topicId}` : chatId);
+      bySid.set(sid, label);
+    }
+    const sids = [...bySid.keys()];
+    const rows: UsageRow[] = new Array(sids.length);
+    let next = 0;
+    const fetchRow = async (): Promise<void> => {
+      for (;;) {
+        const i = next++;
+        if (i >= sids.length) return;
+        const sid = sids[i];
+        const [sess, info] = await Promise.all([
           this.oc.getSession(sid).catch(() => null),
-          this.oc.getSessionModel(sid).catch(() => undefined),
-          this.oc.lastAssistantContext(sid).catch(() => undefined),
+          this.oc.latestAssistantInfo(sid).catch(() => undefined),
         ]);
-        const info = model
-          ? models.find((m) => m.id === model.id && m.providerID === model.providerID) ??
-            models.find((m) => m.id === model.id)
-          : undefined;
-        return {
-          label,
+        const model = info?.model;
+        rows[i] = {
+          label: bySid.get(sid)!,
           id: sid,
-          current,
-          limit: info?.contextLimit,
+          current: info?.context,
+          limit: model
+            ? (models.find((m) => m.id === model.id && m.providerID === model.providerID) ??
+               models.find((m) => m.id === model.id))?.contextLimit
+            : undefined,
           cumInput: (sess as any)?.tokens?.input ?? 0,
           cumOutput: (sess as any)?.tokens?.output ?? 0,
         };
-      }),
-    )) as UsageRow[];
-    // Two convs can share one session (reattach); show it once.
-    const seen = new Set<string>();
-    const deduped = rows.filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)));
-    await this.sendHtml(conv, formatUsageReport(deduped, esc, { warnPct: this.cfg.usageWarnPct, maxRows: this.cfg.usageMaxRows }).join("\n"));
+      }
+    };
+    // At most 4 sessions in flight, regardless of how many are tracked.
+    await Promise.all(Array.from({ length: Math.min(4, sids.length) }, () => fetchRow()));
+    await this.sendHtml(conv, formatUsageReport(rows, esc, { warnPct: this.cfg.usageWarnPct, maxRows: this.cfg.usageMaxRows }).join("\n"));
   }
 
   private async cmdHistory(conv: ConvKey, state: ChatState): Promise<void> {
