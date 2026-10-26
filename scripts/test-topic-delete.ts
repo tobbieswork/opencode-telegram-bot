@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { addWorktree, removeWorktree } from "../src/worktree.js";
 import { StateManager } from "../src/state.js";
 import { Orchestrator } from "../src/orchestrator.js";
+import { Telegram } from "../src/telegram.js";
 
 const pexec = promisify(execFile);
 const git = (cwd: string, args: string[]) => pexec("git", args, { cwd }).then((r) => r.stdout.trim());
@@ -171,6 +172,194 @@ async function main(): Promise<void> {
     st.set(convChat, { sessionID: "ses_mgr", manager: true });
     await orch.onTopicDeleted(convChat);
     check("top-level conv: refused, state kept", st.peek(convChat)?.sessionID === "ses_mgr");
+
+    // ── Case 10: CONCURRENT purges for the same conv collapse to ONE real purge ──
+    // A dead topic fires onTopicDeleted from several failing sends at once
+    // (typing loop, an edit, a report). Without the purgeConv guard these race on
+    // the worktree (index.lock) and can leave state half-cleared. With it, only
+    // one purge does the git work; the rest return immediately.
+    {
+      const wtC = await addWorktree(repo, repo, "conc-worker");
+      writeFileSync(join(wtC.root, "c.txt"), "concurrent work"); // dirty → a real commit step
+      const convC = "1:200";
+      st.set(convC, {
+        sessionID: "ses_conc",
+        worker: { name: "conc-worker", status: "done", spawnedBy: "user", repoRoot: repo, worktree: wtC, createdAt: 0, updatedAt: 0 },
+      });
+      let removeCalls = 0;
+      const orchConc = new Orchestrator({
+        tg: {}, oc: { removeSession: async () => {} }, st, cfg: {}, sendHtml: async () => {},
+        applyModelAndVariant: async () => {}, startTyping: () => {},
+        removeWorktree: async (root: string, wt: any) => { removeCalls++; return removeWorktree(root, wt); }, // count + real work
+      } as any);
+      const results = await Promise.all([0, 1, 2, 3, 4].map(() => orchConc.onTopicDeleted(convC)));
+      check("concurrent: all 5 onTopicDeleted resolve (no crash)", results.length === 5);
+      check("concurrent: exactly ONE real purge (removeWorktree called once)", removeCalls === 1, `removeCalls=${removeCalls}`);
+      check("concurrent: state clean", st.peek(convC) === undefined);
+      check("concurrent: worktree removed", !existsSync(wtC.root));
+    }
+
+    // ── Case 11: onTopicGone fires for an idle (non-running) conv, NOT for a running worker ──
+    {
+      const goneCalls: string[] = [];
+      const orchGone = new Orchestrator({
+        tg: {}, oc: { removeSession: async () => {} }, st, cfg: {}, sendHtml: async () => {},
+        applyModelAndVariant: async () => {}, startTyping: () => {},
+        onTopicGone: (conv: any) => { goneCalls.push(String(conv)); },
+        removeWorktree: async () => "ok", // no real work in this case
+      } as any);
+      // Idle manager topic → purge now → onTopicGone called
+      const convM = "1:201";
+      st.set(convM, { sessionID: "ses_m2", manager: true });
+      await orchGone.onTopicDeleted(convM);
+      check("onTopicGone: called for idle manager topic", goneCalls.includes("1:201"), JSON.stringify(goneCalls));
+      check("onTopicGone: manager topic purged", st.peek(convM) === undefined);
+      // Running worker → deferred → onTopicGone NOT called
+      const wtG = await addWorktree(repo, repo, "gone-worker");
+      const convW = "1:202";
+      st.set(convW, {
+        sessionID: "ses_w2",
+        worker: { name: "gone-worker", status: "running", spawnedBy: "user", repoRoot: repo, worktree: wtG, createdAt: 0, updatedAt: 0 },
+      });
+      await orchGone.onTopicDeleted(convW);
+      check("onTopicGone: NOT called for running worker (deferred)", !goneCalls.includes("1:202"), JSON.stringify(goneCalls));
+      check("onTopicGone: running worker kept (deferred)", st.peek(convW) !== undefined);
+      await removeWorktree(repo, wtG).catch(() => {});
+      st.clear(convW);
+    }
+
+    // ── Case 12: deferred purge FAILS → in-memory flag + persisted marker KEPT for retry ──
+    {
+      const wtF = await addWorktree(repo, repo, "fail-worker");
+      const convF = "1:203";
+      st.set(convF, {
+        sessionID: "ses_f",
+        worker: { name: "fail-worker", status: "running", spawnedBy: "user", repoRoot: join(base, "no-such-repo"), worktree: wtF, createdAt: 0, updatedAt: 0 },
+      });
+      await orch.onTopicDeleted(convF); // deferred (running) → marker persisted
+      check("deferred: marker persisted in state", st.peek(convF)?.topicDeletedPending === true);
+      orch.onExecution(convF, "session.execution.succeeded"); // worker ends → purge attempted, FAILS (bad repoRoot)
+      await new Promise((r) => setTimeout(r, 300)); // let the (failed) deferred purge settle
+      check("deferred failed purge: state KEPT (retryable)", st.peek(convF) !== undefined);
+      check("deferred failed purge: marker STILL present", st.peek(convF)?.topicDeletedPending === true);
+      check("deferred failed purge: worktree still there", existsSync(wtF.root));
+      await removeWorktree(repo, wtF).catch(() => {});
+      st.clear(convF);
+    }
+
+    // ── Case 13: a STOPPED worker (via /stop → interrupted) with a pending delete → purged ──
+    // The pendingTopicDelete flush happens BEFORE the "stopped" early-return in
+    // onWorkerFinished, so a stopped worker's deleted topic is still purged.
+    {
+      const wtS = await addWorktree(repo, repo, "stop-worker");
+      const convS = "1:204";
+      st.set(convS, {
+        sessionID: "ses_s",
+        worker: { name: "stop-worker", status: "running", spawnedBy: "user", repoRoot: repo, worktree: wtS, createdAt: 0, updatedAt: 0 },
+      });
+      await orch.onTopicDeleted(convS); // deferred (running)
+      orch.onExecution(convS, "session.execution.interrupted"); // user /stop → "stopped" → onWorkerFinished
+      for (let i = 0; i < 50 && st.peek(convS) !== undefined; i++) await new Promise((r) => setTimeout(r, 50));
+      check("stopped worker: purged (state cleared)", st.peek(convS) === undefined);
+      check("stopped worker: worktree removed", !existsSync(wtS.root));
+    }
+
+    // ── Case 14: onThreadNotFound only fires for topic-targeting methods (whitelist) ──
+    // A "message thread not found" from a NON-topic method must not purge a
+    // conversation (a false positive destroys session + worktree, irreversibly).
+    {
+      const realFetch = globalThis.fetch;
+      const threadNotFoundCalls: [number, number][] = [];
+      const tg = new Telegram("token", undefined);
+      tg.onThreadNotFound = (chatId, threadId) => threadNotFoundCalls.push([chatId, threadId]);
+      globalThis.fetch = (async () =>
+        new Response(JSON.stringify({ ok: false, description: "Bad Request: message thread not found" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        })) as any;
+      const call = (method: string, body: any) => (tg as any).api(method, body).catch(() => {});
+      await call("sendMessage", { chat_id: 10, message_thread_id: 5 }); // in whitelist
+      check("whitelist: topic-targeting method (sendMessage) FIRES", threadNotFoundCalls.length === 1, `calls=${threadNotFoundCalls.length}`);
+      await call("getChat", { chat_id: 10, message_thread_id: 5 }); // out of whitelist, but still carries message_thread_id
+      check("whitelist: non-topic method (getChat) does NOT fire", threadNotFoundCalls.length === 1, `calls=${threadNotFoundCalls.length}`);
+      await call("deleteMessage", { chat_id: 10, message_thread_id: 6 }); // in whitelist
+      check("whitelist: deleteMessage FIRES again", threadNotFoundCalls.length === 2, `calls=${threadNotFoundCalls.length}`);
+      globalThis.fetch = realFetch;
+    }
+
+    // ── Case 15: startup reap re-purges a persisted marker whose worker is no longer running ──
+    // (item 3a: the marker survives a restart; the in-memory flag does not.)
+    {
+      const wtR = await addWorktree(repo, repo, "reap-worker");
+      const convR = "1:205";
+      // Marker set + worker settled to a non-busy status (as healWorkers would do after a restart).
+      st.set(convR, {
+        sessionID: "ses_r",
+        worker: { name: "reap-worker", status: "done", spawnedBy: "user", repoRoot: repo, worktree: wtR, createdAt: 0, updatedAt: 0 },
+        topicDeletedPending: true,
+      });
+      // Marker set + worker still running → must be RE-ARMED, not purged (let it finish).
+      const wtR2 = await addWorktree(repo, repo, "reap-running");
+      const convR2 = "1:206";
+      st.set(convR2, {
+        sessionID: "ses_r2",
+        worker: { name: "reap-running", status: "running", spawnedBy: "user", repoRoot: repo, worktree: wtR2, createdAt: 0, updatedAt: 0 },
+        topicDeletedPending: true,
+      });
+      await orch.reapPendingTopicDeletes();
+      check("reap: not-running marker conv purged", st.peek(convR) === undefined);
+      check("reap: not-running worktree removed", !existsSync(wtR.root));
+      check("reap: running marker conv KEPT (re-armed, not purged)", st.peek(convR2) !== undefined);
+      check("reap: running worktree kept", existsSync(wtR2.root));
+      // The re-armed running conv is purged when it actually ends.
+      orch.onExecution(convR2, "session.execution.succeeded");
+      for (let i = 0; i < 50 && st.peek(convR2) !== undefined; i++) await new Promise((r) => setTimeout(r, 50));
+      check("reap: re-armed running conv purged when it ends", st.peek(convR2) === undefined);
+      await removeWorktree(repo, wtR2).catch(() => {});
+    }
+
+    // ── Case 16: /prune of an ALREADY-deleted topic — the deleteForumTopic failure
+    // fires onTopicDeleted (→ purgeConv #1, fire-and-forget, exactly like the
+    // production hook in bot.ts) while the /prune loop ALSO calls purgeConv directly
+    // (#2). Both must collapse to ONE real purge (the purging guard), not race on
+    // the worktree's index.lock.
+    {
+      const wtP = await addWorktree(repo, repo, "prune-worker");
+      writeFileSync(join(wtP.root, "p.txt"), "prune work"); // dirty → a real commit step
+      const convP = "1:207";
+      st.set(convP, {
+        sessionID: "ses_p",
+        worker: { name: "prune-worker", status: "done", spawnedBy: "user", repoRoot: repo, worktree: wtP, createdAt: 0, updatedAt: 0 },
+      });
+      let removeCalls = 0;
+      const orchP = new Orchestrator({
+        tg: {}, oc: { removeSession: async () => {} }, st, cfg: {}, sendHtml: async () => {},
+        applyModelAndVariant: async () => {}, startTyping: () => {},
+        removeWorktree: async (root: string, wt: any) => { removeCalls++; return removeWorktree(root, wt); },
+      } as any);
+      // A real Telegram client wired exactly like production (bot.ts): a thread-not-found
+      // from a topic-targeting method → onTopicDeleted, fire-and-forget. Stub fetch so
+      // deleteForumTopic fails with "message thread not found" (topic already deleted).
+      const tg = new Telegram("token");
+      tg.onThreadNotFound = (c, t) => { void orchP.onTopicDeleted(`${c}:${t}`).catch(() => {}); };
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (async () =>
+        new Response(JSON.stringify({ ok: false, description: "Bad Request: message thread not found" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        })) as any;
+      try {
+        await tg.deleteForumTopic(convP).catch(() => {}); // fails → hook → onTopicDeleted → purgeConv #1
+        await (orchP as any).purgeConv(convP); // the /prune loop's direct purgeConv #2
+        for (let i = 0; i < 50 && removeCalls < 1; i++) await new Promise((r) => setTimeout(r, 50));
+        await new Promise((r) => setTimeout(r, 200)); // let the fire-and-forget #1 observe the guard too
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+      check("prune deleted-topic: exactly ONE real purge (no index.lock race)", removeCalls === 1, `removeCalls=${removeCalls}`);
+      check("prune deleted-topic: state clean", st.peek(convP) === undefined);
+      check("prune deleted-topic: worktree removed", !existsSync(wtP.root));
+    }
 
     // tidy up leftover worktrees (the repo is deleted wholesale next)
     for (const wt of [wt3, wt5]) await removeWorktree(repo, wt).catch(() => {});

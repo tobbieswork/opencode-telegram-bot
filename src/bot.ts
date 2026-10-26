@@ -183,7 +183,16 @@ export class Bot {
       sendHtml: (conv, html, opts) => this.sendHtml(conv, html, opts),
       applyModelAndVariant: (sid, state) => this.applyModelAndVariant(sid, state),
       startTyping: (conv) => this.startTyping(conv),
-      onTopicGone: (conv) => this.cancelAllReminders(conv),
+      onTopicGone: async (conv) => {
+        // The topic is gone and the conv is being purged NOW (not the deferred
+        // running-worker case, where the worker is allowed to finish). Fully stop
+        // any in-flight turn for a normal/manager topic — typing, the self-editing
+        // activity line, the inflight AbortController, the manager-busy flag, and a
+        // server-side interrupt — so nothing keeps sending into the dead topic and
+        // re-failing. Then cancel its reminder nudges.
+        await this.stopCurrent(conv, true);
+        this.cancelAllReminders(conv);
+      },
     });
     // A forum topic deleted in the UI sends no Telegram event (Bot API 10.3 has
     // none) — the only signal is a send into it failing with "message thread

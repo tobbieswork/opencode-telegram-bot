@@ -88,6 +88,28 @@ function dest(to: ConvKey | number): { chat_id: number; message_thread_id?: numb
 export const TOPIC_COLORS = [0x6fb9f0, 0xffd67e, 0xcb86db, 0x8eee98, 0xff93b2, 0xfb6f5f];
 
 /**
+ * Methods that address a forum topic directly and therefore surface a deleted
+ * topic as "message thread not found". We only TRUST this error from these
+ * (approach (a) of the review: a whitelist). Any other method returning the
+ * same description (a rare, unrelated reason) must NOT trigger a purge —
+ * purging destroys the session and worktree and cannot be undone, so a
+ * false positive costs the user a whole session. Missing a real deletion is
+ * the safe direction: the orphan is still cleaned by /prune.
+ */
+const THREAD_TARGETING_METHODS = new Set([
+  "sendMessage",
+  "sendRichMessage",
+  "sendChatAction",
+  "editMessageText",
+  "deleteMessage",
+  "createForumTopic",
+  "openForumTopic",
+  "closeForumTopic",
+  "deleteForumTopic",
+  "answerCallbackQuery",
+]);
+
+/**
  * Minimal Telegram Bot API client using long polling over global fetch.
  * No framework dependency — the whole transport is visible in this file.
  */
@@ -141,8 +163,12 @@ export class Telegram {
     if (!json?.ok) {
       // A deleted forum topic: every send into it fails with this. The user
       // already made their choice in the UI — let the caller retire the conv.
+      // Only trust the error from topic-targeting methods (whitelist) so an
+      // unrelated "message thread not found" from another method can't purge a
+      // conversation we can't undo the loss of.
       if (
         this.onThreadNotFound &&
+        THREAD_TARGETING_METHODS.has(method) &&
         typeof (body as any)?.message_thread_id === "number" &&
         /message thread not found/i.test(json?.description ?? "")
       ) {

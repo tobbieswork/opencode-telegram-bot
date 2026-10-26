@@ -27,11 +27,18 @@ export interface Host {
   applyModelAndVariant(sessionID: string, state: ChatState): Promise<void>;
   startTyping(conv: ConvKey): void;
   /**
-   * A conv's Telegram topic is going away (deleted in the UI): cancel its
-   * reminder nudges and any other bot-side in-memory tracking so nothing
-   * keeps firing for a conversation that no longer exists.
+   * A conv's Telegram topic is going away (deleted in the UI): fully stop any
+   * in-flight turn for it (typing, activity, inflight abort + server interrupt)
+   * and cancel its reminder nudges, so nothing keeps firing for a conversation
+   * that no longer exists. Awaited before the conv is purged so the turn is
+   * actually halted first.
    */
-  onTopicGone?: (conv: ConvKey) => void;
+  onTopicGone?: (conv: ConvKey) => void | Promise<void>;
+  /**
+   * Test seam: override the worktree removal (defaults to the real git
+   * removeWorktree). Lets the concurrency test count real purges deterministically.
+   */
+  removeWorktree?: (repoRoot: string, wt: { root: string; branch: string }) => Promise<string>;
 }
 
 export const MANAGER_AGENT = "tg-manager";
@@ -160,6 +167,17 @@ export class Orchestrator {
    */
   private pendingTopicDelete = new Set<ConvKey>();
   /**
+   * Convs whose purge is IN FLIGHT right now (see purgeConv). A dead topic
+   * fires onTopicDeleted from several failing sends at once (the typing loop,
+   * an edit, a report), and /prune's deleteForumTopic failure can fire
+   * onTopicDeleted mid-loop — without this guard, those concurrent purges for
+   * the same conv race on the worktree (git index.lock, noisy logs, a wrong
+   * /prune count). Guarded per-conv so only one purge does the git work at a
+   * time; cleared again once it finishes (on BOTH success and failure) so a
+   * later send-failure or /prune can retry a failed purge.
+   */
+  private purging = new Set<ConvKey>();
+  /**
    * Manager convs whose turn is currently running (a user prompt or a bot event
    * like a worker report). Set synchronously in promptManager so two rapid user
    * messages can't both get through; cleared by the session.execution.* terminal
@@ -191,6 +209,10 @@ export class Orchestrator {
       if (s.manager) await this.ensureManagerTooling(chatOf(conv)).catch((e) => warn("manager tooling:", e?.message));
     }
     await this.healWorkers();
+    // After healWorkers has settled any stuck "running" workers to their real
+    // status, re-purge convs whose topic was deleted but whose purge didn't
+    // finish before the crash/restart (persisted topicDeletedPending marker).
+    await this.reapPendingTopicDeletes();
     if (!this.healTimer) {
       // Events can also be lost while connected (a dropped frame, a server
       // hiccup); a slow sweep keeps a missed turn-end from pinning a worker
@@ -214,6 +236,34 @@ export class Orchestrator {
       const status: WorkerStatus = state.outcome === "succeeded" ? "done" : state.outcome === "failed" ? "failed" : "stopped";
       log(`[chat ${chatOf(conv)}] worker ${w.name} ended while unobserved — ${status}`);
       await this.onWorkerFinished(conv, status);
+    }
+  }
+
+  /**
+   * Startup sweep for deferred topic-delete purges that didn't finish before a
+   * crash/restart. The in-memory `pendingTopicDelete` flag is lost on restart,
+   * but the persisted `topicDeletedPending` marker survives in state.json. For
+   * each such conv:
+   *  - worker no longer running/waiting (or no worker) → purge it now;
+   *  - worker still running/waiting → re-arm the in-memory deferral so the
+   *    (post-restart) turn-end triggers the purge via onWorkerFinished.
+   * Runs AFTER healWorkers, so a worker that only LOOKS busy (its terminal
+   * event was lost) has already been settled to done/failed/stopped and is
+   * purged here rather than re-armed.
+   */
+  async reapPendingTopicDeletes(): Promise<void> {
+    for (const [conv, s] of Object.entries(this.h.st.all())) {
+      if (!s.topicDeletedPending) continue;
+      const w = s.worker;
+      if (w && (w.status === "running" || w.status === "waiting")) {
+        // Still live after the restart: re-arm so its turn-end purges it.
+        this.pendingTopicDelete.add(conv);
+        log(`reapPendingTopicDeletes (${conv}): worker ${w.name} still running — re-arming deferred purge`);
+        continue;
+      }
+      const ok = await this.purgeConv(conv);
+      if (ok) log(`reapPendingTopicDeletes (${conv}): purged topic-deleted conv after restart`);
+      else warn(`reapPendingTopicDeletes (${conv}): purge failed — retry next startup or via /prune`);
     }
   }
 
@@ -715,6 +765,18 @@ export class Orchestrator {
     // "⏳ still working" block in promptManager accurate, and also covers
     // out-of-band executions (worker reports, background tasks) that prompt the
     // Manager without going through promptManager.
+    //
+    // ACCEPTED RISKS (not fixed — documented):
+    //  (a) If the terminal execution event is LOST (e.g. the SSE stream
+    //      reconnects and drops the frame), managerBusy is never cleared and the
+    //      Manager chat stays "⏳ still working" until the user sends /stop.
+    //      (healWorkers only settles WORKERS, not manager flags — a manager has
+    //      no session-state to query for its busy-ness.)
+    //  (b) A LATE event from an older turn can clear the flag of a NEWER turn:
+    //      the flag is a bare Set with no turn id, so an out-of-order
+    //      succeeded/failed/interrupted from a previous execution unconditionally
+    //      deletes the flag even if a new execution already set it. Rare in
+    //      practice (turns are mostly serialized per conv) but not guarded.
     if (s.manager && !s.worker) {
       if (type === "session.execution.started") this.managerBusy.add(conv);
       else this.managerBusy.delete(conv); // succeeded / failed / interrupted
@@ -750,9 +812,21 @@ export class Orchestrator {
       // Topic deleted in the UI while the worker was running: the detection only
       // fires on sends, and a finished worker sends nothing more — this is the
       // moment to retire the conv (see onTopicDeleted).
+      //
+      // Drop the flag ONLY when the purge succeeds. If purgeConv returns false
+      // (worktree removal failed), the worker has already ended and will send
+      // nothing more, so nothing would re-trigger the purge — keep the in-memory
+      // flag AND the persisted `topicDeletedPending` marker (set in onTopicDeleted)
+      // so a later /prune, a later send-failure, or the next startup sweep can
+      // still retry. (The marker lives in the state entry, which the failed purge
+      // deliberately kept.)
       if (this.pendingTopicDelete.has(conv)) {
-        this.pendingTopicDelete.delete(conv);
-        await this.purgeConv(conv);
+        const ok = await this.purgeConv(conv);
+        if (ok) {
+          this.pendingTopicDelete.delete(conv);
+        } else {
+          warn(`onWorkerFinished (${conv}): deferred topic-delete purge failed — keeping it for retry (/prune, next send-failure, or startup sweep)`);
+        }
         return;
       }
       if (w.status === "stopped") return; // stopped by the user: no report, nothing to restart
@@ -995,7 +1069,7 @@ export class Orchestrator {
     return false;
   }
 
-    /**
+  /**
    * Fully retire a conversation: remove its git worktree (if any), its OpenCode
    * session, and its state entry. Idempotent — safe when the state is already
    * gone. The worktree is removed before the state is cleared (removal reads the
@@ -1005,32 +1079,48 @@ export class Orchestrator {
    * Returns false when the worktree could not be removed — the state is then
    * KEPT so /prune can retry, instead of orphaning the worktree and branch.
    * Shared by the /prune confirm and the deleted-topic detection.
+   *
+   * Concurrency-safe: guarded per-conv (this.purging) so the several concurrent
+   * calls a dead topic produces (see the `purging` field) collapse to ONE real
+   * purge — the in-flight one does the git work, the others return false
+   * immediately instead of racing on index.lock. The guard is cleared once the
+   * in-flight purge FINISHES (on both success and failure) so a later
+   * send-failure or /prune can still retry a purge that failed.
    */
   private async purgeConv(conv: ConvKey): Promise<boolean> {
-    const s = this.h.st.peek(conv);
-    if (!s) return true; // already gone
-    const w = s.worker;
-    if (w?.worktree && w.repoRoot) {
-      // A replacement worker (overflow respawn) may share this worktree in a new
-      // topic — removing it would delete the directory from under the new worker.
-      const shared = Object.entries(this.h.st.all()).some(
-        ([k, os]) => k !== conv && os?.worker?.worktree?.root === w.worktree!.root,
-      );
-      if (shared) {
-        warn(`purgeConv (${conv}): worktree shared with another conv — keeping it`);
-      } else {
-        try {
-          await removeWorktree(w.repoRoot, w.worktree);
-        } catch (e) {
-          warn(`removeWorktree (${w.name}) failed — state kept for /prune retry:`, (e as Error)?.message ?? e);
-          return false;
+    if (this.purging.has(conv)) return false; // an in-flight purge owns this conv
+    this.purging.add(conv);
+    try {
+      const s = this.h.st.peek(conv);
+      if (!s) return true; // already gone
+      const w = s.worker;
+      if (w?.worktree && w.repoRoot) {
+        // A replacement worker (overflow respawn) may share this worktree in a new
+        // topic — removing it would delete the directory from under the new worker.
+        const shared = Object.entries(this.h.st.all()).some(
+          ([k, os]) => k !== conv && os?.worker?.worktree?.root === w.worktree!.root,
+        );
+        if (shared) {
+          warn(`purgeConv (${conv}): worktree shared with another conv — keeping it`);
+        } else {
+          try {
+            await (this.h.removeWorktree ?? removeWorktree)(w.repoRoot, w.worktree);
+          } catch (e) {
+            warn(`removeWorktree (${w.name}) failed — state kept for /prune retry:`, (e as Error)?.message ?? e);
+            return false;
+          }
         }
       }
+      if (s.sessionID) await this.h.oc.removeSession(s.sessionID).catch(() => {});
+      this.clearConvMemory(conv);
+      this.h.st.clear(conv);
+      return true;
+    } finally {
+      // Always clear the guard: on success the state is gone (a later call sees
+      // !s → true); on failure the state is kept and a later send-failure or
+      // /prune must be allowed to RETRY (so don't leave the flag behind).
+      this.purging.delete(conv);
     }
-    if (s.sessionID) await this.h.oc.removeSession(s.sessionID).catch(() => {});
-    this.clearConvMemory(conv);
-    this.h.st.clear(conv);
-    return true;
   }
 
   /** Drop this orchestrator's in-memory per-conv tracking (budget, timers, busy flags). */
@@ -1053,6 +1143,11 @@ export class Orchestrator {
    * "message thread not found" (Telegram.api → onThreadNotFound). Retire the
    * conversation. A worker still running/waiting is left alone for in-flight
    * work and gets purged when it ends (pendingTopicDelete).
+   *
+   * ACCEPTED LIMITATION (not a bug): a topic deleted while the conv is IDLE is
+   * not detected until the next send into it fails or the user runs /prune.
+   * Telegram gives us no idle signal for a deleted topic, so there is nothing
+   * to react to until we actually try to send.
    */
   async onTopicDeleted(conv: ConvKey): Promise<void> {
     if (!String(conv).includes(":")) {
@@ -1063,15 +1158,30 @@ export class Orchestrator {
     }
     const s = this.h.st.peek(conv);
     if (!s) return; // already gone (repeated send failures are idempotent)
-    this.h.onTopicGone?.(conv);
     const w = s.worker;
     if (w && (w.status === "running" || w.status === "waiting")) {
+      // Deferred: let the running worker finish — that is the whole point of
+      // pendingTopicDelete. Do NOT call onTopicGone here: it stops the in-flight
+      // turn (typing/abort/interrupt), which would kill a worker we want to run
+      // to completion. Persist a marker so a restart still knows to purge this
+      // conv (the in-memory flag is lost on restart); it is cleared when the
+      // eventual purge succeeds (purgeConv clears the whole entry).
       this.pendingTopicDelete.add(conv);
+      this.h.st.set(conv, { topicDeletedPending: true });
       log(`topic deleted for running worker ${w.name} (${conv}) — purging when the worker ends`);
       return;
     }
+    // Purge now: the topic is gone and nothing is running in it. First stop any
+    // lingering bot-side turn for a normal/manager topic (a turn can still be
+    // live here — typing, inflight, activity — and would keep failing sends),
+    // then retire state/session/worktree.
+    await this.h.onTopicGone?.(conv);
     log(`topic deleted for ${conv} — retiring (worker=${w?.name ?? "none"}, session=${s.sessionID ?? "none"}, worktree=${w?.worktree?.branch ?? "none"})`);
-    await this.purgeConv(conv);
+    const ok = await this.purgeConv(conv);
+    // Purge failed (worktree removal error) → keep a persisted marker so a
+    // restart can retry. Only if the state still exists (a concurrent purge may
+    // have already cleared it — never resurrect a purged conv as a bare marker).
+    if (!ok && this.h.st.peek(conv)) this.h.st.set(conv, { topicDeletedPending: true });
   }
 
   /**
@@ -1186,11 +1296,22 @@ export class Orchestrator {
       } else if (op === "merge") {
         await this.h.sendHtml(conv, `🔀 ${esc(await mergeWorktree(w.repoRoot, wt, w.name))}`);
       } else if (op === "rm") {
-        await this.h.sendHtml(conv, "⚠️ Xoá worktree sẽ <b>mất các thay đổi chưa merge</b> trong thư mục đó (nhánh chưa merge vẫn được giữ). Chắc chắn?", {
+        // Uncommitted work is COMMITTED to the worker branch first (not lost) —
+        // only the worktree directory is removed; an unmerged branch is kept.
+        // So the user loses nothing here, which the warning must say correctly.
+        await this.h.sendHtml(conv, "⚠️ Xoá worktree sẽ <b>commit các thay đổi chưa commit vào nhánh</b> của worker rồi xoá thư mục worktree (nhánh chưa merge vẫn được giữ — không mất gì). Chắc chắn?", {
           reply_markup: { inline_keyboard: [[{ text: "🗑 Xoá thật", callback_data: `wt:${w.name}:rmok` }, { text: "Thôi", callback_data: `wt:${w.name}:keep` }]] },
         });
       } else if (op === "rmok") {
-        const msg = await removeWorktree(w.repoRoot, wt);
+        let msg: string;
+        try {
+          msg = await removeWorktree(w.repoRoot, wt);
+        } catch (e) {
+          // The preservation commit or the worktree removal failed. This path had
+          // no commit step before, so a failure here is new — surface it clearly.
+          // (The generic catch below shows it as ❌.)
+          throw new Error(`Xoá worktree thất bại: ${(e as Error).message.split("\n")[0]}`);
+        }
         // The session lives in the deleted folder: retire it, and point the
         // topic back at the same subfolder of the main checkout so a new
         // message there starts a fresh session that works.
