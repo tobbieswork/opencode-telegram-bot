@@ -10,6 +10,28 @@ export interface ModelRef {
 
 export type WorkerStatus = "idle" | "running" | "waiting" | "done" | "failed" | "stopped";
 
+/** What an indexed message is, for the reaction UX (see msgIndex below). */
+export type MsgPurpose = "user-msg" | "reply" | "worker-done";
+
+/**
+ * One entry of the machine-wide message index for the reaction UX. A
+ * `message_reaction` update carries only chat.id + message_id (no topic
+ * info), so the bot indexes every relevant message it sends or receives; the
+ * index is what a reaction is resolved through.
+ */
+export interface MsgIndexEntry {
+  /** The conversation the message lives in (`"<chat>"` or `"<chat>:<thread>"`). */
+  conv: string;
+  /** user-msg (a user's message) | reply (a bot reply) | worker-done (a worker's DONE report). */
+  purpose: MsgPurpose;
+  /** Set when purpose is "worker-done": the worker's conv (the topic to approve/reject). */
+  workerConv?: string;
+  /** The message text, truncated (the 🚀 spawn turns the stored text into a task). */
+  text: string;
+  /** When it was indexed, ms epoch (drives pruning: oldest dropped first). */
+  ts: number;
+}
+
 /** A worker: one session bound to its own forum topic. */
 export interface WorkerInfo {
   /** Short slug used in the topic title and by the Manager to address it. */
@@ -132,7 +154,22 @@ export interface ChatState {
    * restarts so the watcher doesn't re-announce every already-seen PR/comment
    * after a bot restart (it diffs against this to know what is NEW).
    */
-  prWatchSnapshot?: Record<number, PrSnapshot>;
+   prWatchSnapshot?: Record<number, PrSnapshot>;
+  /**
+   * MACHINE-WIDE (only ever written on the reserved MACHINE_STATE_KEY entry):
+   * the reaction UX's message index, keyed by `${chatId}:${messageId}`. A
+   * `message_reaction` update carries no topic info, so this is how a reaction
+   * is resolved to a conv/purpose. Persisted across restarts; pruned on every
+   * save (REACT_INDEX_CAP, oldest ts first).
+   */
+  msgIndex?: Record<string, MsgIndexEntry>;
+  /**
+   * MACHINE-WIDE: (message,emoji) pairs that already fired a reaction action,
+   * keyed by `${chatId}:${messageId}:${emoji}`. One pair triggers at most ONCE
+   * ever. Persisted across restarts; pruned on every save (REACTED_CAP,
+   * oldest insertion first).
+   */
+  reacted?: Record<string, true>;
 }
 
 export type StateMap = Record<string, ChatState>;

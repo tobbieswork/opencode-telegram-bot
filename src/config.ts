@@ -109,10 +109,18 @@ export interface Config {
    * interval. Default OFF: enable with OPENCODE_TG_PR_WATCH=1.
    */
   prWatch: boolean;
-  /** The GitHub repo to watch, "owner/repo" (empty = watcher stays off even if enabled). */
+   /** The GitHub repo to watch, "owner/repo" (empty = watcher stays off even if enabled). */
   prWatchRepo: string;
   /** Poll interval for the PR watcher, ms (floor 60s). */
   prWatchIntervalMs: number;
+  /**
+   * Telegram reaction UX: the user reacts to indexed messages (🚀 spawn a
+   * worker, 👍 approve / 👎 reject a worker's DONE report) and the bot itself
+   * reacts (🤔 on a new prompt, 🎉 on a worker done, 👎 on a failed turn).
+   * Default OFF: enable with OPENCODE_TG_REACT=1 (needs "message_reaction"
+   * delivery — the bot is admin, and the update is in allowed_updates).
+   */
+  react: boolean;
 }
 
 export function loadConfig(root: string): Config {
@@ -179,6 +187,8 @@ export function loadConfig(root: string): Config {
     prWatch: process.env.OPENCODE_TG_PR_WATCH === "1" || process.env.OPENCODE_TG_PR_WATCH === "true",
     prWatchRepo: process.env.OPENCODE_TG_PR_WATCH_REPO?.trim() ?? "",
     prWatchIntervalMs: parseIntSetting("OPENCODE_TG_PR_WATCH_INTERVAL_MS", 5 * 60_000, 60_000),
+    // Default OFF: only an explicit "1"/"true" enables the reaction UX.
+    react: process.env.OPENCODE_TG_REACT === "1" || process.env.OPENCODE_TG_REACT === "true",
   };
   const agent = process.env.OPENCODE_DEFAULT_AGENT?.trim();
   if (agent) cfg.defaultAgent = agent;

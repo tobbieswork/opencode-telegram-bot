@@ -752,6 +752,38 @@ export class Orchestrator {
     return `⏹ Đã dừng worker <b>${esc(w.name)}</b>.${w.worktree ? " Worktree vẫn giữ — dùng /wt trong topic để xem diff / merge / xoá." : ""}`;
   }
 
+  /**
+   * Reaction UX (👍): the user approved a worker's DONE report — fully retire
+   * the worker conv: delete its topic, its git worktree, its OpenCode session,
+   * and its state. Reuses the exact /prune cleanup path (deleteForumTopic +
+   * purgeConv) instead of reimplementing it. NEVER touches a busy worker —
+   * the caller checks via decideApprove first (and this double-checks).
+   */
+  async approveWorkerReport(conv: ConvKey): Promise<{ ok: boolean; busy: boolean; name?: string }> {
+    const s = this.h.st.peek(conv);
+    const w = s?.worker;
+    if (!w) return { ok: true, busy: false }; // already retired — nothing to clean
+    if (w.status === "running" || w.status === "waiting") return { ok: false, busy: true, name: w.name };
+    try {
+      await this.h.tg.deleteForumTopic(conv);
+    } catch (e) {
+      warn("deleteForumTopic (approve):", (e as Error)?.message ?? e);
+    }
+    const ok = await this.purgeConv(conv);
+    return { ok, busy: false, name: w.name };
+  }
+
+  /**
+   * Reaction UX (👎): the user rejected a worker's DONE report — relay it to
+   * the MANAGER session with the exact mechanism the worker-finish relay uses
+   * (queueReport's debounce → notifyManager's "[Bot event]" prompt). Does NOT
+   * touch the worker conv. A no-op when the chat has no Manager session.
+   */
+  rejectWorkerReport(conv: ConvKey): void {
+    const name = this.h.st.peek(conv)?.worker?.name ?? "?";
+    this.queueReport(chatOf(conv), `User rejected the report of worker ${name} (👎). Ask or decide next step.`);
+  }
+
   private setStatus(conv: ConvKey, status: WorkerStatus, lastResult?: string): void {
     const s = this.h.st.peek(conv);
     if (!s?.worker) return;
