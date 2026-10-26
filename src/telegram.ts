@@ -312,6 +312,27 @@ export class Telegram {
   }
 
   /**
+   * Same as editMessageText but SURFACES 400 errors (including "message to edit
+   * not found" when the user deleted the card) so callers can tell a vanished
+   * card from a no-op edit and fall back to a fresh message.
+   */
+  async editMessageTextStrict(
+    to: ConvKey | number,
+    messageId: number,
+    text: string,
+    opts: Record<string, unknown> = {},
+  ): Promise<void> {
+    await this.api("editMessageText", {
+      chat_id: parseConv(to).chatId,
+      message_id: messageId,
+      text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      ...opts,
+    });
+  }
+
+  /**
    * Remove (or replace) an inline keyboard on a message, keeping its text — used
    * to take the "⏯ Chạy tiếp" button off a failure message after it is tapped,
    * so the one-shot button can't be clicked again or go stale after a /new.

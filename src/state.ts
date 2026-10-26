@@ -50,6 +50,12 @@ export interface PendingPrompt {
   text: string;
   /** Inline keyboard for the prompt, so a reminder can re-offer the answer buttons. */
   keyboard?: unknown;
+  /**
+   * Telegram message_id of the card currently showing this prompt. Reminders
+   * EDIT this card in place (⏰ count line) instead of posting a duplicate;
+   * a missing id (legacy entries) falls back to a fresh message once.
+   */
+  messageId?: number;
   /** When the prompt was first shown (ms epoch). */
   firstShownAt: number;
   /** How many reminders have been sent so far. */
