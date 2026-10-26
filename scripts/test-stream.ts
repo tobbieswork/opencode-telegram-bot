@@ -13,7 +13,7 @@
  *
  * Run:  npx tsx scripts/test-stream.ts
  */
-import { DraftState, onTextDelta, onToolStart, newDraftID } from "../src/stream.js";
+import { DraftState, onTextDelta, onToolStart, newDraftID, isDmConv, EDIT_BUDGET } from "../src/stream.js";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: string): void {
@@ -83,7 +83,7 @@ check("tail: 4097 → last 4096 (drops oldest)", rOver.action?.text === "a".repe
 check("tail: 4097 → length 4096", rOver.action?.text?.length === 4096);
 
 // ── onToolStart: visible text → Thinking… on the SAME draft_id ───────────────
-const stText: DraftState = { partID: "p1", draftID: 7, text: "Some visible text", lastSentAt: 0 };
+const stText: DraftState = { partID: "p1", draftID: 7, text: "Some visible text", lastSentAt: 0, editsLeft: Infinity };
 const rTool = onToolStart(stText, 1_000_000);
 check("tool start → action", rTool.action !== undefined);
 check("tool start → SAME draftID (animated transition)", rTool.action?.draftID === 7);
@@ -99,7 +99,7 @@ check("tool start after window → action again", rToolLate.action !== undefined
 const rNull = onToolStart(null, 1_000_000);
 check("tool start with null state → no action", rNull.action === undefined);
 check("tool start with null state → state stays null", rNull.state === null);
-const stEmpty: DraftState = { partID: "p1", draftID: 3, text: "", lastSentAt: 0 };
+const stEmpty: DraftState = { partID: "p1", draftID: 3, text: "", lastSentAt: 0, editsLeft: Infinity };
 const rEmpty = onToolStart(stEmpty, 1_000_000);
 check("tool start with empty text → no action", rEmpty.action === undefined);
 check("tool start with empty text → state preserved", rEmpty.state?.draftID === 3 && rEmpty.state?.partID === "p1");
@@ -113,6 +113,47 @@ const f2 = onTextDelta(fTool.state, "p2", "Done!", 1_003_000); // new part id
 check("flow: new part → new draftID", f2.state.draftID === 2);
 check("flow: new part → old text not carried over", f2.state.text === "Done!");
 check("flow: new part → action emitted with fresh text", f2.action?.text === "Done!");
+
+// ── isDmConv: transport selection ─────────────────────────────────────────────
+check("isDmConv: user chat → true", isDmConv("1470953552") === true);
+check("isDmConv: group → false", isDmConv("-1004495820706") === false);
+check("isDmConv: topic conv → false", isDmConv("-1004495820706:12") === false);
+check("isDmConv: dm with topic suffix → true", isDmConv("1470953552:5") === true);
+check("isDmConv: garbage → false", isDmConv("abc") === false);
+
+// ── edit budget (group transport rate-limit protection) ──────────────────────
+// First delta emits immediately (lastSentAt=0 vs real clock), each later delta
+// exactly one throttle-window apart — so every delta below emits until the
+// budget is exhausted.
+let bs = onTextDelta(null, "p1", "a", 1_000_000, 1000, 3);
+let nActs = bs.action ? 1 : 0;
+let t = 1_000_000;
+for (const ch of "bcdefg") {
+  t += 1000;
+  bs = onTextDelta(bs.state, "p1", ch, t, 1000, 3);
+  if (bs.action) nActs += 1;
+}
+check("budget: exactly maxEdits actions emitted (incl. first)", nActs === 3);
+check("budget: exhausted state still accumulates text", bs.state.text === "abcdefg");
+check("budget: exhausted state keeps part/draft id", bs.state.partID === "p1" && bs.state.draftID === 1);
+const bNext = onTextDelta(bs.state, "p1", "h", t + 9_999_999, 1000, 3);
+check("budget: no action after exhaustion", bNext.action === undefined);
+check("budget: text keeps growing after exhaustion", bNext.state.text === "abcdefgh");
+const bNew = onTextDelta(bs.state, "p2", "x", t + 9_999_999, 1000, 3);
+check("budget: new part resets budget and emits", bNew.action !== undefined && bNew.state.editsLeft === 2);
+const bEmpty = onToolStart(bs.state, t + 9_999_999, 1000);
+check("budget: tool start with exhausted budget → no action", bEmpty.action === undefined);
+const bFresh: DraftState = { partID: "p1", draftID: 1, text: "hi", lastSentAt: 0, editsLeft: 1 };
+const bTool = onToolStart(bFresh, 1_000_000, 1000);
+check("budget: tool start consumes the last edit", bTool.action !== undefined && bTool.state?.editsLeft === 0);
+const bTool2 = onToolStart(bTool.state, 2_000_000, 1000);
+check("budget: second tool start blocked after exhaustion", bTool2.action === undefined);
+const infChain: Array<ReturnType<typeof onTextDelta>> = [onTextDelta(null, "p1", "a", 1_000_000, 1000)];
+for (let i = 0; i < 50; i++) {
+  infChain.push(onTextDelta(infChain[infChain.length - 1].state, "p1", "z", (i + 1) * 1000 + 1_000_000, 1000));
+}
+check("default: unlimited budget emits every throttled delta", infChain.every((r) => r.action !== undefined));
+check("EDIT_BUDGET is a sane finite number", Number.isFinite(EDIT_BUDGET) && EDIT_BUDGET >= 10);
 
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
