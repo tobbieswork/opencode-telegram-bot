@@ -42,11 +42,23 @@ export type CallbackQuery = {
   message?: { chat: { id: number }; message_id: number; message_thread_id?: number; is_topic_message?: boolean };
 };
 
+/**
+ * Emitted when the user taps the native stop button on a live streaming draft
+ * (Bot API 10.1+ `sendMessageDraft` with `can_stop`). `message_thread_id` is
+ * present only when the draft was sent into a forum topic.
+ */
+export type MessageGenerationStopped = {
+  chat: { id: number };
+  message_thread_id?: number;
+  draft_id: number;
+};
+
 export type Update = {
   update_id: number;
   message?: Message;
   edited_message?: Message;
   callback_query?: CallbackQuery;
+  stopped_message_generation?: MessageGenerationStopped;
 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -99,6 +111,7 @@ export const TOPIC_COLORS = [0x6fb9f0, 0xffd67e, 0xcb86db, 0x8eee98, 0xff93b2, 0
 const THREAD_TARGETING_METHODS = new Set([
   "sendMessage",
   "sendRichMessage",
+  "sendMessageDraft",
   "sendChatAction",
   "editMessageText",
   "deleteMessage",
@@ -221,6 +234,41 @@ export class Telegram {
       ...opts,
     });
     return res?.message_id ?? -1;
+  }
+
+  /**
+   * Stream a LIVE preview of the in-progress reply (Bot API 10.1+
+   * `sendMessageDraft`). The draft is EPHEMERAL (~30 s) and is wiped
+   * automatically the moment ANY regular message is sent to the chat — so the
+   * final reply clears it with no explicit "clear" call. Re-sending the same
+   * draft_id animates in place; a new draft_id replaces without animation.
+   * `text === ""` renders the client's "Thinking…" placeholder. `canStop` shows
+   * the user a native stop button (→ `stopped_message_generation` update).
+   *
+   * Pure preview layer: best-effort, so EVERY error is swallowed (returns
+   * false) and a failed preview can never break the event loop or the
+   * final-reply path.
+   */
+  async sendMessageDraft(
+    to: ConvKey | number,
+    draftID: number,
+    text: string,
+    opts: { canStop?: boolean } = {},
+  ): Promise<boolean> {
+    try {
+      await this.api("sendMessageDraft", {
+        ...dest(to),
+        draft_id: draftID,
+        text,
+        ...(opts.canStop ? { can_stop: true } : {}),
+      });
+      return true;
+    } catch {
+      // Best-effort preview: a deleted topic / rate limit / bad param must not
+      // throw into the OpenCode event loop. (A "message thread not found" here
+      // still fires onThreadNotFound via the api() layer before we swallow it.)
+      return false;
+    }
   }
 
   /**
@@ -360,7 +408,7 @@ export class Telegram {
           (await this.api<Update[]>("getUpdates", {
             offset: this.offset,
             timeout: 30,
-            allowed_updates: ["message", "callback_query"],
+            allowed_updates: ["message", "callback_query", "stopped_message_generation"],
           }, this.abort.signal)) ?? [];
         if (this.healState) recordSuccess(this.healState);
       } catch (e) {

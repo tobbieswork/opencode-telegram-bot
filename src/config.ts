@@ -90,6 +90,12 @@ export interface Config {
   dnsHealCooldownMs: number;
   /** Send final model replies as native rich Markdown (server-side GFM) instead of hand-rolled HTML. */
   richReplies: boolean;
+  /**
+   * Stream a LIVE preview of in-progress replies via `sendMessageDraft`
+   * (Bot API 10.1+). Pure preview layer: the final-message path is unchanged
+   * (the ephemeral draft is wiped when the real reply is sent). Default OFF.
+   */
+  stream: boolean;
   /** /usage: percentage of the context window at/above which a session is flagged with a warning mark. */
   usageWarnPct: number;
   /** /usage: maximum number of per-session rows to render (the rest are counted, not listed). */
@@ -152,6 +158,8 @@ export function loadConfig(root: string): Config {
     dnsHealCooldownMs: parseIntSetting("OPENCODE_TG_DNS_HEAL_COOLDOWN_MS", 10 * 60_000, 1000),
     // Default OFF: only an explicit "1"/"true" enables rich (server-side GFM) replies.
     richReplies: process.env.OPENCODE_TG_RICH === "1" || process.env.OPENCODE_TG_RICH === "true",
+    // Default OFF: only an explicit "1"/"true" enables live streaming drafts.
+    stream: process.env.OPENCODE_TG_STREAM === "1" || process.env.OPENCODE_TG_STREAM === "true",
     usageWarnPct: parseIntSetting("OPENCODE_TG_USAGE_WARN_PCT", 80, 1),
     usageMaxRows: parseIntSetting("OPENCODE_TG_USAGE_MAX_ROWS", 10, 1),
   };
