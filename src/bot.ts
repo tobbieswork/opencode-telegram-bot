@@ -1357,6 +1357,8 @@ export class Bot {
         return this.cmdVariantSet(conv, arg, state);
       case "/stop":
         return this.cmdStop(conv, state);
+      case "/reboot":
+        return this.cmdReboot(conv);
       case "/status":
         return this.cmdStatus(conv, state);
       case "/context":
@@ -1629,6 +1631,7 @@ export class Bot {
         "/mode — chọn mode bằng nút: build / plan / general / explore",
         "/models — list models · /model &lt;id&gt; — set model",
         "/variants — list/set reasoning variant (default xhigh)",
+        "/agents — list agents · /agent &lt;id&gt; — set agent",
        "",
       "<b>Câu hỏi (questions)</b>",
       "Khi OpenCode cần hỏi bạn, chọn đáp án bằng nút bấm hoặc tự gõ.",
@@ -1669,6 +1672,8 @@ export class Bot {
         c("mode", "Chọn mode: build / plan / general / explore"),
         c("models", "Liệt kê model khả dụng"),
         c("model", "Đặt model (cần id)"),
+        c("agents", "Liệt kê agent khả dụng"),
+        c("agent", "Đặt agent cho phiên này (cần id)"),
         c("variants", "Đặt reasoning variant (vd: xhigh)"),
         c("stop", "Dừng task đang chạy"),
         c("reboot", "Reboot máy (2 bước xác nhận)"),
