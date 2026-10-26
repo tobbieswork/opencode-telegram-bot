@@ -10,6 +10,7 @@ import { McpBridge, BridgeTool } from "./mcp-bridge.js";
 import { addWorktree, diffSummary, gitRoot, gitStatusBrief, mergeWorktree, removeWorktree } from "./worktree.js";
 import { listDirs } from "./fsbrowser.js";
 import { selectPruneable, selectFinishedWorkers, WorkerConv } from "./prune.js";
+import { spawnRequestBody } from "./reactions.js";
 import { buildHandoffPrompt, followUpsFromMessages, respawnName, respawnNotice, shouldRespawnWorker } from "./recovery.js";
 import { esc, trunc, timeAgo, stripTags } from "./format.js";
 import { log, warn } from "./logger.js";
@@ -782,6 +783,19 @@ export class Orchestrator {
   rejectWorkerReport(conv: ConvKey): void {
     const name = this.h.st.peek(conv)?.worker?.name ?? "?";
     this.queueReport(chatOf(conv), `User rejected the report of worker ${name} (👎). Ask or decide next step.`);
+  }
+
+  /**
+   * Reaction UX (🔥): the user wants a WORKER for a message — relay its text to
+   * the MANAGER session (the same queueReport → notifyManager "[Bot event]"
+   * path as worker reports and 👎 rejects). The Manager crafts a self-contained
+   * task and spawns the worker itself: it has the full conversation context a
+   * mechanical relay would lack, and picks the name, directory and agent.
+   * A no-op when the chat has no Manager session (the caller checks
+   * isManagerConv first and tells the user).
+   */
+  relaySpawnRequest(conv: ConvKey, text: string): void {
+    this.queueReport(chatOf(conv), spawnRequestBody(conv, text));
   }
 
   private setStatus(conv: ConvKey, status: WorkerStatus, lastResult?: string): void {

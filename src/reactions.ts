@@ -109,7 +109,6 @@ export type SpawnDecision = "spawn" | "already-processed";
 export function decideSpawn(purpose: string | undefined): SpawnDecision {
   return purpose === "user-msg" ? "already-processed" : "spawn";
 }
-
 /**
  * Pure approve decision for a 👍 on an indexed message:
  *  - purpose must be a worker-done report (anything else: no-op),
@@ -124,35 +123,21 @@ export function decideApprove(purpose: string | undefined, workerBusy: boolean):
 }
 
 /**
- * A valid worker name for a 🔥 spawn, derived from the message text:
- * lower-cased, non-alphanumerics collapsed to dashes, max 24 chars — shaped
- * to the orchestrator's NAME_RE (`[a-z0-9][a-z0-9-]{0,23}`). Unicode (e.g.
- * Vietnamese) collapses to the ASCII letters it contains. Falls back to
- * `fallback` when nothing usable is left.
+ * The "[Bot event]" body the bot relays to the MANAGER when the user reacts
+ * 🔥 on a message: the message text plus the instruction to craft a
+ * self-contained task and spawn the worker. The Manager — not the bot — does
+ * the spawning: it has the full conversation context a worker would lack, and
+ * picks the name, directory and agent itself. The text is capped so a huge
+ * pasted message can't bloat the manager prompt.
  */
-export function spawnNameFromText(text: string, fallback = "task"): string {
-  let slug = text
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 24)
-    .replace(/-+$/g, "");
-  if (!/^[a-z0-9]/.test(slug)) return fallback;
-  slug = slug.replace(/-+$/g, "");
-  return slug || fallback;
-}
-
-/**
- * Pick a unique worker name for a 🔥 spawn: the base name, or `<base>-2`,
- * `<base>-3`, … The base is truncated so the suffixed name stays within the
- * 24-char NAME_RE limit (mirroring recovery.ts' respawnName truncation).
- * Returns undefined when every candidate up to `-9` is taken.
- */
-export function uniqueSpawnName(base: string, isTaken: (name: string) => boolean): string | undefined {
-  if (!isTaken(base)) return base;
-  for (let i = 2; i <= 9; i++) {
-    const name = `${base.slice(0, 21)}-${i}`;
-    if (!isTaken(name)) return name;
-  }
-  return undefined;
+export function spawnRequestBody(conv: string, text: string): string {
+  const t = text.length > 1500 ? `${text.slice(0, 1500)}…` : text;
+  return (
+    `The user reacted 🔥 on a message in ${conv} — they want a WORKER for it. ` +
+    `Message text:\n"""\n${t}\n"""\n` +
+    `Craft a self-contained task from it (you have the full conversation context; the worker ` +
+    `does NOT — include every fact it needs: goal, context, constraints, what "done" means). ` +
+    `Pick a fitting short kebab-case name, the right directory and agent. Spawn it with ` +
+    `tg-bridge_spawn_worker, then tell the user the worker name in one line.`
+  );
 }

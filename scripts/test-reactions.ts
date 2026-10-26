@@ -18,8 +18,7 @@ import {
   pruneReacted,
   decideApprove,
   decideSpawn,
-  spawnNameFromText,
-  uniqueSpawnName,
+  spawnRequestBody,
   REACT_INDEX_CAP,
   REACTED_CAP,
   REACTION_SPAWN,
@@ -110,28 +109,17 @@ function check(name: string, cond: boolean, detail?: string): void {
   check("missing purpose → spawn (legacy entries)", decideSpawn(undefined) === "spawn");
 }
 
-// ── 🔥 worker-name derivation ──────────────────────────────────────────────
+// ── 🔥 manager relay body ────────────────────────────────────────────────
 {
-  check("slug: lowercases + dashes", spawnNameFromText("Fix the Cold Pool UI") === "fix-the-cold-pool-ui");
-  check("slug: collapses repeated non-alphanumerics", spawnNameFromText("a  b   c!!d") === "a-b-c-d");
-  check("slug: Vietnamese → only ascii letters kept", spawnNameFromText("sửa lỗi cold pool") === "s-a-l-i-cold-pool");
-  check("slug: leading digit is valid (NAME_RE)", spawnNameFromText("123 abc") === "123-abc");
-  check("slug: all symbols → fallback", spawnNameFromText("!!! ???") === "task");
-  check("slug: caps at 24 chars, no trailing dash", spawnNameFromText("a very very very very long task name here").length <= 24);
-  check("slug: custom fallback", spawnNameFromText("!!! ???", "job") === "job");
-
-  const taken = new Set(["x"]);
-  check("unique: free base kept", uniqueSpawnName("y", (n) => taken.has(n)) === "y");
-  check("unique: taken base → -2", uniqueSpawnName("x", (n) => taken.has(n)) === "x-2");
-  // precise uniqueness sequence
-  const taken2 = new Set(["x", "x-2"]);
-  check("unique: x taken + x-2 taken → x-3", uniqueSpawnName("x", (n) => taken2.has(n)) === "x-3");
-  const taken3 = new Set(Array.from({ length: 9 }, (_, i) => (i === 0 ? "x" : `x-${i + 1}`)));
-  check("unique: x + all suffixes 2..9 taken → undefined", uniqueSpawnName("x", (n) => taken3.has(n)) === undefined);
-  // long base truncates so the suffixed name stays ≤ 24
-  const long = "a".repeat(30);
-  const got = uniqueSpawnName(long, (n) => n === long);
-  check("unique: long base truncated, suffix fits 24", got !== undefined && got.length <= 24 && got.endsWith("-2"));
+  const body = spawnRequestBody("123:456", "Fix the login bug on the settings page");
+  check("body: names the conv", body.includes("123:456"));
+  check("body: carries the message text", body.includes("Fix the login bug on the settings page"));
+  check("body: asks for a self-contained task", body.includes("self-contained task"));
+  check("body: names the spawn tool", body.includes("tg-bridge_spawn_worker"));
+  check("body: says the user is told afterwards", body.includes("tell the user"));
+  // Long text is capped so a huge paste can't bloat the manager prompt.
+  const longBody = spawnRequestBody("1", "a".repeat(5000));
+  check("body: long text capped (≤ 1500 + ellipsis)", longBody.includes("…") && !longBody.includes("a".repeat(1600)));
 }
 
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);
