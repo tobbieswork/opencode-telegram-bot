@@ -988,10 +988,11 @@ export class Bot {
    * backoff: the 1st reminder fires after `remindBaseMs`, each later one farther
    * out (`base * factor^n`) — deliberately NOT a fixed interval.
    */
-  private startPromptReminder(conv: ConvKey, promptId: string, kind: "form" | "permission", text: string, keyboard?: unknown): void {
+  private startPromptReminder(conv: ConvKey, promptId: string, kind: "form" | "permission", text: string, keyboard?: unknown, messageId?: number): void {
     if (!this.cfg.remind) return;
-    const sched = scheduleForRegistration(this.st.get(conv).pendingPrompts?.[promptId], kind, this.cfg.remindBaseMs, Date.now());
-    const pp = { kind, text, keyboard, ...sched };
+    const prev = this.st.get(conv).pendingPrompts?.[promptId];
+    const sched = scheduleForRegistration(prev, kind, this.cfg.remindBaseMs, Date.now());
+    const pp = { kind, text, keyboard, messageId: messageId ?? prev?.messageId, ...sched };
     this.st.set(conv, { pendingPrompts: { ...this.st.get(conv).pendingPrompts, [promptId]: pp } });
     this.armReminderTimer(conv, promptId);
   }
@@ -1066,12 +1067,23 @@ export class Bot {
     if (!live) return;
     const max = this.cfg.remindMax;
     const sent = pp.remindersSent + 1;
-    // Re-send the ORIGINAL prompt + buttons so the user can just tap to answer.
-    await this.sendHtml(
-      conv,
-      `⏰ <i>Nhắc (${sent}/${max}): câu hỏi/quyền này vẫn đang chờ bạn trả lời — hoặc gõ /stop để bỏ.</i>\n\n${pp.text}`,
-      { reply_markup: pp.keyboard as Keyboard | undefined },
-    ).catch(() => {});
+    // Nudge by EDITING the original card in place (⏰ count line on top) — one
+    // prompt = one message, never a duplicate per nudge. Falls back to a fresh
+    // message only when the original is gone (deleted by the user, too old).
+    const text = `⏰ <i>Nhắc (${sent}/${max}): câu hỏi/quyền này vẫn đang chờ bạn trả lời — hoặc gõ /stop để bỏ.</i>\n\n${pp.text}`;
+    const edited = pp.messageId
+      ? await this.editCardInPlace(conv, pp.messageId, text, pp.keyboard as Keyboard | undefined)
+      : -1;
+    if (edited < 0) {
+      const freshId = await this.tg
+        .sendMessageId(conv, text, { reply_markup: pp.keyboard as Keyboard | undefined })
+        .catch(() => -1);
+      if (freshId > 0) {
+        this.st.set(conv, {
+          pendingPrompts: { ...this.st.get(conv).pendingPrompts, [promptId]: { ...pp, messageId: freshId } },
+        });
+      }
+    }
     if (reminderBudgetExhausted(sent, max)) {
       // Budget exhausted: stop nudging (the prompt stays pending). Keep the entry
       // with the spent count so a restart doesn't hand it a fresh budget.
@@ -2638,6 +2650,21 @@ export class Bot {
     }
   }
 
+  /**
+   * Edit a card in place. "message is not modified" counts as success (the card
+   * is still there and matches); any other failure returns -1 so the caller can
+   * fall back to a fresh message. Returns the message id on success.
+   */
+  private async editCardInPlace(conv: ConvKey, messageId: number, text: string, kb?: Keyboard): Promise<number> {
+    try {
+      await this.tg.editMessageTextStrict(conv, messageId, text, { reply_markup: kb });
+      return messageId;
+    } catch (e) {
+      if (/message is not modified/i.test(String((e as Error)?.message))) return messageId;
+      return -1;
+    }
+  }
+
   /** A new question form appeared — relay its first field to the owning chat. */
   private async onFormCreated(form: any): Promise<void> {
     const sessionID = form.sessionID as string;
@@ -2669,12 +2696,16 @@ export class Bot {
     this.orch.onWaiting(conv);
     this.questionForms.set(formID, qf);
     const v = this.renderQuestion(qf);
-    const messageId = await this.tg.sendMessageId(conv, v.text, { reply_markup: v.keyboard }).catch(() => -1);
+    // Re-registration after a restart (reconcile): the original card is usually
+    // still in the chat — refresh it in place instead of posting a duplicate.
+    const prevId = this.st.get(conv).pendingPrompts?.[formID]?.messageId;
+    let messageId = prevId ? await this.editCardInPlace(conv, prevId, v.text, v.keyboard) : -1;
+    if (messageId < 0) messageId = await this.tg.sendMessageId(conv, v.text, { reply_markup: v.keyboard }).catch(() => -1);
     qf.messageId = messageId;
     // Start nudging if the user doesn't answer (exponential backoff; keyed by form id)
     // — but ONLY when the card was actually sent, else a reminder would re-send
     // buttons that were never delivered.
-    if (messageId > 0) this.startPromptReminder(conv, formID, "form", v.text, v.keyboard);
+    if (messageId > 0) this.startPromptReminder(conv, formID, "form", v.text, v.keyboard, messageId);
   }
 
   /** A form was answered/cancelled out-of-band (e.g. in the TUI) — clean up. */
@@ -2784,8 +2815,8 @@ export class Bot {
         const v = this.renderQuestion(qf);
         await this.tg.editMessageText(conv, messageId, v.text, { reply_markup: v.keyboard });
         // Keep nudging about the NEXT field of the same form (same form id), with
-        // its buttons so the reminder is answerable.
-        this.startPromptReminder(conv, qf.formId, "form", v.text, v.keyboard);
+        // its buttons so the reminder is answerable — on the SAME card.
+        this.startPromptReminder(conv, qf.formId, "form", v.text, v.keyboard, messageId);
       } else {
         // Nothing was shown for the new field: don't keep nudging about the old one.
         this.cancelReminder(conv, qf.formId);
@@ -2850,13 +2881,17 @@ export class Bot {
         [{ text: "❌ Từ chối", callback_data: `perm:${requestID}:reject` }],
       ],
     };
-    const messageId = await this.tg.sendMessageId(conv, lines.join("\n"), { reply_markup: kb }).catch(() => -1);
+    // Re-registration after a restart (reconcile): refresh the original card in
+    // place instead of posting a duplicate permission prompt.
+    const prevId = this.st.get(conv).pendingPrompts?.[requestID]?.messageId;
+    let messageId = prevId ? await this.editCardInPlace(conv, prevId, lines.join("\n"), kb) : -1;
+    if (messageId < 0) messageId = await this.tg.sendMessageId(conv, lines.join("\n"), { reply_markup: kb }).catch(() => -1);
     if (messageId > 0) {
       this.permissionPrompts.set(requestID, { requestID, sessionID, conv, messageId });
       // Start nudging if unanswered — but ONLY when the card was actually sent.
       // A failed send (messageId = -1) would leave a reminder re-sending a card
       // whose buttons are no longer valid (dead buttons).
-      this.startPromptReminder(conv, requestID, "permission", lines.join("\n"), kb);
+      this.startPromptReminder(conv, requestID, "permission", lines.join("\n"), kb, messageId);
     }
   }
 
