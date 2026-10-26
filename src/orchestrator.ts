@@ -26,6 +26,12 @@ export interface Host {
   sendHtml(conv: ConvKey, html: string, opts?: { reply_markup?: Keyboard }): Promise<void>;
   applyModelAndVariant(sessionID: string, state: ChatState): Promise<void>;
   startTyping(conv: ConvKey): void;
+  /**
+   * A conv's Telegram topic is going away (deleted in the UI): cancel its
+   * reminder nudges and any other bot-side in-memory tracking so nothing
+   * keeps firing for a conversation that no longer exists.
+   */
+  onTopicGone?: (conv: ConvKey) => void;
 }
 
 export const MANAGER_AGENT = "tg-manager";
@@ -145,6 +151,14 @@ export class Orchestrator {
   private budget = new Map<ConvKey, number>();
   /** Worker convs whose turn-end we are already processing. */
   private finishing = new Set<ConvKey>();
+  /**
+   * Convs whose Telegram topic was deleted while a worker was still
+   * running/waiting: the work is left alone, but the conv must be purged the
+   * moment the worker ends (Telegram sends no further event — topic deletion
+   * is only OBSERVED via send failures, which stop once the worker is done
+   * and sends nothing more). See onTopicDeleted / onWorkerFinished.
+   */
+  private pendingTopicDelete = new Set<ConvKey>();
   /**
    * Manager convs whose turn is currently running (a user prompt or a bot event
    * like a worker report). Set synchronously in promptManager so two rapid user
@@ -403,6 +417,7 @@ export class Orchestrator {
     if (want === "off") {
       if (!top.manager) return void (await this.h.sendHtml(conv, "Manager đang tắt."));
       if (top.sessionID) await this.h.oc.interrupt(top.sessionID).catch(() => {});
+      this.managerBusy.delete(conv); // the manager's session is being dropped — a late terminal event can't clear the flag
       this.bridgeChats.delete(chat);
       this.h.st.set(chat, { manager: false, sessionID: undefined, agent: undefined, directory: undefined, guided: false });
       await this.h.sendHtml(conv, "🧭 Đã tắt Manager. Chat chính quay lại làm việc như một session bình thường; các worker vẫn giữ nguyên.");
@@ -729,8 +744,17 @@ export class Orchestrator {
     if (this.finishing.has(conv)) return;
     this.finishing.add(conv);
     try {
-      const s = this.h.st.get(conv);
-      const w = s.worker!;
+      const s = this.h.st.peek(conv);
+      const w = s?.worker;
+      if (!w) return; // state already retired (e.g. by a concurrent purge)
+      // Topic deleted in the UI while the worker was running: the detection only
+      // fires on sends, and a finished worker sends nothing more — this is the
+      // moment to retire the conv (see onTopicDeleted).
+      if (this.pendingTopicDelete.has(conv)) {
+        this.pendingTopicDelete.delete(conv);
+        await this.purgeConv(conv);
+        return;
+      }
       if (w.status === "stopped") return; // stopped by the user: no report, nothing to restart
       // The final message can land a moment after the event. Only this turn's
       // reply counts (after the newest user message), never the previous one.
@@ -975,35 +999,75 @@ export class Orchestrator {
    * Fully retire a conversation: remove its git worktree (if any), its OpenCode
    * session, and its state entry. Idempotent — safe when the state is already
    * gone. The worktree is removed before the state is cleared (removal reads the
-   * state); unmerged work is never lost (removeWorktree keeps unmerged branches).
-   * Shared by the /prune confirm and the forum_topic_deleted handler.
+   * state); uncommitted work is committed to the worker branch first, and an
+   * unmerged branch is kept (removeWorktree). A worktree still referenced by
+   * ANOTHER conv (e.g. the respawn replacement after an overflow) is NOT removed.
+   * Returns false when the worktree could not be removed — the state is then
+   * KEPT so /prune can retry, instead of orphaning the worktree and branch.
+   * Shared by the /prune confirm and the deleted-topic detection.
    */
-  private async purgeConv(conv: ConvKey): Promise<void> {
+  private async purgeConv(conv: ConvKey): Promise<boolean> {
     const s = this.h.st.peek(conv);
-    if (!s) return;
+    if (!s) return true; // already gone
     const w = s.worker;
     if (w?.worktree && w.repoRoot) {
-      await removeWorktree(w.repoRoot, w.worktree).catch((e) =>
-        warn(`removeWorktree (${w.name}):`, (e as Error)?.message ?? e),
+      // A replacement worker (overflow respawn) may share this worktree in a new
+      // topic — removing it would delete the directory from under the new worker.
+      const shared = Object.entries(this.h.st.all()).some(
+        ([k, os]) => k !== conv && os?.worker?.worktree?.root === w.worktree!.root,
       );
+      if (shared) {
+        warn(`purgeConv (${conv}): worktree shared with another conv — keeping it`);
+      } else {
+        try {
+          await removeWorktree(w.repoRoot, w.worktree);
+        } catch (e) {
+          warn(`removeWorktree (${w.name}) failed — state kept for /prune retry:`, (e as Error)?.message ?? e);
+          return false;
+        }
+      }
     }
     if (s.sessionID) await this.h.oc.removeSession(s.sessionID).catch(() => {});
+    this.clearConvMemory(conv);
     this.h.st.clear(conv);
+    return true;
+  }
+
+  /** Drop this orchestrator's in-memory per-conv tracking (budget, timers, busy flags). */
+  private clearConvMemory(conv: ConvKey): void {
+    this.budget.delete(conv);
+    this.finishing.delete(conv);
+    this.managerBusy.delete(conv);
+    this.reports.delete(conv);
+    const t = this.reportTimers.get(conv);
+    if (t) {
+      clearTimeout(t);
+      this.reportTimers.delete(conv);
+    }
   }
 
   /**
-   * Called when the user deletes a forum topic in the Telegram UI
-   * (a forum_topic_deleted update). Before this, the bot was blind to it and the
-   * topic's state, OpenCode session, and (for workers) git worktree all became
-   * permanent orphans. Now we retire the conversation. A worker still
-   * running/waiting is left alone so in-flight work isn't destroyed.
+   * The user deleted a forum topic in the Telegram UI. Telegram sends NO event
+   * for this (Bot API 10.3 has no forum_topic_deleted update — verified against
+   * the docs and live): we observe it when a send into the topic fails with
+   * "message thread not found" (Telegram.api → onThreadNotFound). Retire the
+   * conversation. A worker still running/waiting is left alone for in-flight
+   * work and gets purged when it ends (pendingTopicDelete).
    */
   async onTopicDeleted(conv: ConvKey): Promise<void> {
+    if (!String(conv).includes(":")) {
+      // Defensive: topic deletion is observed from a topic send, so this can't
+      // be a top-level chat — but if it ever is, never retire the main chat.
+      warn(`onTopicDeleted: refusing to retire top-level conv ${conv}`);
+      return;
+    }
     const s = this.h.st.peek(conv);
-    if (!s) return; // already gone (deleted twice, or never tracked)
+    if (!s) return; // already gone (repeated send failures are idempotent)
+    this.h.onTopicGone?.(conv);
     const w = s.worker;
     if (w && (w.status === "running" || w.status === "waiting")) {
-      log(`topic deleted for running worker ${w.name} (${conv}) — keeping session+worktree for in-flight work`);
+      this.pendingTopicDelete.add(conv);
+      log(`topic deleted for running worker ${w.name} (${conv}) — purging when the worker ends`);
       return;
     }
     log(`topic deleted for ${conv} — retiring (worker=${w?.name ?? "none"}, session=${s.sessionID ?? "none"}, worktree=${w?.worktree?.branch ?? "none"})`);
@@ -1011,11 +1075,12 @@ export class Orchestrator {
   }
 
   /**
-    * The user confirmed a /prune: delete each listed topic (best-effort, count
-    * failures), retire its OpenCode session, and clear its state entry. A worker
-    * that started running again since the list was shown is skipped.
-    */
-   private async handlePruneCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+   * The user confirmed a /prune: delete each listed topic (best-effort, count
+   * failures), retire its OpenCode session, its git worktree, and its state
+   * entry (purgeConv). A worker that started running again since the list was
+   * shown is skipped; a conv whose worktree couldn't be removed is kept for retry.
+   */
+  private async handlePruneCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
     const id = (cb.data ?? "").split(":")[1];
     const p = this.prunePending.get(id);
     if (!p || p.chat !== chatOf(conv)) {
@@ -1039,11 +1104,11 @@ export class Orchestrator {
       } catch (e) {
         warn("deleteForumTopic:", (e as Error)?.message);
       }
-      await this.purgeConv(k); // worktree + session + state (was leaking the worktree before)
-      ok++;
+      if (await this.purgeConv(k)) ok++; // worktree + session + state (keeps state on worktree failure)
+      else skipped++;
     }
     await this.h.tg.answerCallbackQuery(cb.id);
-    const msg = `🧹 Đã xoá ${ok}/${p.convs.length} topic${skipped ? ` · bỏ qua ${skipped} (đang chạy)` : ""}.`;
+    const msg = `🧹 Đã xoá ${ok}/${p.convs.length} topic${skipped ? ` · bỏ qua ${skipped} (đang chạy hoặc chưa xoá được worktree)` : ""}.`;
     if (messageId) await this.h.tg.editMessageText(conv, messageId, msg).catch(() => {});
     else await this.h.sendHtml(conv, msg).catch(() => {});
   }

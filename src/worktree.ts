@@ -113,10 +113,17 @@ export async function mergeWorktree(
 }
 
 /**
- * Remove a worker's worktree. The branch is deleted only if it is fully
- * merged (`branch -d`), so unmerged work is never lost.
+ * Remove a worker's worktree. Uncommitted work is COMMITTED to the worker
+ * branch first (the same safeguard mergeWorktree applies), so --force never
+ * destroys it; the branch is then deleted only if fully merged (`branch -d`),
+ * so the committed work survives either way — at least until the branch is
+ * merged, and recoverable from it until then.
  */
 export async function removeWorktree(repoRoot: string, wt: { root: string; branch: string }): Promise<string> {
+  if (await git(wt.root, ["status", "--porcelain"])) {
+    await git(wt.root, ["add", "-A"]);
+    await git(wt.root, ["commit", "-m", `tg: preserve uncommitted work before worktree removal`]);
+  }
   await git(repoRoot, ["worktree", "remove", "--force", wt.root]);
   const kept = await git(repoRoot, ["branch", "-d", wt.branch]).then(
     () => false,

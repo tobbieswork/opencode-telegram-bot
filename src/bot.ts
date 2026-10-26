@@ -183,7 +183,14 @@ export class Bot {
       sendHtml: (conv, html, opts) => this.sendHtml(conv, html, opts),
       applyModelAndVariant: (sid, state) => this.applyModelAndVariant(sid, state),
       startTyping: (conv) => this.startTyping(conv),
+      onTopicGone: (conv) => this.cancelAllReminders(conv),
     });
+    // A forum topic deleted in the UI sends no Telegram event (Bot API 10.3 has
+    // none) — the only signal is a send into it failing with "message thread
+    // not found". Retire the conversation (state/session/worktree) on first hit.
+    this.tg.onThreadNotFound = (chatId, threadId) => {
+      void this.orch.onTopicDeleted(convKey(chatId, threadId)).catch((e) => warn("onTopicDeleted:", (e as Error)?.message ?? e));
+    };
   }
 
   /** Begin relaying OpenCode question forms to Telegram. Called once from index.ts. */
@@ -475,15 +482,6 @@ export class Bot {
   }
 
   async handle(u: Update): Promise<void> {
-    if (u.forum_topic_deleted) {
-      // The user deleted a forum topic in the Telegram UI. We were previously blind to
-      // this (only message + callback_query were subscribed), so its state, session, and
-      // worktree became permanent orphans. Retire the conversation now.
-      const ft = u.forum_topic_deleted;
-      const conv = convKey(ft.chat.id, ft.message_thread_id);
-      await this.orch.onTopicDeleted(conv).catch((e) => error(`onTopicDeleted (${conv}):`, (e as Error)?.message ?? e));
-      return;
-    }
     if (u.callback_query) {
       await this.handleCallback(u.callback_query);
       return;
@@ -1000,6 +998,7 @@ export class Bot {
   private async stopCurrent(conv: ConvKey, interrupt = false): Promise<void> {
     this.stopTyping(conv);
     this.clearActivity(conv);
+    this.orch.clearManagerBusy(conv); // /new, /clear, /stop all drop the manager's session — never let a late terminal event wedge the flag
     const ac = this.inflight.get(conv);
     if (ac) ac.abort();
     const sid = this.st.peek(conv)?.sessionID;
@@ -2009,7 +2008,6 @@ export class Bot {
   private async cmdStop(conv: ConvKey, state: ChatState): Promise<void> {
     await this.stopCurrent(conv);
     this.cancelAllReminders(conv);
-    this.orch.clearManagerBusy(conv); // never let a stuck busy flag block the Manager chat
     if (state.sessionID) await this.oc.interrupt(state.sessionID).catch(() => {});
     await this.tg.sendMessage(conv, "⏹️ Interrupted.");
   }

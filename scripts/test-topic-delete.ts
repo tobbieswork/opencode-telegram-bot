@@ -1,9 +1,14 @@
 /**
- * Integration test for the topic-deletion cleanup (orchestrator.onTopicDeleted
- * + purgeConv). Builds a throwaway git repo, gives a worker a real worktree,
- * then simulates a forum_topic_deleted and asserts the worktree is removed, the
- * session is retired, and the state entry is cleared — while a running worker
- * is left untouched. No live bot/service needed.
+ * Integration test for the deleted-topic cleanup (orchestrator.onTopicDeleted
+ * + purgeConv + pendingTopicDelete). Telegram sends NO event for a topic
+ * deleted in the UI (Bot API 10.3 has no forum_topic_deleted) — the bot
+ * observes it when a send into the topic fails with "message thread not
+ * found". This test drives onTopicDeleted directly (that is what the
+ * Telegram.api onThreadNotFound hook calls) and asserts: the worktree is
+ * removed (uncommitted work committed to the worker branch first), the session
+ * is retired, the state is cleared — while a running worker is deferred and
+ * purged when it ends, a worktree shared with another conv is kept, and a
+ * failed worktree removal keeps the state for /prune retry.
  *
  * Run:  npx tsx scripts/test-topic-delete.ts
  */
@@ -80,7 +85,7 @@ async function main(): Promise<void> {
     }
     check("second call on a gone conv is a no-op", !threw);
 
-    // ── Case 3: a RUNNING worker → left completely untouched ──
+    // ── Case 3: a RUNNING worker → deferred; purged when it ends ──
     const wt2 = await addWorktree(repo, repo, "run-worker");
     const conv2 = "1:101";
     st.set(conv2, {
@@ -91,6 +96,12 @@ async function main(): Promise<void> {
     check("running worker: worktree KEPT", existsSync(wt2.root));
     check("running worker: state KEPT", st.peek(conv2) !== undefined);
     check("running worker: session NOT retired", !removed.includes("ses_b"));
+    // The worker ends → the deferred purge fires.
+    orch.onExecution(conv2, "session.execution.succeeded");
+    for (let i = 0; i < 50 && st.peek(conv2) !== undefined; i++) await new Promise((r) => setTimeout(r, 50));
+    check("running worker after end: state purged", st.peek(conv2) === undefined);
+    check("running worker after end: worktree removed", !existsSync(wt2.root));
+    check("running worker after end: session retired", removed.includes("ses_b"));
 
     // ── Case 4: a finished worker WITHOUT a worktree (plain session) ──
     const conv3 = "1:102";
@@ -108,8 +119,61 @@ async function main(): Promise<void> {
     }
     check("unknown conv: no-op, no throw", !threw2);
 
-    // tidy up the running worker's worktree (the repo is deleted wholesale next)
-    await removeWorktree(repo, wt2).catch(() => {});
+    // ── Case 6: worktree SHARED with another conv (overflow respawn) → kept ──
+    const wt3 = await addWorktree(repo, repo, "shared-worker");
+    const conv4 = "1:103"; // the dead original worker
+    const conv5 = "1:104"; // the respawn replacement still using the worktree
+    for (const [c, name, status] of [
+      [conv4, "shared-worker", "failed"],
+      [conv5, "shared-worker2", "running"],
+    ] as const) {
+      st.set(c, {
+        sessionID: `ses_${name}`,
+        worker: { name, status, spawnedBy: "user", repoRoot: repo, worktree: wt3, createdAt: 0, updatedAt: 0 },
+      });
+    }
+    await orch.onTopicDeleted(conv4); // the user deletes the dead worker's topic
+    check("shared worktree: dir KEPT (other conv still uses it)", existsSync(wt3.root));
+    check("shared worktree: other conv untouched", st.peek(conv5)?.worker?.worktree?.root === wt3.root);
+    check("shared worktree: dead conv state cleared", st.peek(conv4) === undefined);
+
+    // ── Case 7: DIRTY worktree → uncommitted work committed to the branch first ──
+    const wt4 = await addWorktree(repo, repo, "dirty-worker");
+    writeFileSync(join(wt4.root, "f.txt"), "MODIFIED by worker"); // tracked file changed
+    writeFileSync(join(wt4.root, "scratch.txt"), "untracked work"); // new file
+    const conv6 = "1:105";
+    st.set(conv6, {
+      sessionID: "ses_dirty",
+      worker: { name: "dirty-worker", status: "done", spawnedBy: "user", repoRoot: repo, worktree: wt4, createdAt: 0, updatedAt: 0 },
+    });
+    await orch.onTopicDeleted(conv6);
+    check("dirty worktree: dir removed", !existsSync(wt4.root));
+    const branchKept = (await git(repo, ["branch", "--list", wt4.branch])).includes(wt4.branch);
+    check("dirty worktree: branch kept (carries the work)", branchKept);
+    const recovered = await git(repo, ["show", `${wt4.branch}:scratch.txt`]).catch(() => "");
+    check("dirty worktree: uncommitted file recoverable from branch", recovered === "untracked work");
+    const recoveredMod = await git(repo, ["show", `${wt4.branch}:f.txt`]).catch(() => "");
+    check("dirty worktree: modified file recoverable from branch", recoveredMod === "MODIFIED by worker");
+
+    // ── Case 8: worktree removal FAILS → state KEPT for /prune retry ──
+    const wt5 = await addWorktree(repo, repo, "broken-worker");
+    const conv7 = "1:106";
+    st.set(conv7, {
+      sessionID: "ses_broken",
+      worker: { name: "broken-worker", status: "done", spawnedBy: "user", repoRoot: join(base, "no-such-repo"), worktree: wt5, createdAt: 0, updatedAt: 0 },
+    });
+    await orch.onTopicDeleted(conv7);
+    check("failed removal: state KEPT (retryable via /prune)", st.peek(conv7) !== undefined);
+    check("failed removal: worktree still there", existsSync(wt5.root));
+
+    // ── Case 9: top-level chat conv is never retired ──
+    const convChat = "1"; // no ":" → top level
+    st.set(convChat, { sessionID: "ses_mgr", manager: true });
+    await orch.onTopicDeleted(convChat);
+    check("top-level conv: refused, state kept", st.peek(convChat)?.sessionID === "ses_mgr");
+
+    // tidy up leftover worktrees (the repo is deleted wholesale next)
+    for (const wt of [wt3, wt5]) await removeWorktree(repo, wt).catch(() => {});
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

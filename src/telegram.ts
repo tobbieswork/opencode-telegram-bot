@@ -42,19 +42,11 @@ export type CallbackQuery = {
   message?: { chat: { id: number }; message_id: number; message_thread_id?: number; is_topic_message?: boolean };
 };
 
-/** A forum topic the user deleted in the Telegram UI (forum_topic_deleted). */
-export type ForumTopicDeleted = {
-  chat: { id: number; type?: string };
-  message_thread_id?: number;
-  date?: number;
-};
-
 export type Update = {
   update_id: number;
   message?: Message;
   edited_message?: Message;
   callback_query?: CallbackQuery;
-  forum_topic_deleted?: ForumTopicDeleted;
 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -106,6 +98,17 @@ export class Telegram {
   private healState: HealState | null = null;
   private onDnsHeal?: PollOptions["onDnsHeal"];
 
+  /**
+   * A forum topic the user deleted in the Telegram UI. Telegram has NO event
+   * for this (Bot API 10.3 has no `forum_topic_deleted` update and no deleted
+   * service message — verified against core.telegram.org docs + live probe),
+   * so a dead topic can only be observed the moment a send to it fails with
+   * "message thread not found". Set this and the api() layer fires it with the
+   * topic's chat + thread id before rethrowing, so the caller can retire the
+   * conversation (state, session, worktree) instead of leaking it forever.
+   */
+  onThreadNotFound?: (chatId: number, threadId: number) => void;
+
   constructor(private token: string, private healCfg?: DnsHealConfig) {}
 
   stop(): void {
@@ -136,6 +139,19 @@ export class Telegram {
     }
     const json: any = await res.json().catch(() => null);
     if (!json?.ok) {
+      // A deleted forum topic: every send into it fails with this. The user
+      // already made their choice in the UI — let the caller retire the conv.
+      if (
+        this.onThreadNotFound &&
+        typeof (body as any)?.message_thread_id === "number" &&
+        /message thread not found/i.test(json?.description ?? "")
+      ) {
+        try {
+          this.onThreadNotFound((body as any).chat_id, (body as any).message_thread_id);
+        } catch {
+          /* the callback must never break the send path */
+        }
+      }
       const err: any = new Error(`Telegram ${method} failed: ${json?.description ?? `HTTP ${res.status}`}`);
       err.code = json?.error_code ?? res.status;
       err.retryAfter = json?.parameters?.retry_after;
@@ -318,7 +334,7 @@ export class Telegram {
           (await this.api<Update[]>("getUpdates", {
             offset: this.offset,
             timeout: 30,
-            allowed_updates: ["message", "callback_query", "forum_topic_deleted"],
+            allowed_updates: ["message", "callback_query"],
           }, this.abort.signal)) ?? [];
         if (this.healState) recordSuccess(this.healState);
       } catch (e) {
