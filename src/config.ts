@@ -100,6 +100,17 @@ export interface Config {
   usageWarnPct: number;
   /** /usage: maximum number of per-session rows to render (the rest are counted, not listed). */
   usageMaxRows: number;
+  /**
+   * Watch the configured GitHub repo for PR activity (merged / new review
+   * comments / CI status / reviews) and post ONE line to the main chat per
+   * change. GitHub has no self-hosted webhook here, so this polls on an
+   * interval. Default OFF: enable with OPENCODE_TG_PR_WATCH=1.
+   */
+  prWatch: boolean;
+  /** The GitHub repo to watch, "owner/repo" (empty = watcher stays off even if enabled). */
+  prWatchRepo: string;
+  /** Poll interval for the PR watcher, ms (floor 60s). */
+  prWatchIntervalMs: number;
 }
 
 export function loadConfig(root: string): Config {
@@ -162,6 +173,9 @@ export function loadConfig(root: string): Config {
     stream: process.env.OPENCODE_TG_STREAM === "1" || process.env.OPENCODE_TG_STREAM === "true",
     usageWarnPct: parseIntSetting("OPENCODE_TG_USAGE_WARN_PCT", 80, 1),
     usageMaxRows: parseIntSetting("OPENCODE_TG_USAGE_MAX_ROWS", 10, 1),
+    prWatch: process.env.OPENCODE_TG_PR_WATCH === "1" || process.env.OPENCODE_TG_PR_WATCH === "true",
+    prWatchRepo: process.env.OPENCODE_TG_PR_WATCH_REPO?.trim() ?? "",
+    prWatchIntervalMs: parseIntSetting("OPENCODE_TG_PR_WATCH_INTERVAL_MS", 5 * 60_000, 60_000),
   };
   const agent = process.env.OPENCODE_DEFAULT_AGENT?.trim();
   if (agent) cfg.defaultAgent = agent;
