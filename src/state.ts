@@ -87,6 +87,14 @@ export interface ChatState {
    * needed on /new, /use, or /stop.
    */
   continueOfferedTurn?: string;
+  /**
+   * Scratchpad note written via /note while the agent is busy (see src/notes.ts).
+   * Injected into the model's system context on the next user turn, retired on
+   * the turn after that. notesStage: "pending" = not yet shown, "shown" = the
+   * model has seen it on the previous turn.
+   */
+  notes?: string;
+  notesStage?: "pending" | "shown";
   /** Present when this conversation is a worker topic. */
   worker?: WorkerInfo;
   /**
