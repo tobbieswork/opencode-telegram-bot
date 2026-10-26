@@ -24,6 +24,49 @@ export interface UsageRow {
   cumOutput: number;
 }
 
+/** Model + context of the newest LLM step, extracted from a message list. */
+export interface AssistantInfo {
+  model?: { id: string; providerID: string };
+  /**
+   * The prompt size of that step in tokens: input + cache.read + cache.write.
+   * All three are part of the prompt sent to the model, so all three count
+   * against the context window (a step that just wrote the cache has a large
+   * cache.write and a small input — reading only input+read would show 5%
+   * where the prompt was actually near the limit).
+   */
+  context?: number;
+}
+
+/**
+ * Model + context of the NEWEST assistant message carrying them, from a raw
+ * `message.list` array in ANY order. The API's ordering is not a stable
+ * contract (1.x returned oldest-first, 2.x newest-first), so the list is
+ * sorted by time.created here instead of trusting positions. The newest
+ * assistant message in flight may not have token stats yet — in that case the
+ * context is the newest COMPLETED step, which is exactly "how full is the
+ * context right now" (the in-flight step is at least that big).
+ */
+export function newestAssistantInfo(msgs: any[]): AssistantInfo {
+  const created = (m: any) => m?.info?.time?.created ?? m?.time?.created ?? 0;
+  const sorted = [...(msgs ?? [])].sort((a, b) => created(b) - created(a));
+  const out: AssistantInfo = {};
+  for (const m of sorted) {
+    const info = m?.info ?? m;
+    if (info?.type !== "assistant" && info?.role !== "assistant") continue;
+    if (!out.model && info?.model?.id) out.model = { id: info.model.id, providerID: info.model.providerID ?? "?" };
+    if (out.context === undefined) {
+      const t = info?.tokens ?? m?.tokens;
+      const n =
+        (typeof t?.input === "number" ? t.input : 0) +
+        (typeof t?.cache?.read === "number" ? t.cache.read : 0) +
+        (typeof t?.cache?.write === "number" ? t.cache.write : 0);
+      if (n > 0) out.context = n;
+    }
+    if (out.model && out.context !== undefined) break;
+  }
+  return out;
+}
+
 export interface UsageOpts {
   /** Percentage at/above which a row gets the warning mark (default 80). */
   warnPct?: number;
@@ -43,7 +86,9 @@ export function pctOf(current?: number, limit?: number): number | undefined {
 /** Compact token notation: 980 → "980", 12345 → "12.3K", 2400000 → "2.4M". */
 export function fmtTok(n: number): string {
   if (!Number.isFinite(n) || n < 0) return "0";
-  if (n >= 1_000_000) return trimTrailing((n / 1_000_000).toFixed(1)) + "M";
+  // Round BEFORE choosing the unit: 999 950 is closer to 1M than to 1000K,
+  // and toFixed(1) of 999.95 would otherwise print "1000K".
+  if (n >= 999_500) return trimTrailing((n / 1_000_000).toFixed(1)) + "M";
   if (n >= 1_000) return trimTrailing((n / 1_000).toFixed(1)) + "K";
   return String(Math.round(n));
 }
