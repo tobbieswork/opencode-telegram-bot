@@ -27,6 +27,11 @@ export interface Host {
   applyModelAndVariant(sessionID: string, state: ChatState): Promise<void>;
   startTyping(conv: ConvKey): void;
   /**
+   * Start of a user-initiated manager turn: surface /note scratchpad notes into
+   * the session's instruction entries (or retire last turn's). Best-effort.
+   */
+  prepareNotes?(conv: ConvKey, sid: string): Promise<void>;
+  /**
    * A conv's Telegram topic is going away (deleted in the UI): fully stop any
    * in-flight turn for it (typing, activity, inflight abort + server interrupt)
    * and cancel its reminder nudges, so nothing keeps firing for a conversation
@@ -955,6 +960,7 @@ export class Orchestrator {
     }
     this.managerBusy.add(conv); // mark before the await so a 2nd message can't slip through
     this.budget.set(conv, DISPATCH_BUDGET); // the user spoke: refill the dispatch budget
+    await this.h.prepareNotes?.(conv, this.h.st.get(conv).sessionID!); // /note: surface pending notes this turn
     try {
       await this.h.oc.prompt(this.h.st.get(conv).sessionID!, text);
     } catch (e) {

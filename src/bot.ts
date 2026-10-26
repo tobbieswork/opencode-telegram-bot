@@ -16,6 +16,7 @@ import { CONTINUE_PROMPT, CONTINUE_BUTTON_LABEL, shouldOfferContinue, continueCa
 import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, SAFE_REBOOT_BIN, rebootTokenFile, buildTokenLine, rebootGoData, isRebootConfirmFresh } from "./uptime.js";
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
 import { UsageRow, formatUsageReport } from "./usage.js";
+import { appendNote, dropNotes, noteEntryText, prepareNotes, showNotes } from "./notes.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
 import { log, warn, error } from "./logger.js";
 
@@ -62,6 +63,8 @@ const QUESTIONS_PREAMBLE =
 
 /** Key under which the per-session language instruction is stored (namespaced `api/<key>`). */
 const LANGUAGE_INSTRUCTION_KEY = "tgbot.language";
+/** Instruction-entry key for /note scratchpad notes (see src/notes.ts). */
+const NOTES_KEY = "tgbot.notes";
 /** Injected per-session so the model keeps the user's language and does not leak CJK. */
 const LANGUAGE_INSTRUCTION =
   "Always reply in the SAME language the user wrote in, throughout the entire answer. Do NOT " +
@@ -183,6 +186,7 @@ export class Bot {
       cfg,
       sendHtml: (conv, html, opts) => this.sendHtml(conv, html, opts),
       applyModelAndVariant: (sid, state) => this.applyModelAndVariant(sid, state),
+      prepareNotes: (conv, sid) => this.prepareNotesTurn(conv, sid),
       startTyping: (conv) => this.startTyping(conv),
       onTopicGone: async (conv) => {
         // The topic is gone and the conv is being purged NOW (not the deferred
@@ -841,6 +845,8 @@ export class Bot {
         return this.cmdHistory(conv, state);
       case "/clear":
         return this.cmdClear(conv, state);
+      case "/note":
+        return this.cmdNote(conv, arg);
       default:
         return this.tg.sendMessage(conv, `Unknown command: ${esc(cmd)}\nSend /help`);
     }
@@ -892,6 +898,8 @@ export class Bot {
         }
         if (state.guidedLanguageSession === sid) this.st.set(conv, { guidedLanguageSession: undefined });
       }
+      // Scratchpad notes (/note): retire last turn's notes or surface pending ones.
+      await this.prepareNotesTurn(conv, sid);
       // Inject the "ask via question tool" preamble once per session so the agent
       // knows it is headless and should surface decisions as answerable questions.
       let promptText = text;
@@ -1076,6 +1084,7 @@ export class Bot {
        "",
        "<b>Control</b>",
         "/stop — interrupt the running task",
+        "/note [ghi chú] — ghi lại thông tin khi agent đang bận (agent đọc ở lượt tiếp theo)",
         "/context — photo of the current session (usage + files touched)",
         "/usage — context pressure per session (current vs window, near-limit warnings)",
         "/history — show recent messages",
@@ -1145,8 +1154,49 @@ export class Bot {
     const sessionID = await this.oc.createSession(dir);
     await this.applyModelAndVariant(sessionID, state);
     if (state.agent) await this.oc.setAgent(sessionID, state.agent).catch((e) => warn("setAgent:", e?.message));
-    this.st.set(conv, { sessionID, directory: dir });
+    this.st.set(conv, { sessionID, directory: dir, ...dropNotes() }); // a fresh session must not inherit pending notes
     await this.tg.sendMessage(conv, `🆕 New session <code>${sessionID}</code>\ndir: <code>${esc(dir)}</code>`);
+  }
+
+  /**
+   * `/note [text]` — jot down information while the agent is busy. Without a
+   * text, show the pending notes. The note reaches the model through an
+   * instruction entry at the start of the next user-initiated turn and retires
+   * on the turn after that (see src/notes.ts).
+   */
+  private async cmdNote(conv: ConvKey, arg: string): Promise<void> {
+    const text = arg.trim();
+    if (!text) {
+      const pending = showNotes(this.st.get(conv));
+      await this.tg.sendMessage(conv, pending ? `📝 Ghi chú đang chờ:\n${esc(pending)}` : "Chưa có ghi chú nào. Dùng: /note <nội dung>");
+      return;
+    }
+    const cur = this.st.get(conv);
+    const next = appendNote(cur, text, Date.now());
+    this.st.set(conv, next);
+    const sid = cur.sessionID; // appendNote spreads the full state, so sessionID is unchanged
+    if (sid) {
+      // Best-effort immediate PUT so the note is in context by the time the next
+      // turn starts; prepareNotesTurn re-puts at turn start anyway (self-healing).
+      await this.oc.setInstruction(sid, NOTES_KEY, noteEntryText(next.notes!)).catch((e) => warn("note put:", (e as Error).message));
+    }
+    await this.tg.sendMessage(conv, "📝 Đã ghi — agent sẽ xem ở lượt tiếp theo.");
+  }
+
+  /**
+   * Start of a user-initiated turn: retire notes already shown last turn, or make
+   * pending notes visible in this turn's system context. Never throws — a notes
+   * failure must not break the turn.
+   */
+  private async prepareNotesTurn(conv: ConvKey, sid: string): Promise<void> {
+    try {
+      const prep = prepareNotes(this.st.get(conv));
+      if (prep.put || prep.remove) this.st.set(conv, prep.state);
+      if (prep.put) await this.oc.setInstruction(sid, NOTES_KEY, prep.put);
+      else if (prep.remove) await this.oc.removeInstruction(sid, NOTES_KEY);
+    } catch (e) {
+      warn("notes turn prep:", (e as Error).message);
+    }
   }
 
   private async cmdList(conv: ConvKey): Promise<void> {
