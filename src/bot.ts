@@ -3,15 +3,32 @@ import { existsSync, statSync, readFileSync, mkdirSync, writeFileSync } from "no
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
-import { Telegram, Update, CallbackQuery, Message, MessageGenerationStopped } from "./telegram.js";
+import { Telegram, Update, CallbackQuery, Message, MessageGenerationStopped, MessageReactionUpdated } from "./telegram.js";
 import { OpenCodeCtl, newMessageID, assistantText, ModelInfo, SessionBrief } from "./opencode.js";
-import { StateManager, ChatState, MACHINE_STATE_KEY } from "./state.js";
-import { ConvKey, convKey, chatOf } from "./conv.js";
+import { StateManager, ChatState, MsgPurpose, MACHINE_STATE_KEY } from "./state.js";
+import { ConvKey, convKey, chatOf, parseConv } from "./conv.js";
 import { Orchestrator } from "./orchestrator.js";
 import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure } from "./format.js";
 import { richMarkdownChunks } from "./rich.js";
 import { scheduleForRegistration, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
+import {
+  classifyAction,
+  decideApprove,
+  indexKey,
+  reactedKey,
+  alreadyReacted,
+  pruneIndex,
+  pruneReacted,
+  spawnNameFromText,
+  uniqueSpawnName,
+  REACT_INDEX_CAP,
+  REACTED_CAP,
+  REACT_TEXT_MAX,
+  REACTION_THINK,
+  REACTION_CELEBRATE,
+  REACTION_FAIL,
+} from "./reactions.js";
 import { CONTINUE_PROMPT, CONTINUE_BUTTON_LABEL, shouldOfferContinue, continueCallbackData, parseContinueData, alreadyOfferedContinue } from "./continue.js";
 import { PrSnapshot, PrState, diffSnapshots, renderEvent } from "./pr-watch.js";
 import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, SAFE_REBOOT_BIN, rebootTokenFile, buildTokenLine, rebootGoData, isRebootConfirmFresh } from "./uptime.js";
@@ -207,6 +224,8 @@ export class Bot {
   private modelPickers = new Map<ConvKey, { models: ModelInfo[]; page: number }>();
   /** The user's most recent top-level chat, for proactive notices (e.g. DNS heal). */
   private lastActiveConv?: ConvKey;
+  /** Reaction UX: index keys already logged as "not indexed", so a reaction storm doesn't spam the log. */
+  private missingIdxLogged = new Set<string>();
 
   /** Worker topics + the Manager agent (multi-session layer). */
   private orch: Orchestrator;
@@ -250,6 +269,8 @@ export class Bot {
     this.tg.onThreadNotFound = (chatId, threadId) => {
       void this.orch.onTopicDeleted(convKey(chatId, threadId)).catch((e) => warn("onTopicDeleted:", (e as Error)?.message ?? e));
     };
+    // Reaction UX (OPENCODE_TG_REACT): user reactions on indexed messages.
+    this.tg.onMessageReaction = (ev) => this.onMessageReaction(ev);
   }
 
   /** Begin relaying OpenCode question forms to Telegram. Called once from index.ts. */
@@ -578,6 +599,10 @@ export class Bot {
     // Remember the user's top-level chat so proactive notices (e.g. DNS heal)
     // have a destination even mid-polling-failure.
     this.lastActiveConv = chatOf(conv);
+    // Reaction UX: index every user message so a reaction on it can be
+    // resolved (the update carries no topic info) — and give the user a quick
+    // "got it" 🤔 when a real prompt (not a command) starts a turn.
+    if (msg.message_id) this.indexUserMessage(conv, msg.message_id, text);
     const state = this.st.get(conv);
     if (!state.directory) {
       // A topic the user opened by hand starts where the chat's main session works
@@ -587,9 +612,14 @@ export class Bot {
     }
 
     if (text.startsWith("/")) await this.handleCommand(conv, text, state);
-    else if (await this.handleFormText(conv, text)) return;
-    else if (state.manager) await this.orch.promptManager(conv, text);
-    else await this.runPrompt(conv, text, state);
+    else {
+      // Body language (feature C): the bot thinks on a new prompt. Best-effort,
+      // never affects the dispatch.
+      this.bodyReact(conv, msg.message_id, REACTION_THINK);
+      if (await this.handleFormText(conv, text)) return;
+      else if (state.manager) await this.orch.promptManager(conv, text);
+      else await this.runPrompt(conv, text, state, msg.message_id);
+    }
   }
 
   // ── PR watcher (watched GitHub repo → one line per new event) ─────────────
@@ -744,25 +774,212 @@ export class Bot {
    * GFM, ~32 768-char limit) — one message unless it is a rare >30k tail — and
    * fall back to HTML per-message on error. Otherwise hand-render Markdown as
    * Telegram HTML (4 096-char limit). The quiet meta footer is a separate
-   * message (see runPrompt) and is unaffected here. */
+   * message (see runPrompt) and is unaffected here.
+   *
+   * Reaction UX: every chunk's message_id is indexed (purpose "reply", or
+   * "worker-done" when the conv is a worker topic) so a reaction on it can be
+   * resolved; a worker that has just finished gets a 🎉 on its report.
+   */
   private async sendReply(conv: ConvKey, text: string): Promise<void> {
     const clean = stripTags(text ?? "");
     if (!clean) return;
+    const worker = this.st.peek(conv)?.worker;
+    const purpose: MsgPurpose = worker ? "worker-done" : "reply";
+    // Body language (feature C): celebrate ONLY the report of a worker that
+    // has already settled to "done" (the settle races the relay; when the
+    // status isn't done yet this is simply skipped — best-effort by design).
+    const celebrate = worker?.status === "done";
+    let lastId = -1;
     if (this.cfg.richReplies) {
       for (const c of richMarkdownChunks(clean)) {
         try {
-          await this.tg.sendRich(conv, c);
+          lastId = await this.tg.sendRich(conv, c);
         } catch (e) {
           // Per-message graceful fallback: retry THIS chunk through the existing
           // HTML path (mdToHtmlChunks + sendMessage) so a rich parse/method error
           // costs only this message, never a lost reply.
           warn(`sendRich failed (${(e as Error)?.message ?? e}) — falling back to HTML for one chunk`);
           for (const h of mdToHtmlChunks(c, this.cfg.replyMaxLen)) await this.tg.sendMessage(conv, h);
+          lastId = -1;
         }
+        this.indexSent(conv, lastId, c, purpose);
+      }
+      this.celebrateWorkerDone(conv, lastId, celebrate);
+      return;
+    }
+    for (const c of mdToHtmlChunks(clean, this.cfg.replyMaxLen)) {
+      lastId = await this.tg.sendMessageId(conv, c);
+      this.indexSent(conv, lastId, c, purpose);
+    }
+    this.celebrateWorkerDone(conv, lastId, celebrate);
+  }
+
+  /**
+   * Reaction UX: index a message we just sent, so a user reaction on it can be
+   * resolved to a conv/purpose. No-op when the flag is off or the send yielded
+   * no message id. Prunes on every write (the cap keeps state.json small).
+   */
+  private indexSent(conv: ConvKey, messageId: number, text: string, purpose: MsgPurpose): void {
+    if (!this.cfg.react || !Number.isInteger(messageId) || messageId < 0) return;
+    const { chatId } = parseConv(conv);
+    const m = this.st.peek(MACHINE_STATE_KEY) ?? {};
+    const idx = {
+      ...(m.msgIndex ?? {}),
+      [indexKey(chatId, messageId)]: {
+        conv,
+        purpose,
+        ...(purpose === "worker-done" ? { workerConv: conv } : {}),
+        text: text.slice(0, REACT_TEXT_MAX),
+        ts: Date.now(),
+      },
+    };
+    this.st.set(MACHINE_STATE_KEY, { msgIndex: pruneIndex(idx, REACT_INDEX_CAP) });
+  }
+
+  /** Reaction UX: index an incoming user message (see indexSent). */
+  private indexUserMessage(conv: ConvKey, messageId: number, text: string): void {
+    if (!this.cfg.react || !text) return;
+    const { chatId } = parseConv(conv);
+    const m = this.st.peek(MACHINE_STATE_KEY) ?? {};
+    const idx = {
+      ...(m.msgIndex ?? {}),
+      [indexKey(chatId, messageId)]: { conv, purpose: "user-msg" as MsgPurpose, text: text.slice(0, REACT_TEXT_MAX), ts: Date.now() },
+    };
+    this.st.set(MACHINE_STATE_KEY, { msgIndex: pruneIndex(idx, REACT_INDEX_CAP) });
+  }
+
+  /**
+   * Reaction UX: mark (message,emoji) as fired, BEFORE any async action, so a
+   * doubled update or a second tap of the same emoji can't trigger twice.
+   */
+  private markReacted(chatId: number, messageId: number, emoji: string): void {
+    const m = this.st.peek(MACHINE_STATE_KEY) ?? {};
+    const reacted: Record<string, true> = { ...(m.reacted ?? {}), [reactedKey(chatId, messageId, emoji)]: true };
+    this.st.set(MACHINE_STATE_KEY, { reacted: pruneReacted(reacted, REACTED_CAP) });
+  }
+
+  /**
+   * Body language (feature C): the bot reacts to a message. Best-effort — a
+   * failure is logged and never affects the turn (setReaction never throws).
+   */
+  private bodyReact(conv: ConvKey, messageId: number | undefined, emoji: string): void {
+    if (!this.cfg.react || !messageId) return;
+    const { chatId } = parseConv(conv);
+    void this.tg.setReaction(chatId, messageId, emoji).then((ok) => {
+      if (!ok) log(`body reaction ${emoji} missed on ${conv} msg ${messageId}`);
+    });
+  }
+
+  /** Body language (feature C): 🎉 on a worker's DONE report, just sent. */
+  private celebrateWorkerDone(conv: ConvKey, messageId: number, celebrate: boolean): void {
+    if (!celebrate) return;
+    this.bodyReact(conv, messageId, REACTION_CELEBRATE);
+  }
+
+  /**
+   * Reaction UX: a user reaction landed. Resolves the (message,emoji) pair
+   * against the persisted index and fires the mapped action at most once.
+   * Deliberately cheap up front: dedup + mark happen synchronously, before
+   * any await, so concurrent/duplicated updates can't double-trigger.
+   */
+  private async onMessageReaction(ev: MessageReactionUpdated): Promise<void> {
+    if (!this.cfg.react) return;
+    const emoji = ev.new_reaction?.[0];
+    if (!emoji || emoji.type !== "emoji" || !emoji.emoji) return; // only emoji reactions act
+    const chatId = ev.chat.id;
+    const messageId = ev.message_id;
+    const m = this.st.peek(MACHINE_STATE_KEY) ?? {};
+    if (alreadyReacted(m.reacted, chatId, messageId, emoji.emoji)) return; // fired once, ever
+    this.markReacted(chatId, messageId, emoji.emoji);
+    const entry = m.msgIndex?.[indexKey(chatId, messageId)];
+    if (!entry) {
+      const key = indexKey(chatId, messageId);
+      if (!this.missingIdxLogged.has(key)) {
+        this.missingIdxLogged.add(key);
+        log(`reaction ${emoji.emoji} on unindexed message ${key} — ignoring (sent before the reaction UX, or pruned)`);
       }
       return;
     }
-    for (const c of mdToHtmlChunks(clean, this.cfg.replyMaxLen)) await this.tg.sendMessage(conv, c);
+    const action = classifyAction(emoji.emoji);
+    if (!action) return; // any other emoji: no-op
+    try {
+      if (action === "spawn") await this.reactSpawn(entry);
+      else if (action === "approve") await this.reactApprove(entry);
+      else await this.reactReject(entry);
+    } catch (e) {
+      error(`reaction ${action} failed:`, (e as Error)?.message ?? e);
+    }
+  }
+
+  /**
+   * 🚀 on an indexed message (any conv, bot or user text): spawn a worker from
+   * the stored text. The text is the task; the name is derived from it (with
+   * the existing spawn naming for uniqueness). One short line lands in the
+   * chat's General conversation.
+   */
+  private async reactSpawn(entry: { conv: string; text: string }): Promise<void> {
+    const text = entry.text.trim();
+    if (text.length < 8) return; // too short to be a task
+    const chat = chatOf(entry.conv);
+    const name = uniqueSpawnName(spawnNameFromText(text), (n) => !!this.st.findWorker(chat, n));
+    if (!name) {
+      await this.tg.sendMessage(chat, "⚠️ Không tạo được worker từ phản ứng: hết tên khả dụng.").catch(() => {});
+      return;
+    }
+    const task = `Task (delegated by user 🚀 on a message):\n\n${text}`;
+    let r: { conv: ConvKey; worker: { name: string } };
+    try {
+      r = await this.orch.spawn(chat, {
+        name,
+        directory: this.cfg.opencodeDirectory,
+        task,
+        agent: "build",
+        spawnedBy: "user",
+      });
+    } catch (e) {
+      await this.tg.sendMessage(chat, `⚠️ Không tạo được worker từ phản ứng: ${esc((e as Error).message)}`).catch(() => {});
+      return;
+    }
+    await this.tg.sendMessage(chat, `🚀 Worker <b>${esc(r.worker.name)}</b> — ${esc(trunc(text, 60))}`).catch(() => {});
+  }
+
+  /**
+   * 👍: valid only on a worker's DONE report. If that worker is still busy we
+   * just say so; otherwise the existing purge path retires the worker conv
+   * (topic + worktree + session + state) and one line confirms it in General.
+   */
+  private async reactApprove(entry: { purpose: MsgPurpose; conv: string; workerConv?: string }): Promise<void> {
+    if (entry.purpose !== "worker-done") return; // approved something else: no-op
+    const workerConv = (entry.workerConv ?? entry.conv) as ConvKey;
+    const w = this.st.peek(workerConv)?.worker;
+    const decision = decideApprove(entry.purpose, w ? w.status === "running" || w.status === "waiting" : false);
+    const chat = chatOf(workerConv);
+    if (decision === "busy") {
+      await this.tg.sendMessage(chat, "⏳ worker vẫn đang chạy").catch(() => {});
+      return;
+    }
+    if (decision === "invalid") return;
+    const res = await this.orch.approveWorkerReport(workerConv);
+    if (res.busy) {
+      await this.tg.sendMessage(chat, "⏳ worker vẫn đang chạy").catch(() => {});
+      return;
+    }
+    if (!res.ok) {
+      await this.tg.sendMessage(chat, "⚠️ Chưa dọn xong worker (worktree chưa xoá được — thử /prune sau).").catch(() => {});
+      return;
+    }
+    await this.tg.sendMessage(chat, `✅ ${esc(res.name ?? "worker")} approved — dọn xong.`).catch(() => {});
+  }
+
+  /**
+   * 👎: valid only on a worker's DONE report — relay it to the Manager session
+   * (the same "[Bot event]" path the worker-finish relay uses). Never touches
+   * the worker conv itself.
+   */
+  private reactReject(entry: { purpose: MsgPurpose; conv: string; workerConv?: string }): void {
+    if (entry.purpose !== "worker-done") return;
+    const workerConv = (entry.workerConv ?? entry.conv) as ConvKey;
+    this.orch.rejectWorkerReport(workerConv);
   }
 
   /** A media message with no text/caption — acknowledge it; the bot reads text only. */
@@ -1161,7 +1378,7 @@ export class Bot {
   }
 
   // ── the long-running prompt ──────────────────────────────────────────────
-  private async runPrompt(conv: ConvKey, text: string, state: ChatState): Promise<void> {
+  private async runPrompt(conv: ConvKey, text: string, state: ChatState, userMsgId?: number): Promise<void> {
     // A closed worker topic reopens itself when the user speaks in it
     // (openForumTopic is a no-op on an already-open topic, so safe every time).
     if (state.worker) void this.tg.openForumTopic(conv).catch(() => {});
@@ -1219,14 +1436,14 @@ export class Bot {
       this.inflight.set(conv, ac);
       log(`[chat ${conv}] prompt on ${sid} (${text.length} chars)`);
       // Fire-and-forget: don't block the polling loop; /stop aborts `ac`.
-      void this.runPromptTask(conv, sid, promptText, ac).catch((e) => error("prompt task:", e?.message));
+      void this.runPromptTask(conv, sid, promptText, ac, userMsgId).catch((e) => error("prompt task:", e?.message));
     } catch (e) {
       this.stopTyping(conv); // don't leave "typing…" running if the prompt never started
       throw e;
     }
   }
 
-  private async runPromptTask(conv: ConvKey, sid: string, text: string, ac: AbortController): Promise<void> {
+  private async runPromptTask(conv: ConvKey, sid: string, text: string, ac: AbortController, userMsgId?: number): Promise<void> {
     // One id for this user message, reused by the reconnect retry below: the
     // server dedupes on it, so the retry waits on the same turn instead of
     // running the instruction a second time.
@@ -1268,6 +1485,8 @@ export class Bot {
         // button to the failure message so the user can resume the same session.
         const kb = this.offerContinueKeyboard(conv, sid, messageID, res.outcome, res.interrupted);
         await this.sendHtml(conv, formatTurnFailure(res.error, res.elapsedMs), kb ? { reply_markup: kb } : {});
+        // Body language (feature C): the bot dislikes the turn that failed.
+        this.bodyReact(conv, userMsgId, REACTION_FAIL);
         return;
       }
       const reply = res.reply || (res.interrupted ? "(interrupted — no text produced yet)" : "(no text reply)");
@@ -1288,6 +1507,8 @@ export class Bot {
         ? "⚠️ Không thể nối tới OpenCode (service có thể đang restart / chưa chạy). Hẵng thử lại sau, hoặc kiểm tra `opencode service status`."
         : `❌ Error: ${esc((e as Error).message)}`;
       await this.tg.sendMessage(conv, msg).catch(() => {});
+      // Body language (feature C): the bot dislikes the turn that failed.
+      this.bodyReact(conv, userMsgId, REACTION_FAIL);
     } finally {
       this.clearActivity(conv);
       // NOTE: do NOT delete the streaming wrapper here — it must stay (killed

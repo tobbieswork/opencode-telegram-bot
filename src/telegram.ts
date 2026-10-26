@@ -42,6 +42,26 @@ export type CallbackQuery = {
   message?: { chat: { id: number }; message_id: number; message_thread_id?: number; is_topic_message?: boolean };
 };
 
+/** A single reaction on a message (the emoji-relevant subset of the Bot API). */
+export type MessageReaction = { type: string; emoji?: string };
+
+/**
+ * A user changed their reaction on a message (the `message_reaction` update).
+ * It carries chat.id + message_id ONLY — no topic info — so resolving WHICH
+ * conversation the message belongs to requires the bot-maintained message
+ * index (see state.ts msgIndex). Requires the bot to be admin and
+ * "message_reaction" in allowed_updates. The bot's OWN setReactions produce
+ * no such update (no echo loop).
+ */
+export type MessageReactionUpdated = {
+  chat: { id: number };
+  message_id: number;
+  user?: { id: number; first_name?: string; username?: string };
+  date: number;
+  old_reaction: MessageReaction[];
+  new_reaction: MessageReaction[];
+};
+
 /**
  * Emitted when the user taps the native stop button on a live streaming draft
  * (Bot API 10.1+ `sendMessageDraft` with `can_stop`). `message_thread_id` is
@@ -59,6 +79,7 @@ export type Update = {
   edited_message?: Message;
   callback_query?: CallbackQuery;
   stopped_message_generation?: MessageGenerationStopped;
+  message_reaction?: MessageReactionUpdated;
 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -143,6 +164,15 @@ export class Telegram {
    * conversation (state, session, worktree) instead of leaking it forever.
    */
   onThreadNotFound?: (chatId: number, threadId: number) => void;
+
+  /**
+   * Fired for every `message_reaction` update (a user changed a reaction on
+   * a message). Mirrors the onThreadNotFound dispatch: the poll loop calls it
+   * directly instead of routing it through the generic message handler, which
+   * has no conv to enqueue it under (the update carries no message/topic).
+   * May be async; the poll loop awaits it and never lets it break polling.
+   */
+  onMessageReaction?: (ev: MessageReactionUpdated) => void | Promise<void>;
 
   constructor(private token: string, private healCfg?: DnsHealConfig) {}
 
@@ -275,14 +305,16 @@ export class Telegram {
    * Send a final model reply as a native rich message (Telegram Bot API 10.1+):
    * `markdown` is parsed server-side as GFM, so no manual HTML conversion and a
    * 32 768-char limit instead of 4 096. Mirrors sendMessage's dest() chat_id +
-   * message_thread_id split and its void-on-resolve return style.
+   * message_thread_id split; resolves to the Telegram message_id (like
+   * sendMessageId) so the reaction UX can index the sent message.
    */
-  async sendRich(to: ConvKey | number, markdown: string, opts: { reply_markup?: unknown } = {}): Promise<void> {
-    await this.api("sendRichMessage", {
+  async sendRich(to: ConvKey | number, markdown: string, opts: { reply_markup?: unknown } = {}): Promise<number> {
+    const res = await this.api<{ message_id: number }>("sendRichMessage", {
       ...dest(to),
       rich_message: { markdown },
       ...(opts.reply_markup ? { reply_markup: opts.reply_markup } : {}),
     });
+    return res?.message_id ?? -1;
   }
 
   /**
@@ -412,6 +444,26 @@ export class Telegram {
   }
 
   /**
+   * Set ONE emoji reaction on a message (works on the bot's own and the
+   * user's messages, in topics). Fire-and-log: resolves false on any error
+   * (bad emoji, rate limit, deleted message) and never throws — reactions
+   * are cosmetic and must not break the paths that use them.
+   */
+  async setReaction(chatId: number, messageId: number, emoji: string): Promise<boolean> {
+    try {
+      await this.api("setMessageReaction", {
+        chat_id: chatId,
+        message_id: messageId,
+        reaction: [{ type: "emoji", emoji }],
+      });
+      return true;
+    } catch (e) {
+      log(`setReaction(${emoji}) chat=${chatId} msg=${messageId} failed: ${(e as Error)?.message ?? e}`);
+      return false;
+    }
+  }
+
+  /**
    * Long-polling loop. Each update is handed to `handler`; the handler is
    * awaited so it should return quickly for long-running work (spawn it,
    * don't block here). Retries with backoff on transient errors, honors 429.
@@ -429,7 +481,7 @@ export class Telegram {
           (await this.api<Update[]>("getUpdates", {
             offset: this.offset,
             timeout: 30,
-            allowed_updates: ["message", "callback_query", "stopped_message_generation"],
+            allowed_updates: ["message", "callback_query", "stopped_message_generation", "message_reaction"],
           }, this.abort.signal)) ?? [];
         if (this.healState) recordSuccess(this.healState);
       } catch (e) {
@@ -466,7 +518,13 @@ export class Telegram {
       for (const u of updates) {
         this.offset = u.update_id + 1;
         try {
-          await handler(u);
+          if (u.message_reaction) {
+            // No message/conv to enqueue under — dispatch through the dedicated
+            // callback instead (onMessageReaction), like onThreadNotFound.
+            if (this.onMessageReaction) await this.onMessageReaction(u.message_reaction);
+          } else {
+            await handler(u);
+          }
         } catch (e) {
           error("Update handler error:", (e as Error)?.message ?? e);
         }
