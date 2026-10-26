@@ -1,5 +1,6 @@
 import { OpenCode } from "@opencode/client";
 import { Service } from "@opencode/client/service";
+import { newestAssistantInfo, AssistantInfo } from "./usage.js";
 import { existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
@@ -12,6 +13,8 @@ export interface ModelInfo {
   name?: string;
   /** Variant ids the model offers (e.g. ["xhigh","high","medium","low"]); empty if unknown. */
   variants: string[];
+  /** The model's context window in tokens (limit.context); unknown when the server omits it. */
+  contextLimit?: number;
 }
 export interface AgentInfo {
   id: string;
@@ -266,6 +269,7 @@ export class OpenCodeCtl {
       providerID: m.providerID,
       name: m.name,
       variants: ((m.variants ?? []) as any[]).map((v) => v?.id).filter(Boolean) as string[],
+      contextLimit: typeof m.limit?.context === "number" ? m.limit.context : undefined,
     }));
     return this.modelsCache;
   }
@@ -346,18 +350,32 @@ export class OpenCodeCtl {
   }
 
   /**
+   * Model + current context of the session's newest LLM step, from ONE
+   * `message.list` call (capped at 20). Delegates to `newestAssistantInfo()`,
+   * which sorts by `time.created` and therefore does not depend on the API's
+   * list order. On 2.1.x the list comes back newest-first (verified live with
+   * scripts/probe-usage.ts, 2026-10-26), but that ordering is not a stable
+   * contract — position-based scans have bitten us before, so the sort stays.
+   *
+   * Token accounting (live shape: `tokens: {input, output, reasoning,
+   * cache: {read, write}}`): the prompt sent to the model is
+   * `input + cache.read + cache.write` — `input` is the non-cached part,
+   * `cache.read` the part served from the provider's cache, `cache.write` the
+   * part just written into it. All three count against the context window.
+   * (`reasoning` is an OUTPUT token, not prompt, so it is excluded.)
+   */
+  async latestAssistantInfo(sessionID: string): Promise<AssistantInfo> {
+    const msgs = ((await this.listMessages(sessionID, 20).catch(() => [])) as any[]) ?? [];
+    return newestAssistantInfo(msgs);
+  }
+
+  /**
    * The model actually used by the newest assistant message. The session object
    * carries no model field, so this is the only way to observe which model the
    * session is running on (explicitly set or server-resolved default).
    */
   async getSessionModel(sessionID: string): Promise<{ id: string; providerID: string } | undefined> {
-    const msgs = ((await this.listMessages(sessionID, 10).catch(() => [])) as any[]) ?? [];
-    for (const m of msgs) {
-      if (m?.type === "assistant" && m.model?.id) {
-        return { id: m.model.id, providerID: m.model.providerID ?? "?" };
-      }
-    }
-    return undefined;
+    return (await this.latestAssistantInfo(sessionID)).model;
   }
 
   /**

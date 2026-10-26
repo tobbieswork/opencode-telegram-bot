@@ -90,6 +90,10 @@ export interface Config {
   dnsHealCooldownMs: number;
   /** Send final model replies as native rich Markdown (server-side GFM) instead of hand-rolled HTML. */
   richReplies: boolean;
+  /** /usage: percentage of the context window at/above which a session is flagged with a warning mark. */
+  usageWarnPct: number;
+  /** /usage: maximum number of per-session rows to render (the rest are counted, not listed). */
+  usageMaxRows: number;
 }
 
 export function loadConfig(root: string): Config {
@@ -148,6 +152,8 @@ export function loadConfig(root: string): Config {
     dnsHealCooldownMs: parseIntSetting("OPENCODE_TG_DNS_HEAL_COOLDOWN_MS", 10 * 60_000, 1000),
     // Default OFF: only an explicit "1"/"true" enables rich (server-side GFM) replies.
     richReplies: process.env.OPENCODE_TG_RICH === "1" || process.env.OPENCODE_TG_RICH === "true",
+    usageWarnPct: parseIntSetting("OPENCODE_TG_USAGE_WARN_PCT", 80, 1),
+    usageMaxRows: parseIntSetting("OPENCODE_TG_USAGE_MAX_ROWS", 10, 1),
   };
   const agent = process.env.OPENCODE_DEFAULT_AGENT?.trim();
   if (agent) cfg.defaultAgent = agent;

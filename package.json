@@ -19,11 +19,12 @@
     "test:prune": "tsx scripts/test-prune.ts",
     "test:config": "tsx scripts/test-config.ts",
     "test:uptime": "tsx scripts/test-uptime.ts",
+    "test:usage": "tsx scripts/test-usage.ts",
     "test:recovery": "tsx scripts/test-recovery.ts",
     "test:topic-delete": "tsx scripts/test-topic-delete.ts",
     "test:dns-heal": "tsx scripts/test-dns-heal.ts",
     "test:rich": "tsx scripts/test-rich-replies.ts",
-    "test:unit": "npm run test:format && npm run test:fsbrowser && npm run test:state && npm run test:multi && npm run test:activity && npm run test:reminders && npm run test:prune && npm run test:config && npm run test:rich && npm run test:continue && npm run test:dns-heal && npm run test:recovery && npm run test:topic-delete && npm run test:uptime",
+    "test:unit": "npm run test:format && npm run test:fsbrowser && npm run test:state && npm run test:multi && npm run test:activity && npm run test:reminders && npm run test:prune && npm run test:config && npm run test:rich && npm run test:continue && npm run test:dns-heal && npm run test:recovery && npm run test:topic-delete && npm run test:uptime && npm run test:usage",
     "typecheck": "tsc --noEmit",
     "test:multi": "tsx scripts/test-multi.ts",
     "smoke:multi": "tsx scripts/smoke-multi.ts"

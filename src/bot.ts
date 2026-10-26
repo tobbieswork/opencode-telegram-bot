@@ -15,6 +15,7 @@ import { scheduleForRegistration, reminderBudgetExhausted, nextScheduleAfterRemi
 import { CONTINUE_PROMPT, CONTINUE_BUTTON_LABEL, shouldOfferContinue, continueCallbackData, parseContinueData, alreadyOfferedContinue } from "./continue.js";
 import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, SAFE_REBOOT_BIN, rebootTokenFile, buildTokenLine, rebootGoData, isRebootConfirmFresh } from "./uptime.js";
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
+import { UsageRow, formatUsageReport } from "./usage.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
 import { log, warn, error } from "./logger.js";
 
@@ -834,6 +835,8 @@ export class Bot {
       case "/context":
       case "/ctx":
         return this.cmdContext(conv, state);
+      case "/usage":
+        return this.cmdUsage(conv);
       case "/history":
         return this.cmdHistory(conv, state);
       case "/clear":
@@ -1074,6 +1077,7 @@ export class Bot {
        "<b>Control</b>",
         "/stop — interrupt the running task",
         "/context — photo of the current session (usage + files touched)",
+        "/usage — context pressure per session (current vs window, near-limit warnings)",
         "/history — show recent messages",
        "/status — what I'm connected to",
        "/clear — reset this chat's state",
@@ -1102,6 +1106,7 @@ export class Bot {
         c("reboot", "Reboot máy (2 bước xác nhận)"),
         c("status", "Trạng thái kết nối"),
         c("context", "Ảnh chụp phiên hiện tại (usage + files)"),
+        c("usage", "Mức dùng context theo session (cảnh báo gần tràn)"),
         c("history", "Xem tin nhắn gần đây"),
         c("clear", "Xoá state của chat này"),
         c("spawn", "Tạo worker (topic + session riêng)"),
@@ -1125,8 +1130,9 @@ export class Bot {
         [b("📍 Thư mục", "cmd:dir"), b("📁 Duyệt", "cmd:browse")],
         [b("🎛 Mode", "cmd:mode"), b("🤖 Models", "cmd:models")],
         [b("🎚 Variants", "cmd:variants"), b("📊 Trạng thái", "cmd:status")],
-        [b("📋 Context", "cmd:context"), b("📜 Lịch sử", "cmd:history")],
-        [b("⏹ Dừng", "cmd:stop"), b("🧹 Xoá state", "cmd:clear")],
+        [b("📋 Context", "cmd:context"), b("📊 Usage", "cmd:usage")],
+        [b("📜 Lịch sử", "cmd:history"), b("⏹ Dừng", "cmd:stop")],
+        [b("🧹 Xoá state", "cmd:clear")],
         [b("📖 Help", "cmd:help")],
       ],
     };
@@ -1552,6 +1558,9 @@ export class Bot {
           break;
         case "context":
           await this.cmdContext(conv, state);
+          break;
+        case "usage":
+          await this.cmdUsage(conv);
           break;
         case "history":
           await this.cmdHistory(conv, state);
@@ -2098,6 +2107,66 @@ export class Bot {
       if (last.trim()) lines.push(`👤 last: “${esc(trunc(stripTags(last), 120))}”`);
     }
     await this.sendHtml(conv, lines.join("\n"));
+  }
+
+  /**
+   * /usage — context pressure across every session this bot tracks (manager,
+   * workers, regular chats): current context vs the model's window, plus the
+   * cumulative totals. The answer to "which session is about to overflow?"
+   *
+   * REST budget: exactly 2 calls per UNIQUE session — session.get (cumulative
+   * tokens) and one message.list (model + current context). Convs that share a
+   * session (reattach) are deduped by session id BEFORE any call is made, and
+   * the calls run through a small worker pool so many tracked sessions can't
+   * fan out into an unbounded burst. (maxRows can't be applied before the
+   * fetch: the rows are sorted BY context pressure, which only exists after
+   * the calls — so the cap still applies post-fetch, but the fetch itself is
+   * already bounded by dedup + pool + the small number of tracked sessions.)
+   */
+  private async cmdUsage(conv: ConvKey): Promise<void> {
+    const models = await this.oc.listModels().catch(() => [] as ModelInfo[]);
+    const entries = Object.entries(this.st.all()).filter(
+      ([k, s]) => typeof s.sessionID === "string" && k !== MACHINE_STATE_KEY,
+    );
+    // Several convs can point at one session (reattach): dedup BEFORE calling
+    // the API so a shared session costs one fetch, not one per conv.
+    const bySid = new Map<string, string>();
+    for (const [key, s] of entries) {
+      const sid = s.sessionID as string;
+      if (bySid.has(sid)) continue;
+      const [chatId, topicId] = key.split(":");
+      const label = s.worker?.name ?? (s.manager ? "manager" : topicId ? `#topic ${topicId}` : chatId);
+      bySid.set(sid, label);
+    }
+    const sids = [...bySid.keys()];
+    const rows: UsageRow[] = new Array(sids.length);
+    let next = 0;
+    const fetchRow = async (): Promise<void> => {
+      for (;;) {
+        const i = next++;
+        if (i >= sids.length) return;
+        const sid = sids[i];
+        const [sess, info] = await Promise.all([
+          this.oc.getSession(sid).catch(() => null),
+          this.oc.latestAssistantInfo(sid).catch(() => undefined),
+        ]);
+        const model = info?.model;
+        rows[i] = {
+          label: bySid.get(sid)!,
+          id: sid,
+          current: info?.context,
+          limit: model
+            ? (models.find((m) => m.id === model.id && m.providerID === model.providerID) ??
+               models.find((m) => m.id === model.id))?.contextLimit
+            : undefined,
+          cumInput: (sess as any)?.tokens?.input ?? 0,
+          cumOutput: (sess as any)?.tokens?.output ?? 0,
+        };
+      }
+    };
+    // At most 4 sessions in flight, regardless of how many are tracked.
+    await Promise.all(Array.from({ length: Math.min(4, sids.length) }, () => fetchRow()));
+    await this.sendHtml(conv, formatUsageReport(rows, esc, { warnPct: this.cfg.usageWarnPct, maxRows: this.cfg.usageMaxRows }).join("\n"));
   }
 
   private async cmdHistory(conv: ConvKey, state: ChatState): Promise<void> {
