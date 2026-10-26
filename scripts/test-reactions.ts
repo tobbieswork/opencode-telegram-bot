@@ -1,10 +1,10 @@
 /**
  * Checks the reaction UX's pure decision logic (src/reactions.ts):
- *  - emoji → action mapping (🚀 spawn / 👍 approve / 👎 reject / no-op),
+ *  - emoji → action mapping (🔥 spawn / 👍 approve / 👎 reject / no-op),
  *  - the (message,emoji) "fired once" dedup keys,
  *  - index/reacted pruning at the caps (oldest first, no-op under cap),
  *  - the 👍 approve decision (worker-done only, never a busy worker),
- *  - 🚀 worker-name derivation (slug rules, Vietnamese text, fallbacks).
+ *  - 🔥 worker-name derivation (slug rules, Vietnamese text, fallbacks).
  *
  * Run:  npx tsx scripts/test-reactions.ts
  */
@@ -38,7 +38,7 @@ function check(name: string, cond: boolean, detail?: string): void {
 
 // ── emoji → action mapping ─────────────────────────────────────────────────
 {
-  check("🚀 → spawn", classifyAction(REACTION_SPAWN) === "spawn");
+  check("🔥 → spawn", classifyAction(REACTION_SPAWN) === "spawn");
   check("👍 → approve", classifyAction(REACTION_APPROVE) === "approve");
   check("👎 → reject", classifyAction(REACTION_REJECT) === "reject");
   check("unknown emoji (👏) → no-op", classifyAction("👏") === null);
@@ -100,7 +100,7 @@ function check(name: string, cond: boolean, detail?: string): void {
   check("missing purpose → invalid", decideApprove(undefined, false) === "invalid");
 }
 
-// ── 🚀 worker-name derivation ──────────────────────────────────────────────
+// ── 🔥 worker-name derivation ──────────────────────────────────────────────
 {
   check("slug: lowercases + dashes", spawnNameFromText("Fix the Cold Pool UI") === "fix-the-cold-pool-ui");
   check("slug: collapses repeated non-alphanumerics", spawnNameFromText("a  b   c!!d") === "a-b-c-d");

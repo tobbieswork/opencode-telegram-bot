@@ -912,7 +912,7 @@ export class Bot {
   }
 
   /**
-   * 🚀 on an indexed message (any conv, bot or user text): spawn a worker from
+   * 🔥 on an indexed message (any conv, bot or user text): spawn a worker from
    * the stored text. The text is the task; the name is derived from it (with
    * the existing spawn naming for uniqueness). One short line lands in the
    * chat's General conversation.
@@ -926,7 +926,7 @@ export class Bot {
       await this.tg.sendMessage(chat, "⚠️ Không tạo được worker từ phản ứng: hết tên khả dụng.").catch(() => {});
       return;
     }
-    const task = `Task (delegated by user 🚀 on a message):\n\n${text}`;
+    const task = `Task (delegated by user 🔥 on a message):\n\n${text}`;
     let r: { conv: ConvKey; worker: { name: string } };
     try {
       r = await this.orch.spawn(chat, {
@@ -940,7 +940,7 @@ export class Bot {
       await this.tg.sendMessage(chat, `⚠️ Không tạo được worker từ phản ứng: ${esc((e as Error).message)}`).catch(() => {});
       return;
     }
-    await this.tg.sendMessage(chat, `🚀 Worker <b>${esc(r.worker.name)}</b> — ${esc(trunc(text, 60))}`).catch(() => {});
+    await this.tg.sendMessage(chat, `🔥 Worker <b>${esc(r.worker.name)}</b> — ${esc(trunc(text, 60))}`).catch(() => {});
   }
 
   /**
