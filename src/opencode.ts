@@ -12,6 +12,8 @@ export interface ModelInfo {
   name?: string;
   /** Variant ids the model offers (e.g. ["xhigh","high","medium","low"]); empty if unknown. */
   variants: string[];
+  /** The model's context window in tokens (limit.context); unknown when the server omits it. */
+  contextLimit?: number;
 }
 export interface AgentInfo {
   id: string;
@@ -266,6 +268,7 @@ export class OpenCodeCtl {
       providerID: m.providerID,
       name: m.name,
       variants: ((m.variants ?? []) as any[]).map((v) => v?.id).filter(Boolean) as string[],
+      contextLimit: typeof m.limit?.context === "number" ? m.limit.context : undefined,
     }));
     return this.modelsCache;
   }
@@ -356,6 +359,26 @@ export class OpenCodeCtl {
       if (m?.type === "assistant" && m.model?.id) {
         return { id: m.model.id, providerID: m.model.providerID ?? "?" };
       }
+    }
+    return undefined;
+  }
+
+  /**
+   * The context size of the newest LLM step (input + cache-read tokens) — the
+   * number that actually decides overflow, unlike the session's CUMULATIVE
+   * tokens. Scans the newest messages backwards for the first assistant turn
+   * that carries token stats. `message.list` items carry tokens under
+   * `info.tokens` on 2.1.x; `tokens` is kept as a fallback for older shapes.
+   */
+  async lastAssistantContext(sessionID: string): Promise<number | undefined> {
+    const msgs = ((await this.listMessages(sessionID, 20).catch(() => [])) as any[]) ?? [];
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i];
+      const isAssistant = m?.type === "assistant" || m?.role === "assistant";
+      if (!isAssistant) continue;
+      const t = m.info?.tokens ?? m.tokens;
+      const n = (typeof t?.input === "number" ? t.input : 0) + (typeof t?.cache?.read === "number" ? t.cache.read : 0);
+      if (n > 0) return n;
     }
     return undefined;
   }

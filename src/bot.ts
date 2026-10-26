@@ -15,6 +15,7 @@ import { scheduleForRegistration, reminderBudgetExhausted, nextScheduleAfterRemi
 import { CONTINUE_PROMPT, CONTINUE_BUTTON_LABEL, shouldOfferContinue, continueCallbackData, parseContinueData, alreadyOfferedContinue } from "./continue.js";
 import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, SAFE_REBOOT_BIN, rebootTokenFile, buildTokenLine, rebootGoData, isRebootConfirmFresh } from "./uptime.js";
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
+import { UsageRow, formatUsageReport } from "./usage.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
 import { log, warn, error } from "./logger.js";
 
@@ -834,6 +835,8 @@ export class Bot {
       case "/context":
       case "/ctx":
         return this.cmdContext(conv, state);
+      case "/usage":
+        return this.cmdUsage(conv);
       case "/history":
         return this.cmdHistory(conv, state);
       case "/clear":
@@ -1072,8 +1075,9 @@ export class Bot {
         "/prune [số_ngày] — dọn topic worker đã xong (mặc định >7 ngày)",
        "",
        "<b>Control</b>",
-        "/stop — interrupt the running task",
+         "/stop — interrupt the running task",
         "/context — photo of the current session (usage + files touched)",
+        "/usage — context pressure per session (current vs window, near-limit warnings)",
         "/history — show recent messages",
        "/status — what I'm connected to",
        "/clear — reset this chat's state",
@@ -1102,6 +1106,7 @@ export class Bot {
         c("reboot", "Reboot máy (2 bước xác nhận)"),
         c("status", "Trạng thái kết nối"),
         c("context", "Ảnh chụp phiên hiện tại (usage + files)"),
+        c("usage", "Mức dùng context theo session (cảnh báo gần tràn)"),
         c("history", "Xem tin nhắn gần đây"),
         c("clear", "Xoá state của chat này"),
         c("spawn", "Tạo worker (topic + session riêng)"),
@@ -1125,8 +1130,9 @@ export class Bot {
         [b("📍 Thư mục", "cmd:dir"), b("📁 Duyệt", "cmd:browse")],
         [b("🎛 Mode", "cmd:mode"), b("🤖 Models", "cmd:models")],
         [b("🎚 Variants", "cmd:variants"), b("📊 Trạng thái", "cmd:status")],
-        [b("📋 Context", "cmd:context"), b("📜 Lịch sử", "cmd:history")],
-        [b("⏹ Dừng", "cmd:stop"), b("🧹 Xoá state", "cmd:clear")],
+        [b("📋 Context", "cmd:context"), b("📊 Usage", "cmd:usage")],
+        [b("📜 Lịch sử", "cmd:history"), b("⏹ Dừng", "cmd:stop")],
+        [b("🧹 Xoá state", "cmd:clear")],
         [b("📖 Help", "cmd:help")],
       ],
     };
@@ -1552,6 +1558,9 @@ export class Bot {
           break;
         case "context":
           await this.cmdContext(conv, state);
+          break;
+        case "usage":
+          await this.cmdUsage(conv);
           break;
         case "history":
           await this.cmdHistory(conv, state);
@@ -2098,6 +2107,46 @@ export class Bot {
       if (last.trim()) lines.push(`👤 last: “${esc(trunc(stripTags(last), 120))}”`);
     }
     await this.sendHtml(conv, lines.join("\n"));
+  }
+
+  /**
+   * /usage — context pressure across every session this bot tracks (manager,
+   * workers, regular chats): current context vs the model's window, plus the
+   * cumulative totals. The answer to "which session is about to overflow?"
+   */
+  private async cmdUsage(conv: ConvKey): Promise<void> {
+    const models = await this.oc.listModels().catch(() => [] as ModelInfo[]);
+    const entries = Object.entries(this.st.all()).filter(
+      ([k, s]) => typeof s.sessionID === "string" && k !== MACHINE_STATE_KEY,
+    );
+    const rows = (await Promise.all(
+      entries.map(async ([key, s]): Promise<UsageRow> => {
+        const sid = s.sessionID as string;
+        const [chatId, topicId] = key.split(":");
+        const label = s.worker?.name ?? (s.manager ? "manager" : topicId ? `#topic ${topicId}` : chatId);
+        const [sess, model, current] = await Promise.all([
+          this.oc.getSession(sid).catch(() => null),
+          this.oc.getSessionModel(sid).catch(() => undefined),
+          this.oc.lastAssistantContext(sid).catch(() => undefined),
+        ]);
+        const info = model
+          ? models.find((m) => m.id === model.id && m.providerID === model.providerID) ??
+            models.find((m) => m.id === model.id)
+          : undefined;
+        return {
+          label,
+          id: sid,
+          current,
+          limit: info?.contextLimit,
+          cumInput: (sess as any)?.tokens?.input ?? 0,
+          cumOutput: (sess as any)?.tokens?.output ?? 0,
+        };
+      }),
+    )) as UsageRow[];
+    // Two convs can share one session (reattach); show it once.
+    const seen = new Set<string>();
+    const deduped = rows.filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)));
+    await this.sendHtml(conv, formatUsageReport(deduped, esc, { warnPct: this.cfg.usageWarnPct, maxRows: this.cfg.usageMaxRows }).join("\n"));
   }
 
   private async cmdHistory(conv: ConvKey, state: ChatState): Promise<void> {
