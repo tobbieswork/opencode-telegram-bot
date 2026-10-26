@@ -13,6 +13,7 @@ import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo, formatTu
 import { richMarkdownChunks } from "./rich.js";
 import { scheduleForRegistration, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
 import { CONTINUE_PROMPT, CONTINUE_BUTTON_LABEL, shouldOfferContinue, continueCallbackData, parseContinueData, alreadyOfferedContinue } from "./continue.js";
+import { PrSnapshot, PrState, diffSnapshots, renderEvent } from "./pr-watch.js";
 import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, SAFE_REBOOT_BIN, rebootTokenFile, buildTokenLine, rebootGoData, isRebootConfirmFresh } from "./uptime.js";
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
 import { DraftState, DraftAction, onTextDelta, onToolStart, isDmConv, EDIT_BUDGET } from "./stream.js";
@@ -138,6 +139,18 @@ interface PermissionPrompt {
 }
 
 /**
+ * GitHub PR list item (the subset the watcher uses), from GET /pulls?...
+ */
+interface GhPr {
+  number: number;
+  state: "open" | "closed";
+  title: string;
+  updated_at: string;
+  merged_at: string | null;
+  head: { sha: string; ref: string };
+}
+
+/**
  * Glue between Telegram and OpenCode. Owns per-chat state and the in-flight
  * prompt task, so a running prompt never blocks the polling loop and /stop
  * can interrupt it.
@@ -158,6 +171,9 @@ export class Bot {
    */
   private reminders = new Map<string, ReturnType<typeof setTimeout>>();
   private uptimeTimer?: ReturnType<typeof setInterval>;
+  private prWatchTimer?: ReturnType<typeof setInterval>;
+  /** True while a PR-watch tick is running, so a slow tick can't overlap the next. */
+  private prWatchBusy = false;
   /** A reboot is already armed (token minted, timer pending) — ignores a double-tap on "Xác nhận". */
   private rebootArmed = false;
   /** Sessions from which we already stripped the language instruction this process (when the toggle is off), so we don't call removeInstruction every prompt. */
@@ -256,6 +272,9 @@ export class Bot {
     // Nudge the user to reboot the machine when uptime passes the threshold
     // (kernel updates only apply after a reboot). Runs once now, then every 6 hours.
     this.startUptimeMonitor();
+    // Post one line per new PR event (merged / comment / CI / review) on the
+    // watched GitHub repo. Default OFF; see cfg.prWatch*.
+    this.startPrWatchMonitor();
   }
 
   // ── Uptime monitor + reboot ─────────────────────────────────────────────────
@@ -571,6 +590,144 @@ export class Bot {
     else if (await this.handleFormText(conv, text)) return;
     else if (state.manager) await this.orch.promptManager(conv, text);
     else await this.runPrompt(conv, text, state);
+  }
+
+  // ── PR watcher (watched GitHub repo → one line per new event) ─────────────
+  /**
+   * Kick off the PR watcher: the first tick builds a SILENT baseline (it
+   * saves state but emits nothing — enabling the watcher must not replay the
+   * repo's whole history into the chat), then re-checks on the configured
+   * interval and posts one line per genuinely new event.
+   */
+  private startPrWatchMonitor(): void {
+    if (!this.cfg.prWatch || !this.cfg.prWatchRepo) return;
+    void this.prWatchTick();
+    this.prWatchTimer = setInterval(() => void this.prWatchTick(), this.cfg.prWatchIntervalMs);
+    this.prWatchTimer.unref?.();
+  }
+
+  /** One gh REST call for the watched repo (array form, no shell). */
+  private ghApi<T = any>(path: string): Promise<T> {
+    return new Promise((resolve, reject) => {
+      execFile(
+        "gh",
+        ["api", `repos/${this.cfg.prWatchRepo}/${path}`],
+        { timeout: 20_000, maxBuffer: 4 * 1024 * 1024 },
+        (err, stdout, stderr) => {
+          if (err) return reject(new Error(`gh api ${path}: ${stderr?.trim() || err.message}`));
+          try {
+            resolve(JSON.parse(stdout) as T);
+          } catch (e) {
+            reject(e as Error);
+          }
+        },
+      );
+    });
+  }
+
+  /**
+   * One watcher tick: list open + recently-closed PRs, refresh detail (review
+   * comments / reviews / CI) for every open PR and for closed PRs we have not
+   * seen yet, diff against the stored snapshot, and post the new events.
+   * Never throws into the poll loop — any failure just skips this tick.
+   */
+  private async prWatchTick(): Promise<void> {
+    if (!this.cfg.prWatch || !this.cfg.prWatchRepo || this.prWatchBusy) return;
+    this.prWatchBusy = true;
+    try {
+      const repo = this.cfg.prWatchRepo;
+      const [open, closed] = await Promise.all([
+        this.ghApi<GhPr[]>("pulls?state=open&per_page=30&sort=created&direction=desc"),
+        this.ghApi<GhPr[]>("pulls?state=closed&per_page=30&sort=updated&direction=desc"),
+      ]);
+      const prev = (this.st.peek(MACHINE_STATE_KEY)?.prWatchSnapshot ?? {}) as PrState;
+      const now = Date.now();
+      const dayMs = 24 * 3600 * 1000;
+      const next: PrState = {};
+      const details: { comments: Record<number, { id: number; user: string; body: string }[]>; reviews: Record<number, { id: number; user: string; state: string }[]> } =
+        { comments: {}, reviews: {} };
+
+      // Open PRs: details can always change (comments, reviews, CI) → refetch.
+      for (const pr of open) {
+        const d = await this.prWatchDetails(pr);
+        next[pr.number] = d.snapshot;
+        details.comments[pr.number] = d.comments;
+        details.reviews[pr.number] = d.reviews;
+      }
+      // Closed PRs updated within the last 24 h: the first time we see one we
+      // fetch details (its merge event + final CI fire once); afterwards we
+      // keep the stored entry as-is so it is never re-announced.
+      for (const pr of closed) {
+        if (now - Date.parse(pr.updated_at) > dayMs) continue;
+        if (prev[pr.number]) {
+          next[pr.number] = prev[pr.number];
+          continue;
+        }
+        const d = await this.prWatchDetails(pr);
+        next[pr.number] = d.snapshot;
+        details.comments[pr.number] = d.comments;
+        details.reviews[pr.number] = d.reviews;
+      }
+      // Carry merged-but-unseen entries a little longer (state hygiene, 7 days)
+      // so a restart within that window cannot re-announce an old merge.
+      const weekMs = 7 * dayMs;
+      for (const [n, s] of Object.entries(prev)) {
+        const num = Number(n);
+        if (!(num in next) && s.mergedAt && now - Date.parse(s.mergedAt) < weekMs) next[num] = s;
+      }
+
+      const firstRun = Object.keys(prev).length === 0;
+      const events = firstRun ? [] : diffSnapshots(prev, next, details);
+      if (!firstRun) log(`pr-watch: ${events.length} event(s) in tick`);
+      const conv = this.lastActiveConv ?? (this.cfg.allowedUserIds[0] ? String(this.cfg.allowedUserIds[0]) : undefined);
+      if (conv) for (const ev of events) await this.tg.sendMessage(conv, renderEvent(ev, repo)).catch(() => {});
+      this.st.set(MACHINE_STATE_KEY, { prWatchSnapshot: next });
+    } catch (e) {
+      warn("pr-watch tick:", (e as Error).message);
+    } finally {
+      this.prWatchBusy = false;
+    }
+  }
+
+  /** Fresh detail for one PR: snapshot fields + the comment/review rows the diff needs. */
+  private async prWatchDetails(pr: GhPr): Promise<{
+    snapshot: PrSnapshot;
+    comments: { id: number; user: string; body: string }[];
+    reviews: { id: number; user: string; state: string }[];
+  }> {
+    const [comments, reviews, checks] = await Promise.all([
+      this.ghApi<Array<{ id: number; user: { login: string }; body: string }>>(`pulls/${pr.number}/comments?per_page=100`),
+      this.ghApi<Array<{ id: number; user: { login: string }; state: string }>>(`pulls/${pr.number}/reviews?per_page=30`),
+      this.ghApi<{ check_runs: Array<{ name: string; conclusion: string | null }> }>(`commits/${pr.head.sha}/check-runs?per_page=20`),
+    ]);
+    const conclusions = checks.check_runs.map((c) => c.conclusion);
+    const terminal = conclusions.filter((c): c is string => !!c);
+    const ciConclusion = terminal.length === 0
+      ? null
+      : conclusions.includes("failure")
+        ? "failure"
+        : conclusions.includes("cancelled")
+          ? "cancelled"
+          : terminal.every((c) => c === "success")
+            ? "success"
+            : null;
+    return {
+      snapshot: {
+        number: pr.number,
+        state: pr.state === "closed" ? "closed" : "open",
+        headSha: pr.head.sha,
+        title: pr.title,
+        updated: pr.updated_at,
+        mergedAt: pr.merged_at,
+        maxCommentId: comments.reduce((m, c) => Math.max(m, c.id), 0),
+        maxReviewId: reviews.reduce((m, r) => Math.max(m, r.id), 0),
+        ciSha: pr.head.sha,
+        ciName: checks.check_runs[0]?.name ?? null,
+        ciConclusion,
+      },
+      comments: comments.map((c) => ({ id: c.id, user: c.user.login, body: c.body })),
+      reviews: reviews.map((r) => ({ id: r.id, user: r.user.login, state: r.state })),
+    };
   }
 
   // ── send helpers ─────────────────────────────────────────────────────────

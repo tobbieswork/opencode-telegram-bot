@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
 import { ConvKey, chatOf } from "./conv.js";
+import type { PrSnapshot } from "./pr-watch.js";
 
 export interface ModelRef {
   id: string;
@@ -119,6 +120,13 @@ export interface ChatState {
    * box keeps running.
    */
   lastRebootReminderMs?: number;
+  /**
+   * MACHINE-WIDE (only ever written on the reserved MACHINE_STATE_KEY entry):
+   * the PR watcher's last snapshot, keyed by PR number. Persists across
+   * restarts so the watcher doesn't re-announce every already-seen PR/comment
+   * after a bot restart (it diffs against this to know what is NEW).
+   */
+  prWatchSnapshot?: Record<number, PrSnapshot>;
 }
 
 export type StateMap = Record<string, ChatState>;
