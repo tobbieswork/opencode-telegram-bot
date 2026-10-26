@@ -95,6 +95,22 @@ export function pruneReacted(reacted: Record<string, true>, cap: number = REACTE
 }
 
 /**
+ * Pure spawn decision for a 🔥 on an indexed message:
+ *  - purpose "user-msg": the message is one the USER typed — the bot has
+ *    already received it as input (every indexed user message was dispatched
+ *    to a turn or command), so a spawn from it would duplicate work that is
+ *    already in flight. The bot says "đã nhận rồi" and does NOT spawn.
+ *  - purpose "reply" / "worker-done": the message is BOT output (a report,
+ *    a summary, a research result) — nothing is working on it yet, which is
+ *    exactly the clean use case for a spawn.
+ *  - missing purpose (legacy index entries): treat as spawn, as before.
+ */
+export type SpawnDecision = "spawn" | "already-processed";
+export function decideSpawn(purpose: string | undefined): SpawnDecision {
+  return purpose === "user-msg" ? "already-processed" : "spawn";
+}
+
+/**
  * Pure approve decision for a 👍 on an indexed message:
  *  - purpose must be a worker-done report (anything else: no-op),
  *  - the worker must not be busy (running/waiting) — then it stays and we

@@ -4,6 +4,7 @@
  *  - the (message,emoji) "fired once" dedup keys,
  *  - index/reacted pruning at the caps (oldest first, no-op under cap),
  *  - the 👍 approve decision (worker-done only, never a busy worker),
+ *  - the 🔥 spawn decision (never a user's own already-processed message),
  *  - 🔥 worker-name derivation (slug rules, Vietnamese text, fallbacks).
  *
  * Run:  npx tsx scripts/test-reactions.ts
@@ -16,6 +17,7 @@ import {
   pruneIndex,
   pruneReacted,
   decideApprove,
+  decideSpawn,
   spawnNameFromText,
   uniqueSpawnName,
   REACT_INDEX_CAP,
@@ -98,6 +100,14 @@ function check(name: string, cond: boolean, detail?: string): void {
   check("plain reply → invalid", decideApprove("reply", false) === "invalid");
   check("user-msg → invalid", decideApprove("user-msg", false) === "invalid");
   check("missing purpose → invalid", decideApprove(undefined, false) === "invalid");
+}
+
+// ── 🔥 spawn decision (user-message guard) ─────────────────────────────────
+{
+  check("user-msg → already-processed (no duplicate spawn)", decideSpawn("user-msg") === "already-processed");
+  check("reply → spawn", decideSpawn("reply") === "spawn");
+  check("worker-done → spawn", decideSpawn("worker-done") === "spawn");
+  check("missing purpose → spawn (legacy entries)", decideSpawn(undefined) === "spawn");
 }
 
 // ── 🔥 worker-name derivation ──────────────────────────────────────────────

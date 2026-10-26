@@ -14,6 +14,7 @@ import { richMarkdownChunks } from "./rich.js";
 import { scheduleForRegistration, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
 import {
   classifyAction,
+  decideSpawn,
   decideApprove,
   indexKey,
   reactedKey,
@@ -916,8 +917,19 @@ export class Bot {
    * the stored text. The text is the task; the name is derived from it (with
    * the existing spawn naming for uniqueness). One short line lands in the
    * chat's General conversation.
+   *
+   * Guard: a 🔥 on a USER message is never a spawn (decideSpawn →
+   * "already-processed") — that message already went through a turn, so
+   * spawning a worker from it would duplicate in-flight work. The bot just
+   * confirms it already got it.
    */
-  private async reactSpawn(entry: { conv: string; text: string }): Promise<void> {
+  private async reactSpawn(entry: { conv: string; purpose: MsgPurpose; text: string }): Promise<void> {
+    if (decideSpawn(entry.purpose) === "already-processed") {
+      await this.tg
+        .sendMessage(entry.conv, "👌 Tôi đã nhận rồi — không spawn worker trùng. Muốn tách worker: 🔥 vào tin của tôi.")
+        .catch(() => {});
+      return;
+    }
     const text = entry.text.trim();
     if (text.length < 8) return; // too short to be a task
     const chat = chatOf(entry.conv);
