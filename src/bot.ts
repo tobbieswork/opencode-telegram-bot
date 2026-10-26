@@ -3,7 +3,7 @@ import { existsSync, statSync, readFileSync, mkdirSync, writeFileSync } from "no
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
-import { Telegram, Update, CallbackQuery, Message } from "./telegram.js";
+import { Telegram, Update, CallbackQuery, Message, MessageGenerationStopped } from "./telegram.js";
 import { OpenCodeCtl, newMessageID, assistantText, ModelInfo, SessionBrief } from "./opencode.js";
 import { StateManager, ChatState, MACHINE_STATE_KEY } from "./state.js";
 import { ConvKey, convKey, chatOf } from "./conv.js";
@@ -15,6 +15,7 @@ import { scheduleForRegistration, reminderBudgetExhausted, nextScheduleAfterRemi
 import { CONTINUE_PROMPT, CONTINUE_BUTTON_LABEL, shouldOfferContinue, continueCallbackData, parseContinueData, alreadyOfferedContinue } from "./continue.js";
 import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, SAFE_REBOOT_BIN, rebootTokenFile, buildTokenLine, rebootGoData, isRebootConfirmFresh } from "./uptime.js";
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
+import { DraftState, onTextDelta, onToolStart } from "./stream.js";
 import { UsageRow, formatUsageReport } from "./usage.js";
 import { appendNote, dropNotes, noteEntryText, prepareNotes, showNotes } from "./notes.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
@@ -165,6 +166,12 @@ export class Bot {
   private activity = new Map<ConvKey, { msgId: number; label: string; toolStart: number }>();
   /** Tool-call id → tool name per conv (learned from session.tool.input.started). */
   private toolNames = new Map<ConvKey, Map<string, string>>();
+  /**
+   * Live streaming-draft state per conv (Bot API 10.1+ sendMessageDraft). One
+   * DraftState per conversation while a turn streams; cleared on every turn
+   * exit and on stop. Pure preview — the final reply path is independent.
+   */
+  private drafts = new Map<ConvKey, DraftState>();
   /** Open /model button pickers, one per conv (in-memory; dead buttons after a restart are handled). */
   private modelPickers = new Map<ConvKey, { models: ModelInfo[]; page: number }>();
   /** The user's most recent top-level chat, for proactive notices (e.g. DNS heal). */
@@ -503,6 +510,11 @@ export class Bot {
   }
 
   async handle(u: Update): Promise<void> {
+    // The user tapped the native stop button on a live streaming draft.
+    if (u.stopped_message_generation) {
+      await this.onStoppedMessageGeneration(u.stopped_message_generation);
+      return;
+    }
     if (u.callback_query) {
       await this.handleCallback(u.callback_query);
       return;
@@ -677,6 +689,36 @@ export class Bot {
       void this.finishActivity(conv, t === "session.tool.success");
       if (id) names?.delete(id);
     }
+  }
+
+  // ── live streaming draft (Bot API 10.1+ sendMessageDraft; pure preview) ─────
+  /**
+   * One OpenCode `session.text.delta` → advance the conv's live streaming draft.
+   * The segment key is `assistantMessageID` + `ordinal`: OpenCode gives each
+   * text part a fresh id and a new part begins after every tool call, so the
+   * draft resets per segment (no text carried over from the previous part).
+   * No-op when streaming is disabled (the caller gates on cfg.stream).
+   */
+  private onDraftTextDelta(d: any): void {
+    const conv = d?.sessionID ? this.st.findChatBySession(d.sessionID) : undefined;
+    if (!conv) return;
+    const segKey = `${d?.assistantMessageID ?? ""}:${d?.ordinal ?? 0}`;
+    const r = onTextDelta(this.drafts.get(conv) ?? null, segKey, String(d?.delta ?? ""), Date.now());
+    this.drafts.set(conv, r.state);
+    if (r.action) void this.tg.sendMessageDraft(conv, r.action.draftID, r.action.text, { canStop: true });
+  }
+
+  /**
+   * One OpenCode tool start → flash the conv's live draft to the "Thinking…"
+   * placeholder. No-op when there is no visible draft text yet. No-op when
+   * streaming is disabled (the caller gates on cfg.stream).
+   */
+  private onDraftToolStart(d: any): void {
+    const conv = d?.sessionID ? this.st.findChatBySession(d.sessionID) : undefined;
+    if (!conv) return;
+    const r = onToolStart(this.drafts.get(conv) ?? null, Date.now());
+    if (r.state) this.drafts.set(conv, r.state);
+    if (r.action) void this.tg.sendMessageDraft(conv, r.action.draftID, r.action.text, { canStop: true });
   }
 
   // ── command dispatch ─────────────────────────────────────────────────────
@@ -973,6 +1015,7 @@ export class Bot {
       await this.tg.sendMessage(conv, msg).catch(() => {});
     } finally {
       this.clearActivity(conv);
+      this.drafts.delete(conv); // drop the live preview on every turn exit (success/fail/catch)
       this.inflight.delete(conv);
     }
   }
@@ -1025,11 +1068,30 @@ export class Bot {
   private async stopCurrent(conv: ConvKey, interrupt = false): Promise<void> {
     this.stopTyping(conv);
     this.clearActivity(conv);
+    this.drafts.delete(conv); // stopping a turn drops its live draft preview
     this.orch.clearManagerBusy(conv); // /new, /clear, /stop all drop the manager's session — never let a late terminal event wedge the flag
     const ac = this.inflight.get(conv);
     if (ac) ac.abort();
     const sid = this.st.peek(conv)?.sessionID;
     if (ac && interrupt && sid) await this.oc.interrupt(sid).catch((e) => warn("interrupt:", e?.message));
+  }
+
+  /**
+   * The user tapped the native stop button on a live streaming draft
+   * (Bot API 10.1+ `stopped_message_generation`). Map the event to its
+   * conversation, drop the draft state, and interrupt the turn using the SAME
+   * logic /stop uses: abort the in-flight controller (if any) PLUS an explicit
+   * server-side interrupt — the fallback that also stops fire-and-forget
+   * manager turns, which have no in-flight controller. No reply message: the
+   * user already knows (they tapped stop).
+   */
+  private async onStoppedMessageGeneration(ev: MessageGenerationStopped): Promise<void> {
+    const conv = convKey(ev.chat.id, ev.message_thread_id);
+    this.drafts.delete(conv);
+    await this.stopCurrent(conv);
+    this.cancelAllReminders(conv);
+    const sid = this.st.peek(conv)?.sessionID;
+    if (sid) await this.oc.interrupt(sid).catch(() => {});
   }
 
   // ── model + variant helpers ─────────────────────────────────────────────────────
@@ -2273,6 +2335,11 @@ export class Bot {
       t === "session.tool.failed"
     ) {
       this.onToolEvent(t, ev?.data);
+      // Live draft: flash to "Thinking…" when a tool starts (streaming only).
+      if (this.cfg.stream && t === "session.tool.input.started") this.onDraftToolStart(ev?.data);
+    } else if (t === "session.text.delta") {
+      // Live draft: stream the token into the conv's ephemeral preview.
+      if (this.cfg.stream) this.onDraftTextDelta(ev?.data);
     } else if (t === "session.shell.started" || t === "session.shell.ended") {
       const conv = ev?.data?.sessionID ? this.st.findChatBySession(ev.data.sessionID) : undefined;
       if (conv) void (t === "session.shell.started" ? this.showActivity(conv, "▶ Đang chạy shell…") : this.finishActivity(conv, true));
