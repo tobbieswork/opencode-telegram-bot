@@ -22,6 +22,25 @@ export interface DraftState {
   text: string;
   /** ms timestamp of the last draft sent; `0` = nothing sent yet. */
   lastSentAt: number;
+  /**
+   * Remaining preview updates this turn may still send (edit transport is
+   * rate-limited per chat, so a finite budget prevents a 3-minute turn from
+   * storming `editMessageText`). `Infinity` = unlimited (draft transport).
+   */
+  editsLeft: number;
+}
+
+/** Edit-transport preview updates per turn (group chats, ~3s throttle). */
+export const EDIT_BUDGET = 20;
+
+/**
+ * Is this conversation a 1:1 user chat (chat_id > 0)? Only 1:1 peers accept
+ * `sendMessageDraft` (groups reject with `TEXTDRAFT_PEER_INVALID`), so the
+ * bot uses the ephemeral-draft transport here and the self-editing-message
+ * transport in groups.
+ */
+export function isDmConv(conv: string): boolean {
+  return Number(conv.split(":")[0]) > 0;
 }
 
 /** A single draft update to send. `text === ""` → the client's "Thinking…" placeholder. */
@@ -66,14 +85,16 @@ export function onTextDelta(
   delta: string,
   now: number,
   throttleMs = 1500,
+  maxEdits: number = Infinity,
 ): { state: DraftState; action?: DraftAction } {
   const fresh = state === null || state.partID !== partID;
   const s: DraftState = fresh
-    ? { partID, draftID: newDraftID(state?.draftID), text: "", lastSentAt: 0 }
+    ? { partID, draftID: newDraftID(state?.draftID), text: "", lastSentAt: 0, editsLeft: maxEdits }
     : { ...state };
   s.text += delta;
-  if (now - s.lastSentAt >= throttleMs) {
+  if (s.editsLeft > 0 && now - s.lastSentAt >= throttleMs) {
     s.lastSentAt = now;
+    s.editsLeft -= 1;
     return { state: s, action: { draftID: s.draftID, text: tail(s.text, DRAFT_TEXT_LIMIT) } };
   }
   return { state: s };
@@ -92,8 +113,8 @@ export function onToolStart(
   now: number,
   throttleMs = 1500,
 ): { state: DraftState | null; action?: DraftAction } {
-  if (state && state.text.length > 0 && now - state.lastSentAt >= throttleMs) {
-    const s: DraftState = { ...state, lastSentAt: now };
+  if (state && state.text.length > 0 && state.editsLeft > 0 && now - state.lastSentAt >= throttleMs) {
+    const s: DraftState = { ...state, lastSentAt: now, editsLeft: state.editsLeft - 1 };
     return { state: s, action: { draftID: state.draftID, text: "" } };
   }
   return { state };

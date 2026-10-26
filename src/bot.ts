@@ -15,7 +15,7 @@ import { scheduleForRegistration, reminderBudgetExhausted, nextScheduleAfterRemi
 import { CONTINUE_PROMPT, CONTINUE_BUTTON_LABEL, shouldOfferContinue, continueCallbackData, parseContinueData, alreadyOfferedContinue } from "./continue.js";
 import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, SAFE_REBOOT_BIN, rebootTokenFile, buildTokenLine, rebootGoData, isRebootConfirmFresh } from "./uptime.js";
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
-import { DraftState, onTextDelta, onToolStart } from "./stream.js";
+import { DraftState, DraftAction, onTextDelta, onToolStart, isDmConv, EDIT_BUDGET } from "./stream.js";
 import { UsageRow, formatUsageReport } from "./usage.js";
 import { appendNote, dropNotes, noteEntryText, prepareNotes, showNotes } from "./notes.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
@@ -167,11 +167,26 @@ export class Bot {
   /** Tool-call id → tool name per conv (learned from session.tool.input.started). */
   private toolNames = new Map<ConvKey, Map<string, string>>();
   /**
-   * Live streaming-draft state per conv (Bot API 10.1+ sendMessageDraft). One
-   * DraftState per conversation while a turn streams; cleared on every turn
-   * exit and on stop. Pure preview — the final reply path is independent.
+   * Live streaming-draft state per conv (Bot API 10.1+ sendMessageDraft).
+   * One wrapper per conversation while a turn streams; the wrapper survives
+   * the turn exit with its preview killed (previewMsgId = 0) so late deltas
+   * of the same turn cannot resurrect a stray preview after the final reply.
+   * The next turn starts clean (runPromptTask deletes the entry). Pure
+   * preview — the final-reply path is independent.
    */
-  private drafts = new Map<ConvKey, DraftState>();
+  private drafts = new Map<
+    ConvKey,
+    { state: DraftState | null; previewMsgId?: number; throttleMs: number; nextEditAt: number; budget: number; gen: number }
+  >();
+
+  /**
+   * Per-conv turn generation, bumped at the start of every turn and again when
+   * the preview is dropped (turn end / stop). A streaming wrapper only pushes
+   * preview updates while its generation still matches — this is what kills
+   * the race where a late delta of a finished turn would otherwise spawn a
+   * stray preview message after the final reply.
+   */
+  private turnGen = new Map<ConvKey, number>();
   /** Open /model button pickers, one per conv (in-memory; dead buttons after a restart are handled). */
   private modelPickers = new Map<ConvKey, { models: ModelInfo[]; page: number }>();
   /** The user's most recent top-level chat, for proactive notices (e.g. DNS heal). */
@@ -702,10 +717,11 @@ export class Bot {
   private onDraftTextDelta(d: any): void {
     const conv = d?.sessionID ? this.st.findChatBySession(d.sessionID) : undefined;
     if (!conv) return;
+    const w = this.streamFor(conv);
     const segKey = `${d?.assistantMessageID ?? ""}:${d?.ordinal ?? 0}`;
-    const r = onTextDelta(this.drafts.get(conv) ?? null, segKey, String(d?.delta ?? ""), Date.now());
-    this.drafts.set(conv, r.state);
-    if (r.action) void this.tg.sendMessageDraft(conv, r.action.draftID, r.action.text, { canStop: true });
+    const r = onTextDelta(w.state, segKey, String(d?.delta ?? ""), Date.now(), w.throttleMs, w.budget);
+    w.state = r.state;
+    if (r.action) void this.pushPreview(conv, r.action);
   }
 
   /**
@@ -716,9 +732,90 @@ export class Bot {
   private onDraftToolStart(d: any): void {
     const conv = d?.sessionID ? this.st.findChatBySession(d.sessionID) : undefined;
     if (!conv) return;
-    const r = onToolStart(this.drafts.get(conv) ?? null, Date.now());
-    if (r.state) this.drafts.set(conv, r.state);
-    if (r.action) void this.tg.sendMessageDraft(conv, r.action.draftID, r.action.text, { canStop: true });
+    const w = this.streamFor(conv);
+    const r = onToolStart(w.state, Date.now(), w.throttleMs);
+    if (r.state) w.state = r.state;
+    if (r.action) void this.pushPreview(conv, r.action);
+  }
+
+  /** Lazily create the conv's streaming wrapper (fresh per turn). */
+  private streamFor(conv: ConvKey): {
+    state: DraftState | null;
+    previewMsgId?: number;
+    throttleMs: number;
+    nextEditAt: number;
+    budget: number;
+    gen: number;
+  } {
+    let w = this.drafts.get(conv);
+    if (!w) {
+      const dm = isDmConv(conv);
+      w = {
+        state: null,
+        previewMsgId: undefined,
+        throttleMs: dm ? 1500 : 3000,
+        nextEditAt: 0,
+        budget: dm ? Infinity : EDIT_BUDGET,
+        gen: this.turnGen.get(conv) ?? 0,
+      };
+      this.drafts.set(conv, w);
+    }
+    return w;
+  }
+
+  /**
+   * Deliver one preview update through the transport for this conversation:
+   * ephemeral `sendMessageDraft` in a 1:1 chat (native stop button), and a
+   * self-editing PLAIN-TEXT message in a group (drafts are rejected there with
+   * TEXTDRAFT_PEER_INVALID; plain text because a half-streamed reply is not
+   * valid HTML/Markdown mid-flight). Best-effort: any failure only slows or
+   * stops the preview, never the turn.
+   */
+  private async pushPreview(
+    conv: ConvKey,
+    action: { draftID: number; text: string },
+  ): Promise<void> {
+    const w = this.drafts.get(conv);
+    if (!w || w.gen !== this.turnGen.get(conv) || w.previewMsgId === 0 || Date.now() < w.nextEditAt) return;
+    const text = action.text || "✍️ Đang xử lý…";
+    try {
+      if (isDmConv(conv)) {
+        // 1:1: ephemeral draft ("" renders the client's "Thinking…" placeholder).
+        const ok = await this.tg.sendMessageDraft(conv, action.draftID, action.text, { canStop: true });
+        if (!ok) w.nextEditAt = Date.now() + 2000;
+        return;
+      }
+      if (w.previewMsgId === undefined) {
+        const id = await this.tg.sendMessageId(conv, text, { parse_mode: undefined });
+        w.previewMsgId = id > 0 ? id : 0;
+      } else {
+        await this.tg.editMessageText(conv, w.previewMsgId, text, { parse_mode: undefined });
+      }
+    } catch (e: any) {
+      // Flood control → honor retry_after; anything else → brief pause. In
+      // both cases the throttle adapts upward (3s → 6s → 10s cap) so a long
+      // turn can never storm the chat's edit rate limit.
+      const ra = Number(e?.retryAfter ?? 0);
+      w.nextEditAt = Date.now() + (ra > 0 ? ra * 1000 : 1000);
+      if (e?.code === 404) w.previewMsgId = 0; // deleted under us — stop editing
+      w.throttleMs = Math.min(w.throttleMs * 2, 10000);
+    }
+  }
+
+  /**
+   * Kill the conv's preview before the final reply lands: delete the
+   * self-editing message (group transport) and mark the wrapper dead so late
+   * deltas of this turn cannot spawn a stray preview after the final message.
+   * The wrapper is removed at the start of the NEXT turn (runPromptTask).
+   */
+  private async dropPreview(conv: ConvKey): Promise<void> {
+    const w = this.drafts.get(conv);
+    // Bump the generation FIRST so even a concurrent in-flight pushPreview
+    // result cannot re-arm the preview after this point.
+    this.turnGen.set(conv, (this.turnGen.get(conv) ?? 0) + 1);
+    if (!w) return;
+    if (w.previewMsgId && w.previewMsgId !== 0) await this.tg.deleteMessage(conv, w.previewMsgId).catch(() => {});
+    w.previewMsgId = 0;
   }
 
   // ── command dispatch ─────────────────────────────────────────────────────
@@ -965,6 +1062,11 @@ export class Bot {
     // server dedupes on it, so the retry waits on the same turn instead of
     // running the instruction a second time.
     const messageID = newMessageID();
+    // Bump the turn generation: invalidates any preview state from a previous
+    // turn (its wrapper may still linger to absorb late deltas) and starts the
+    // streaming wrapper for this turn fresh.
+    this.turnGen.set(conv, (this.turnGen.get(conv) ?? 0) + 1);
+    this.drafts.delete(conv);
     const run = () => this.oc.promptAndWait(sid, text, { signal: ac.signal, messageID });
     try {
       let res;
@@ -983,6 +1085,9 @@ export class Bot {
         }
       }
       this.stopTyping(conv);
+      // Drop the live preview before the final message lands (group transport
+      // keeps a real, self-editing message that must not outlive the reply).
+      await this.dropPreview(conv);
       // A failed turn produced no useful reply — surface the real reason (often
       // context overflow, fixable with /clear) instead of an opaque "failed · Xs".
       if (res.outcome === "failed" && !res.interrupted) {
@@ -1008,6 +1113,7 @@ export class Bot {
       if (!res.interrupted && res.reply) await this.maybeOfferPlanToBuild(conv);
     } catch (e) {
       this.stopTyping(conv);
+      await this.dropPreview(conv);
       error("prompt error:", (e as Error)?.message);
       const msg = isTransportError(e)
         ? "⚠️ Không thể nối tới OpenCode (service có thể đang restart / chưa chạy). Hẵng thử lại sau, hoặc kiểm tra `opencode service status`."
@@ -1015,7 +1121,10 @@ export class Bot {
       await this.tg.sendMessage(conv, msg).catch(() => {});
     } finally {
       this.clearActivity(conv);
-      this.drafts.delete(conv); // drop the live preview on every turn exit (success/fail/catch)
+      // NOTE: do NOT delete the streaming wrapper here — it must stay (killed
+      // by the generation bump in dropPreview) so late deltas of this turn
+      // cannot spawn a stray preview after the final message. The NEXT turn
+      // removes it (see the turnGen bump at the top of runPromptTask).
       this.inflight.delete(conv);
     }
   }
@@ -1068,7 +1177,7 @@ export class Bot {
   private async stopCurrent(conv: ConvKey, interrupt = false): Promise<void> {
     this.stopTyping(conv);
     this.clearActivity(conv);
-    this.drafts.delete(conv); // stopping a turn drops its live draft preview
+    await this.dropPreview(conv); // stopping a turn drops its live preview (and kills late deltas)
     this.orch.clearManagerBusy(conv); // /new, /clear, /stop all drop the manager's session — never let a late terminal event wedge the flag
     const ac = this.inflight.get(conv);
     if (ac) ac.abort();
