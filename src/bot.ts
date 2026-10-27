@@ -1080,7 +1080,6 @@ export class Bot {
    * is manager-only, so worker topics never reach here.
    */
   private startWorking(conv: ConvKey): void {
-    log(`[debug-wi] startWorking conv=${conv} working=${this.cfg.working} dm=${isDmConv(conv)}`);
     if (!this.cfg.working || isDmConv(conv)) return; // manager turns in groups/topics; DMs show native typing fine
     if (this.working.has(conv)) return;
     log(`⏳ working indicator shown for ${conv}`);
@@ -1489,7 +1488,6 @@ export class Bot {
     // (openForumTopic is a no-op on an already-open topic, so safe every time).
     if (state.worker) void this.tg.openForumTopic(conv).catch(() => {});
     if (this.inflight.has(conv)) {
-      log(`[debug-wi] busy-guard skip conv=${conv}`);
       if (userMsgId != null) {
         // Offer a one-tap "save as note" for this dropped message: the button's
         // callback data carries the user message's id and its text is retained,
