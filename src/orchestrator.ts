@@ -15,6 +15,7 @@ import { buildHandoffPrompt, followUpsFromMessages, respawnName, respawnNotice, 
 import { esc, trunc, timeAgo, stripTags } from "./format.js";
 import { log, warn } from "./logger.js";
 import { BUSY_REPLY_TEXT, NOTE_BUTTON_LABEL, noteCallbackData, BusyNoteStore } from "./notes.js";
+import type { Schedule } from "./schedule.js";
 
 type Btn = { text: string; callback_data: string };
 type Keyboard = { inline_keyboard: Btn[][] };
@@ -131,7 +132,7 @@ interface SpawnSpec {
   task?: string;
   agent?: string;
   writes?: boolean;
-  spawnedBy: "user" | "manager";
+  spawnedBy: "user" | "manager" | "schedule";
   /**
    * When `false`, skip git worktree isolation entirely and run the worker in the
    * given directory as-is. Used for overflow respawns, which must stay in the
@@ -754,6 +755,67 @@ export class Orchestrator {
     if (s.sessionID) await this.h.oc.interrupt(s.sessionID).catch(() => {});
     if (close) await this.h.tg.closeForumTopic(conv);
     return `⏹ Đã dừng worker <b>${esc(w.name)}</b>.${w.worktree ? " Worktree vẫn giữ — dùng /wt trong topic để xem diff / merge / xoá." : ""}`;
+  }
+
+  /** Is a worker of this name under the chat currently running/waiting? (scheduler's busy/skip check) */
+  workerBusyByName(chat: ConvKey, name: string): boolean {
+    const found = this.h.st.findWorker(chat, name);
+    return !!found && BUSY.includes(found[1].worker!.status);
+  }
+
+  /**
+   * Run a schedule once — the real dispatch behind the scheduler's `dispatch`
+   * dependency. Finds (or creates) the schedule's worker topic, applies the
+   * ≤1-live-session policy, prompts it, and arms an anti-hang timeout.
+   */
+  async runScheduled(chat: ConvKey, sch: Schedule): Promise<void> {
+    const name = "sch-" + sch.id;
+    let conv: ConvKey;
+    let justSpawned: boolean;
+    const existing = this.h.st.findWorker(chat, name);
+    if (existing) {
+      conv = existing[0];
+      justSpawned = false;
+    } else {
+      // First run: create the worker with NO task → it starts idle and takes
+      // no busy slot. If spawn throws (e.g. topic unsupported) let it throw —
+      // the scheduler's tick catches it and records the schedule error.
+      conv = (await this.spawn(chat, { name, directory: sch.dir, agent: sch.agent, spawnedBy: "schedule" })).conv;
+      justSpawned = true;
+    }
+    const state = this.h.st.get(conv);
+    let sessionID: string;
+    if (justSpawned) {
+      // First run: reuse the session spawn() already created (a second create
+      // would orphan a session).
+      sessionID = state.sessionID!;
+    } else {
+      // Repeat run: fresh session, created BEFORE retiring the old one so a
+      // failed create never drops the previous session (≤1 live session).
+      sessionID = await this.h.oc.createSession(sch.dir, {
+        title: "tg:" + name,
+        agent: sch.agent,
+        metadata: { tgWorker: name, tgChat: chat },
+      });
+      if (state.sessionID) await this.h.oc.removeSession(state.sessionID).catch(() => {});
+    }
+    // Bind the session to this conv so relay + permission/form route here.
+    this.h.st.set(conv, { sessionID, guided: true, lastRelayedTime: 1 });
+    await this.h.applyModelAndVariant(sessionID, this.h.st.get(conv));
+    this.setStatus(conv, "running");
+    await this.h.oc.prompt(sessionID, workerPreamble(name) + "\n\n" + sch.prompt);
+    this.h.startTyping(conv);
+    // Anti-hang timeout: if still BUSY when it fires, stop it and report once.
+    const timer = setTimeout(() => {
+      void (async () => {
+        const cur = this.h.st.peek(conv);
+        if (cur?.worker && BUSY.includes(cur.worker.status)) {
+          await this.stopWorker(conv, false).catch(() => {});
+          await this.h.tg.sendMessage(conv, "⏱ Quá hạn — đã dừng lịch " + name).catch(() => {});
+        }
+      })();
+    }, this.h.cfg.scheduleTimeoutMs);
+    timer.unref?.();
   }
 
   /**
