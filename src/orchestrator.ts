@@ -31,6 +31,10 @@ export interface Host {
   sendHtml(conv: ConvKey, html: string, opts?: { reply_markup?: Keyboard }): Promise<void>;
   applyModelAndVariant(sessionID: string, state: ChatState): Promise<void>;
   startTyping(conv: ConvKey): void;
+  /** Show the "⏳ Đang xử lý…" line for a manager turn (the manager uses promptManager, not runPrompt). */
+  startWorking(conv: ConvKey): void;
+  /** Remove the "⏳ Đang xử lý…" line for a manager turn (at turn end). */
+  stopWorking(conv: ConvKey): void;
   /**
    * Start of a user-initiated manager turn: surface /note scratchpad notes into
    * the session's instruction entries (or retire last turn's). Best-effort.
@@ -1088,6 +1092,7 @@ export class Orchestrator {
       throw e;
     }
     this.h.startTyping(conv);
+    this.h.startWorking(conv); // "⏳ Đang xử lý…" for the manager turn (event-stream-driven, not runPrompt)
   }
 
   /** Drop the Manager busy flag (used by /stop so a stuck flag can't wedge the chat). */

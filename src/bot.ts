@@ -268,6 +268,8 @@ export class Bot {
       applyModelAndVariant: (sid, state) => this.applyModelAndVariant(sid, state),
       prepareNotes: (conv, sid) => this.prepareNotesTurn(conv, sid),
       startTyping: (conv) => this.startTyping(conv),
+      startWorking: (conv) => this.startWorking(conv),
+      stopWorking: (conv) => this.stopWorking(conv),
       onTopicGone: async (conv) => {
         // The topic is gone and the conv is being purged NOW (not the deferred
         // running-worker case, where the worker is allowed to finish). Fully stop
@@ -3252,6 +3254,7 @@ export class Bot {
         this.startTyping(conv);
       } else {
         this.stopTyping(conv);
+        this.stopWorking(conv); // manager turn ended (fire-and-forget, not inflight) — remove the "⏳"
         this.clearActivity(conv);
         void this.sweepUnrelayedReplies(conv, "turn ended out-of-band", t === "session.execution.succeeded");
       }
