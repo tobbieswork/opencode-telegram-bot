@@ -1648,7 +1648,7 @@ export class Bot {
     const text = arg.trim();
     if (!text) {
       const pending = showNotes(this.st.get(conv));
-      await this.tg.sendMessage(conv, pending ? `📝 Ghi chú đang chờ:\n${esc(pending)}` : "Chưa có ghi chú nào. Dùng: /note <nội dung>");
+      await this.tg.sendMessage(conv, pending ? `📝 Ghi chú đang chờ:\n${esc(pending)}` : "Chưa có ghi chú nào. Dùng: /note (nội dung)");
       return;
     }
     const cur = this.st.get(conv);
