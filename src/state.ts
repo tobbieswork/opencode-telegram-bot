@@ -39,7 +39,7 @@ export interface WorkerInfo {
   status: WorkerStatus;
   /** The task it was spawned with (Manager-spawned workers). */
   task?: string;
-  spawnedBy: "user" | "manager";
+  spawnedBy: "user" | "manager" | "schedule";
   /** Whether the task may edit files (decides worktree isolation). */
   writes?: boolean;
   /** Git repo root of its directory (main checkout), when in a repo. */

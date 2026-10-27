@@ -41,6 +41,8 @@ export interface Config {
   guideLanguage: boolean;
   /** Show a live "agent is doing…" activity line while a turn runs. */
   activity: boolean;
+  /** Show a "⏳ Đang xử lý…" line in the General top-level while the Manager works (native typing doesn't render there). */
+  working: boolean;
   /** Remind the user about a pending question-form / permission they haven't answered. */
   remind: boolean;
   /** Base delay (ms) before the FIRST reminder for a pending form/permission. */
@@ -121,6 +123,20 @@ export interface Config {
    * delivery — the bot is admin, and the update is in allowed_updates).
    */
   react: boolean;
+  /**
+   * Master switch for /schedule (automated prompts). Default ON; "0" disables.
+   * The on/off is enforced by the caller (slice 3 starts the Scheduler only when
+   * true) — the Scheduler itself is config-agnostic (deps-injected).
+   */
+  schedule: boolean;
+  /** IANA timezone used as the DEFAULT for new schedules (each schedule stores its own at creation). */
+  scheduleTz: string;
+  /** Max number of schedules allowed; the store's `add` throws beyond this. */
+  maxSchedules: number;
+  /** A due run late by at most this many ms still fires once (catchup); later is skipped. */
+  scheduleGraceMs: number;
+  /** A scheduled run still running/waiting after this long is interrupted (slice 3). */
+  scheduleTimeoutMs: number;
 }
 
 export function loadConfig(root: string): Config {
@@ -155,6 +171,7 @@ export function loadConfig(root: string): Config {
     guideQuestions: process.env.OPENCODE_TG_GUIDE !== "0",
     guideLanguage: process.env.OPENCODE_TG_LANGUAGE !== "0",
     activity: process.env.OPENCODE_TG_ACTIVITY !== "0",
+    working: process.env.OPENCODE_TG_WORKING !== "0",
     remind: process.env.OPENCODE_TG_REMIND !== "0",
     // parseIntSetting/parseFloatSetting guard against a non-numeric env value (e.g.
     // OPENCODE_TG_REMIND_MAX=abc) yielding NaN, which would make the backoff fire ~every ms.
@@ -189,6 +206,14 @@ export function loadConfig(root: string): Config {
     prWatchIntervalMs: parseIntSetting("OPENCODE_TG_PR_WATCH_INTERVAL_MS", 5 * 60_000, 60_000),
     // Default OFF: only an explicit "1"/"true" enables the reaction UX.
     react: process.env.OPENCODE_TG_REACT === "1" || process.env.OPENCODE_TG_REACT === "true",
+    // --- /schedule (slice 2 engine; slice 3 wires the command + dispatch) ---
+    // Default ON; only an explicit "0" disables (the tick loop is started by slice 3 only when true).
+    schedule: process.env.OPENCODE_TG_SCHEDULE !== "0",
+    scheduleTz: parseTzSetting(process.env.OPENCODE_TG_TIMEZONE?.trim() ?? ""),
+    maxSchedules: parseIntSetting("OPENCODE_TG_MAX_SCHEDULES", 10, 1),
+    // Minute-valued env → ms (the scheduler works in ms; decideRun/nextRunAfter too).
+    scheduleGraceMs: parseIntSetting("OPENCODE_TG_SCHEDULE_GRACE_MIN", 60, 1) * 60_000,
+    scheduleTimeoutMs: parseIntSetting("OPENCODE_TG_SCHEDULE_TIMEOUT_MIN", 30, 1) * 60_000,
   };
   const agent = process.env.OPENCODE_DEFAULT_AGENT?.trim();
   if (agent) cfg.defaultAgent = agent;
@@ -222,6 +247,31 @@ function parseFloatSetting(name: string, fallback: number, min: number): number 
 function parseWorktreeMode(raw?: string): Config["worktreeMode"] {
   const v = raw?.trim().toLowerCase();
   return v === "always" || v === "off" ? v : "auto";
+}
+
+/** The system IANA timezone, with a hard fallback when Intl reports nothing. */
+function defaultTz(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Ho_Chi_Minh";
+  } catch {
+    return "Asia/Ho_Chi_Minh";
+  }
+}
+
+/**
+ * The default timezone for NEW schedules. Empty/absent → system tz; a value that
+ * Intl rejects → warn + system tz (an invalid tz would throw on every nextRunAfter).
+ * Each schedule stores its own tz at creation, so editing this does not move existing ones.
+ */
+function parseTzSetting(raw: string): string {
+  if (!raw) return defaultTz();
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: raw });
+    return raw;
+  } catch {
+    warn(`OPENCODE_TG_TIMEZONE=${raw} is not a valid IANA timezone — using ${defaultTz()}`);
+    return defaultTz();
+  }
 }
 
 /**

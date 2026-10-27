@@ -48,6 +48,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     log(`\n${sig} received, stopping…`);
+    bot.stopScheduler();
     tg.stop();
     setTimeout(() => process.exit(0), 500).unref();
   };
