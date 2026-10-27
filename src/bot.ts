@@ -26,7 +26,6 @@ import {
   REACT_INDEX_CAP,
   REACTED_CAP,
   REACT_TEXT_MAX,
-  REACTION_THINK,
   REACTION_CELEBRATE,
   REACTION_FAIL,
 } from "./reactions.js";
@@ -658,9 +657,8 @@ export class Bot {
 
     if (text.startsWith("/")) await this.handleCommand(conv, text, state, uid);
     else {
-      // Body language (feature C): the bot thinks on a new prompt. Best-effort,
-      // never affects the dispatch.
-      this.bodyReact(conv, msg.message_id, REACTION_THINK);
+      // (The "🤔 thinking" body-react on the user's message was removed 2026-10-27:
+      // the working indicator now covers "the bot is working" on new prompts.)
       if (await this.handleFormText(conv, text)) return;
       else if (state.manager) await this.orch.promptManager(conv, text, msg.message_id);
       else await this.runPrompt(conv, text, state, msg.message_id);
