@@ -85,6 +85,8 @@ const QUESTIONS_PREAMBLE =
 const LANGUAGE_INSTRUCTION_KEY = "tgbot.language";
 /** Instruction-entry key for /note scratchpad notes (see src/notes.ts). */
 const NOTES_KEY = "tgbot.notes";
+/** Instruction key for /new --keep carry-over (recent-thread summary injected into the fresh session). */
+const CARRYOVER_KEY = "tgbot.carryover";
 /** Injected per-session so the model keeps the user's language and does not leak CJK. */
 const LANGUAGE_INSTRUCTION =
   "Always reply in the SAME language the user wrote in, throughout the entire answer. Do NOT " +
@@ -1430,7 +1432,7 @@ export class Bot {
       case "/help":
         return this.cmdHelp(conv);
       case "/new":
-        return this.cmdNew(conv, state);
+        return this.cmdNew(conv, state, /--keep\b/i.test(arg));
       case "/ls":
       case "/sessions":
         return this.cmdList(conv);
@@ -1742,15 +1744,59 @@ export class Bot {
     void this.tg.setMyCommands(myCommands()).catch((e) => warn("setMyCommands:", e?.message));
   }
 
-  private async cmdNew(conv: ConvKey, state: ChatState): Promise<void> {
+  private async cmdNew(conv: ConvKey, state: ChatState, keep = false): Promise<void> {
+    // --keep: capture a short handoff summary of the CURRENT session before
+    // replacing it, then inject it into the fresh session's context so the new
+    // session continues with the recent thread (decisions, in-progress work)
+    // instead of starting cold. Rules (project-memory) persist by default;
+    // the recent conversation is what --keep carries over.
+    const oldSID = state.sessionID;
+    let carryover = "";
+    if (keep && oldSID) {
+      await this.tg.sendMessage(conv, "🔁 Đang tóm tắt session cũ để giữ mạch…");
+      carryover = await this.summarizeForHandoff(oldSID);
+    }
     await this.stopCurrent(conv, true);
     this.cancelAllReminders(conv); // abandoning the current session's pending prompts
     const dir = state.directory || this.cfg.opencodeDirectory;
     const sessionID = await this.oc.createSession(dir);
     await this.applyModelAndVariant(sessionID, state);
     if (state.agent) await this.oc.setAgent(sessionID, state.agent).catch((e) => warn("setAgent:", e?.message));
+    if (carryover) {
+      // Inject the carry-over as a system-context instruction (no turn consumed),
+      // so the fresh session "remembers" the recent thread for its whole life.
+      await this.oc
+        .setInstruction(
+          sessionID,
+          CARRYOVER_KEY,
+          `You are continuing from a previous session. Carry-over context (recent decisions, in-progress work, open threads):\n${carryover}\nContinue from here, picking up where the previous session left off.`,
+        )
+        .catch((e) => warn("carryover instruction:", (e as Error).message));
+    }
     this.st.set(conv, { sessionID, directory: dir, ...dropNotes() }); // a fresh session must not inherit pending notes
-    await this.tg.sendMessage(conv, `🆕 New session <code>${sessionID}</code>\ndir: <code>${esc(dir)}</code>`);
+    await this.tg.sendMessage(
+      conv,
+      `🆕 New session <code>${sessionID}</code>\ndir: <code>${esc(dir)}</code>${keep ? `\n🔁 carry-over: ${carryover ? "✓" : "(session cũ trống)"}` : ""}`,
+    );
+  }
+
+  /**
+   * Ask the (soon-to-be-replaced) session for a concise handoff summary of the
+   * recent thread. Runs as one hidden turn in that session; the reply stays in
+   * the (abandoned) session, so it never reaches the user's chat.
+   */
+  private async summarizeForHandoff(sessionID: string): Promise<string> {
+    try {
+      const r = await this.oc.promptAndWait(
+        sessionID,
+        "Summarize the recent conversation for handoff to a fresh session: key decisions, in-progress work, important facts, and open threads. Be concise (≤ 300 words). Do NOT summarize this summarization request itself.",
+      );
+      const t = (r.reply ?? "").trim();
+      return t.length > 4000 ? `${t.slice(0, 4000)}…` : t;
+    } catch (e) {
+      warn("handoff summary:", (e as Error).message);
+      return "";
+    }
   }
 
   /**
