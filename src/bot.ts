@@ -35,7 +35,7 @@ import { toolActivityLabel, activityDoneLine } from "./activity.js";
 import { DraftState, DraftAction, onTextDelta, onToolStart, isDmConv, EDIT_BUDGET } from "./stream.js";
 import { myCommands, helpText, commandGrid } from "./commands.js";
 import { UsageRow, formatUsageReport } from "./usage.js";
-import { appendNote, dropNotes, noteEntryText, prepareNotes, showNotes } from "./notes.js";
+import { appendNote, dropNotes, noteEntryText, prepareNotes, showNotes, BUSY_REPLY_TEXT, NOTE_BUTTON_LABEL, NOTE_CB_PREFIX, noteCallbackData, parseNoteCallback, BusyNoteStore } from "./notes.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
 import { log, warn, error } from "./logger.js";
 
@@ -220,6 +220,14 @@ export class Bot {
    * stray preview message after the final reply.
    */
   private turnGen = new Map<ConvKey, number>();
+  /**
+   * Retention for the "📝 Thêm vào note" busy-reply button: user messages that
+   * arrived while the agent was busy, keyed by conv (capped, oldest dropped),
+   * cleared when the turn ends or on /stop so a stale tap is "not found". One
+   * shared instance — handed to the Orchestrator so the Manager's busy reply
+   * retains into the same store and taps are handled identically.
+   */
+  private busyNotes = new BusyNoteStore();
   /** Open /model button pickers, one per conv (in-memory; dead buttons after a restart are handled). */
   private modelPickers = new Map<ConvKey, { models: ModelInfo[]; page: number }>();
   /** The user's most recent top-level chat, for proactive notices (e.g. DNS heal). */
@@ -241,6 +249,7 @@ export class Bot {
       oc,
       st,
       cfg,
+      busyNotes: this.busyNotes,
       sendHtml: (conv, html, opts) => this.sendHtml(conv, html, opts),
       applyModelAndVariant: (sid, state) => this.applyModelAndVariant(sid, state),
       prepareNotes: (conv, sid) => this.prepareNotesTurn(conv, sid),
@@ -617,7 +626,7 @@ export class Bot {
       // never affects the dispatch.
       this.bodyReact(conv, msg.message_id, REACTION_THINK);
       if (await this.handleFormText(conv, text)) return;
-      else if (state.manager) await this.orch.promptManager(conv, text);
+      else if (state.manager) await this.orch.promptManager(conv, text, msg.message_id);
       else await this.runPrompt(conv, text, state, msg.message_id);
     }
   }
@@ -1384,7 +1393,16 @@ export class Bot {
     // (openForumTopic is a no-op on an already-open topic, so safe every time).
     if (state.worker) void this.tg.openForumTopic(conv).catch(() => {});
     if (this.inflight.has(conv)) {
-      await this.tg.sendMessage(conv, "⏳ Still working on the previous message. Send /stop to interrupt.");
+      if (userMsgId != null) {
+        // Offer a one-tap "save as note" for this dropped message: the button's
+        // callback data carries the user message's id and its text is retained,
+        // so the tap can append it to /note (see handleNoteCallback).
+        const kb: Keyboard = { inline_keyboard: [[{ text: NOTE_BUTTON_LABEL, callback_data: noteCallbackData(userMsgId) }]] };
+        await this.tg.sendMessage(conv, BUSY_REPLY_TEXT, { reply_markup: kb });
+        this.busyNotes.push(conv, userMsgId, text);
+      } else {
+        await this.tg.sendMessage(conv, BUSY_REPLY_TEXT);
+      }
       return;
     }
     // Keep the "typing…" indicator alive for the whole turn (until the reply is sent).
@@ -1517,6 +1535,7 @@ export class Bot {
       // cannot spawn a stray preview after the final message. The NEXT turn
       // removes it (see the turnGen bump at the top of runPromptTask).
       this.inflight.delete(conv);
+      this.busyNotes.clear(conv); // the turn ended: the note-button retention window is over
     }
   }
 
@@ -1568,6 +1587,7 @@ export class Bot {
   private async stopCurrent(conv: ConvKey, interrupt = false): Promise<void> {
     this.stopTyping(conv);
     this.clearActivity(conv);
+    this.busyNotes.clear(conv); // /stop (and /new, /clear) end the turn: drop the note-button retention
     await this.dropPreview(conv); // stopping a turn drops its live preview (and kills late deltas)
     this.orch.clearManagerBusy(conv); // /new, /clear, /stop all drop the manager's session — never let a late terminal event wedge the flag
     const ac = this.inflight.get(conv);
@@ -1661,6 +1681,43 @@ export class Bot {
       await this.oc.setInstruction(sid, NOTES_KEY, noteEntryText(next.notes!)).catch((e) => warn("note put:", (e as Error).message));
     }
     await this.tg.sendMessage(conv, "📝 Đã ghi — agent sẽ xem ở lượt tiếp theo.");
+  }
+
+  /**
+   * "📝 Thêm vào note" button on a busy reply: append the user message that was
+   * dropped (the agent was busy) to the scratchpad notes, so the agent sees it on
+   * the next turn. The text is looked up in the in-memory retention map by the
+   * user message's Telegram id (carried in the callback data); if the turn has
+   * already ended (or the bot restarted) the entry is gone → "not found".
+   */
+  private async handleNoteCallback(cb: CallbackQuery, conv: ConvKey, messageId: number | undefined): Promise<void> {
+    const id = parseNoteCallback(cb.data);
+    if (id == null) {
+      await this.tg.answerCallbackQuery(cb.id);
+      return;
+    }
+    // Consume the entry NOW (before any await) so a double-tap can't append twice.
+    const text = this.busyNotes.take(conv, id);
+    if (text == null) {
+      await this.tg.answerCallbackQuery(cb.id, "Không tìm thấy nội dung tin nhắn đó.");
+      return;
+    }
+    // Save via the SAME path as cmdNote: append + persist + best-effort PUT.
+    const cur = this.st.get(conv);
+    const next = appendNote(cur, text, Date.now());
+    this.st.set(conv, next);
+    const sid = cur.sessionID; // appendNote spreads the full state, so sessionID is unchanged
+    if (sid) {
+      await this.oc.setInstruction(sid, NOTES_KEY, noteEntryText(next.notes!)).catch((e) => warn("note put:", (e as Error).message));
+    }
+    await this.tg.answerCallbackQuery(cb.id, "📝 Đã ghi — agent sẽ xem ở lượt tiếp theo.");
+    // Remove the button: edit the busy message back to plain text (empty keyboard).
+    // Best-effort — the message may be too old or deleted; ignore gracefully.
+    if (messageId != null) {
+      await this.tg
+        .editMessageText(conv, messageId, BUSY_REPLY_TEXT, { reply_markup: { inline_keyboard: [] } })
+        .catch(() => {});
+    }
   }
 
   /**
@@ -1915,6 +1972,10 @@ export class Bot {
     }
     if (data.startsWith("cont:")) {
       await this.handleContinueCallback(cb, conv, messageId);
+      return;
+    }
+    if (data.startsWith(NOTE_CB_PREFIX)) {
+      await this.handleNoteCallback(cb, conv, messageId);
       return;
     }
     if (data.startsWith("reboot:")) {
