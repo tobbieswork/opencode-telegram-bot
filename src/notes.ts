@@ -25,9 +25,9 @@ export interface NoteState {
 /** Notes are capped to keep system context small; the oldest characters are trimmed. */
 export const NOTE_MAX_CHARS = 4000;
 
-/** Append one note line (HH:MM-prefixed) and re-arm the stage to "pending". */
+/** Append one note line (local HH:MM-prefixed) and re-arm the stage to "pending". */
 export function appendNote(state: NoteState, text: string, now: number): NoteState {
-  const line = `- ${new Date(now).toISOString().slice(11, 16)}: ${text.trim()}`;
+  const line = `- ${new Date(now).toTimeString().slice(0, 5)}: ${text.trim()}`;
   const next = state.notes ? `${state.notes}\n${line}` : line;
   return { ...state, notes: next.length > NOTE_MAX_CHARS ? next.slice(-NOTE_MAX_CHARS) : next, notesStage: "pending" };
 }

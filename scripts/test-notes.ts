@@ -18,15 +18,17 @@ function check(name: string, cond: boolean, detail?: string): void {
 }
 
 const T0 = Date.parse("2026-10-26T21:00:00Z");
+const T01 = new Date(T0 + 60000); // +1 min, same local day
+const HHMM = (t: number) => new Date(t).toTimeString().slice(0, 5); // tz-agnostic expectations
 
 // ── appendNote: lines accumulate, stage always re-arms to "pending" ─────────
 {
   const s1 = appendNote({}, "hello", T0);
-  check("first note is pending", s1.notesStage === "pending" && s1.notes === "- 21:00: hello", JSON.stringify(s1));
+  check("first note is pending", s1.notesStage === "pending" && s1.notes === `- ${HHMM(T0)}: hello`, JSON.stringify(s1));
   const s2 = appendNote(s1, "second", T0 + 5 * 60000);
-  check("second note appends a line", s2.notes === "- 21:00: hello\n- 21:05: second" && s2.notesStage === "pending", JSON.stringify(s2.notes));
+  check("second note appends a line", s2.notes === `- ${HHMM(T0)}: hello\n- ${HHMM(T0 + 5 * 60000)}: second` && s2.notesStage === "pending", JSON.stringify(s2.notes));
   const s3 = appendNote(s2, "  padded  ", T0 + 60000);
-  check("note text is trimmed", s3.notes!.endsWith("- 21:01: padded"), JSON.stringify(s3.notes));
+  check("note text is trimmed", s3.notes!.endsWith(`- ${HHMM(T01)}: padded`), JSON.stringify(s3.notes));
 }
 
 // ── appendNote: size cap trims the oldest characters ────────────────────────
@@ -46,7 +48,7 @@ const T0 = Date.parse("2026-10-26T21:00:00Z");
 {
   const s = appendNote({}, "hello", T0);
   const p1 = prepareNotes(s);
-  check("pending → PUT entry", typeof p1.put === "string" && p1.put!.includes("- 21:00: hello") && !p1.remove, JSON.stringify(p1));
+  check("pending → PUT entry", typeof p1.put === "string" && p1.put!.includes(`- ${HHMM(T0)}: hello`) && !p1.remove, JSON.stringify(p1));
   check("pending → marked shown", p1.state.notesStage === "shown" && p1.state.notes === s.notes, JSON.stringify(p1.state));
 
   const p2 = prepareNotes(p1.state);
