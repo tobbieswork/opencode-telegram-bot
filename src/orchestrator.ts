@@ -14,6 +14,7 @@ import { spawnRequestBody } from "./reactions.js";
 import { buildHandoffPrompt, followUpsFromMessages, respawnName, respawnNotice, shouldRespawnWorker } from "./recovery.js";
 import { esc, trunc, timeAgo, stripTags } from "./format.js";
 import { log, warn } from "./logger.js";
+import { BUSY_REPLY_TEXT, NOTE_BUTTON_LABEL, noteCallbackData, BusyNoteStore } from "./notes.js";
 
 type Btn = { text: string; callback_data: string };
 type Keyboard = { inline_keyboard: Btn[][] };
@@ -24,6 +25,8 @@ export interface Host {
   oc: OpenCodeCtl;
   st: StateManager;
   cfg: Config;
+  /** Shared retention for the busy-reply "Thêm vào note" button (owned by the Bot). */
+  busyNotes: BusyNoteStore;
   sendHtml(conv: ConvKey, html: string, opts?: { reply_markup?: Keyboard }): Promise<void>;
   applyModelAndVariant(sessionID: string, state: ChatState): Promise<void>;
   startTyping(conv: ConvKey): void;
@@ -473,7 +476,7 @@ export class Orchestrator {
     if (want === "off") {
       if (!top.manager) return void (await this.h.sendHtml(conv, "Manager đang tắt."));
       if (top.sessionID) await this.h.oc.interrupt(top.sessionID).catch(() => {});
-      this.managerBusy.delete(conv); // the manager's session is being dropped — a late terminal event can't clear the flag
+      this.dropManagerTurn(conv); // the manager's session is being dropped — a late terminal event can't clear the flag
       this.bridgeChats.delete(chat);
       this.h.st.set(chat, { manager: false, sessionID: undefined, agent: undefined, directory: undefined, guided: false });
       await this.h.sendHtml(conv, "🧭 Đã tắt Manager. Chat chính quay lại làm việc như một session bình thường; các worker vẫn giữ nguyên.");
@@ -830,7 +833,7 @@ export class Orchestrator {
     //      practice (turns are mostly serialized per conv) but not guarded.
     if (s.manager && !s.worker) {
       if (type === "session.execution.started") this.managerBusy.add(conv);
-      else this.managerBusy.delete(conv); // succeeded / failed / interrupted
+      else this.dropManagerTurn(conv); // succeeded / failed / interrupted
       return;
     }
     if (!s.worker) return;
@@ -992,7 +995,7 @@ export class Orchestrator {
 
   // ── Manager ───────────────────────────────────────────────────────────────
   /** A user message for the Manager: admit it without blocking; the reply is relayed when the turn ends. */
-  async promptManager(conv: ConvKey, text: string): Promise<void> {
+  async promptManager(conv: ConvKey, text: string, messageId?: number): Promise<void> {
     const s = this.h.st.get(conv);
     if (!s.sessionID) {
       await this.cmdManager(conv, "on");
@@ -1001,7 +1004,16 @@ export class Orchestrator {
     // A turn is already running (this user's previous message, or a bot event
     // such as a worker report): block and notify, matching normal chats.
     if (this.managerBusy.has(conv)) {
-      await this.h.tg.sendMessage(conv, "⏳ Still working on the previous message. Send /stop to interrupt.");
+      if (messageId != null) {
+        // Offer the same one-tap "save as note" as the regular busy reply: the
+        // button's callback data carries the user message's id and its text is
+        // retained, so the tap appends it to /note (handled in Bot.handleNoteCallback).
+        const kb: Keyboard = { inline_keyboard: [[{ text: NOTE_BUTTON_LABEL, callback_data: noteCallbackData(messageId) }]] };
+        await this.h.tg.sendMessage(conv, BUSY_REPLY_TEXT, { reply_markup: kb });
+        this.h.busyNotes.push(conv, messageId, text);
+      } else {
+        await this.h.tg.sendMessage(conv, BUSY_REPLY_TEXT);
+      }
       return;
     }
     this.managerBusy.add(conv); // mark before the await so a 2nd message can't slip through
@@ -1010,7 +1022,7 @@ export class Orchestrator {
     try {
       await this.h.oc.prompt(this.h.st.get(conv).sessionID!, text);
     } catch (e) {
-      this.managerBusy.delete(conv); // the prompt was never accepted — don't stay busy forever
+      this.dropManagerTurn(conv); // the prompt was never accepted — don't stay busy forever
       throw e;
     }
     this.h.startTyping(conv);
@@ -1018,7 +1030,18 @@ export class Orchestrator {
 
   /** Drop the Manager busy flag (used by /stop so a stuck flag can't wedge the chat). */
   clearManagerBusy(conv: ConvKey): void {
+    this.dropManagerTurn(conv);
+  }
+
+  /**
+   * Clear a conv's manager busy flag AND its note-button retention together — one
+   * logical turn end. Keeping them in one place guarantees the retention window
+   * (busy reply → turn end) always closes with the busy flag, so a tap after the
+   * turn ends (or on /stop, /new, /clear, manager off, or purge) is "not found".
+   */
+  private dropManagerTurn(conv: ConvKey): void {
     this.managerBusy.delete(conv);
+    this.h.busyNotes.clear(conv);
   }
 
   /** Batch worker reports and feed them to the Manager as one "[Bot event]" message. */
@@ -1179,7 +1202,7 @@ export class Orchestrator {
   private clearConvMemory(conv: ConvKey): void {
     this.budget.delete(conv);
     this.finishing.delete(conv);
-    this.managerBusy.delete(conv);
+    this.dropManagerTurn(conv);
     this.reports.delete(conv);
     const t = this.reportTimers.get(conv);
     if (t) {

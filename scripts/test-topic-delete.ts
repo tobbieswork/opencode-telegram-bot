@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { addWorktree, removeWorktree } from "../src/worktree.js";
 import { StateManager } from "../src/state.js";
 import { Orchestrator } from "../src/orchestrator.js";
+import { BusyNoteStore } from "../src/notes.js";
 import { Telegram } from "../src/telegram.js";
 
 const pexec = promisify(execFile);
@@ -52,6 +53,7 @@ async function main(): Promise<void> {
     oc: { removeSession: async (id: string) => { removed.push(id); } },
     st,
     cfg: {},
+    busyNotes: new BusyNoteStore(),
     sendHtml: async () => {},
     applyModelAndVariant: async () => {},
     startTyping: () => {},
@@ -188,7 +190,7 @@ async function main(): Promise<void> {
       });
       let removeCalls = 0;
       const orchConc = new Orchestrator({
-        tg: {}, oc: { removeSession: async () => {} }, st, cfg: {}, sendHtml: async () => {},
+        tg: {}, oc: { removeSession: async () => {} }, st, cfg: {}, busyNotes: new BusyNoteStore(), sendHtml: async () => {},
         applyModelAndVariant: async () => {}, startTyping: () => {},
         removeWorktree: async (root: string, wt: any) => { removeCalls++; return removeWorktree(root, wt); }, // count + real work
       } as any);
@@ -203,7 +205,7 @@ async function main(): Promise<void> {
     {
       const goneCalls: string[] = [];
       const orchGone = new Orchestrator({
-        tg: {}, oc: { removeSession: async () => {} }, st, cfg: {}, sendHtml: async () => {},
+        tg: {}, oc: { removeSession: async () => {} }, st, cfg: {}, busyNotes: new BusyNoteStore(), sendHtml: async () => {},
         applyModelAndVariant: async () => {}, startTyping: () => {},
         onTopicGone: (conv: any) => { goneCalls.push(String(conv)); },
         removeWorktree: async () => "ok", // no real work in this case
@@ -333,7 +335,7 @@ async function main(): Promise<void> {
       });
       let removeCalls = 0;
       const orchP = new Orchestrator({
-        tg: {}, oc: { removeSession: async () => {} }, st, cfg: {}, sendHtml: async () => {},
+        tg: {}, oc: { removeSession: async () => {} }, st, cfg: {}, busyNotes: new BusyNoteStore(), sendHtml: async () => {},
         applyModelAndVariant: async () => {}, startTyping: () => {},
         removeWorktree: async (root: string, wt: any) => { removeCalls++; return removeWorktree(root, wt); },
       } as any);

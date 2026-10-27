@@ -12,6 +12,7 @@ import {
   noteCallbackData,
   parseNoteCallback,
   pushBusyNote,
+  BusyNoteStore,
 } from "../src/notes.js";
 import type { BusyNoteEntry } from "../src/notes.js";
 
@@ -71,6 +72,35 @@ function check(name: string, cond: boolean, detail?: string): void {
 // ── the user-facing label is pinned ──────────────────────────────────────────
 {
   check("button label is Vietnamese", NOTE_BUTTON_LABEL === "📝 Thêm vào note", NOTE_BUTTON_LABEL);
+}
+
+// ── BusyNoteStore: shared retention — push/take/clear semantics ─────────────
+{
+  const s = new BusyNoteStore();
+  s.push("c1", 100, "  hello  ");
+  check("take returns the trimmed text", s.take("c1", 100) === "hello");
+  check("take is consume-once (second tap → null)", s.take("c1", 100) === null);
+
+  const t = new BusyNoteStore();
+  check("take on unknown id → null", t.take("c1", 1) === null);
+  check("take on unknown conv → null", t.take("nope", 1) === null);
+
+  const u = new BusyNoteStore();
+  u.push("a", 1, "in a");
+  u.push("b", 2, "in b");
+  check("convs are isolated (take from b)", u.take("b", 2) === "in b");
+  check("a is untouched", u.take("a", 1) === "in a");
+
+  const v = new BusyNoteStore();
+  v.push("c", 7, "keep me");
+  v.clear("c");
+  check("clear drops the conv (take → null)", v.take("c", 7) === null);
+
+  const w = new BusyNoteStore();
+  for (let i = 1; i <= NOTE_RETENTION_CAP; i++) w.push("c", i, `m${i}`);
+  w.push("c", NOTE_RETENTION_CAP + 1, "m11");
+  check("store push caps at 10 (oldest dropped)", w.take("c", 1) === null && w.take("c", 2) === "m2");
+  check("store keeps the newest", w.take("c", NOTE_RETENTION_CAP + 1) === "m11");
 }
 
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);

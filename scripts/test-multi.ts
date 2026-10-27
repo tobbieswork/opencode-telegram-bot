@@ -16,6 +16,7 @@ import { StateManager } from "../src/state.js";
 import { McpBridge } from "../src/mcp-bridge.js";
 import { addWorktree, diffSummary, gitRoot, mergeWorktree, removeWorktree } from "../src/worktree.js";
 import { Orchestrator, Host } from "../src/orchestrator.js";
+import { BusyNoteStore } from "../src/notes.js";
 import { loadConfig, type Config } from "../src/config.js";
 
 let failures = 0;
@@ -178,6 +179,7 @@ const repo = join(tmp, "repo");
     oc,
     st,
     cfg,
+    busyNotes: new BusyNoteStore(),
     sendHtml: async (_conv, html, opts) => {
       sent.push(html);
       if (opts?.reply_markup) lastKb = opts.reply_markup;
@@ -379,6 +381,7 @@ const repo = join(tmp, "repo");
     oc: {} as any,
     st,
     cfg: { browseRoots: [repo], managerDir: join(tmp, "mgr"), maxWorkers: 2, worktreeMode: "auto" } as any,
+    busyNotes: new BusyNoteStore(),
     sendHtml: async (_c, html) => void sent.push(html),
     applyModelAndVariant: async () => {},
     startTyping: () => {},

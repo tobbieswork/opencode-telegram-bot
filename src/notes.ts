@@ -92,6 +92,9 @@ export const NOTE_BUTTON_LABEL = "📝 Thêm vào note";
 /** How many busy messages are retained per conv (the oldest are dropped beyond this). */
 export const NOTE_RETENTION_CAP = 10;
 
+/** The reply shown when a message arrives while the agent is already working. */
+export const BUSY_REPLY_TEXT = "⏳ Still working on the previous message. Send /stop to interrupt.";
+
 /**
  * Pure: build the callback data for the note button targeting the user message
  * with Telegram `messageId`. Message ids are small integers, so `note:<id>` is
@@ -126,4 +129,41 @@ export function pushBusyNote(
 ): BusyNoteEntry[] {
   const next = [...list, { id, text }];
   return next.length > cap ? next.slice(next.length - cap) : next;
+}
+
+/**
+ * In-memory, per-conversation retention of user messages that arrived while the
+ * agent was busy, so the busy-reply "📝 Thêm vào note" button can save one with a
+ * tap. A single instance is created by the Bot and handed to the Orchestrator, so
+ * BOTH busy paths (the regular chat in bot.ts and the Manager in orchestrator.ts)
+ * retain into — and are handled identically from — the SAME store. Capped per
+ * conv (oldest dropped); cleared when the turn ends or on /stop so a stale tap
+ * after the turn is "not found".
+ */
+export class BusyNoteStore {
+  private map = new Map<string, BusyNoteEntry[]>();
+
+  /** Retain a busy message (text trimmed as sent); caps per conv (oldest dropped). */
+  push(conv: string, id: number, text: string): void {
+    this.map.set(conv, pushBusyNote(this.map.get(conv) ?? [], id, text.trim()));
+  }
+
+  /**
+   * Look up + consume a retained entry by its message id. Returns the stored
+   * text, or null when it is not there (never retained, already consumed by a
+   * prior tap, or the turn ended and the conv was cleared).
+   */
+  take(conv: string, id: number): string | null {
+    const list = this.map.get(conv);
+    if (!list) return null;
+    const idx = list.findIndex((e) => e.id === id);
+    if (idx === -1) return null;
+    const [entry] = list.splice(idx, 1);
+    return entry.text;
+  }
+
+  /** Drop every retained entry for a conv (the turn ended or /stop). */
+  clear(conv: string): void {
+    this.map.delete(conv);
+  }
 }
