@@ -199,6 +199,8 @@ export class Bot {
   private languageRemoved = new Set<string>();
   /** The self-editing "agent is doing…" line per conv: message id + current label. */
   private activity = new Map<ConvKey, { msgId: number; label: string; toolStart: number }>();
+  /** The "⏳ Đang xử lý…" line per conv (General top-level only): msgId once sent + the elapsed-time timer. */
+  private working = new Map<ConvKey, { msgId?: number; startedAt: number; timer?: ReturnType<typeof setInterval> }>();
   /** Tool-call id → tool name per conv (learned from session.tool.input.started). */
   private toolNames = new Map<ConvKey, Map<string, string>>();
   /**
@@ -1066,6 +1068,47 @@ export class Bot {
     this.typing.delete(conv);
   }
 
+  // ── "⏳ Đang xử lý…" working indicator (General top-level only) ─────────────
+  /**
+   * Telegram's native "typing…" doesn't render in a forum group's General
+   * top-level pane, leaving a blank gap from turn start until the first
+   * text/tool event (when the streaming preview appears). Post a "⏳ Đang xử lý…"
+   * line to fill it; it shows elapsed time and is removed by stopWorking. No-op
+   * for DMs and topics (native typing renders fine there).
+   */
+  private startWorking(conv: ConvKey): void {
+    if (!this.cfg.working || isDmConv(conv) || conv !== chatOf(conv)) return; // General top-level only
+    if (this.working.has(conv)) return;
+    const startedAt = Date.now();
+    this.working.set(conv, { msgId: undefined, startedAt, timer: undefined }); // sync marker (race-safe)
+    void this.tg
+      .sendMessageId(conv, "⏳ Đang xử lý…")
+      .then((id) => {
+        const e = this.working.get(conv);
+        if (id <= 0) {
+          this.working.delete(conv);
+          return;
+        }
+        if (!e) return void this.tg.deleteMessage(conv, id).catch(() => {}); // turn ended before the send: delete the orphan
+        e.msgId = id;
+        e.timer = setInterval(() => {
+          const secs = Math.round((Date.now() - startedAt) / 1000);
+          void this.tg.editMessageText(conv, id, `⏳ Đang xử lý… · ${secs}s`).catch(() => {});
+        }, 10000);
+        (e.timer as any).unref?.();
+      })
+      .catch(() => this.working.delete(conv));
+  }
+
+  /** Remove the "⏳ Đang xử lý…" line (idempotent) — when the reply stream starts or the turn ends. */
+  private stopWorking(conv: ConvKey): void {
+    const e = this.working.get(conv);
+    if (!e) return;
+    this.working.delete(conv);
+    if (e.timer) clearInterval(e.timer);
+    if (e.msgId) void this.tg.deleteMessage(conv, e.msgId).catch(() => {});
+  }
+
   // ── live tool activity (one self-editing line per conv) ─────────────────────
   /** Show (or update) the "agent is doing…" line for a conv. */
   private async showActivity(conv: ConvKey, label: string): Promise<void> {
@@ -1200,6 +1243,7 @@ export class Bot {
         return;
       }
       if (w.previewMsgId === undefined) {
+        this.stopWorking(conv); // the streamed reply takes over — drop the "⏳ Đang xử lý…" line
         const id = await this.tg.sendMessageId(conv, text, { parse_mode: undefined });
         w.previewMsgId = id > 0 ? id : 0;
       } else {
@@ -1441,6 +1485,7 @@ export class Bot {
     }
     // Keep the "typing…" indicator alive for the whole turn (until the reply is sent).
     this.startTyping(conv);
+    this.startWorking(conv); // "⏳ Đang xử lý…" — General top-level only (native typing doesn't render there)
     try {
       let sid = state.sessionID;
       if (!sid) {
@@ -1564,6 +1609,7 @@ export class Bot {
       this.bodyReact(conv, userMsgId, REACTION_FAIL);
     } finally {
       this.clearActivity(conv);
+      this.stopWorking(conv); // safety net: drop the "⏳ Đang xử lý…" line if it never reached the stream
       // NOTE: do NOT delete the streaming wrapper here — it must stay (killed
       // by the generation bump in dropPreview) so late deltas of this turn
       // cannot spawn a stray preview after the final message. The NEXT turn

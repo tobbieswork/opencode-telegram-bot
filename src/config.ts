@@ -41,6 +41,8 @@ export interface Config {
   guideLanguage: boolean;
   /** Show a live "agent is doing…" activity line while a turn runs. */
   activity: boolean;
+  /** Show a "⏳ Đang xử lý…" line in the General top-level while the Manager works (native typing doesn't render there). */
+  working: boolean;
   /** Remind the user about a pending question-form / permission they haven't answered. */
   remind: boolean;
   /** Base delay (ms) before the FIRST reminder for a pending form/permission. */
@@ -169,6 +171,7 @@ export function loadConfig(root: string): Config {
     guideQuestions: process.env.OPENCODE_TG_GUIDE !== "0",
     guideLanguage: process.env.OPENCODE_TG_LANGUAGE !== "0",
     activity: process.env.OPENCODE_TG_ACTIVITY !== "0",
+    working: process.env.OPENCODE_TG_WORKING !== "0",
     remind: process.env.OPENCODE_TG_REMIND !== "0",
     // parseIntSetting/parseFloatSetting guard against a non-numeric env value (e.g.
     // OPENCODE_TG_REMIND_MAX=abc) yielding NaN, which would make the backoff fire ~every ms.
