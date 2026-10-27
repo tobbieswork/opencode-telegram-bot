@@ -42,6 +42,7 @@ import { log, warn, error } from "./logger.js";
 import { AGENT_WHITELIST, QUESTIONS_PREAMBLE, NOTES_KEY } from "./shared.js";
 import type { Btn, Keyboard } from "./shared.js";
 import { cmdAgents, cmdAgent, handleAgentCallback } from "./commands/agents.js";
+import { cmdSchedule, handleScheduleCallback } from "./commands/schedule.js";
 
 /** The message carries media (sticker/photo/video/voice/…) — used to acknowledge non-text input. */
 function hasNonTextContent(m: Message): boolean {
@@ -225,9 +226,9 @@ export class Bot {
   private missingIdxLogged = new Set<string>();
 
   /** Worker topics + the Manager agent (multi-session layer). */
-  private orch: Orchestrator;
+  public orch: Orchestrator;
   /** Schedules, in their own file (data/schedules.json) — /clear must never touch them. */
-  private scheduleStore: ScheduleStore;
+  public scheduleStore: ScheduleStore;
   /** /schedule tick engine — only constructed/started when cfg.schedule is on. */
   private scheduler?: Scheduler;
 
@@ -235,7 +236,7 @@ export class Bot {
     public tg: Telegram,
     public oc: OpenCodeCtl,
     public st: StateManager,
-    private cfg: Config,
+    public cfg: Config,
   ) {
     // Same data dir as state.json (derived from cfg.stateFile); a SEPARATE file
     // on purpose so /clear and the per-chat sweeps can't wipe schedules.
@@ -1460,7 +1461,7 @@ export class Bot {
       case "/note":
         return this.cmdNote(conv, arg);
       case "/schedule":
-        return this.cmdSchedule(conv, arg, state, uid);
+        return cmdSchedule(this, conv, arg, state, uid);
       default:
         return this.tg.sendMessage(conv, `Unknown command: ${esc(cmd)}\nSend /help`);
     }
@@ -2130,7 +2131,7 @@ export class Bot {
       return;
     }
     if (data.startsWith("sch:")) {
-      await this.handleScheduleCallback(cb, conv, messageId);
+      await handleScheduleCallback(this, cb, conv, messageId);
       return;
     }
     if (!data.startsWith("bs:")) {
@@ -2289,7 +2290,7 @@ export class Bot {
           await this.cmdClear(conv, state);
           break;
         case "schedule":
-          await this.cmdSchedule(conv, "", state, cb.from?.id);
+          await cmdSchedule(this, conv, "", state, cb.from?.id);
           break;
         case "help":
           await this.cmdHelp(conv);
@@ -2835,310 +2836,6 @@ export class Bot {
       return "· " + m.type;
     });
     await this.sendHtml(conv, `<b>Recent messages</b>\n${lines.join("\n")}`);
-  }
-
-  // ── /schedule ────────────────────────────────────────────────────────────
-  // Schedules live in a SEPARATE file (data/schedules.json), never in
-  // state.json: /clear and the per-chat sweeps must not touch them. The
-  // Scheduler (src/scheduler.ts) ticks that file; this is only the command
-  // surface. v1 scope: scheduled runs do read/analyze + report only — the
-  // worker's permission cards still go to the user, nothing is auto-approved.
-
-  /** A fresh 4-char base36 id (fits callback_data) that doesn't collide yet. */
-  private newScheduleId(): string {
-    const existing = new Set(this.scheduleStore.load().map((s) => s.id));
-    for (let i = 0; i < 16; i++) {
-      const id = randomInt(36 ** 4).toString(36).padStart(4, "0");
-      if (!existing.has(id)) return id;
-    }
-    return Date.now().toString(36).slice(-4).padStart(4, "0");
-  }
-
-  /** Re-check a schedule's creator against the allowlist (it can change after creation). */
-  private creatorAllowed(sch: Schedule): boolean {
-    if (this.cfg.allowAny) return true;
-    return this.cfg.allowedUserIds.includes(sch.createdBy);
-  }
-
-  /** The list view: one line + one button row per schedule (⏸/▶ · ▶▶ · 🗑). */
-  private scheduleListMarkup(mine: Schedule[]): { html: string; kb: Keyboard } {
-    const fmtNext = (ms: number) =>
-      new Date(ms).toLocaleString("vi-VN", { dateStyle: "short", timeStyle: "short" });
-    const lines = mine.map((s) => {
-      const paused = s.enabled ? "" : "⏸ ";
-      const status = s.lastStatus ? ` · ${s.lastStatus}` : "";
-      const next = s.enabled ? ` · lần tới: ${fmtNext(s.nextRunAt)}` : "";
-      return `${paused}${formatSchedule(s)}${status}${next}`;
-    });
-    const rows = mine.map((s) => [
-      { text: s.enabled ? "⏸" : "▶", callback_data: `sch:${s.enabled ? "p" : "r"}:${s.id}` },
-      { text: "▶▶", callback_data: `sch:run:${s.id}` },
-      { text: "🗑", callback_data: `sch:d:${s.id}` },
-    ]);
-    return { html: `<b>⏰ Lịch (${mine.length})</b>\n${lines.join("\n")}`, kb: { inline_keyboard: rows } };
-  }
-
-  /** The /schedule usage card, HTML-escaped (sendMessage is parse_mode HTML). */
-  private scheduleUsageText(): string {
-    const usage =
-      "Đặt lịch: /schedule <spec> <prompt> [dir=<đường dẫn> agent=<tên>]\n" +
-      "spec: daily|weekdays HH:MM · weekly mon..sun HH:MM · every <N>h · once YYYY-MM-DD HH:MM\n" +
-      `vd: /schedule daily 08:00 Review commit 24h qua dir=${this.cfg.opencodeDirectory}\n\n` +
-      "Quản lý: /schedule help · pause|resume|run|rm <id>\n" +
-      "Lưu ý: phải có dir= (thư mục ngoài data/manager) — lịch không chạy trong thư mục Manager. Agent mặc định: build.";
-    return esc(usage);
-  }
-
-  private async cmdSchedule(conv: ConvKey, arg: string, state: ChatState, uid?: number): Promise<void> {
-    // Top-level safety net: no /schedule input may drop without a reply — an
-    // unexpected throw (e.g. statSync on a vanishing dir) must never be silent.
-    try {
-      await this.cmdScheduleInner(conv, arg, state, uid);
-    } catch (e) {
-      const m = (e as Error)?.message ?? String(e);
-      try {
-        await this.tg.sendMessage(conv, `❌ Lỗi: ${m}`);
-      } catch {
-        /* swallow — last resort */
-      }
-    }
-  }
-
-  private async cmdScheduleInner(conv: ConvKey, arg: string, state: ChatState, uid?: number): Promise<void> {
-    // No arg → list this conv's schedules with control buttons.
-    if (!arg) {
-      const mine = this.scheduleStore.load().filter((s) => s.conv === conv);
-      if (!mine.length) {
-        await this.tg.sendMessage(conv, "⏰ Chưa có lịch nào cho chat này.\n\n" + this.scheduleUsageText());
-        return;
-      }
-      const v = this.scheduleListMarkup(mine);
-      await this.sendHtml(conv, v.html, { reply_markup: v.kb });
-      return;
-    }
-
-    // Subcommands: pause|resume|run|rm <id>
-    const [sub, ...rest] = arg.split(/\s+/);
-    const subLc = sub.toLowerCase();
-    if (subLc === "help" || subLc === "--help" || subLc === "-h") {
-      await this.tg.sendMessage(conv, "⏰ Cách dùng /schedule\n\n" + this.scheduleUsageText());
-      return;
-    }
-    if (["pause", "resume", "run", "rm", "del", "delete"].includes(subLc)) {
-      const id = (rest.join(" ").trim().split(/\s+/)[0] ?? "").replace(/^#/, "").toLowerCase();
-      if (!/^[a-z0-9]{4}$/.test(id)) {
-        await this.tg.sendMessage(conv, "⏰ Id không hợp lệ — 4 ký tự a-z/0-9. Danh sách: /schedule");
-        return;
-      }
-      if (subLc === "run") return this.scheduleRun(conv, id);
-      const op: "pause" | "resume" | "rm" = subLc === "pause" ? "pause" : subLc === "resume" ? "resume" : "rm";
-      return this.scheduleMutate(conv, id, op);
-    }
-
-    // Add: /schedule <spec> <prompt> [dir=<path> agent=<name>]
-    if (uid === undefined) {
-      await this.tg.sendMessage(conv, "⛔ Không xác định được người dùng.");
-      return;
-    }
-    let spec: SchedSpec;
-    let prompt: string;
-    try {
-      ({ spec, prompt } = parseScheduleSpec(arg, Date.now()));
-    } catch (e) {
-      await this.tg.sendMessage(conv, `❌ ${(e as Error).message.replace(/^schedule:\s*/, "")}`);
-      return;
-    }
-    if (!prompt) {
-      await this.tg.sendMessage(conv, "❌ Thiếu prompt — ví dụ: /schedule daily 08:00 Review commit 24h qua");
-      return;
-    }
-    // Option tokens — parseScheduleSpec strips them from the prompt itself.
-    let dir = state.directory || this.cfg.opencodeDirectory;
-    let agent = "build";
-    for (const t of arg.trim().split(/\s+/)) {
-      if (/^dir=/i.test(t)) dir = t.slice(4);
-      else if (/^agent=/i.test(t)) agent = t.slice(6).toLowerCase();
-    }
-    if (!AGENT_WHITELIST.includes(agent)) {
-      await this.tg.sendMessage(conv, `❌ Agent không hợp lệ — chọn: ${AGENT_WHITELIST.join(", ")}`);
-      return;
-    }
-    if (!isAbsolute(dir)) dir = resolve(this.cfg.opencodeDirectory, dir);
-    if (!existsSync(dir) || !statSync(dir).isDirectory()) {
-      await this.tg.sendMessage(conv, `❌ Không tìm thấy thư mục: <code>${esc(dir)}</code>`);
-      return;
-    }
-    if (this.cfg.browseRoots.length && !isUnderRoot(dir, this.cfg.browseRoots)) {
-      await this.tg.sendMessage(conv, `❌ Thư mục ngoài vùng cho phép (OPENCODE_TG_BROWSE_ROOTS): <code>${esc(dir)}</code>`);
-      return;
-    }
-    if (this.scheduleStore.load().length >= this.cfg.maxSchedules) {
-      await this.tg.sendMessage(conv, `❌ Đã đủ ${this.cfg.maxSchedules} lịch (giới hạn). Xoá bớt trước khi thêm.`);
-      return;
-    }
-    const now = Date.now();
-    const sch: Schedule = {
-      id: this.newScheduleId(),
-      conv,
-      prompt,
-      spec,
-      tz: this.cfg.scheduleTz,
-      dir,
-      agent,
-      nextRunAt: nextRunAfter(spec, now, this.cfg.scheduleTz),
-      createdBy: uid,
-      enabled: true,
-      createdAt: now,
-    };
-    // Spawn the (idle) worker topic FIRST: if the chat can't host a topic the
-    // schedule would be useless, so on failure nothing is kept. The error
-    // message already carries the topic guidance (orchestrator.spawn).
-    try {
-      await this.orch.spawn(conv, { name: "sch-" + sch.id, directory: dir, agent, spawnedBy: "schedule" });
-    } catch (e) {
-      const m = (e as Error).message;
-      const hint = m.includes("thư mục của Manager")
-        ? `\n→ Thêm dir= (thư mục ngoài data/manager). VD: dir=${this.cfg.opencodeDirectory}`
-        : "";
-      await this.tg.sendMessage(conv, `❌ ${m}${hint}`);
-      return;
-    }
-    try {
-      this.scheduleStore.add(sch);
-    } catch (e) {
-      await this.tg.sendMessage(conv, `❌ ${(e as Error).message}`);
-      return;
-    }
-    await this.tg.sendMessage(
-      conv,
-      `⏰ Đã tạo lịch <b>#${sch.id}</b> — ${formatSchedule(sch)}\nlần tới: ${new Date(sch.nextRunAt).toLocaleString("vi-VN", { dateStyle: "short", timeStyle: "short" })}\n📁 <code>${esc(dir)}</code> · agent: ${agent}`,
-    );
-  }
-
-  /** pause/resume/rm — the creator must still be on the allowlist. */
-  private async scheduleMutate(conv: ConvKey, id: string, op: "pause" | "resume" | "rm"): Promise<void> {
-    const sch = this.scheduleStore.get(id);
-    if (!sch || sch.conv !== conv) {
-      await this.tg.sendMessage(conv, `⏰ Không tìm thấy lịch #${id} của chat này.`);
-      return;
-    }
-    if (!this.creatorAllowed(sch)) {
-      await this.tg.sendMessage(conv, `⛔ Người tạo lịch #${id} không còn trong allowlist — không thể thao tác.`);
-      return;
-    }
-    if (op === "rm") {
-      this.scheduleStore.remove(id);
-      await this.tg.sendMessage(conv, `🗑 Đã xoá lịch #${id}. Topic + lịch sử vẫn giữ — /prune để dọn topic.`);
-      return;
-    }
-    const updated = this.scheduleStore.set(id, { enabled: op === "resume" });
-    if (!updated) {
-      await this.tg.sendMessage(conv, `⏰ Không tìm thấy lịch #${id}.`);
-      return;
-    }
-    await this.tg.sendMessage(conv, op === "resume" ? `▶ Đã bật lại lịch #${id}.` : `⏸ Đã tạm dừng lịch #${id}.`);
-  }
-
-  /** Run a schedule now (manual trigger). */
-  private async scheduleRun(conv: ConvKey, id: string): Promise<void> {
-    const sch = this.scheduleStore.get(id);
-    if (!sch || sch.conv !== conv) {
-      await this.tg.sendMessage(conv, `⏰ Không tìm thấy lịch #${id} của chat này.`);
-      return;
-    }
-    if (!this.creatorAllowed(sch)) {
-      await this.tg.sendMessage(conv, `⛔ Người tạo lịch #${id} không còn trong allowlist — không thể chạy.`);
-      return;
-    }
-    try {
-      await this.orch.runScheduled(conv, sch);
-      await this.tg.sendMessage(conv, `▶▶ Đã chạy lịch #${id} — kết quả sẽ hiện trong topic sch-${id}.`);
-    } catch (e) {
-      await this.tg.sendMessage(conv, `❌ Lịch #${id} không chạy được: ${(e as Error).message}`);
-    }
-  }
-
-  /** Schedule button taps: sch:p/sch:r (pause/resume) · sch:run · sch:d/sch:dy (rm, 2-step) · sch:ls (re-list). */
-  private async handleScheduleCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
-    const [, op, id] = (cb.data ?? "").split(":");
-    // Re-list after a confirm/cancel — no schedule id involved.
-    if (op === "ls") {
-      await this.tg.answerCallbackQuery(cb.id);
-      if (!messageId) return;
-      const mine = this.scheduleStore.load().filter((s) => s.conv === conv);
-      const v = mine.length
-        ? this.scheduleListMarkup(mine)
-        : { html: "⏰ Không còn lịch nào.", kb: { inline_keyboard: [] } };
-      await this.tg.editMessageText(conv, messageId, v.html, { reply_markup: v.kb }).catch(() => {});
-      return;
-    }
-    if (!/^[a-z0-9]{4}$/.test(id ?? "")) {
-      await this.tg.answerCallbackQuery(cb.id, "⏰ Id không hợp lệ");
-      return;
-    }
-    const sch = this.scheduleStore.get(id);
-    if (!sch || sch.conv !== conv) {
-      await this.tg.answerCallbackQuery(cb.id, "⏰ Không tìm thấy lịch này của chat");
-      return;
-    }
-    if (!this.creatorAllowed(sch)) {
-      await this.tg.answerCallbackQuery(cb.id, "⛔ Người tạo không còn trong allowlist");
-      return;
-    }
-    switch (op) {
-      case "p":
-      case "r": {
-        const enable = op === "r";
-        this.scheduleStore.set(id, { enabled: enable });
-        await this.tg.answerCallbackQuery(cb.id, enable ? `▶ Đã bật lại #${id}` : `⏸ Đã dừng #${id}`);
-        if (messageId) {
-          const mine = this.scheduleStore.load().filter((s) => s.conv === conv);
-          const v = mine.length
-            ? this.scheduleListMarkup(mine)
-            : { html: "⏰ Không còn lịch nào.", kb: { inline_keyboard: [] } };
-          await this.tg.editMessageText(conv, messageId, v.html, { reply_markup: v.kb }).catch(() => {});
-        }
-        return;
-      }
-      case "run": {
-        await this.tg.answerCallbackQuery(cb.id, `▶▶ Đang chạy #${id}…`);
-        try {
-          await this.orch.runScheduled(conv, sch);
-        } catch (e) {
-          await this.tg.sendMessage(conv, `❌ Lịch #${id} không chạy được: ${(e as Error).message}`).catch(() => {});
-        }
-        return;
-      }
-      case "d": {
-        // Destructive — two-step confirm (like /reboot).
-        await this.tg.answerCallbackQuery(cb.id);
-        if (!messageId) return;
-        const kb: Keyboard = {
-          inline_keyboard: [
-            [
-              { text: `🗑 Xoá #${id}`, callback_data: `sch:dy:${id}` },
-              { text: "↩️ Quay lại", callback_data: "sch:ls" },
-            ],
-          ],
-        };
-        await this.tg
-          .editMessageText(conv, messageId, `⚠️ Xoá lịch <b>#${id}</b> (${formatSchedule(sch)})? Topic + lịch sử vẫn giữ.`, { reply_markup: kb })
-          .catch(() => {});
-        return;
-      }
-      case "dy": {
-        this.scheduleStore.remove(id);
-        await this.tg.answerCallbackQuery(cb.id, `🗑 Đã xoá #${id}`);
-        if (messageId) {
-          await this.tg
-            .editMessageText(conv, messageId, `🗑 Đã xoá lịch <b>#${id}</b>. Dọn topic mồ côi bằng /prune.`, { reply_markup: { inline_keyboard: [] } })
-            .catch(() => {});
-        }
-        return;
-      }
-      default:
-        await this.tg.answerCallbackQuery(cb.id);
-    }
   }
 
   private async cmdClear(conv: ConvKey, state: ChatState): Promise<void> {
