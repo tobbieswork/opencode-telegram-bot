@@ -2861,6 +2861,17 @@ export class Bot {
     return { html: `<b>⏰ Lịch (${mine.length})</b>\n${lines.join("\n")}`, kb: { inline_keyboard: rows } };
   }
 
+  /** The /schedule usage card, HTML-escaped (sendMessage is parse_mode HTML). */
+  private scheduleUsageText(): string {
+    const usage =
+      "Đặt lịch: /schedule <spec> <prompt> [dir=<đường dẫn> agent=<tên>]\n" +
+      "spec: daily|weekdays HH:MM · weekly mon..sun HH:MM · every <N>h · once YYYY-MM-DD HH:MM\n" +
+      `vd: /schedule daily 08:00 Review commit 24h qua dir=${this.cfg.opencodeDirectory}\n\n` +
+      "Quản lý: /schedule help · pause|resume|run|rm <id>\n" +
+      "Lưu ý: phải có dir= (thư mục ngoài data/manager) — lịch không chạy trong thư mục Manager. Agent mặc định: build.";
+    return esc(usage);
+  }
+
   private async cmdSchedule(conv: ConvKey, arg: string, state: ChatState, uid?: number): Promise<void> {
     // Top-level safety net: no /schedule input may drop without a reply — an
     // unexpected throw (e.g. statSync on a vanishing dir) must never be silent.
@@ -2881,14 +2892,7 @@ export class Bot {
     if (!arg) {
       const mine = this.scheduleStore.load().filter((s) => s.conv === conv);
       if (!mine.length) {
-        const guidance =
-          "⏰ Chưa có lịch nào cho chat này.\n\n" +
-          "Đặt lịch: /schedule <spec> <prompt> [dir=<đường dẫn> agent=<tên>]\n" +
-          "spec: daily|weekdays HH:MM · weekly mon..sun HH:MM · every <N>h · once YYYY-MM-DD HH:MM\n" +
-          `vd: /schedule daily 08:00 Review commit 24h qua dir=${this.cfg.opencodeDirectory}\n\n` +
-          "Quản lý: /schedule pause|resume|run|rm <id>\n" +
-          "Lưu ý: phải có dir= (thư mục ngoài data/manager) — lịch không chạy trong thư mục Manager. Agent mặc định: build.";
-        await this.tg.sendMessage(conv, esc(guidance));
+        await this.tg.sendMessage(conv, "⏰ Chưa có lịch nào cho chat này.\n\n" + this.scheduleUsageText());
         return;
       }
       const v = this.scheduleListMarkup(mine);
@@ -2899,6 +2903,10 @@ export class Bot {
     // Subcommands: pause|resume|run|rm <id>
     const [sub, ...rest] = arg.split(/\s+/);
     const subLc = sub.toLowerCase();
+    if (subLc === "help" || subLc === "--help" || subLc === "-h") {
+      await this.tg.sendMessage(conv, "⏰ Cách dùng /schedule\n\n" + this.scheduleUsageText());
+      return;
+    }
     if (["pause", "resume", "run", "rm", "del", "delete"].includes(subLc)) {
       const id = (rest.join(" ").trim().split(/\s+/)[0] ?? "").replace(/^#/, "").toLowerCase();
       if (!/^[a-z0-9]{4}$/.test(id)) {
