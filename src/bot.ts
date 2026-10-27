@@ -39,9 +39,8 @@ import { UsageRow, formatUsageReport } from "./usage.js";
 import { appendNote, dropNotes, noteEntryText, prepareNotes, showNotes, BUSY_REPLY_TEXT, NOTE_BUTTON_LABEL, NOTE_CB_PREFIX, noteCallbackData, parseNoteCallback, BusyNoteStore } from "./notes.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
 import { log, warn, error } from "./logger.js";
-
-/** Agents shown to the user (the rest are internal OpenCode roles). */
-const AGENT_WHITELIST = ["build", "general", "explore", "plan"];
+import { AGENT_WHITELIST, QUESTIONS_PREAMBLE, NOTES_KEY } from "./shared.js";
+import type { Btn, Keyboard } from "./shared.js";
 
 /** The message carries media (sticker/photo/video/voice/…) — used to acknowledge non-text input. */
 function hasNonTextContent(m: Message): boolean {
@@ -70,21 +69,8 @@ const BROWSE_COLUMNS = 2;
 /** Models shown per page in the /model button picker. */
 const MODEL_PAGE_SIZE = 10;
 
-/**
- * Preamble prepended to the FIRST prompt of each session so the agent knows it is
- * headless (driven via Telegram) and should ask decisions through the `question`
- * tool — which we relay to the user as Telegram buttons — one question at a time.
- */
-const QUESTIONS_PREAMBLE =
-  "[System note: You are running headless, driven through Telegram — the user has no terminal. " +
-  "When you need a decision or input from the user, ask with the `question` tool using clear " +
-  "multiple-choice options, ONE question at a time; the user answers via Telegram buttons. " +
-  "Prefer asking over guessing when genuinely ambiguous.]";
-
 /** Key under which the per-session language instruction is stored (namespaced `api/<key>`). */
 const LANGUAGE_INSTRUCTION_KEY = "tgbot.language";
-/** Instruction-entry key for /note scratchpad notes (see src/notes.ts). */
-const NOTES_KEY = "tgbot.notes";
 /** Instruction key for /new --keep carry-over (recent-thread summary injected into the fresh session). */
 const CARRYOVER_KEY = "tgbot.carryover";
 /** Injected per-session so the model keeps the user's language and does not leak CJK. */
@@ -102,9 +88,6 @@ function isTransportError(e: any): boolean {
     msg,
   );
 }
-
-type Btn = { text: string; callback_data: string };
-type Keyboard = { inline_keyboard: Btn[][] };
 
 /** In-memory state of the folder browser, one per chat. */
 interface BrowseState {
