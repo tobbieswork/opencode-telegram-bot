@@ -1,7 +1,11 @@
 import { OpenCode } from "@opencode/client";
 import { Service } from "@opencode/client/service";
+import { newestAssistantInfo, AssistantInfo } from "./usage.js";
 import { existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
+
+/** Tool names that modify files (their input carries the target at `.path`). */
+const MUTATING_TOOLS = new Set(["write", "edit", "apply_patch", "delete_file", "create_file", "move"]);
 
 export interface ModelInfo {
   id: string;
@@ -9,6 +13,8 @@ export interface ModelInfo {
   name?: string;
   /** Variant ids the model offers (e.g. ["xhigh","high","medium","low"]); empty if unknown. */
   variants: string[];
+  /** The model's context window in tokens (limit.context); unknown when the server omits it. */
+  contextLimit?: number;
 }
 export interface AgentInfo {
   id: string;
@@ -27,6 +33,39 @@ export interface PromptResult {
   elapsedMs: number;
   /** time.created of the assistant message that produced `reply` (0 if none). */
   replyTime?: number;
+  /** Provider/turn error from the newest assistant/idle/compaction message (present on a failed turn). */
+  error?: { type?: string; message?: string };
+}
+
+/** Cumulative token usage for a session (as reported by OpenCode). */
+export interface SessionTokens {
+  input: number;
+  output: number;
+  reasoning: number;
+  cache: number;
+}
+
+/**
+ * A snapshot of a session for `/context`: identity, cumulative usage, and the
+ * files it most recently modified. OpenCode exposes no context-window-remaining
+ * field, so this is cumulative tokens + observed file activity — not "how much
+ * context is left".
+ */
+export interface SessionReport {
+  id: string;
+  title?: string;
+  directory?: string;
+  agent?: string;
+  outcome?: string;
+  created?: number;
+  updated?: number;
+  messageCount: number;
+  tokens?: SessionTokens;
+  cost?: number;
+  /** Unique file paths most recently modified (newest first), capped. */
+  modifiedFiles: string[];
+  /** Text of the newest user prompt. */
+  lastUserPrompt?: string;
 }
 
 /**
@@ -39,6 +78,52 @@ function unwrap<T = any>(x: any): T {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const ID_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+let idLastMs = 0;
+let idCounter = 0;
+
+/**
+ * A client-chosen, time-sortable user message id (same shape OpenCode mints:
+ * `msg_` + 12 hex time chars + 14 random). Passing it to `session.prompt`
+ * makes the prompt idempotent: re-sending the same id returns the already
+ * admitted input instead of queueing a duplicate turn — so a retry after a
+ * transport blip can never run the same instruction twice.
+ */
+export function newMessageID(): string {
+  const now = Date.now();
+  if (now !== idLastMs) {
+    idLastMs = now;
+    idCounter = 0;
+  }
+  idCounter++;
+  const v = BigInt(now) * 0x1000n + BigInt(idCounter);
+  let time = "";
+  for (let i = 0; i < 6; i++) time += Number((v >> BigInt(40 - 8 * i)) & 0xffn).toString(16).padStart(2, "0");
+  const rnd = Array.from(crypto.getRandomValues(new Uint8Array(14)), (b) => ID_CHARS[b % 62]).join("");
+  return "msg_" + time + rnd;
+}
+
+/** Join the text parts of an assistant message. */
+export function assistantText(m: any): string {
+  return ((m?.content ?? []) as any[])
+    .filter((c: any) => c?.type === "text")
+    .map((c: any) => c.text)
+    .join("\n");
+}
+
+/**
+ * Join the text of a *user* message. User messages carry their text either as a
+ * plain `m.text` string or (less commonly) as text parts in `m.content` — handle
+ * both so follow-up extraction works regardless of the server's exact shape.
+ */
+export function userText(m: any): string {
+  if (typeof m?.text === "string") return m.text;
+  return ((m?.content ?? []) as any[])
+    .filter((c: any) => c?.type === "text")
+    .map((c: any) => c.text)
+    .join("\n");
+}
 
 /**
  * True when an error is a *network-level* fetch failure — connection refused,
@@ -100,7 +185,7 @@ export class OpenCodeCtl {
   private url?: string;
   private version?: string;
   private discoverArgs?: { serviceUrl?: string; user?: string; password?: string };
-  private eventCbs?: { onEvent: (ev: any) => void; onError?: (e: any) => void };
+  private eventCbs?: { onEvent: (ev: any) => void; onError?: (e: any) => void; onConnect?: () => void };
 
   /** Discover the shared background service (or start one), or use an explicit URL. */
   async connect(
@@ -125,7 +210,7 @@ export class OpenCodeCtl {
     this.stopEvents();
     await this.establishClient();
     this.modelsCache = undefined; // the service may have restarted; refetch models
-    if (this.eventCbs) this.subscribeEvents(this.eventCbs.onEvent, this.eventCbs.onError);
+    if (this.eventCbs) this.subscribeEvents(this.eventCbs.onEvent, this.eventCbs.onError, this.eventCbs.onConnect);
   }
 
   private async establishClient(): Promise<void> {
@@ -143,7 +228,18 @@ export class OpenCodeCtl {
       try {
         ep = await Service.discover();
       } catch {
+        ep = undefined;
+      }
+      // discover() resolves to undefined (it does not throw) when the
+      // registered service is not running. Fall back to ensure(), which
+      // spawns `opencode serve --service` when missing and waits (up to
+      // ~2 min) for it to become ready — this is what brings the bot back
+      // after a machine reboot without any manual intervention.
+      if (!ep) {
         ep = await Service.ensure();
+      }
+      if (!ep) {
+        throw new Error("OpenCode service unavailable: discover() and ensure() both returned no endpoint");
       }
       url = ep.url;
       headers = Service.headers(ep) as Record<string, string>;
@@ -173,6 +269,7 @@ export class OpenCodeCtl {
       providerID: m.providerID,
       name: m.name,
       variants: ((m.variants ?? []) as any[]).map((v) => v?.id).filter(Boolean) as string[],
+      contextLimit: typeof m.limit?.context === "number" ? m.limit.context : undefined,
     }));
     return this.modelsCache;
   }
@@ -198,14 +295,29 @@ export class OpenCodeCtl {
     return arr.map((s) => ({ id: s.id, title: s.title, updated: s.time?.updated }));
   }
 
-  async createSession(directory: string): Promise<string> {
+  async createSession(
+    directory: string,
+    opts: { title?: string; agent?: string; metadata?: Record<string, string | number | boolean> } = {},
+  ): Promise<string> {
     this.ensureClient();
     const dir = isAbsolute(directory) ? directory : resolve(directory);
     if (!existsSync(dir)) throw new Error(`Directory does not exist: ${dir}`);
-    const s = (await retryTransient(() => this.client.session.create({ location: { directory: dir } }))) as any;
+    const input: any = { location: { directory: dir } };
+    if (opts.title) input.title = opts.title;
+    if (opts.agent) input.agent = opts.agent;
+    if (opts.metadata) input.metadata = opts.metadata;
+    // Create is not idempotent; a retried create may leave one extra empty
+    // session behind, which is harmless (nothing runs in it).
+    const s = (await retryTransient(() => this.client.session.create(input))) as any;
     const id = unwrap<any>(s)?.id ?? s?.id;
     if (!id) throw new Error("Failed to create session (no id returned).");
     return id as string;
+  }
+
+  /** Delete a session on the server (used by /prune to retire a finished worker's session). */
+  async removeSession(sessionID: string): Promise<void> {
+    this.ensureClient();
+    await retryTransient(() => this.client.session.remove({ sessionID }));
   }
 
   async setModel(sessionID: string, model: { id: string; providerID: string; variant?: string }): Promise<void> {
@@ -238,6 +350,112 @@ export class OpenCodeCtl {
   }
 
   /**
+   * Model + current context of the session's newest LLM step, from ONE
+   * `message.list` call (capped at 20). Delegates to `newestAssistantInfo()`,
+   * which sorts by `time.created` and therefore does not depend on the API's
+   * list order. On 2.1.x the list comes back newest-first (verified live with
+   * scripts/probe-usage.ts, 2026-10-26), but that ordering is not a stable
+   * contract — position-based scans have bitten us before, so the sort stays.
+   *
+   * Token accounting (live shape: `tokens: {input, output, reasoning,
+   * cache: {read, write}}`): the prompt sent to the model is
+   * `input + cache.read + cache.write` — `input` is the non-cached part,
+   * `cache.read` the part served from the provider's cache, `cache.write` the
+   * part just written into it. All three count against the context window.
+   * (`reasoning` is an OUTPUT token, not prompt, so it is excluded.)
+   */
+  async latestAssistantInfo(sessionID: string): Promise<AssistantInfo> {
+    const msgs = ((await this.listMessages(sessionID, 20).catch(() => [])) as any[]) ?? [];
+    return newestAssistantInfo(msgs);
+  }
+
+  /**
+   * The model actually used by the newest assistant message. The session object
+   * carries no model field, so this is the only way to observe which model the
+   * session is running on (explicitly set or server-resolved default).
+   */
+  async getSessionModel(sessionID: string): Promise<{ id: string; providerID: string } | undefined> {
+    return (await this.latestAssistantInfo(sessionID)).model;
+  }
+
+  /**
+   * Put / list / remove a per-session instruction entry. OpenCode namespaces
+   * these as `api/<key>` and injects them into the session's system context
+   * (the same channel as AGENTS.md), so this is a clean way to steer the model
+   * WITHOUT polluting the user's actual prompt text.
+   */
+  async setInstruction(sessionID: string, key: string, value: unknown): Promise<void> {
+    this.ensureClient();
+    await retryTransient(() => this.client.session.instructions.entry.put({ sessionID, key, value }));
+  }
+
+  async listInstructions(sessionID: string): Promise<any[]> {
+    this.ensureClient();
+    const raw = (await retryTransient(() => this.client.session.instructions.entry.list({ sessionID }))) as any;
+    return (Array.isArray(raw) ? raw : (raw?.data ?? [])) as any[];
+  }
+
+  async removeInstruction(sessionID: string, key: string): Promise<void> {
+    this.ensureClient();
+    await retryTransient(() => this.client.session.instructions.entry.remove({ sessionID, key }));
+  }
+
+  /**
+   * Snapshot for `/context`: identity, cumulative usage, message count, the
+   * files the session most recently modified, and the newest user prompt.
+   * Tool parts carry their input under `state.input`; file tools put the
+   * target at `state.input.path`.
+   */
+  async getSessionReport(sessionID: string): Promise<SessionReport> {
+    const s = ((await this.getSession(sessionID).catch(() => null)) ?? {}) as any;
+    const msgs = ((await this.listMessages(sessionID).catch(() => [])) as any[]) ?? [];
+
+    // File-modification events in message order (each hit is one write/edit/...).
+    const events: string[] = [];
+    let lastUserPrompt: string | undefined;
+    for (const m of msgs) {
+      if (m?.type === "user") lastUserPrompt = typeof m.text === "string" ? m.text : lastUserPrompt;
+      for (const c of m?.content ?? []) {
+        if (c?.type !== "tool") continue;
+        if (!MUTATING_TOOLS.has(c.name)) continue;
+        const p = c.state?.input?.path;
+        if (typeof p === "string") events.push(p);
+      }
+    }
+
+    // Newest-first, de-duplicated, capped.
+    const seen = new Set<string>();
+    const modifiedFiles: string[] = [];
+    for (let i = events.length - 1; i >= 0 && modifiedFiles.length < 8; i--) {
+      if (seen.has(events[i])) continue;
+      seen.add(events[i]);
+      modifiedFiles.push(events[i]);
+    }
+
+    return {
+      id: s.id ?? sessionID,
+      title: s.title,
+      directory: s.location?.directory,
+      agent: s.agent,
+      outcome: s.outcome,
+      created: s.time?.created,
+      updated: s.time?.updated,
+      messageCount: msgs.length,
+      tokens: s.tokens
+        ? {
+            input: s.tokens.input ?? 0,
+            output: s.tokens.output ?? 0,
+            reasoning: s.tokens.reasoning ?? 0,
+            cache: s.tokens.cache?.read ?? 0,
+          }
+        : undefined,
+      cost: typeof s.cost === "number" ? s.cost : undefined,
+      modifiedFiles,
+      lastUserPrompt,
+    };
+  }
+
+  /**
    * Send a prompt, block until the session goes idle, then return the latest
    * assistant text. If the passed signal aborts (e.g. /stop), we still read
    * whatever partial reply exists and report `interrupted: true`.
@@ -245,10 +463,13 @@ export class OpenCodeCtl {
   async promptAndWait(
     sessionID: string,
     text: string,
-    opts: { signal?: AbortSignal } = {},
+    opts: { signal?: AbortSignal; messageID?: string } = {},
   ): Promise<PromptResult> {
     this.ensureClient();
     const t0 = Date.now();
+    // A stable id makes every re-send of this prompt (here, or by a caller that
+    // retries the whole turn after a reconnect) resolve to the same input.
+    const id = opts.messageID ?? newMessageID();
     // Snapshot the messages that already exist so the reply we return is scoped
     // to THIS turn. (Reading "the last assistant message in the session" leaked
     // the PREVIOUS turn's answer: message.list is paged, newest-first, so a turn
@@ -259,11 +480,11 @@ export class OpenCodeCtl {
         .filter(Boolean),
     );
     // A dropped/blipped connection here is the classic "Transport: fetch
-    // failed". The prompt is a fresh request each attempt, so retrying it is
-    // safe (a Transport error means the request did not complete). A small
-    // number of retries is enough to ride out a transient blip.
+    // failed". A transport error does NOT prove the request never reached the
+    // server, so retrying is only safe because the input id is fixed: the
+    // server dedupes on it.
     await retryTransient(
-      () => this.client.session.prompt({ sessionID, text }),
+      () => this.client.session.prompt({ sessionID, id, text }),
       { attempts: 3, baseMs: 1000, signal: opts.signal },
     );
     let interrupted = false;
@@ -286,22 +507,26 @@ export class OpenCodeCtl {
     // final message is listed, so re-check a few times before giving up.
     let reply = "";
     let replyTime = 0;
+    let error: { type?: string; message?: string } | undefined;
     for (let attempt = 0; attempt < 4; attempt++) {
       const messages = (await this.listMessages(sessionID, 200).catch(() => [])) as any[];
       const fresh = messages.filter((m: any) => m && m.id && !beforeIds.has(m.id));
       for (const m of fresh) {
+        // A failed turn leaves the provider/turn error NOT only on the assistant
+        // message but on the "idle" (outcome + error) and "compaction" messages
+        // too — grab the first of these types that carries an error.
+        if (!error && (m.type === "assistant" || m.type === "idle" || m.type === "compaction") && m.error) {
+          error = typeof m.error === "string" ? { message: m.error } : { type: m.error?.type, message: m.error?.message };
+        }
         if (m?.type !== "assistant") continue;
-        const t = (m.content ?? [])
-          .filter((c: any) => c?.type === "text")
-          .map((c: any) => c.text)
-          .join("\n");
+        const t = assistantText(m);
         if (t) {
           reply = t;
           replyTime = m.time?.created ?? 0;
           break; // messages are newest-first, so the first hit is the latest
         }
       }
-      if (reply || opts.signal?.aborted) break;
+      if (reply || error || opts.signal?.aborted) break;
       await sleep(300);
     }
     let outcome: string | undefined;
@@ -310,7 +535,85 @@ export class OpenCodeCtl {
     } catch {
       /* ignore */
     }
-    return { reply, outcome, interrupted, elapsedMs: Date.now() - t0, replyTime };
+    return { reply, outcome, interrupted, elapsedMs: Date.now() - t0, replyTime, error };
+  }
+
+  /**
+   * Admit a prompt and return immediately; the turn runs on the server and its
+   * end is observed through `session.execution.*` events. Used for worker and
+   * Manager turns, which must never block the bot. Idempotent via `messageID`.
+   */
+  async prompt(sessionID: string, text: string, opts: { messageID?: string } = {}): Promise<string> {
+    this.ensureClient();
+    const id = opts.messageID ?? newMessageID();
+    await retryTransient(() => this.client.session.prompt({ sessionID, id, text }), { attempts: 3, baseMs: 1000 });
+    return id;
+  }
+
+  /**
+   * Newest assistant text in a session created after `afterTime` (0 = any),
+   * with its time. With `lastTurn`, only replies after the newest user message
+   * count — so a turn that ended without text never returns the previous
+   * turn's answer.
+   */
+  async latestReply(
+    sessionID: string,
+    afterTime = 0,
+    opts: { lastTurn?: boolean } = {},
+  ): Promise<{ text: string; time: number } | undefined> {
+    const msgs = (await this.listMessages(sessionID, 50).catch(() => [] as any[])) as any[];
+    if (opts.lastTurn) {
+      const lastUser = Math.max(0, ...msgs.filter((m: any) => m?.type === "user").map((m: any) => m.time?.created ?? 0));
+      afterTime = Math.max(afterTime, lastUser);
+    }
+    const newest = msgs
+      .filter((m: any) => m?.type === "assistant" && (m.time?.created ?? 0) > afterTime && assistantText(m))
+      .sort((a: any, b: any) => (b.time?.created ?? 0) - (a.time?.created ?? 0))[0];
+    return newest ? { text: assistantText(newest), time: newest.time?.created ?? 0 } : undefined;
+  }
+
+  /**
+   * Whether a session's turn is still running, and how the last one ended.
+   * There is no status endpoint: a session is idle once `time.idle` has caught
+   * up with `time.updated` (while busy, `updated` moves past `idle` and
+   * `outcome` still describes the previous turn).
+   */
+  async sessionState(sessionID: string): Promise<{ busy: boolean; outcome?: string }> {
+    const s = await this.getSession(sessionID);
+    const idle = s?.time?.idle;
+    const busy = !idle || (s?.time?.updated ?? 0) > idle;
+    return { busy, outcome: busy ? undefined : s?.outcome };
+  }
+
+  /** Pending permission requests of one session (to re-surface after a missed event). */
+  async listPermissions(sessionID: string): Promise<any[]> {
+    this.ensureClient();
+    const raw = (await retryTransient(() => this.client.permission.list({ sessionID }))) as any;
+    return (Array.isArray(raw) ? raw : (raw?.data ?? [])) as any[];
+  }
+
+  // ── MCP (the Manager's tool bridge) ──────────────────────────────────────
+  /**
+   * Register a remote MCP server for one location only (runtime, not written to
+   * any config file — so it must be re-added after the service restarts).
+   * Code Mode is off so the tools stay on the model's native tool list.
+   */
+  async addRemoteMcp(directory: string, name: string, url: string, headers: Record<string, string>): Promise<void> {
+    this.ensureClient();
+    const location = { directory };
+    await this.client.mcp.remove({ server: name, location }).catch(() => {});
+    await retryTransient(() =>
+      this.client.mcp.add({ server: name, location, config: { type: "remote", url, headers, oauth: false, codemode: false } }),
+    );
+    await retryTransient(() => this.client.mcp.connect({ server: name, location })).catch(() => {});
+  }
+
+  /** Connection status of one MCP server at a location ("connected", "failed", …) plus its error. */
+  async mcpStatus(directory: string, name: string): Promise<{ status: string; error?: string }> {
+    this.ensureClient();
+    const raw = (await retryTransient(() => this.client.mcp.list({ location: { directory } }))) as any;
+    const s = ((raw?.data ?? raw ?? []) as any[]).find((x) => x?.name === name)?.status;
+    return { status: s?.status ?? "missing", error: s?.error };
   }
 
   // ── questions / forms ────────────────────────────────────────────────────
@@ -333,24 +636,63 @@ export class OpenCodeCtl {
     await retryTransient(() => this.client.session.form.reply({ sessionID, formID, answer }));
   }
 
-  async cancelForm(sessionID: string, formID: string, message?: string): Promise<void> {
-    this.ensureClient();
-    await retryTransient(() =>
-      this.client.session.form.cancel({
-        sessionID,
-        formID,
-        ...(message ? { message } : {}),
-      }),
-    );
-  }
+   async cancelForm(sessionID: string, formID: string, message?: string): Promise<void> {
+     this.ensureClient();
+     await retryTransient(() =>
+       this.client.session.form.cancel({
+         sessionID,
+         formID,
+         ...(message ? { message } : {}),
+       }),
+     );
+   }
 
+   /**
+    * Answer a pending permission request (what the TUI does when you press a
+    * key). `decision`: "once" (allow just this call), "always" (save a rule
+    * so this is never asked again), or "reject".
+    */
+   async replyPermission(
+     sessionID: string,
+     requestID: string,
+     decision: "once" | "always" | "reject",
+     message?: string,
+   ): Promise<void> {
+     this.ensureClient();
+     await retryTransient(() =>
+       this.client.permission.reply({
+         sessionID,
+         requestID,
+         decision,
+         ...(message ? { message } : {}),
+       }),
+     );
+   }
+
+   /**
+    * Create a permission request on a session, the same way a tool call would.
+    * Returns the request id and its resolved effect ("ask" = pending, fires
+    * the `permission.asked` event; "allow"/"deny" = settled by saved rules).
+    * Used by the smoke test to drive the permission relay end-to-end.
+    */
+   async createPermission(
+     sessionID: string,
+     action: string,
+     resources: string[],
+   ): Promise<{ id: string; effect: string }> {
+     this.ensureClient();
+     const raw = (await retryTransient(() =>
+       this.client.permission.create({ sessionID, action, resources }),
+     )) as any;
+     return { id: String(raw?.id ?? ""), effect: String(raw?.effect ?? "") };
+   }
   /**
    * Subscribe to the OpenCode event stream and forward every event to
    * `onEvent`. The stream is live-only with no replay, so on a drop we
    * re-subscribe with backoff. Stops when `stopEvents()` is called.
    */
-  subscribeEvents(onEvent: (ev: any) => void, onError?: (e: any) => void): void {
-    this.eventCbs = { onEvent, onError };
+  subscribeEvents(onEvent: (ev: any) => void, onError?: (e: any) => void, onConnect?: () => void): void {
+    this.eventCbs = { onEvent, onError, onConnect };
     if (this.eventRunning) return;
     this.eventRunning = true;
     this.eventAbort = new AbortController();
@@ -375,6 +717,14 @@ export class OpenCodeCtl {
       try {
         const stream = this.client.event.subscribe({ signal: this.eventAbort?.signal }) as AsyncIterable<any>;
         delay = 1000; // reset backoff after a clean (re)connect
+        // The stream has no replay: anything emitted while we were away (a
+        // question, a permission ask, a finished turn) is gone. Let the bot
+        // reconcile from the API on every (re)connect.
+        try {
+          this.eventCbs?.onConnect?.();
+        } catch (e) {
+          onError?.(e);
+        }
         for await (const ev of stream) {
           if (!alive()) break;
           try {

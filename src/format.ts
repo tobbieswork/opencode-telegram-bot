@@ -16,6 +16,97 @@ export function trunc(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n) + "…";
 }
 
+/** Transient provider RATE LIMIT — NOT a full context, so /clear won't help; retrying shortly does. */
+const RATE_LIMIT_RE = /rate ?limit|per (minute|hour|day)|too many requests|requests per (minute|hour)|throttl|overloaded/i;
+
+/** A plan/quota/credit cap — does NOT clear in seconds, so "wait a moment" would be wrong advice. */
+const USAGE_CAP_RE = /usage limit|quota|limit reached|insufficient (credit|balance|fund)|out of credit|billing/i;
+
+/** The model's CONTEXT was exceeded — fixable by starting a fresh session. */
+const CONTEXT_OVERFLOW_RE = /context (length|window|limit|size)|maximum context|prompt is too long|input length/i;
+/** Weaker overflow wording ("too many tokens"): also used by quota errors, so a cap word vetoes it. */
+const WEAK_OVERFLOW_RE = /too many tokens/i;
+
+export type FailureKind = "rate-limit" | "overflow" | "usage-cap";
+
+/**
+ * Classify a provider error text. ONE classifier for both what the user is told
+ * (formatTurnFailure) and what the bot does (worker auto-respawn), so the two can
+ * never disagree. Precedence: rate limit > context overflow > usage cap.
+ * Overflow beats the cap because USAGE_CAP_RE is broad ("limit reached") and a
+ * "context limit reached" error must say /clear, not "switch model"; only the
+ * weak "too many tokens" wording yields to a cap word (quota/billing…).
+ */
+export function classifyFailure(text: string): FailureKind | undefined {
+  if (RATE_LIMIT_RE.test(text)) return "rate-limit";
+  if (CONTEXT_OVERFLOW_RE.test(text)) return "overflow";
+  if (USAGE_CAP_RE.test(text)) return "usage-cap";
+  if (WEAK_OVERFLOW_RE.test(text)) return "overflow";
+  return undefined;
+}
+
+/** Is this error text a *context-overflow* error? Shared with worker auto-recovery. */
+export function isOverflowError(text: string): boolean {
+  return classifyFailure(text) === "overflow";
+}
+
+/**
+ * A short, actionable Telegram-HTML message for a failed turn. A failed turn
+ * almost always means the provider rejected the request. The raw error comes
+ * from the newest assistant / idle / compaction message's `.error` field (the
+ * session object carries none). We distinguish a *rate limit* (wait and retry —
+ * /clear is useless) from a *usage cap* (wait for a reset or switch model) and
+ * from *context overflow* (start a fresh session), then fall back to the raw message.
+ */
+export function formatTurnFailure(
+  error: { type?: string; message?: string } | undefined,
+  elapsedMs: number,
+): string {
+  const secs = (elapsedMs / 1000).toFixed(1);
+  const raw = (error?.message ?? "").trim();
+  const text = `${error?.type ?? ""}\n${raw}`;
+  const detail = raw ? `\n<i>${esc(trunc(raw, 200))}</i>` : "";
+  // A rate/usage cap is not a full context — tell the user to wait, not /clear.
+  switch (classifyFailure(text)) {
+    case "rate-limit":
+      return `⏳ Provider đang giới hạn tốc độ (rate limit) — không phải lỗi context, chờ vài giây rồi thử lại.${detail}`;
+    case "overflow":
+      return (
+        "⚠️ <b>Session đã đầy context</b> — vượt giới hạn token của model nên không chạy tiếp được.\n" +
+        "Gõ <code>/clear</code> để bắt đầu phiên mới."
+      );
+    case "usage-cap":
+      return `🚫 Đã hết hạn mức sử dụng của provider/model — chờ đến khi hạn mức được reset hoặc đổi model bằng /model.${detail}`;
+  }
+  if (raw) {
+    const type = error?.type ? ` <code>${esc(error.type)}</code>` : "";
+    return `❌ <b>Turn lỗi</b>${type}: ${esc(trunc(raw, 400))}\n<i>${secs}s</i>`;
+  }
+  return `❌ <b>Turn bị lỗi</b> (${secs}s) — không có thông tin chi tiết. Nếu lặp lại, thử <code>/clear</code>.`;
+}
+
+/** Compact number for display: "1.2K" / "3.4M" (plain if < 1000). */
+export function fmtNum(n: number): string {
+  if (!Number.isFinite(n)) return "0";
+  const abs = Math.abs(n);
+  const trim = (x: number) => x.toFixed(1).replace(/\.0$/, "");
+  if (abs >= 1e6) return trim(n / 1e6) + "M";
+  if (abs >= 1e3) return trim(n / 1e3) + "K";
+  return String(Math.round(n));
+}
+
+/** Relative time from a Unix-epoch-ms timestamp ("3m ago" style). */
+export function timeAgo(ts: number): string {
+  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+
 /**
  * Split text into chunks of at most `max` chars, preferring line boundaries.
  * Safe for sending escaped plain text to Telegram (4096 char limit).
@@ -52,7 +143,15 @@ function blockToHtml(raw: string): string {
     return `<pre><code>${esc(inner)}</code></pre>`;
   }
   let out = esc(raw);
-  out = out.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+  // Pull inline code spans out FIRST so the bold/italic/strikethrough passes
+  // below can't mistake a literal `*`, `_` or `~` inside code (e.g. a regex
+  // like `.*`) for a Markdown delimiter — that produced unbalanced <i>/<b>
+  // tags and Telegram's "can't parse entities". Restored after the passes.
+  const codeSpans: string[] = [];
+  out = out.replace(/`([^`\n]+)`/g, (_m: string, inner: string) => {
+    codeSpans.push(`<code>${inner}</code>`);
+    return `\u0000${codeSpans.length - 1}\u0000`;
+  });
   out = out.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
   out = out.replace(/__([^_]+)__/g, "<b>$1</b>");
   out = out.replace(/~~([^~]+)~~/g, "<s>$1</s>");
@@ -64,6 +163,8 @@ function blockToHtml(raw: string): string {
   out = out.replace(/^#{1,6}\s+(.*)$/, "<b>$1</b>");
   out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2">$1</a>');
   out = out.replace(/^(\s*)[-*]\s+/, "$1• ");
+  // Put the code spans back now that no delimiter passes are left to misread them.
+  out = out.replace(/\u0000(\d+)\u0000/g, (m: string, i: string) => codeSpans[Number(i)] ?? m);
   return out;
 }
 
@@ -82,23 +183,144 @@ function hardSplit(s: string, max: number): string[] {
   return out;
 }
 
+const PRE_OPEN = "<pre><code>";
+const PRE_CLOSE = "</code></pre>";
+
+// ── Tables ─────────────────────────────────────────────────────────────────
+
+/** Max total width (chars) for a table to render as an aligned monospace block. */
+const TABLE_PRE_MAX_WIDTH = 40;
+/** Max columns for the monospace form — beyond that columns squeeze a phone screen. */
+const TABLE_PRE_MAX_COLS = 3;
+
+/** Split a GFM table line into trimmed cells (honors escaped pipes `\|`). */
+function splitRow(line: string): string[] {
+  return line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|\s*$/, "")
+    .split(/(?<!\\)\|/g)
+    .map((c) => c.trim().replace(/\\\|/g, "|"));
+}
+
+function isTableRow(line: string): boolean {
+  const t = line.trim();
+  return t.startsWith("|") && t.indexOf("|", 1) !== -1;
+}
+
+function isTableSepLine(line: string): boolean {
+  const t = line.trim();
+  if (!t.startsWith("|") || !t.includes("-")) return false;
+  const cells = t.replace(/^\|/, "").replace(/\|$/, "").split(/(?<!\\)\|/g);
+  return cells.length > 0 && cells.every((c) => /^\s*:?-+:?\s*$/.test(c));
+}
+
+interface ParsedTable {
+  header: string[];
+  rows: string[][];
+}
+
+function parseTable(lines: string[]): ParsedTable {
+  const cells = lines.map(splitRow);
+  const ncols = Math.max(...cells.map((r) => r.length));
+  const norm = cells.map((r) => {
+    const c = r.slice();
+    while (c.length < ncols) c.push("");
+    return c;
+  });
+  const header = norm[0];
+  const rows = norm.slice(2).filter((r) => r.some((c) => c !== ""));
+  return { header, rows };
+}
+
+/**
+ * Render a parsed table as message-safe HTML units. Narrow tables (≤
+ * TABLE_PRE_MAX_WIDTH chars, ≤ TABLE_PRE_MAX_COLS columns) become an aligned
+ * monospace block so columns stay straight; wider tables become a bullet list
+ * (first cell = row label, remaining columns as "header: value" pairs) which
+ * wraps gracefully on a phone. A monospace table taller than one message is
+ * split at row boundaries, repeating the header on continuation messages.
+ */
+function tableToUnits(t: ParsedTable, max: number): string[] {
+  const ncols = t.header.length;
+  // Widths are measured on the escaped text: escaping happens before padding,
+  // so padding on escaped widths keeps every rendered line exactly equal.
+  const colW: number[] = [];
+  for (let c = 0; c < ncols; c++) {
+    let w = esc(t.header[c]).length;
+    for (const r of t.rows) w = Math.max(w, esc(r[c]).length);
+    colW.push(w);
+  }
+  const totalWidth = 2 + colW.reduce((s, w) => s + w + 2, 0);
+
+  if (totalWidth > TABLE_PRE_MAX_WIDTH || ncols > TABLE_PRE_MAX_COLS) {
+    const units: string[] = [];
+    for (const r of t.rows) {
+      let raw: string;
+      if (ncols === 1) raw = `• ${r[0]}`;
+      else if (ncols === 2) raw = `• **${r[0]}:** ${r[1]}`.replace(/\s+$/, "");
+      else {
+        const rest = r
+          .slice(1)
+          .map((c, i) => (t.header[i + 1] ? `${t.header[i + 1]}: ${c}` : c))
+          .filter(Boolean)
+          .join(" · ");
+        raw = rest ? `• **${r[0]}** · ${rest}` : `• ${r[0]}`;
+      }
+      const html = blockToHtml(raw);
+      if (html.length > max) for (const p of hardSplit(raw, max)) units.push(blockToHtml(p));
+      else units.push(html);
+    }
+    return units;
+  }
+
+  const line = (cells: string[]) =>
+    "| " + cells.map((c, i) => esc(c).padEnd(colW[i])).join(" | ") + " |";
+  const headerLine = line(t.header);
+  const sepLine = "|" + colW.map((w) => "-".repeat(w + 2)).join("|") + "|";
+  const cap = max - PRE_OPEN.length - PRE_CLOSE.length;
+  const units: string[] = [];
+  let group: string[] = [];
+  let first = true;
+  const push = (): void => {
+    if (!group.length) return;
+    const head = first ? headerLine + "\n" + sepLine : headerLine;
+    units.push(PRE_OPEN + head + "\n" + group.join("\n") + PRE_CLOSE);
+    group = [];
+    first = false;
+  };
+  for (const l of t.rows.map(line)) {
+    const headLen = first ? headerLine.length + 1 + sepLine.length + 1 : headerLine.length + 1;
+    const groupLen = group.length ? group.join("\n").length + 1 : 0;
+    if (headLen + groupLen + l.length > cap) push();
+    group.push(l);
+  }
+  push();
+  return units;
+}
+
+// ── Chunking ───────────────────────────────────────────────────────────────
+
 /**
  * Turn a Markdown-ish reply into one or more Telegram-HTML messages, each at
  * most `max` chars with every tag balanced within its own message. Splits at
- * code-fence / line / word boundaries, so a long reply is never cut in the
- * middle of a tag (which would make Telegram reject the whole message).
+ * code-fence / table-row / line / word boundaries, so a long reply is never
+ * cut in the middle of a tag (which would make Telegram reject the whole
+ * message) and a table is never rendered as ragged plain text.
  */
 export function mdToHtmlChunks(text: string, max: number): string[] {
   if (!text) return [];
   const lines = text.replace(/\r\n/g, "\n").split("\n");
 
-  // Group lines into blocks: a fenced code block is one atomic unit; otherwise
-  // each line is its own block (blank lines are kept for paragraph spacing).
-  const blocks: string[] = [];
+  // Group lines into self-contained HTML units: a fenced code block is one
+  // unit; a GFM table is one (or a few) units; otherwise each line is its own
+  // unit (blank lines are kept for paragraph spacing).
+  const units: string[] = [];
   let i = 0;
   while (i < lines.length) {
-    if (/^```/.test(lines[i])) {
-      const buf: string[] = [lines[i]];
+    const line = lines[i];
+    if (/^```/.test(line)) {
+      const buf: string[] = [line];
       i++;
       while (i < lines.length && !/^```/.test(lines[i])) {
         buf.push(lines[i]);
@@ -108,13 +330,35 @@ export function mdToHtmlChunks(text: string, max: number): string[] {
         buf.push(lines[i]);
         i++;
       }
-      blocks.push(buf.join("\n"));
+      const inner = buf
+        .join("\n")
+        .replace(/^```\w*\s?\n?/, "")
+        .replace(/```\s*$/, "")
+        .replace(/\n$/, "");
+      const pre = PRE_OPEN + esc(inner) + PRE_CLOSE;
+      if (pre.length > max) {
+        const cap = max - PRE_OPEN.length - PRE_CLOSE.length;
+        for (const piece of hardSplit(esc(inner), cap)) units.push(PRE_OPEN + piece + PRE_CLOSE);
+      } else {
+        units.push(pre);
+      }
+    } else if (isTableRow(line) && i + 1 < lines.length && isTableSepLine(lines[i + 1])) {
+      const run: string[] = [];
+      while (i < lines.length && isTableRow(lines[i])) {
+        run.push(lines[i]);
+        i++;
+      }
+      units.push(...tableToUnits(parseTable(run), max));
     } else {
-      blocks.push(lines[i]);
+      const html = blockToHtml(line);
+      if (html.length > max) for (const p of hardSplit(line, max)) units.push(blockToHtml(p));
+      else units.push(html);
       i++;
     }
   }
 
+  // Pack units into messages of at most `max` chars. Every unit is
+  // self-contained (all tags balanced), so any concatenation is sendable.
   const out: string[] = [];
   let cur = "";
   const flush = (): void => {
@@ -123,26 +367,14 @@ export function mdToHtmlChunks(text: string, max: number): string[] {
       cur = "";
     }
   };
-
-  for (const block of blocks) {
-    const html = blockToHtml(block);
-    if (html.length > max) {
-      // A single block bigger than one message: break it into safe sub-pieces.
+  for (const u of units) {
+    if (u.length > max) {
       flush();
-      if (block.startsWith("```")) {
-        const inner = block
-          .replace(/^```\w*\s?\n?/, "")
-          .replace(/```\s*$/, "")
-          .replace(/\n$/, "");
-        const cap = max - "<pre><code>".length - "</code></pre>".length;
-        for (const piece of hardSplit(esc(inner), cap)) out.push(`<pre><code>${piece}</code></pre>`);
-      } else {
-        for (const piece of hardSplit(block, max)) out.push(blockToHtml(piece));
-      }
+      out.push(u);
       continue;
     }
-    if (cur && (cur + "\n" + html).length > max) flush();
-    cur = cur ? cur + "\n" + html : html;
+    if (cur && (cur + "\n" + u).length > max) flush();
+    cur = cur ? cur + "\n" + u : u;
   }
   flush();
   return out;

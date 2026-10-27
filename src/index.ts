@@ -19,9 +19,14 @@ async function main(): Promise<void> {
   const connected = await oc.connect(cfg.opencodeServiceUrl, cfg.opencodeServiceUser, cfg.opencodeServicePassword);
   log(`Connected to OpenCode ${connected.version ?? "?"} @ ${connected.url}`);
 
-  const tg = new Telegram(cfg.telegramToken);
+  const tg = new Telegram(cfg.telegramToken, {
+    enabled: cfg.dnsHeal && cfg.dnsStaleIp !== "",
+    staleIp: cfg.dnsStaleIp,
+    minFailures: cfg.dnsHealMinFailures,
+    cooldownMs: cfg.dnsHealCooldownMs,
+  });
   const me = await tg.getMe();
-  log(`Telegram bot: @${me.username ?? "?"} (id ${me.id})`);
+  log(`Telegram bot: @${me.username ?? "?"} (id ${me.id}) · topics in private chats: ${me.has_topics_enabled ? "on" : "off"}`);
 
   if (cfg.allowAny) {
     warn("OPENCODE_TG_ALLOW_ANY=1 — the bot will respond to ANYONE. Prefer TELEGRAM_ALLOWED_USER_IDS.");
@@ -43,6 +48,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     log(`\n${sig} received, stopping…`);
+    bot.stopScheduler();
     tg.stop();
     setTimeout(() => process.exit(0), 500).unref();
   };
@@ -50,7 +56,9 @@ async function main(): Promise<void> {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("unhandledRejection", (e) => error("Unhandled rejection:", e));
 
-  await tg.poll((u) => bot.handle(u));
+  await tg.poll((u) => bot.enqueue(u), {
+    onDnsHeal: () => bot.notifyDnsHeal(),
+  });
 }
 
 main().catch((e) => {

@@ -30,6 +30,7 @@ class MockTelegram {
   }
   async answerCallbackQuery(_id: string, _text?: string): Promise<void> {}
   async deleteMessage(_chatId: number, _messageId: number): Promise<void> {}
+  async setMyCommands(_commands: Array<{ command: string; description: string }>): Promise<void> {}
   sendChatAction(): void {}
   async getMe() {
     return { id: 1, username: "Mock" };
@@ -64,6 +65,9 @@ async function main(): Promise<void> {
   process.env.TELEGRAM_BOT_TOKEN = "dummy";
   process.env.TELEGRAM_ALLOWED_USER_IDS = "1";
   process.env.OPENCODE_DIRECTORY = "/tmp/opencode/testws";
+  // Keep the live activity line off: its "✅ … · Ns" text would trip the
+  // smoke's prompt-completed heuristics. It has its own unit tests.
+  process.env.OPENCODE_TG_ACTIVITY = "0";
   process.env.STATE_FILE = mkdtempSync(tmpdir() + "/ocbot-") + "/state.json";
   const cfg = loadConfig(root);
 
@@ -90,6 +94,17 @@ async function main(): Promise<void> {
   await bot.handle(upd("/help"));
   show("/help");
 
+  // ── command menu (buttons under /help) ───────────────────────────────────────
+  const helpKb = mock.keyboards[mock.keyboards.length - 1];
+  const menuBtn = JSON.stringify(helpKb).match(/cmd:(?:new|ls|dir|browse|mode|models|variants|status|context|history|stop|clear|help)/);
+  console.log("menu button:", menuBtn ? menuBtn[0] : "NOT FOUND");
+  if (menuBtn) {
+    await bot.handle(tap("cmd:ls"));
+    show("menu: tap sessions");
+    await bot.handle(tap("cmd:mode"));
+    show("menu: tap mode");
+  }
+
   await bot.handle(upd("/new"));
   show("/new");
 
@@ -100,9 +115,17 @@ async function main(): Promise<void> {
 
   await bot.handle(upd("/status"));
   show("/status");
+  const statusMsg = mock.out[mock.out.length - 1];
+  console.log("status model line:", (statusMsg.match(/model: .*/) ?? ["?"])[0]);
 
   await bot.handle(upd("/history"));
   show("/history");
+
+  await bot.handle(upd("/context"));
+  show("/context");
+  const ctxMsg = mock.out[mock.out.length - 1];
+  console.log("context has files:", /files: /.test(ctxMsg));
+  console.log("context has tokens:", /tokens: /.test(ctxMsg));
 
   await bot.handle(upd("/models"));
   show("/models");
@@ -110,6 +133,109 @@ async function main(): Promise<void> {
   await bot.handle(upd("/agents"));
   show("/agents");
 
+  // ── mode picker (buttons) ─────────────────────────────────────────────────────
+  await bot.handle(upd("/mode"));
+  show("mode: picker");
+  const modeKb = mock.keyboards[mock.keyboards.length - 1];
+  console.log("mode keyboard:", JSON.stringify(modeKb, null, 2));
+  const mBtn = JSON.stringify(modeKb).match(/mode:(plan|build|general|explore)/);
+  console.log("mode option button:", mBtn ? mBtn[0] : "NOT FOUND");
+  if (mBtn) {
+    await bot.handle(tap("mode:plan"));
+    show("mode: tap plan");
+    await bot.handle(tap("mode:build"));
+    show("mode: tap build");
+  }
+  await bot.handle(upd("/mode explore"));
+  show("mode: text switch to explore");
+  await bot.handle(tap("mode:info"));
+  show("mode: show roles");
+  await bot.handle(tap("mode:build"));
+  show("mode: back to build (for the rest of the smoke)");
+  await bot.handle(tap("mode:close"));
+  show("mode: close picker");
+
+  // ── out-of-band turn (background-wake simulation) ───────────────────────────
+  // Prompt the session DIRECTLY via the API (not through the bot), exactly like
+  // OpenCode runs a turn triggered by a background-task completion. The bot's
+  // live event subscription should relay the reply — before this feature the
+  // output was silently dropped until the next restart.
+  {
+    const stt = st.get(42);
+    if (stt.sessionID) {
+      const probe = "SWEEP-PROBE-" + Date.now();
+      console.log("\n== sweep: out-of-band turn == (session " + stt.sessionID + ", probe " + probe + ")");
+      await oc.promptAndWait(stt.sessionID, `Reply with exactly the single word: ${probe}. Nothing else.`);
+      const swept = await waitFor((a) => a.some((m) => m.includes(probe)), mock.out);
+      console.log("sweep relayed the out-of-band reply to Telegram:", swept);
+       show("sweep: relayed out-of-band reply");
+    }
+  }
+
+  // ── permission relay (approve a tool permission from Telegram) ──────────────
+  // Create a real permission request on the session (like a tool call would).
+  // If it stays pending, the live event stream must surface it as buttons and
+  // tapping one must answer it through the API.
+  {
+    const stt = st.get(42);
+    if (stt.sessionID) {
+      console.log("\n== permission: relay + tap ==");
+      // Deliberately outside /tmp/opencode (a saved "always" rule from earlier
+      // approvals auto-allow it), so the request stays pending (effect "ask").
+      const perm = await oc.createPermission(stt.sessionID, "external_directory", ["/tmp/opencode-smoke-perm-test"]);
+      console.log("permission created:", perm.id, "effect:", perm.effect || "?");
+      if (perm.id && perm.effect === "ask") {
+        const surfaced = await waitFor((a) => a.some((m) => m.includes("🔐")), mock.out);
+        console.log("permission prompt surfaced:", surfaced);
+        if (surfaced) {
+          await bot.handle(tap(`perm:${perm.id}:once`));
+          const answered = await waitFor((a) => a.some((m) => m.startsWith("[edit]") && m.includes("Đã duyệt")), mock.out);
+          console.log("permission answered via Telegram:", answered);
+          if (!answered) {
+            // Settle it so it doesn't linger as a pending prompt in the TUI.
+            await oc.replyPermission(stt.sessionID, perm.id, "reject").catch(() => {});
+            console.log("tap did not settle the request — rejected as cleanup");
+          }
+          show("permission: prompt + answer");
+        }
+      } else {
+        console.log("permission auto-settled by saved rules — skipping tap (effect:", perm.effect || "unknown", ")");
+      }
+    }
+  }
+
+  // ── plan → build handoff ────────────────────────────────────────────────────
+  // A successful turn that ENDS in plan mode should offer the one-tap
+  // plan-to-build button; tapping it must switch the agent to build and run
+  // the execution prompt (which the bot then relays as a normal reply).
+  {
+    const stt = st.get(42);
+    if (stt.sessionID) {
+      console.log("\n== plan-to-build: plan turn + tap ==");
+      await bot.handle(upd("/mode plan"));
+      const probe = "PLAN2BUILD-" + Date.now();
+      await bot.handle(
+        upd(
+          `Viết kế hoạch ${probe}: liệt kê đúng 3 bước ngắn để tạo file hello.txt với nội dung "hi". Chỉ liệt kê, chưa thực hiện, không cần hỏi thêm.`,
+        ),
+      );
+      const offered = await waitFor((a) => a.some((m) => m.includes("Kế hoạch đã sẵn sàng")), mock.out, 120000);
+      console.log("plan-to-build offered:", offered);
+      if (offered) {
+        const before = mock.out.length;
+        await bot.handle(tap("pb:go"));
+        const executed = await waitFor((a) => a.length >= before + 2, mock.out, 120000);
+        console.log("execution turn relayed after tap:", executed);
+        await bot.handle(upd("/status"));
+        const statusMsg = mock.out[mock.out.length - 1];
+        console.log("status after tap:", (statusMsg.match(/agent: .*/) ?? ["?"])[0]);
+        show("plan-to-build: offer + tap + status");
+      } else {
+        await bot.handle(upd("/mode build"));
+        console.log("plan-to-build offer not surfaced — restoring build mode");
+      }
+    }
+  }
   await bot.handle(upd("/dir"));
   show("/dir");
 
