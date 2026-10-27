@@ -1074,10 +1074,11 @@ export class Bot {
    * top-level pane, leaving a blank gap from turn start until the first
    * text/tool event (when the streaming preview appears). Post a "⏳ Đang xử lý…"
    * line to fill it; it shows elapsed time and is removed by stopWorking. No-op
-   * for DMs and topics (native typing renders fine there).
+   * for DMs (native typing renders fine there). Manager turns only — runPromptTask
+   * is manager-only, so worker topics never reach here.
    */
   private startWorking(conv: ConvKey): void {
-    if (!this.cfg.working || isDmConv(conv) || conv !== chatOf(conv)) return; // General top-level only
+    if (!this.cfg.working || isDmConv(conv)) return; // manager turns in groups/topics; DMs show native typing fine
     if (this.working.has(conv)) return;
     log(`⏳ working indicator shown for ${conv}`);
     const startedAt = Date.now();
