@@ -1079,6 +1079,7 @@ export class Bot {
   private startWorking(conv: ConvKey): void {
     if (!this.cfg.working || isDmConv(conv) || conv !== chatOf(conv)) return; // General top-level only
     if (this.working.has(conv)) return;
+    log(`⏳ working indicator shown for ${conv}`);
     const startedAt = Date.now();
     this.working.set(conv, { msgId: undefined, startedAt, timer: undefined }); // sync marker (race-safe)
     void this.tg
@@ -1106,7 +1107,20 @@ export class Bot {
     if (!e) return;
     this.working.delete(conv);
     if (e.timer) clearInterval(e.timer);
-    if (e.msgId) void this.tg.deleteMessage(conv, e.msgId).catch(() => {});
+    if (!e.msgId) return;
+    const msgId = e.msgId;
+    const shownMs = Date.now() - e.startedAt;
+    log(`⏳ working indicator stopping for ${conv} (shown ${Math.round(shownMs / 1000)}s)`);
+    // Keep the line visible for a minimum of ~1.5s so a fast reply (first event
+    // before the line even lands, or within a second) doesn't make it a
+    // sub-second flash the user never notices.
+    const remaining = 1500 - shownMs;
+    if (remaining <= 0) {
+      void this.tg.deleteMessage(conv, msgId).catch(() => {});
+    } else {
+      const t = setTimeout(() => void this.tg.deleteMessage(conv, msgId).catch(() => {}), remaining);
+      (t as any).unref?.();
+    }
   }
 
   // ── live tool activity (one self-editing line per conv) ─────────────────────
