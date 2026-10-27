@@ -2881,15 +2881,14 @@ export class Bot {
     if (!arg) {
       const mine = this.scheduleStore.load().filter((s) => s.conv === conv);
       if (!mine.length) {
-        await this.tg.sendMessage(
-          conv,
+        const guidance =
           "⏰ Chưa có lịch nào cho chat này.\n\n" +
-            "Đặt lịch: /schedule <spec> <prompt> [dir=<đường dẫn> agent=<tên>]\n" +
-            "spec: daily|weekdays HH:MM · weekly mon..sun HH:MM · every <N>h · once YYYY-MM-DD HH:MM\n" +
-            `vd: /schedule daily 08:00 Review commit 24h qua dir=${this.cfg.opencodeDirectory}\n\n` +
-            "Quản lý: /schedule pause|resume|run|rm <id>\n" +
-            "Lưu ý: phải có dir= (thư mục ngoài data/manager) — lịch không chạy trong thư mục Manager. Agent mặc định: build.",
-        );
+          "Đặt lịch: /schedule <spec> <prompt> [dir=<đường dẫn> agent=<tên>]\n" +
+          "spec: daily|weekdays HH:MM · weekly mon..sun HH:MM · every <N>h · once YYYY-MM-DD HH:MM\n" +
+          `vd: /schedule daily 08:00 Review commit 24h qua dir=${this.cfg.opencodeDirectory}\n\n` +
+          "Quản lý: /schedule pause|resume|run|rm <id>\n" +
+          "Lưu ý: phải có dir= (thư mục ngoài data/manager) — lịch không chạy trong thư mục Manager. Agent mặc định: build.";
+        await this.tg.sendMessage(conv, esc(guidance));
         return;
       }
       const v = this.scheduleListMarkup(mine);
@@ -2974,7 +2973,7 @@ export class Bot {
     } catch (e) {
       const m = (e as Error).message;
       const hint = m.includes("thư mục của Manager")
-        ? `\n→ Thêm dir=<thư mục ngoài data/manager>. VD: dir=${this.cfg.opencodeDirectory}`
+        ? `\n→ Thêm dir= (thư mục ngoài data/manager). VD: dir=${this.cfg.opencodeDirectory}`
         : "";
       await this.tg.sendMessage(conv, `❌ ${m}${hint}`);
       return;
