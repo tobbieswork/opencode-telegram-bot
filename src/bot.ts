@@ -2862,13 +2862,33 @@ export class Bot {
   }
 
   private async cmdSchedule(conv: ConvKey, arg: string, state: ChatState, uid?: number): Promise<void> {
+    // Top-level safety net: no /schedule input may drop without a reply — an
+    // unexpected throw (e.g. statSync on a vanishing dir) must never be silent.
+    try {
+      await this.cmdScheduleInner(conv, arg, state, uid);
+    } catch (e) {
+      const m = (e as Error)?.message ?? String(e);
+      try {
+        await this.tg.sendMessage(conv, `❌ Lỗi: ${m}`);
+      } catch {
+        /* swallow — last resort */
+      }
+    }
+  }
+
+  private async cmdScheduleInner(conv: ConvKey, arg: string, state: ChatState, uid?: number): Promise<void> {
     // No arg → list this conv's schedules with control buttons.
     if (!arg) {
       const mine = this.scheduleStore.load().filter((s) => s.conv === conv);
       if (!mine.length) {
         await this.tg.sendMessage(
           conv,
-          "⏰ Chưa có lịch nào cho chat này.\nThêm: /schedule <spec> <prompt> [dir=<path> agent=<name>]\nVí dụ: /schedule daily 08:00 Review commit 24h qua",
+          "⏰ Chưa có lịch nào cho chat này.\n\n" +
+            "Đặt lịch: /schedule <spec> <prompt> [dir=<đường dẫn> agent=<tên>]\n" +
+            "spec: daily|weekdays HH:MM · weekly mon..sun HH:MM · every <N>h · once YYYY-MM-DD HH:MM\n" +
+            `vd: /schedule daily 08:00 Review commit 24h qua dir=${this.cfg.opencodeDirectory}\n\n` +
+            "Quản lý: /schedule pause|resume|run|rm <id>\n" +
+            "Lưu ý: phải có dir= (thư mục ngoài data/manager) — lịch không chạy trong thư mục Manager. Agent mặc định: build.",
         );
         return;
       }
@@ -2901,7 +2921,7 @@ export class Bot {
     try {
       ({ spec, prompt } = parseScheduleSpec(arg, Date.now()));
     } catch (e) {
-      await this.tg.sendMessage(conv, `❌ ${(e as Error).message}`);
+      await this.tg.sendMessage(conv, `❌ ${(e as Error).message.replace(/^schedule:\s*/, "")}`);
       return;
     }
     if (!prompt) {
@@ -2952,7 +2972,11 @@ export class Bot {
     try {
       await this.orch.spawn(conv, { name: "sch-" + sch.id, directory: dir, agent, spawnedBy: "schedule" });
     } catch (e) {
-      await this.tg.sendMessage(conv, `❌ ${(e as Error).message}`);
+      const m = (e as Error).message;
+      const hint = m.includes("thư mục của Manager")
+        ? `\n→ Thêm dir=<thư mục ngoài data/manager>. VD: dir=${this.cfg.opencodeDirectory}`
+        : "";
+      await this.tg.sendMessage(conv, `❌ ${m}${hint}`);
       return;
     }
     try {
