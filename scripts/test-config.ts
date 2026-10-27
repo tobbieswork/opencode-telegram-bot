@@ -89,5 +89,44 @@ check("richReplies unset → false (default off)", loadConfig(process.cwd()).ric
 process.env.OPENCODE_TG_RICH = "1";
 check('richReplies "1" → true', loadConfig(process.cwd()).richReplies === true);
 
+// --- /schedule knobs: master switch, timezone, cap, grace/timeout -----------
+// Default ON (off only on an explicit "0"), caps/grace/timeout fall back to
+// safe defaults on NaN, valid values are respected, a bad timezone falls back
+// (never lets an invalid tz through to nextRunAfter).
+delete process.env.OPENCODE_TG_RICH;
+check("schedule default ON", loadConfig(process.cwd()).schedule === true);
+process.env.OPENCODE_TG_SCHEDULE = "0";
+check("schedule OFF on =0", loadConfig(process.cwd()).schedule === false);
+delete process.env.OPENCODE_TG_SCHEDULE;
+
+const schedBase = loadConfig(process.cwd());
+check("maxSchedules default 10", schedBase.maxSchedules === 10, String(schedBase.maxSchedules));
+check("scheduleGraceMs default 60min", schedBase.scheduleGraceMs === 60 * 60_000, String(schedBase.scheduleGraceMs));
+check("scheduleTimeoutMs default 30min", schedBase.scheduleTimeoutMs === 30 * 60_000, String(schedBase.scheduleTimeoutMs));
+check("scheduleTz default is a non-empty IANA string", typeof schedBase.scheduleTz === "string" && schedBase.scheduleTz.length > 0, String(schedBase.scheduleTz));
+
+// valid values are respected.
+process.env.OPENCODE_TG_MAX_SCHEDULES = "7";
+process.env.OPENCODE_TG_SCHEDULE_GRACE_MIN = "5";
+process.env.OPENCODE_TG_SCHEDULE_TIMEOUT_MIN = "15";
+process.env.OPENCODE_TG_TIMEZONE = "America/New_York";
+const schedGood = loadConfig(process.cwd());
+check("maxSchedules valid respected (7)", schedGood.maxSchedules === 7, String(schedGood.maxSchedules));
+check("scheduleGraceMs valid respected (5min)", schedGood.scheduleGraceMs === 5 * 60_000, String(schedGood.scheduleGraceMs));
+check("scheduleTimeoutMs valid respected (15min)", schedGood.scheduleTimeoutMs === 15 * 60_000, String(schedGood.scheduleTimeoutMs));
+check("scheduleTz valid respected", schedGood.scheduleTz === "America/New_York", String(schedGood.scheduleTz));
+
+// garbage values → fallback + no crash.
+process.env.OPENCODE_TG_MAX_SCHEDULES = "abc";
+process.env.OPENCODE_TG_SCHEDULE_GRACE_MIN = "xyz";
+process.env.OPENCODE_TG_SCHEDULE_TIMEOUT_MIN = "nope";
+process.env.OPENCODE_TG_TIMEZONE = "Not/AZone";
+const schedBad = loadConfig(process.cwd());
+check("maxSchedules NaN → default 10", schedBad.maxSchedules === 10, String(schedBad.maxSchedules));
+check("scheduleGraceMs NaN → default 60min", schedBad.scheduleGraceMs === 60 * 60_000, String(schedBad.scheduleGraceMs));
+check("scheduleTimeoutMs NaN → default 30min", schedBad.scheduleTimeoutMs === 30 * 60_000, String(schedBad.scheduleTimeoutMs));
+check("scheduleTz invalid → fallback (not the garbage)", schedBad.scheduleTz.length > 0 && schedBad.scheduleTz !== "Not/AZone", String(schedBad.scheduleTz));
+delete process.env.OPENCODE_TG_TIMEZONE;
+
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
