@@ -8,6 +8,7 @@ import { OpenCodeCtl, newMessageID, assistantText, ModelInfo, SessionBrief } fro
 import { StateManager, ChatState, MsgPurpose, MACHINE_STATE_KEY } from "./state.js";
 import { ConvKey, convKey, chatOf, parseConv } from "./conv.js";
 import { Orchestrator } from "./orchestrator.js";
+import { closeFinishedTopicsAtStartup } from "./orchestrator/topics.js";
 import { ScheduleStore, Scheduler } from "./scheduler.js";
 import { Schedule, SchedSpec, formatSchedule, nextRunAfter, parseScheduleSpec } from "./schedule.js";
 import { Config } from "./config.js";
@@ -313,7 +314,7 @@ export class Bot {
     }
     // Close topics left open by workers that finished before auto-close existed
     // (or while the service was down). Fire-and-forget; never fails startup.
-    void this.orch.closeFinishedTopicsAtStartup().catch((e) => warn("startup topic close:", e?.message));
+    void closeFinishedTopicsAtStartup(this.orch).catch((e) => warn("startup topic close:", e?.message));
     // Register the Telegram /command autocomplete menu (cosmetic, best-effort).
     this.registerCommands();
     // Nudge the user to reboot the machine when uptime passes the threshold

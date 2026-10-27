@@ -9,13 +9,14 @@ import { ConvKey, chatOf, convKey, parseConv } from "./conv.js";
 import { McpBridge, BridgeTool } from "./mcp-bridge.js";
 import { addWorktree, diffSummary, gitRoot, gitStatusBrief, mergeWorktree, removeWorktree } from "./worktree.js";
 import { listDirs } from "./fsbrowser.js";
-import { selectPruneable, selectFinishedWorkers, WorkerConv } from "./prune.js";
 import { spawnRequestBody } from "./reactions.js";
 import { buildHandoffPrompt, followUpsFromMessages, respawnName, respawnNotice, shouldRespawnWorker } from "./recovery.js";
-import { esc, trunc, timeAgo, stripTags } from "./format.js";
+import { ICON, esc, trunc, timeAgo, stripTags } from "./format.js";
 import { log, warn } from "./logger.js";
 import { BUSY_REPLY_TEXT, NOTE_BUTTON_LABEL, noteCallbackData, BusyNoteStore } from "./notes.js";
 import { queueReport } from "./orchestrator/report.js";
+import { purgeConv, cmdPrune, handlePruneCallback } from "./orchestrator/purge.js";
+import { onTopicDeleted, reapPendingTopicDeletes, closeFinishedTopicsAtStartup } from "./orchestrator/topics.js";
 import type { Schedule } from "./schedule.js";
 
 type Btn = { text: string; callback_data: string };
@@ -60,14 +61,6 @@ export const MANAGER_AGENT = "tg-manager";
 const BRIDGE_NAME = "tg-bridge";
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,23}$/;
 const BUSY: WorkerStatus[] = ["running", "waiting"];
-const ICON: Record<WorkerStatus, string> = {
-  idle: "💤",
-  running: "🟢",
-  waiting: "🟡",
-  done: "✅",
-  failed: "❌",
-  stopped: "⏹",
-};
 /** Manager-initiated dispatches allowed between two user messages (loop/cost guard). */
 const DISPATCH_BUDGET = 12;
 
@@ -164,7 +157,7 @@ export class Orchestrator {
   private bridge?: McpBridge;
   private approvals = new Map<string, Approval>();
   /** Pending /prune confirmations: id → which convs to delete when the user taps "Xoá". */
-  private prunePending = new Map<string, { chat: ConvKey; convs: ConvKey[] }>();
+  prunePending = new Map<string, { chat: ConvKey; convs: ConvKey[] }>();
   reports = new Map<ConvKey, string[]>();
   reportTimers = new Map<ConvKey, ReturnType<typeof setTimeout>>();
   /** Remaining Manager dispatches per chat until the user speaks again. */
@@ -178,7 +171,7 @@ export class Orchestrator {
    * is only OBSERVED via send failures, which stop once the worker is done
    * and sends nothing more). See onTopicDeleted / onWorkerFinished.
    */
-  private pendingTopicDelete = new Set<ConvKey>();
+  pendingTopicDelete = new Set<ConvKey>();
   /**
    * Convs whose purge is IN FLIGHT right now (see purgeConv). A dead topic
    * fires onTopicDeleted from several failing sends at once (the typing loop,
@@ -189,7 +182,7 @@ export class Orchestrator {
    * time; cleared again once it finishes (on BOTH success and failure) so a
    * later send-failure or /prune can retry a failed purge.
    */
-  private purging = new Set<ConvKey>();
+  purging = new Set<ConvKey>();
   /**
    * Manager convs whose turn is currently running (a user prompt or a bot event
    * like a worker report). Set synchronously in promptManager so two rapid user
@@ -225,7 +218,7 @@ export class Orchestrator {
     // After healWorkers has settled any stuck "running" workers to their real
     // status, re-purge convs whose topic was deleted but whose purge didn't
     // finish before the crash/restart (persisted topicDeletedPending marker).
-    await this.reapPendingTopicDeletes();
+    await reapPendingTopicDeletes(this);
     if (!this.healTimer) {
       // Events can also be lost while connected (a dropped frame, a server
       // hiccup); a slow sweep keeps a missed turn-end from pinning a worker
@@ -249,59 +242,6 @@ export class Orchestrator {
       const status: WorkerStatus = state.outcome === "succeeded" ? "done" : state.outcome === "failed" ? "failed" : "stopped";
       log(`[chat ${chatOf(conv)}] worker ${w.name} ended while unobserved — ${status}`);
       await this.onWorkerFinished(conv, status);
-    }
-  }
-
-  /**
-   * Startup sweep for deferred topic-delete purges that didn't finish before a
-   * crash/restart. The in-memory `pendingTopicDelete` flag is lost on restart,
-   * but the persisted `topicDeletedPending` marker survives in state.json. For
-   * each such conv:
-   *  - worker no longer running/waiting (or no worker) → purge it now;
-   *  - worker still running/waiting → re-arm the in-memory deferral so the
-   *    (post-restart) turn-end triggers the purge via onWorkerFinished.
-   * Runs AFTER healWorkers, so a worker that only LOOKS busy (its terminal
-   * event was lost) has already been settled to done/failed/stopped and is
-   * purged here rather than re-armed.
-   */
-  async reapPendingTopicDeletes(): Promise<void> {
-    for (const [conv, s] of Object.entries(this.h.st.all())) {
-      if (!s.topicDeletedPending) continue;
-      const w = s.worker;
-      if (w && (w.status === "running" || w.status === "waiting")) {
-        // Still live after the restart: re-arm so its turn-end purges it.
-        this.pendingTopicDelete.add(conv);
-        log(`reapPendingTopicDeletes (${conv}): worker ${w.name} still running — re-arming deferred purge`);
-        continue;
-      }
-      const ok = await this.purgeConv(conv);
-      if (ok) log(`reapPendingTopicDeletes (${conv}): purged topic-deleted conv after restart`);
-      else warn(`reapPendingTopicDeletes (${conv}): purge failed — retry next startup or via /prune`);
-    }
-  }
-
-  /**
-   * Retroactive auto-close at startup: a worker that finished before auto-close
-   * existed (or while the service was down/restarting) never got its topic
-   * closed and now sits open forever. Close the topic of every finished worker
-   * (done/failed/stopped); closing an already-closed topic is a no-op, so this
-   * is safe to re-run on every restart. Best-effort — it never fails startup.
-   * Returns the number of topics attempted.
-   */
-  async closeFinishedTopicsAtStartup(): Promise<number> {
-    if (!this.h.cfg.autoClose) return 0;
-    try {
-      const items: WorkerConv[] = [];
-      for (const [conv, s] of Object.entries(this.h.st.all())) {
-        if (s.worker) items.push({ conv, status: s.worker.status });
-      }
-      const targets = selectFinishedWorkers(items);
-      for (const conv of targets) await this.h.tg.closeForumTopic(conv).catch(() => {});
-      if (targets.length) log(`startup: retroactively closed ${targets.length} finished worker topics`);
-      return targets.length;
-    } catch (e) {
-      warn("startup topic close:", e instanceof Error ? e.message : String(e));
-      return 0;
     }
   }
 
@@ -366,7 +306,7 @@ export class Orchestrator {
         await this.cmdWorktree(conv);
         return true;
       case "/prune":
-        await this.cmdPrune(conv, arg);
+        await cmdPrune(this, conv, arg);
         return true;
       default:
         return false;
@@ -538,42 +478,8 @@ export class Orchestrator {
     await this.h.sendHtml(conv, this.worktreeText(w), { reply_markup: this.worktreeKeyboard(w) });
   }
 
-  /**
-   * `/prune [số_ngày]` — offer to delete finished worker topics that haven't
-   * been touched for N days (default 7). The user confirms with a button
-   * before anything is deleted; the list card stays valid until tapped.
-   */
-  private async cmdPrune(conv: ConvKey, arg: string): Promise<void> {
-    const chat = chatOf(conv);
-    if (conv !== chat) {
-      await this.h.sendHtml(conv, "ℹ️ Dùng /prune ở khung chat chính (General), không phải trong topic.");
-      return;
-    }
-    const n = parseInt(arg, 10);
-    const days = Number.isInteger(n) && n > 0 ? n : 7;
-    const now = Date.now();
-    const items = this.workersOf(chat).map(([k, s]) => ({ conv: k, status: s.worker!.status, updatedAt: s.worker!.updatedAt }));
-    const convs = selectPruneable(items, now, days * 86_400_000);
-    if (!convs.length) {
-      await this.h.sendHtml(conv, "Không có topic worker cũ nào để dọn.");
-      return;
-    }
-    const id = randomBytes(5).toString("hex");
-    this.prunePending.set(id, { chat, convs });
-    const lines = [`🧹 <b>Dọn ${convs.length} topic</b> cũ hơn ${days} ngày:`];
-    for (const k of convs) {
-      const w = this.h.st.peek(k)?.worker;
-      if (!w) continue;
-      lines.push(`${ICON[w.status]} <b>${esc(w.name)}</b> · ${w.status} · ${timeAgo(w.updatedAt)}`);
-    }
-    lines.push("", "<i>Bấm Xoá để xoá topic + state + session (không ảnh hưởng worker đang chạy).</i>");
-    await this.h.sendHtml(conv, lines.join("\n"), {
-      reply_markup: { inline_keyboard: [[{ text: "🗑 Xoá", callback_data: `prune:${id}` }]] },
-    });
-  }
-
   // ── workers ───────────────────────────────────────────────────────────────
-  private workersOf(conv: ConvKey): [ConvKey, ChatState][] {
+  workersOf(conv: ConvKey): [ConvKey, ChatState][] {
     return this.h.st.convsOfChat(conv).filter(([, s]) => s.worker);
   }
 
@@ -1182,7 +1088,7 @@ export class Orchestrator {
       return true;
     }
     if (data.startsWith("prune:")) {
-      await this.handlePruneCallback(cb, conv, messageId);
+      await handlePruneCallback(this, cb, conv, messageId);
       return true;
     }
     return false;
@@ -1206,44 +1112,10 @@ export class Orchestrator {
    * in-flight purge FINISHES (on both success and failure) so a later
    * send-failure or /prune can still retry a purge that failed.
    */
-  private async purgeConv(conv: ConvKey): Promise<boolean> {
-    if (this.purging.has(conv)) return false; // an in-flight purge owns this conv
-    this.purging.add(conv);
-    try {
-      const s = this.h.st.peek(conv);
-      if (!s) return true; // already gone
-      const w = s.worker;
-      if (w?.worktree && w.repoRoot) {
-        // A replacement worker (overflow respawn) may share this worktree in a new
-        // topic — removing it would delete the directory from under the new worker.
-        const shared = Object.entries(this.h.st.all()).some(
-          ([k, os]) => k !== conv && os?.worker?.worktree?.root === w.worktree!.root,
-        );
-        if (shared) {
-          warn(`purgeConv (${conv}): worktree shared with another conv — keeping it`);
-        } else {
-          try {
-            await (this.h.removeWorktree ?? removeWorktree)(w.repoRoot, w.worktree);
-          } catch (e) {
-            warn(`removeWorktree (${w.name}) failed — state kept for /prune retry:`, (e as Error)?.message ?? e);
-            return false;
-          }
-        }
-      }
-      if (s.sessionID) await this.h.oc.removeSession(s.sessionID).catch(() => {});
-      this.clearConvMemory(conv);
-      this.h.st.clear(conv);
-      return true;
-    } finally {
-      // Always clear the guard: on success the state is gone (a later call sees
-      // !s → true); on failure the state is kept and a later send-failure or
-      // /prune must be allowed to RETRY (so don't leave the flag behind).
-      this.purging.delete(conv);
-    }
-  }
+  private async purgeConv(conv: ConvKey): Promise<boolean> { return purgeConv(this, conv); }
 
   /** Drop this orchestrator's in-memory per-conv tracking (budget, timers, busy flags). */
-  private clearConvMemory(conv: ConvKey): void {
+  clearConvMemory(conv: ConvKey): void {
     this.budget.delete(conv);
     this.finishing.delete(conv);
     this.dropManagerTurn(conv);
@@ -1255,92 +1127,9 @@ export class Orchestrator {
     }
   }
 
-  /**
-   * The user deleted a forum topic in the Telegram UI. Telegram sends NO event
-   * for this (Bot API 10.3 has no forum_topic_deleted update — verified against
-   * the docs and live): we observe it when a send into the topic fails with
-   * "message thread not found" (Telegram.api → onThreadNotFound). Retire the
-   * conversation. A worker still running/waiting is left alone for in-flight
-   * work and gets purged when it ends (pendingTopicDelete).
-   *
-   * ACCEPTED LIMITATION (not a bug): a topic deleted while the conv is IDLE is
-   * not detected until the next send into it fails or the user runs /prune.
-   * Telegram gives us no idle signal for a deleted topic, so there is nothing
-   * to react to until we actually try to send.
-   */
-  async onTopicDeleted(conv: ConvKey): Promise<void> {
-    if (!String(conv).includes(":")) {
-      // Defensive: topic deletion is observed from a topic send, so this can't
-      // be a top-level chat — but if it ever is, never retire the main chat.
-      warn(`onTopicDeleted: refusing to retire top-level conv ${conv}`);
-      return;
-    }
-    const s = this.h.st.peek(conv);
-    if (!s) return; // already gone (repeated send failures are idempotent)
-    const w = s.worker;
-    if (w && (w.status === "running" || w.status === "waiting")) {
-      // Deferred: let the running worker finish — that is the whole point of
-      // pendingTopicDelete. Do NOT call onTopicGone here: it stops the in-flight
-      // turn (typing/abort/interrupt), which would kill a worker we want to run
-      // to completion. Persist a marker so a restart still knows to purge this
-      // conv (the in-memory flag is lost on restart); it is cleared when the
-      // eventual purge succeeds (purgeConv clears the whole entry).
-      this.pendingTopicDelete.add(conv);
-      this.h.st.set(conv, { topicDeletedPending: true });
-      log(`topic deleted for running worker ${w.name} (${conv}) — purging when the worker ends`);
-      return;
-    }
-    // Purge now: the topic is gone and nothing is running in it. First stop any
-    // lingering bot-side turn for a normal/manager topic (a turn can still be
-    // live here — typing, inflight, activity — and would keep failing sends),
-    // then retire state/session/worktree.
-    await this.h.onTopicGone?.(conv);
-    log(`topic deleted for ${conv} — retiring (worker=${w?.name ?? "none"}, session=${s.sessionID ?? "none"}, worktree=${w?.worktree?.branch ?? "none"})`);
-    const ok = await this.purgeConv(conv);
-    // Purge failed (worktree removal error) → keep a persisted marker so a
-    // restart can retry. Only if the state still exists (a concurrent purge may
-    // have already cleared it — never resurrect a purged conv as a bare marker).
-    if (!ok && this.h.st.peek(conv)) this.h.st.set(conv, { topicDeletedPending: true });
-  }
+  async onTopicDeleted(conv: ConvKey): Promise<void> { return onTopicDeleted(this, conv); }
 
-  /**
-   * The user confirmed a /prune: delete each listed topic (best-effort, count
-   * failures), retire its OpenCode session, its git worktree, and its state
-   * entry (purgeConv). A worker that started running again since the list was
-   * shown is skipped; a conv whose worktree couldn't be removed is kept for retry.
-   */
-  private async handlePruneCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
-    const id = (cb.data ?? "").split(":")[1];
-    const p = this.prunePending.get(id);
-    if (!p || p.chat !== chatOf(conv)) {
-      await this.h.tg.answerCallbackQuery(cb.id, "Yêu cầu này đã hết hạn.");
-      if (messageId) await this.h.tg.editMessageText(conv, messageId, "⌛ Yêu cầu này đã hết hạn (bot đã khởi động lại hoặc đã xử lý).").catch(() => {});
-      return;
-    }
-    this.prunePending.delete(id);
-    let ok = 0;
-    let skipped = 0;
-    for (const k of p.convs) {
-      const s = this.h.st.peek(k);
-      const w = s?.worker;
-      // It may have started a new turn since the list was shown — never delete a busy worker.
-      if (w && (w.status === "running" || w.status === "waiting")) {
-        skipped++;
-        continue;
-      }
-      try {
-        await this.h.tg.deleteForumTopic(k);
-      } catch (e) {
-        warn("deleteForumTopic:", (e as Error)?.message);
-      }
-      if (await this.purgeConv(k)) ok++; // worktree + session + state (keeps state on worktree failure)
-      else skipped++;
-    }
-    await this.h.tg.answerCallbackQuery(cb.id);
-    const msg = `🧹 Đã xoá ${ok}/${p.convs.length} topic${skipped ? ` · bỏ qua ${skipped} (đang chạy hoặc chưa xoá được worktree)` : ""}.`;
-    if (messageId) await this.h.tg.editMessageText(conv, messageId, msg).catch(() => {});
-    else await this.h.sendHtml(conv, msg).catch(() => {});
-  }
+  async reapPendingTopicDeletes(): Promise<void> { return reapPendingTopicDeletes(this); }
 
   private async handleApprovalCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
     const [, id, op] = (cb.data ?? "").split(":");
