@@ -15,6 +15,7 @@ import { buildHandoffPrompt, followUpsFromMessages, respawnName, respawnNotice, 
 import { esc, trunc, timeAgo, stripTags } from "./format.js";
 import { log, warn } from "./logger.js";
 import { BUSY_REPLY_TEXT, NOTE_BUTTON_LABEL, noteCallbackData, BusyNoteStore } from "./notes.js";
+import { queueReport } from "./orchestrator/report.js";
 import type { Schedule } from "./schedule.js";
 
 type Btn = { text: string; callback_data: string };
@@ -69,8 +70,6 @@ const ICON: Record<WorkerStatus, string> = {
 };
 /** Manager-initiated dispatches allowed between two user messages (loop/cost guard). */
 const DISPATCH_BUDGET = 12;
-/** Worker reports arriving within this window reach the Manager as one message. */
-const REPORT_DEBOUNCE_MS = 4000;
 
 const workerPreamble = (name: string) =>
   `[System note: You are worker "${name}", one of several agents working in parallel. You are driven ` +
@@ -166,8 +165,8 @@ export class Orchestrator {
   private approvals = new Map<string, Approval>();
   /** Pending /prune confirmations: id → which convs to delete when the user taps "Xoá". */
   private prunePending = new Map<string, { chat: ConvKey; convs: ConvKey[] }>();
-  private reports = new Map<ConvKey, string[]>();
-  private reportTimers = new Map<ConvKey, ReturnType<typeof setTimeout>>();
+  reports = new Map<ConvKey, string[]>();
+  reportTimers = new Map<ConvKey, ReturnType<typeof setTimeout>>();
   /** Remaining Manager dispatches per chat until the user speaks again. */
   private budget = new Map<ConvKey, number>();
   /** Worker convs whose turn-end we are already processing. */
@@ -214,7 +213,7 @@ export class Orchestrator {
   private reserved = new Map<ConvKey, Set<string>>();
   private healTimer?: ReturnType<typeof setInterval>;
 
-  constructor(private h: Host) {}
+  constructor(public h: Host) {}
 
   // ── lifecycle ─────────────────────────────────────────────────────────────
   /** On every (re)connect to OpenCode: re-register the bridge for chats with a Manager (it is runtime-only). */
@@ -851,7 +850,7 @@ export class Orchestrator {
    */
   rejectWorkerReport(conv: ConvKey): void {
     const name = this.h.st.peek(conv)?.worker?.name ?? "?";
-    this.queueReport(chatOf(conv), `User rejected the report of worker ${name} (👎). Ask or decide next step.`);
+    queueReport(this, chatOf(conv), `User rejected the report of worker ${name} (👎). Ask or decide next step.`);
   }
 
   /**
@@ -864,7 +863,7 @@ export class Orchestrator {
    * isManagerConv first and tells the user).
    */
   relaySpawnRequest(conv: ConvKey, text: string): void {
-    this.queueReport(chatOf(conv), spawnRequestBody(conv, text));
+    queueReport(this, chatOf(conv), spawnRequestBody(conv, text));
   }
 
   private setStatus(conv: ConvKey, status: WorkerStatus, lastResult?: string): void {
@@ -980,7 +979,8 @@ export class Orchestrator {
         await this.h.sendHtml(conv, this.worktreeText(w), { reply_markup: this.worktreeKeyboard(w) }).catch(() => {});
       }
       if (this.h.st.peek(chatOf(conv))?.manager) {
-        this.queueReport(
+        queueReport(
+          this,
           chatOf(conv),
           respawnedAs
             ? `[worker ${w.name}] FAILED (context overflow) → respawned as ${respawnedAs} — continuing in the same worktree; the new worker will report on its own.`
@@ -1109,29 +1109,6 @@ export class Orchestrator {
   private dropManagerTurn(conv: ConvKey): void {
     this.managerBusy.delete(conv);
     this.h.busyNotes.clear(conv);
-  }
-
-  /** Batch worker reports and feed them to the Manager as one "[Bot event]" message. */
-  private queueReport(chat: ConvKey, report: string): void {
-    const list = this.reports.get(chat) ?? [];
-    list.push(report);
-    this.reports.set(chat, list);
-    if (this.reportTimers.has(chat)) return;
-    const t = setTimeout(() => {
-      this.reportTimers.delete(chat);
-      const batch = this.reports.get(chat) ?? [];
-      this.reports.delete(chat);
-      void this.notifyManager(chat, batch.join("\n\n")).catch((e) => warn("notify manager:", e?.message));
-    }, REPORT_DEBOUNCE_MS);
-    (t as any).unref?.();
-    this.reportTimers.set(chat, t);
-  }
-
-  private async notifyManager(chat: ConvKey, body: string): Promise<void> {
-    const sid = this.h.st.peek(chat)?.manager ? this.h.st.peek(chat)?.sessionID : undefined;
-    if (!sid || !body) return;
-    await this.h.oc.prompt(sid, `[Bot event — not from the user]\n${body}`);
-    this.h.startTyping(chat);
   }
 
   /** Spend one unit of the chat's dispatch budget, or refuse. */
@@ -1378,7 +1355,7 @@ export class Orchestrator {
     const what = a.kind === "spawn" ? `tạo worker ${a.spawn?.name}` : `gửi việc cho ${a.send?.name}`;
     if (op === "no") {
       if (messageId) await this.h.tg.editMessageText(conv, messageId, `❌ Đã huỷ: ${esc(what)}.`).catch(() => {});
-      this.queueReport(a.chat, `[approval #${id}] REJECTED by the user: ${what}. Do not retry it; ask the user what to do instead if needed.`);
+      queueReport(this, a.chat, `[approval #${id}] REJECTED by the user: ${what}. Do not retry it; ask the user what to do instead if needed.`);
       return;
     }
     if (op === "auto") this.h.st.set(a.chat, { auto: true });
@@ -1389,11 +1366,11 @@ export class Orchestrator {
           .editMessageText(conv, messageId, `✅ Đã duyệt: ${esc(what)}.${op === "auto" ? "\n⚡ Auto đã bật — các lần sau không hỏi nữa (/auto off để tắt)." : ""}`)
           .catch(() => {});
       }
-      this.queueReport(a.chat, `[approval #${id}] APPROVED by the user: ${result}.${op === "auto" ? " Auto mode is now on." : ""}`);
+      queueReport(this, a.chat, `[approval #${id}] APPROVED by the user: ${result}.${op === "auto" ? " Auto mode is now on." : ""}`);
     } catch (e) {
       const msg = (e as Error).message;
       if (messageId) await this.h.tg.editMessageText(conv, messageId, `⚠️ Duyệt nhưng thất bại: ${esc(msg)}`).catch(() => {});
-      this.queueReport(a.chat, `[approval #${id}] approved but FAILED: ${msg}`);
+      queueReport(this, a.chat, `[approval #${id}] approved but FAILED: ${msg}`);
     }
   }
 
