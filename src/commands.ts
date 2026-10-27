@@ -77,6 +77,7 @@ export const COMMANDS: BotCommand[] = [
   { cmd: "status", desc: "Trạng thái kết nối", button: "🔌 Trạng thái", group: "control" },
   { cmd: "reboot", desc: "Reboot máy (2 bước xác nhận)", button: "🔄 Reboot", group: "control" },
   { cmd: "clear", desc: "Xoá state của chat này", button: "🧹 Xoá state", group: "control" },
+  { cmd: "schedule", arg: "<spec> <prompt>", desc: "Đặt lịch chạy prompt tự động", button: "⏰ Lịch", group: "control" },
   { cmd: "help", desc: "Danh sách lệnh + nút bấm", button: "📖 Help", group: "control" },
 ];
 
