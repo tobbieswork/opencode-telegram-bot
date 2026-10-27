@@ -8,7 +8,7 @@ import { OpenCodeCtl, newMessageID, assistantText, ModelInfo, SessionBrief } fro
 import { StateManager, ChatState, MsgPurpose, MACHINE_STATE_KEY } from "./state.js";
 import { ConvKey, convKey, chatOf, parseConv } from "./conv.js";
 import { Orchestrator } from "./orchestrator.js";
-import { ScheduleStore } from "./scheduler.js";
+import { ScheduleStore, Scheduler } from "./scheduler.js";
 import { Schedule, SchedSpec, formatSchedule, nextRunAfter, parseScheduleSpec } from "./schedule.js";
 import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure } from "./format.js";
@@ -241,6 +241,8 @@ export class Bot {
   private orch: Orchestrator;
   /** Schedules, in their own file (data/schedules.json) — /clear must never touch them. */
   private scheduleStore: ScheduleStore;
+  /** /schedule tick engine — only constructed/started when cfg.schedule is on. */
+  private scheduler?: Scheduler;
 
   constructor(
     private tg: Telegram,
@@ -304,6 +306,21 @@ export class Bot {
     );
     // Resume any pending-prompt reminder nudges that were scheduled before a restart.
     this.resumePromptReminders();
+    // Start the /schedule tick engine alongside the reminder re-arm (both are
+    // startup "re-arm" concerns). Guarded on the cfg.schedule toggle.
+    if (this.cfg.schedule) {
+      this.scheduler = new Scheduler({
+        now: () => Date.now(),
+        store: this.scheduleStore,
+        dispatch: (sch) => this.orch.runScheduled(sch.conv, sch),
+        isBusy: (sch) => this.orch.workerBusyByName(sch.conv, "sch-" + sch.id),
+        isAllowed: (uid) => this.cfg.allowedUserIds.includes(uid),
+        notify: (conv, text) => this.tg.sendMessage(conv, text),
+        tickMs: 30_000,
+        graceMs: this.cfg.scheduleGraceMs,
+      });
+      this.scheduler.start();
+    }
     // Close topics left open by workers that finished before auto-close existed
     // (or while the service was down). Fire-and-forget; never fails startup.
     void this.orch.closeFinishedTopicsAtStartup().catch((e) => warn("startup topic close:", e?.message));
@@ -315,6 +332,11 @@ export class Bot {
     // Post one line per new PR event (merged / comment / CI / review) on the
     // watched GitHub repo. Default OFF; see cfg.prWatch*.
     this.startPrWatchMonitor();
+  }
+
+  /** Stop the /schedule tick engine (called from index.ts during shutdown). */
+  stopScheduler(): void {
+    this.scheduler?.stop();
   }
 
   // ── Uptime monitor + reboot ─────────────────────────────────────────────────
