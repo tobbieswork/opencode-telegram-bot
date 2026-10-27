@@ -41,6 +41,7 @@ import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbro
 import { log, warn, error } from "./logger.js";
 import { AGENT_WHITELIST, QUESTIONS_PREAMBLE, NOTES_KEY } from "./shared.js";
 import type { Btn, Keyboard } from "./shared.js";
+import { cmdAgents, cmdAgent, handleAgentCallback } from "./commands/agents.js";
 
 /** The message carries media (sticker/photo/video/voice/…) — used to acknowledge non-text input. */
 function hasNonTextContent(m: Message): boolean {
@@ -231,9 +232,9 @@ export class Bot {
   private scheduler?: Scheduler;
 
   constructor(
-    private tg: Telegram,
-    private oc: OpenCodeCtl,
-    private st: StateManager,
+    public tg: Telegram,
+    public oc: OpenCodeCtl,
+    public st: StateManager,
     private cfg: Config,
   ) {
     // Same data dir as state.json (derived from cfg.stateFile); a SEPARATE file
@@ -790,7 +791,7 @@ export class Bot {
 
   // ── send helpers ─────────────────────────────────────────────────────────
   /** Send short, already-formatted HTML (commands, status). */
-  private async sendHtml(conv: ConvKey, html: string, opts: { reply_markup?: Keyboard } = {}): Promise<void> {
+  public async sendHtml(conv: ConvKey, html: string, opts: { reply_markup?: Keyboard } = {}): Promise<void> {
     const chunks = chunk(html, this.cfg.replyMaxLen);
     // The keyboard (if any) rides on the final chunk.
     for (let i = 0; i < chunks.length; i++) {
@@ -1431,9 +1432,9 @@ export class Bot {
       case "/model":
         return this.cmdModel(conv, arg, state);
       case "/agents":
-        return this.cmdAgents(conv);
+        return cmdAgents(this, conv);
       case "/agent":
-        return this.cmdAgent(conv, arg, state);
+        return cmdAgent(this, conv, arg, state);
       case "/modes":
       case "/mode":
         return this.cmdMode(conv, arg, state);
@@ -2111,7 +2112,7 @@ export class Bot {
       return;
     }
     if (data.startsWith("agent:")) {
-      await this.handleAgentCallback(cb, conv, messageId);
+      await handleAgentCallback(this, cb, conv, messageId);
       return;
     }
     if (data.startsWith("variant:")) {
@@ -2264,7 +2265,7 @@ export class Bot {
           await this.cmdVariants(conv, "", state);
           break;
         case "agents":
-          await this.cmdAgents(conv);
+          await cmdAgents(this, conv);
           break;
         case "stop":
           await this.cmdStop(conv, state);
@@ -2427,80 +2428,6 @@ export class Bot {
       }
       // "noop" or unknown
       await this.tg.answerCallbackQuery(cb.id);
-    } catch (e) {
-      await this.tg.answerCallbackQuery(cb.id, `⚠️ ${(e as Error).message}`);
-    }
-  }
-
-  private async cmdAgents(conv: ConvKey): Promise<void> {
-    const agents = await this.oc.listAgents();
-    const cur = this.st.get(conv).agent;
-    const lines = agents
-      .filter((a) => AGENT_WHITELIST.includes(a.id))
-      .map((a) => `${cur === a.id ? "▶️ " : ""}<code>${a.id}</code>${a.description ? ` — ${esc(trunc(a.description, 44))}` : ""}`);
-    await this.sendHtml(conv, `<b>Agents</b>\n${lines.join("\n")}\n\nSet with /agent &lt;id&gt;`);
-  }
-
-  /**
-   * `/agent [id]` — set the agent. Without a valid argument the user gets a
-   * button picker of the whitelisted agents instead of the text list.
-   */
-  private async cmdAgent(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
-    void state;
-    let agents: { id: string }[] | undefined;
-    try {
-      agents = await this.oc.listAgents();
-    } catch (e) {
-      warn("listAgents:", (e as Error).message);
-    }
-    if (!arg) return this.sendAgentPicker(conv, undefined);
-    // Unknown id (and the listing succeeded) → show the picker too; a failed
-    // listing keeps the old behaviour of trusting the typed id.
-    if (agents && !agents.some((a) => a.id === arg)) return this.sendAgentPicker(conv, `❌ Unknown agent: <code>${esc(arg)}</code>`);
-    const how = await this.applyAgent(conv, arg);
-    await this.tg.sendMessage(conv, `✅ Agent → <code>${esc(arg)}</code> (${how === "applied" ? "applied to current session" : "applies on /new"})`);
-  }
-
-  /** Apply the agent switch (shared by the typed command and the picker buttons). */
-  private async applyAgent(conv: ConvKey, agent: string): Promise<"applied" | "applies on /new"> {
-    this.st.set(conv, { agent });
-    const sid = this.st.get(conv).sessionID;
-    if (sid) {
-      await this.oc.setAgent(sid, agent).catch((e) => error("setAgent:", e?.message));
-      return "applied";
-    }
-    return "applies on /new";
-  }
-
-  /** The /agent picker card: one button per whitelisted agent + a hint line. */
-  private sendAgentPicker(conv: ConvKey, errorNote?: string): Promise<void> {
-    const cur = this.st.get(conv).agent;
-    const rows: Btn[][] = [];
-    for (let i = 0; i < AGENT_WHITELIST.length; i += 2) {
-      rows.push(
-        AGENT_WHITELIST.slice(i, i + 2).map((id) => ({ text: `${cur === id ? "▶️ " : ""}${id}`, callback_data: `agent:${id}` })),
-      );
-    }
-    rows.push([{ text: "❌ Đóng", callback_data: "agent:close" }]);
-    return this.tg.sendMessage(
-      conv,
-      [errorNote ?? "❓ <b>/agent</b> cần tên agent", "Hoặc gửi: <code>/agent &lt;id&gt;</code>"].join("\n"),
-      { reply_markup: { inline_keyboard: rows } },
-    );
-  }
-
-  /** Handle a tap on the /agent picker (data = `agent:<id|close>`). */
-  private async handleAgentCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
-    const id = (cb.data ?? "").slice("agent:".length);
-    if (id === "close") {
-      await this.tg.answerCallbackQuery(cb.id);
-      if (messageId) await this.tg.deleteMessage(conv, messageId).catch(() => {});
-      return;
-    }
-    try {
-      const how = await this.applyAgent(conv, id);
-      await this.tg.answerCallbackQuery(cb.id, `Agent → ${id}`);
-      if (messageId) await this.tg.editMessageText(conv, messageId, `✅ Agent → <code>${esc(id)}</code> (${how})`).catch(() => {});
     } catch (e) {
       await this.tg.answerCallbackQuery(cb.id, `⚠️ ${(e as Error).message}`);
     }
