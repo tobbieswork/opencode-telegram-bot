@@ -345,3 +345,14 @@ export function formatSchedule(sch: Schedule): string {
   }
   return `${desc} · #${sch.id}`;
 }
+
+/**
+ * Whether `uid` may run or manage a schedule: allow-any mode, or the uid is
+ * on the allow-list. Shared by Bot.allowed() (the message gate) and the
+ * scheduler's per-run isAllowed re-check — so OPENCODE_TG_ALLOW_ANY=1 with an
+ * empty allow-list never silently skips a run.
+ */
+export const isUserAllowed = (
+  cfg: { allowAny: boolean; allowedUserIds: number[] },
+  uid?: number,
+): boolean => cfg.allowAny || (uid !== undefined && cfg.allowedUserIds.includes(uid));
