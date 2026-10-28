@@ -64,5 +64,13 @@ jobs:
               tree: head.tree.sha,
               parents: [pr.head.sha],
             });
-            await github.rest.git.updateRef({ owner, repo, ref: 'refs/heads/' + pr.head.ref, sha: bump.sha });
+            // Push via real git: the @actions/github client bundled with
+            // actions/github-script@v7 URL-encodes the whole `ref` parameter
+            // of git.updateRef as one segment, producing /git/refs/refs%2Fheads%2F…
+            // ("Reference does not exist", 422).
+            const { execSync } = require('child_process');
+            execSync(
+              `git push "https://x-access-token:${process.env.GITHUB_TOKEN}@github.com/${owner}/${repo}.git" ${bump.sha}:refs/heads/${pr.head.ref}`,
+              { stdio: 'pipe' },
+            );
             core.info('Pushed no-op commit to ' + pr.head.ref);
