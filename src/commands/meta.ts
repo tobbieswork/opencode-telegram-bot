@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import type { Bot } from "../bot.js";
 import type { CallbackQuery } from "../telegram.js";
 import type { ModelInfo } from "../opencode.js";
@@ -78,8 +79,22 @@ export async function handleNoteCallback(bot: Bot, cb: CallbackQuery, conv: Conv
   }
 }
 
+/**
+ * The deployed version: `git describe --tags --always --dirty` (e.g. `v1.0.2-3-gabc1234`),
+ * or the bare short hash when no tag exists yet. Empty string on any failure —
+ * /status must never break because git is missing or the repo is not clean.
+ */
+function deployedVersion(): Promise<string> {
+  return new Promise((res) =>
+    execFile("git", ["describe", "--tags", "--always", "--dirty"], { timeout: 3000 }, (e, out) =>
+      res(e ? "" : out.trim())
+    )
+  );
+}
+
 export async function cmdStatus(bot: Bot, conv: ConvKey, state: ChatState): Promise<void> {
   const info = await bot.oc.serverInfo().catch(() => null);
+  const version = await deployedVersion();
   const busy = bot.inflight.has(conv);
   const mode = bot.currentMode(state);
   // Explicitly set model wins; otherwise observe what the session actually
@@ -88,6 +103,7 @@ export async function cmdStatus(bot: Bot, conv: ConvKey, state: ChatState): Prom
   const model = state.model ?? live;
   const modelLabel = model ? (model.providerID && model.providerID !== "?" ? `${model.providerID}/${model.id}` : model.id) : null;
   const lines = [
+    `<b>Bot</b>${version ? ` <code>${esc(version)}</code>` : ""}`,
     `<b>OpenCode</b>${info?.version ? " v" + info.version : ""}`,
     `url: <code>${esc((info?.urls ?? [info?.url]).filter(Boolean).join(", ") || "?")}</code>`,
     `dir: <code>${esc(state.directory || bot.cfg.opencodeDirectory)}</code>`,

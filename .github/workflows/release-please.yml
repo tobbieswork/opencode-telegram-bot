@@ -1,0 +1,30 @@
+name: Release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      # Bootstrap guard: the very first release (v1.0.0) is tagged manually.
+      # Until a v1.* tag exists this job is a no-op, so the initial push of
+      # this workflow can't race the manual tag or emit a stray release.
+      - name: Check for existing releases
+        id: has-releases
+        run: |
+          if git ls-remote --tags origin 'v1.*' | grep -q .; then
+            echo "has=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Release-please
+        if: steps.has-releases.outputs.has == 'true'
+        uses: google-github-actions/release-please-action@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
