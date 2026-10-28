@@ -54,7 +54,7 @@ jobs:
           script: |
             const { owner, repo } = context.repo;
             const { data: prs } = await github.rest.pulls.list({ owner, repo, state: 'open' });
-            const pr = prs.find(p => p.user.login.startsWith('app/') && p.head.ref.startsWith('release-please--'));
+            const pr = prs.find(p => p.user.login === 'github-actions[bot]' && p.head.ref.startsWith('release-please--'));
             if (!pr) { core.info('No open release PR — nothing to do'); return; }
             core.info('Firing synchronize on release PR #' + pr.number);
             const { data: head } = await github.rest.git.getCommit({ owner, repo, commit_sha: pr.head.sha });
