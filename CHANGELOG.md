@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.2.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.2.0...opencode-telegram-bot-v1.2.1) (2026-10-28)
+
+
+### Bug Fixes
+
+* **release:** keep anchor tag + API updateRef + clean /status tag ([b7fc9af](https://github.com/tobbieswork/opencode-telegram-bot/commit/b7fc9af1292c416c2cdcb780bfb9c9a74fbefb6b))
+* **release:** keep anchor tag + API updateRef + clean /status tag ([c69221b](https://github.com/tobbieswork/opencode-telegram-bot/commit/c69221b3f09a9a08cb78dc0192c5d7bbcbc4533d))
+* **release:** monorepo config + normalize tag to v-prefixed ([72ab9a1](https://github.com/tobbieswork/opencode-telegram-bot/commit/72ab9a181eb2c9af9598b79c8ece791be7f00cdd))
+* **release:** monorepo config + normalize tag to v-prefixed ([2e9de8e](https://github.com/tobbieswork/opencode-telegram-bot/commit/2e9de8e0a8c0a77a74018407507a38c22e9eb244))
+* **release:** push no-op via git instead of git.updateRef ([c22f097](https://github.com/tobbieswork/opencode-telegram-bot/commit/c22f0973dedcc39f2c40650ddee4fcc13692cb9e))
+* **release:** single-repo config for clean tag names ([103787f](https://github.com/tobbieswork/opencode-telegram-bot/commit/103787f662a306b3e7720dfb5e6d761834b3fffe))
+* **release:** single-repo config format for clean v-prefixed tags ([7785b50](https://github.com/tobbieswork/opencode-telegram-bot/commit/7785b50ffe93141c085169aef226efe830e1744d))
+* **release:** trigger no-op via git push ([f96e49d](https://github.com/tobbieswork/opencode-telegram-bot/commit/f96e49d53ca2b876da2949b5119cce7567a3466c))
+
 ## [1.2.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.1.0...opencode-telegram-bot-v1.2.0) (2026-10-28)
 
 
