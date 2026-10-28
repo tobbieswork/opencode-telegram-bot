@@ -1,3 +1,14 @@
+import type { WorkerStatus } from "./state.js";
+
+export const ICON: Record<WorkerStatus, string> = {
+  idle: "💤",
+  running: "🟢",
+  waiting: "🟡",
+  done: "✅",
+  failed: "❌",
+  stopped: "⏹",
+};
+
 /** Escape text for Telegram HTML parse mode. */
 export function esc(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");

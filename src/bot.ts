@@ -2,16 +2,17 @@ import { isAbsolute, resolve, dirname, join } from "node:path";
 import { existsSync, statSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
-import { randomBytes, randomInt } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { Telegram, Update, CallbackQuery, Message, MessageGenerationStopped, MessageReactionUpdated } from "./telegram.js";
 import { OpenCodeCtl, newMessageID, assistantText, ModelInfo, SessionBrief } from "./opencode.js";
 import { StateManager, ChatState, MsgPurpose, MACHINE_STATE_KEY } from "./state.js";
 import { ConvKey, convKey, chatOf, parseConv } from "./conv.js";
 import { Orchestrator } from "./orchestrator.js";
+import { closeFinishedTopicsAtStartup } from "./orchestrator/topics.js";
 import { ScheduleStore, Scheduler } from "./scheduler.js";
-import { Schedule, SchedSpec, formatSchedule, isUserAllowed, nextRunAfter, parseScheduleSpec } from "./schedule.js";
+import { isUserAllowed } from "./schedule.js";
 import { Config } from "./config.js";
-import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure } from "./format.js";
+import { esc, stripTags, chunk, trunc, mdToHtmlChunks, formatTurnFailure } from "./format.js";
 import { richMarkdownChunks } from "./rich.js";
 import { scheduleForRegistration, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
 import {
@@ -34,14 +35,15 @@ import { PrSnapshot, PrState, diffSnapshots, renderEvent } from "./pr-watch.js";
 import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, SAFE_REBOOT_BIN, rebootTokenFile, buildTokenLine, rebootGoData, isRebootConfirmFresh } from "./uptime.js";
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
 import { DraftState, DraftAction, onTextDelta, onToolStart, isDmConv, EDIT_BUDGET } from "./stream.js";
-import { myCommands, helpText, commandGrid } from "./commands.js";
-import { UsageRow, formatUsageReport } from "./usage.js";
-import { appendNote, dropNotes, noteEntryText, prepareNotes, showNotes, BUSY_REPLY_TEXT, NOTE_BUTTON_LABEL, NOTE_CB_PREFIX, noteCallbackData, parseNoteCallback, BusyNoteStore } from "./notes.js";
+import { myCommands } from "./commands.js";
+import { dropNotes, prepareNotes, BUSY_REPLY_TEXT, NOTE_BUTTON_LABEL, NOTE_CB_PREFIX, noteCallbackData, BusyNoteStore } from "./notes.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
 import { log, warn, error } from "./logger.js";
-
-/** Agents shown to the user (the rest are internal OpenCode roles). */
-const AGENT_WHITELIST = ["build", "general", "explore", "plan"];
+import { QUESTIONS_PREAMBLE, NOTES_KEY } from "./shared.js";
+import type { Btn, Keyboard } from "./shared.js";
+import { cmdAgents, cmdAgent, handleAgentCallback } from "./commands/agents.js";
+import { cmdSchedule, handleScheduleCallback } from "./commands/schedule.js";
+import { cmdHelp, cmdStatus, cmdContext, cmdUsage, cmdHistory, cmdNote, handleNoteCallback } from "./commands/meta.js";
 
 /** The message carries media (sticker/photo/video/voice/…) — used to acknowledge non-text input. */
 function hasNonTextContent(m: Message): boolean {
@@ -70,21 +72,8 @@ const BROWSE_COLUMNS = 2;
 /** Models shown per page in the /model button picker. */
 const MODEL_PAGE_SIZE = 10;
 
-/**
- * Preamble prepended to the FIRST prompt of each session so the agent knows it is
- * headless (driven via Telegram) and should ask decisions through the `question`
- * tool — which we relay to the user as Telegram buttons — one question at a time.
- */
-const QUESTIONS_PREAMBLE =
-  "[System note: You are running headless, driven through Telegram — the user has no terminal. " +
-  "When you need a decision or input from the user, ask with the `question` tool using clear " +
-  "multiple-choice options, ONE question at a time; the user answers via Telegram buttons. " +
-  "Prefer asking over guessing when genuinely ambiguous.]";
-
 /** Key under which the per-session language instruction is stored (namespaced `api/<key>`). */
 const LANGUAGE_INSTRUCTION_KEY = "tgbot.language";
-/** Instruction-entry key for /note scratchpad notes (see src/notes.ts). */
-const NOTES_KEY = "tgbot.notes";
 /** Instruction key for /new --keep carry-over (recent-thread summary injected into the fresh session). */
 const CARRYOVER_KEY = "tgbot.carryover";
 /** Injected per-session so the model keeps the user's language and does not leak CJK. */
@@ -102,9 +91,6 @@ function isTransportError(e: any): boolean {
     msg,
   );
 }
-
-type Btn = { text: string; callback_data: string };
-type Keyboard = { inline_keyboard: Btn[][] };
 
 /** In-memory state of the folder browser, one per chat. */
 interface BrowseState {
@@ -174,9 +160,13 @@ interface GhPr {
  * Glue between Telegram and OpenCode. Owns per-chat state and the in-flight
  * prompt task, so a running prompt never blocks the polling loop and /stop
  * can interrupt it.
+ *
+ * Members that are `public` without being API (tg/oc/st/cfg/orch/scheduleStore/
+ * inflight/busyNotes/sendHtml/currentMode) exist only for the handler modules in
+ * src/commands/*, which take the Bot as their first argument. Don't use them elsewhere.
  */
 export class Bot {
-  private inflight = new Map<ConvKey, AbortController>();
+  public inflight = new Map<ConvKey, AbortController>();
   private browsers = new Map<ConvKey, BrowseState>();
   private questionForms = new Map<string, QuestionFormState>();
   private permissionPrompts = new Map<string, PermissionPrompt>();
@@ -232,7 +222,7 @@ export class Bot {
    * shared instance — handed to the Orchestrator so the Manager's busy reply
    * retains into the same store and taps are handled identically.
    */
-  private busyNotes = new BusyNoteStore();
+  public busyNotes = new BusyNoteStore();
   /** Open /model button pickers, one per conv (in-memory; dead buttons after a restart are handled). */
   private modelPickers = new Map<ConvKey, { models: ModelInfo[]; page: number }>();
   /** The user's most recent top-level chat, for proactive notices (e.g. DNS heal). */
@@ -241,17 +231,17 @@ export class Bot {
   private missingIdxLogged = new Set<string>();
 
   /** Worker topics + the Manager agent (multi-session layer). */
-  private orch: Orchestrator;
+  public orch: Orchestrator;
   /** Schedules, in their own file (data/schedules.json) — /clear must never touch them. */
-  private scheduleStore: ScheduleStore;
+  public scheduleStore: ScheduleStore;
   /** /schedule tick engine — only constructed/started when cfg.schedule is on. */
   private scheduler?: Scheduler;
 
   constructor(
-    private tg: Telegram,
-    private oc: OpenCodeCtl,
-    private st: StateManager,
-    private cfg: Config,
+    public tg: Telegram,
+    public oc: OpenCodeCtl,
+    public st: StateManager,
+    public cfg: Config,
   ) {
     // Same data dir as state.json (derived from cfg.stateFile); a SEPARATE file
     // on purpose so /clear and the per-chat sweeps can't wipe schedules.
@@ -328,7 +318,7 @@ export class Bot {
     }
     // Close topics left open by workers that finished before auto-close existed
     // (or while the service was down). Fire-and-forget; never fails startup.
-    void this.orch.closeFinishedTopicsAtStartup().catch((e) => warn("startup topic close:", e?.message));
+    void closeFinishedTopicsAtStartup(this.orch).catch((e) => warn("startup topic close:", e?.message));
     // Register the Telegram /command autocomplete menu (cosmetic, best-effort).
     this.registerCommands();
     // Nudge the user to reboot the machine when uptime passes the threshold
@@ -806,7 +796,7 @@ export class Bot {
 
   // ── send helpers ─────────────────────────────────────────────────────────
   /** Send short, already-formatted HTML (commands, status). */
-  private async sendHtml(conv: ConvKey, html: string, opts: { reply_markup?: Keyboard } = {}): Promise<void> {
+  public async sendHtml(conv: ConvKey, html: string, opts: { reply_markup?: Keyboard } = {}): Promise<void> {
     const chunks = chunk(html, this.cfg.replyMaxLen);
     // The keyboard (if any) rides on the final chunk.
     for (let i = 0; i < chunks.length; i++) {
@@ -1429,7 +1419,7 @@ export class Bot {
     switch (cmd.toLowerCase()) {
       case "/start":
       case "/help":
-        return this.cmdHelp(conv);
+        return cmdHelp(this, conv);
       case "/new":
         return this.cmdNew(conv, state, /--keep\b/i.test(arg));
       case "/ls":
@@ -1447,9 +1437,9 @@ export class Bot {
       case "/model":
         return this.cmdModel(conv, arg, state);
       case "/agents":
-        return this.cmdAgents(conv);
+        return cmdAgents(this, conv);
       case "/agent":
-        return this.cmdAgent(conv, arg, state);
+        return cmdAgent(this, conv, arg, state);
       case "/modes":
       case "/mode":
         return this.cmdMode(conv, arg, state);
@@ -1462,20 +1452,20 @@ export class Bot {
       case "/reboot":
         return this.cmdReboot(conv);
       case "/status":
-        return this.cmdStatus(conv, state);
+        return cmdStatus(this, conv, state);
       case "/context":
       case "/ctx":
-        return this.cmdContext(conv, state);
+        return cmdContext(this, conv, state);
       case "/usage":
-        return this.cmdUsage(conv, arg);
+        return cmdUsage(this, conv, arg);
       case "/history":
-        return this.cmdHistory(conv, state);
+        return cmdHistory(this, conv, state);
       case "/clear":
         return this.cmdClear(conv, state);
       case "/note":
-        return this.cmdNote(conv, arg);
+        return cmdNote(this, conv, arg);
       case "/schedule":
-        return this.cmdSchedule(conv, arg, state, uid);
+        return cmdSchedule(this, conv, arg, state, uid);
       default:
         return this.tg.sendMessage(conv, `Unknown command: ${esc(cmd)}\nSend /help`);
     }
@@ -1734,9 +1724,6 @@ export class Bot {
   // The autocomplete menu, the /help card, and the button grid are all
   // rendered from the shared catalog (src/commands.ts) so they cannot drift
   // apart (drift cost us two follow-up fixes: /agents, /reboot).
-  private async cmdHelp(conv: ConvKey): Promise<void> {
-    await this.sendHtml(conv, helpText(), { reply_markup: commandGrid() });
-  }
 
   /** Register the Telegram /command menu (autocomplete) — cosmetic, best-effort. */
   private registerCommands(): void {
@@ -1795,68 +1782,6 @@ export class Bot {
     } catch (e) {
       warn("handoff summary:", (e as Error).message);
       return "";
-    }
-  }
-
-  /**
-   * `/note [text]` — jot down information while the agent is busy. Without a
-   * text, show the pending notes. The note reaches the model through an
-   * instruction entry at the start of the next user-initiated turn and retires
-   * on the turn after that (see src/notes.ts).
-   */
-  private async cmdNote(conv: ConvKey, arg: string): Promise<void> {
-    const text = arg.trim();
-    if (!text) {
-      const pending = showNotes(this.st.get(conv));
-      await this.tg.sendMessage(conv, pending ? `📝 Ghi chú đang chờ:\n${esc(pending)}` : "Chưa có ghi chú nào. Dùng: /note (nội dung)");
-      return;
-    }
-    const cur = this.st.get(conv);
-    const next = appendNote(cur, text, Date.now());
-    this.st.set(conv, next);
-    const sid = cur.sessionID; // appendNote spreads the full state, so sessionID is unchanged
-    if (sid) {
-      // Best-effort immediate PUT so the note is in context by the time the next
-      // turn starts; prepareNotesTurn re-puts at turn start anyway (self-healing).
-      await this.oc.setInstruction(sid, NOTES_KEY, noteEntryText(next.notes!)).catch((e) => warn("note put:", (e as Error).message));
-    }
-    await this.tg.sendMessage(conv, "📝 Đã ghi — agent sẽ xem ở lượt tiếp theo.");
-  }
-
-  /**
-   * "📝 Thêm vào note" button on a busy reply: append the user message that was
-   * dropped (the agent was busy) to the scratchpad notes, so the agent sees it on
-   * the next turn. The text is looked up in the in-memory retention map by the
-   * user message's Telegram id (carried in the callback data); if the turn has
-   * already ended (or the bot restarted) the entry is gone → "not found".
-   */
-  private async handleNoteCallback(cb: CallbackQuery, conv: ConvKey, messageId: number | undefined): Promise<void> {
-    const id = parseNoteCallback(cb.data);
-    if (id == null) {
-      await this.tg.answerCallbackQuery(cb.id);
-      return;
-    }
-    // Consume the entry NOW (before any await) so a double-tap can't append twice.
-    const text = this.busyNotes.take(conv, id);
-    if (text == null) {
-      await this.tg.answerCallbackQuery(cb.id, "Không tìm thấy nội dung tin nhắn đó.");
-      return;
-    }
-    // Save via the SAME path as cmdNote: append + persist + best-effort PUT.
-    const cur = this.st.get(conv);
-    const next = appendNote(cur, text, Date.now());
-    this.st.set(conv, next);
-    const sid = cur.sessionID; // appendNote spreads the full state, so sessionID is unchanged
-    if (sid) {
-      await this.oc.setInstruction(sid, NOTES_KEY, noteEntryText(next.notes!)).catch((e) => warn("note put:", (e as Error).message));
-    }
-    await this.tg.answerCallbackQuery(cb.id, "📝 Đã ghi — agent sẽ xem ở lượt tiếp theo.");
-    // Remove the button: edit the busy message back to plain text (empty keyboard).
-    // Best-effort — the message may be too old or deleted; ignore gracefully.
-    if (messageId != null) {
-      await this.tg
-        .editMessageText(conv, messageId, BUSY_REPLY_TEXT, { reply_markup: { inline_keyboard: [] } })
-        .catch(() => {});
     }
   }
 
@@ -2115,7 +2040,7 @@ export class Bot {
       return;
     }
     if (data.startsWith(NOTE_CB_PREFIX)) {
-      await this.handleNoteCallback(cb, conv, messageId);
+      await handleNoteCallback(this, cb, conv, messageId);
       return;
     }
     if (data.startsWith("reboot:")) {
@@ -2127,7 +2052,7 @@ export class Bot {
       return;
     }
     if (data.startsWith("agent:")) {
-      await this.handleAgentCallback(cb, conv, messageId);
+      await handleAgentCallback(this, cb, conv, messageId);
       return;
     }
     if (data.startsWith("variant:")) {
@@ -2145,7 +2070,7 @@ export class Bot {
       return;
     }
     if (data.startsWith("sch:")) {
-      await this.handleScheduleCallback(cb, conv, messageId);
+      await handleScheduleCallback(this, cb, conv, messageId);
       return;
     }
     if (!data.startsWith("bs:")) {
@@ -2280,7 +2205,7 @@ export class Bot {
           await this.cmdVariants(conv, "", state);
           break;
         case "agents":
-          await this.cmdAgents(conv);
+          await cmdAgents(this, conv);
           break;
         case "stop":
           await this.cmdStop(conv, state);
@@ -2289,25 +2214,25 @@ export class Bot {
           await this.cmdReboot(conv);
           break;
         case "status":
-          await this.cmdStatus(conv, state);
+          await cmdStatus(this, conv, state);
           break;
         case "context":
-          await this.cmdContext(conv, state);
+          await cmdContext(this, conv, state);
           break;
         case "usage":
-          await this.cmdUsage(conv);
+          await cmdUsage(this, conv);
           break;
         case "history":
-          await this.cmdHistory(conv, state);
+          await cmdHistory(this, conv, state);
           break;
         case "clear":
           await this.cmdClear(conv, state);
           break;
         case "schedule":
-          await this.cmdSchedule(conv, "", state, cb.from?.id);
+          await cmdSchedule(this, conv, "", state, cb.from?.id);
           break;
         case "help":
-          await this.cmdHelp(conv);
+          await cmdHelp(this, conv);
           break;
         default:
           await this.tg.sendMessage(conv, "❓ Lệnh không rõ.");
@@ -2448,82 +2373,8 @@ export class Bot {
     }
   }
 
-  private async cmdAgents(conv: ConvKey): Promise<void> {
-    const agents = await this.oc.listAgents();
-    const cur = this.st.get(conv).agent;
-    const lines = agents
-      .filter((a) => AGENT_WHITELIST.includes(a.id))
-      .map((a) => `${cur === a.id ? "▶️ " : ""}<code>${a.id}</code>${a.description ? ` — ${esc(trunc(a.description, 44))}` : ""}`);
-    await this.sendHtml(conv, `<b>Agents</b>\n${lines.join("\n")}\n\nSet with /agent &lt;id&gt;`);
-  }
-
-  /**
-   * `/agent [id]` — set the agent. Without a valid argument the user gets a
-   * button picker of the whitelisted agents instead of the text list.
-   */
-  private async cmdAgent(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
-    void state;
-    let agents: { id: string }[] | undefined;
-    try {
-      agents = await this.oc.listAgents();
-    } catch (e) {
-      warn("listAgents:", (e as Error).message);
-    }
-    if (!arg) return this.sendAgentPicker(conv, undefined);
-    // Unknown id (and the listing succeeded) → show the picker too; a failed
-    // listing keeps the old behaviour of trusting the typed id.
-    if (agents && !agents.some((a) => a.id === arg)) return this.sendAgentPicker(conv, `❌ Unknown agent: <code>${esc(arg)}</code>`);
-    const how = await this.applyAgent(conv, arg);
-    await this.tg.sendMessage(conv, `✅ Agent → <code>${esc(arg)}</code> (${how === "applied" ? "applied to current session" : "applies on /new"})`);
-  }
-
-  /** Apply the agent switch (shared by the typed command and the picker buttons). */
-  private async applyAgent(conv: ConvKey, agent: string): Promise<"applied" | "applies on /new"> {
-    this.st.set(conv, { agent });
-    const sid = this.st.get(conv).sessionID;
-    if (sid) {
-      await this.oc.setAgent(sid, agent).catch((e) => error("setAgent:", e?.message));
-      return "applied";
-    }
-    return "applies on /new";
-  }
-
-  /** The /agent picker card: one button per whitelisted agent + a hint line. */
-  private sendAgentPicker(conv: ConvKey, errorNote?: string): Promise<void> {
-    const cur = this.st.get(conv).agent;
-    const rows: Btn[][] = [];
-    for (let i = 0; i < AGENT_WHITELIST.length; i += 2) {
-      rows.push(
-        AGENT_WHITELIST.slice(i, i + 2).map((id) => ({ text: `${cur === id ? "▶️ " : ""}${id}`, callback_data: `agent:${id}` })),
-      );
-    }
-    rows.push([{ text: "❌ Đóng", callback_data: "agent:close" }]);
-    return this.tg.sendMessage(
-      conv,
-      [errorNote ?? "❓ <b>/agent</b> cần tên agent", "Hoặc gửi: <code>/agent &lt;id&gt;</code>"].join("\n"),
-      { reply_markup: { inline_keyboard: rows } },
-    );
-  }
-
-  /** Handle a tap on the /agent picker (data = `agent:<id|close>`). */
-  private async handleAgentCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
-    const id = (cb.data ?? "").slice("agent:".length);
-    if (id === "close") {
-      await this.tg.answerCallbackQuery(cb.id);
-      if (messageId) await this.tg.deleteMessage(conv, messageId).catch(() => {});
-      return;
-    }
-    try {
-      const how = await this.applyAgent(conv, id);
-      await this.tg.answerCallbackQuery(cb.id, `Agent → ${id}`);
-      if (messageId) await this.tg.editMessageText(conv, messageId, `✅ Agent → <code>${esc(id)}</code> (${how})`).catch(() => {});
-    } catch (e) {
-      await this.tg.answerCallbackQuery(cb.id, `⚠️ ${(e as Error).message}`);
-    }
-  }
-
   /** The current mode, derived from the session's agent (a curated label). */
-  private currentMode(state: ChatState): string | undefined {
+  public currentMode(state: ChatState): string | undefined {
     return Object.entries(MODES).find(([, m]) => m.agent === state.agent)?.[0];
   }
 
@@ -2773,461 +2624,6 @@ export class Bot {
     this.cancelAllReminders(conv);
     if (state.sessionID) await this.oc.interrupt(state.sessionID).catch(() => {});
     await this.tg.sendMessage(conv, "⏹️ Interrupted.");
-  }
-
-  private async cmdStatus(conv: ConvKey, state: ChatState): Promise<void> {
-    const info = await this.oc.serverInfo().catch(() => null);
-    const busy = this.inflight.has(conv);
-    const mode = this.currentMode(state);
-    // Explicitly set model wins; otherwise observe what the session actually
-    // runs on (server-resolved default) from the newest assistant message.
-    const live = state.sessionID ? await this.oc.getSessionModel(state.sessionID).catch(() => undefined) : undefined;
-    const model = state.model ?? live;
-    const modelLabel = model ? (model.providerID && model.providerID !== "?" ? `${model.providerID}/${model.id}` : model.id) : null;
-    const lines = [
-      `<b>OpenCode</b>${info?.version ? " v" + info.version : ""}`,
-      `url: <code>${esc((info?.urls ?? [info?.url]).filter(Boolean).join(", ") || "?")}</code>`,
-      `dir: <code>${esc(state.directory || this.cfg.opencodeDirectory)}</code>`,
-      `session: ${state.sessionID ? `<code>${state.sessionID}</code>` : "none"}`,
-      `model: ${modelLabel ? `<code>${esc(modelLabel)}</code>` : "default"}`,
-      `variant: <code>${esc(state.variant ?? this.cfg.defaultVariant)}</code>`,
-      `mode: ${mode ? `<code>${esc(mode)}</code>` : "—"}`,
-      `agent: ${state.agent ? `<code>${state.agent}</code>` : "default"}`,
-      `state: ${busy ? "⏳ busy" : "🟢 idle"}`,
-    ];
-    await this.sendHtml(conv, lines.join("\n"));
-  }
-
-  /**
-   * `/context` — a photo of the current session: what it is, how much it has
-   * used, and what it most recently touched. Distinct from /status (connection
-   * + settings) and /history (recent message text).
-   */
-  private async cmdContext(conv: ConvKey, state: ChatState): Promise<void> {
-    if (!state.sessionID) return this.tg.sendMessage(conv, "No current session. Send /new.");
-    let r;
-    try {
-      r = await this.oc.getSessionReport(state.sessionID);
-    } catch (e) {
-      return this.tg.sendMessage(conv, `⚠️ Could not read the session: ${(e as Error).message}`);
-    }
-    const base = r.directory || state.directory || this.cfg.opencodeDirectory;
-    const rel = (p: string) => (base && p.startsWith(base) ? p.slice(base.length).replace(/^\//, "") : p);
-
-    const lines: string[] = [];
-    lines.push(`📋 <b>Session</b> — ${esc(trunc(r.title || "(no title)", 60))}`);
-    lines.push(`id: <code>${esc(r.id)}</code>`);
-    if (r.directory) lines.push(`📁 <code>${esc(r.directory)}</code>`);
-
-    const live = await this.oc.getSessionModel(state.sessionID).catch(() => undefined);
-    const model = state.model ?? live;
-    const modelLabel = model ? (model.providerID && model.providerID !== "?" ? `${model.providerID}/${model.id}` : model.id) : null;
-    lines.push(
-      `🤖 model: ${modelLabel ? `<code>${esc(modelLabel)}</code>` : "default"} · agent: ${r.agent ? `<code>${esc(r.agent)}</code>` : "default"}`,
-    );
-
-    const t = r.tokens;
-    if (t) lines.push(`📦 tokens: in ${fmtNum(t.input)} / out ${fmtNum(t.output)} / reasoning ${fmtNum(t.reasoning)} · cache ${fmtNum(t.cache)}`);
-    if (typeof r.cost === "number" && r.cost > 0) lines.push(`💰 cost: $${r.cost.toFixed(4)}`);
-    lines.push(`💬 ${r.messageCount} messages`);
-    if (r.created) lines.push(`🕐 started ${timeAgo(r.created)}`);
-
-    if (r.modifiedFiles.length) {
-      const files = r.modifiedFiles.map((f) => `<code>${esc(rel(f))}</code>`).join(", ");
-      lines.push(`📝 files: ${files}`);
-    }
-    if (r.lastUserPrompt) {
-      // The first prompt is sent with the headless preamble prepended; strip it
-      // so the "last" line shows what the user actually typed.
-      const last = r.lastUserPrompt.startsWith(QUESTIONS_PREAMBLE)
-        ? r.lastUserPrompt.slice(QUESTIONS_PREAMBLE.length).replace(/^\s+\n+/, "").replace(/\n+$/, "")
-        : r.lastUserPrompt;
-      if (last.trim()) lines.push(`👤 last: “${esc(trunc(stripTags(last), 120))}”`);
-    }
-    await this.sendHtml(conv, lines.join("\n"));
-  }
-
-  /**
-   * /usage — context pressure across every session this bot tracks (manager,
-   * workers, regular chats): current context vs the model's window, plus the
-   * cumulative totals. The answer to "which session is about to overflow?"
-   *
-   * REST budget: exactly 2 calls per UNIQUE session — session.get (cumulative
-   * tokens) and one message.list (model + current context). Convs that share a
-   * session (reattach) are deduped by session id BEFORE any call is made, and
-   * the calls run through a small worker pool so many tracked sessions can't
-   * fan out into an unbounded burst. (maxRows can't be applied before the
-   * fetch: the rows are sorted BY context pressure, which only exists after
-   * the calls — so the cap still applies post-fetch, but the fetch itself is
-   * already bounded by dedup + pool + the small number of tracked sessions.)
-   */
-  private async cmdUsage(conv: ConvKey, arg = ""): Promise<void> {
-    const all = /\s--all\b/.test(arg);
-    const models = await this.oc.listModels().catch(() => [] as ModelInfo[]);
-    const entries = Object.entries(this.st.all()).filter(
-      ([k, s]) => typeof s.sessionID === "string" && k !== MACHINE_STATE_KEY,
-    );
-    // Several convs can point at one session (reattach): dedup BEFORE calling
-    // the API so a shared session costs one fetch, not one per conv.
-    const bySid = new Map<string, string>();
-    for (const [key, s] of entries) {
-      const sid = s.sessionID as string;
-      if (bySid.has(sid)) continue;
-      const [chatId, topicId] = key.split(":");
-      const label = s.worker?.name ?? (s.manager ? "manager" : topicId ? `#topic ${topicId}` : chatId);
-      bySid.set(sid, label);
-    }
-    const sids = [...bySid.keys()];
-    const rows: UsageRow[] = new Array(sids.length);
-    let next = 0;
-    const fetchRow = async (): Promise<void> => {
-      for (;;) {
-        const i = next++;
-        if (i >= sids.length) return;
-        const sid = sids[i];
-        const [sess, info] = await Promise.all([
-          this.oc.getSession(sid).catch(() => null),
-          this.oc.latestAssistantInfo(sid).catch(() => undefined),
-        ]);
-        const model = info?.model;
-        rows[i] = {
-          label: bySid.get(sid)!,
-          id: sid,
-          current: info?.context,
-          limit: model
-            ? (models.find((m) => m.id === model.id && m.providerID === model.providerID) ??
-               models.find((m) => m.id === model.id))?.contextLimit
-            : undefined,
-           cumInput: (sess as any)?.tokens?.input ?? 0,
-           cumOutput: (sess as any)?.tokens?.output ?? 0,
-           // Liveness signal (session.time.updated) — already fetched above, zero extra calls.
-           updated: typeof (sess as any)?.time?.updated === "number" ? (sess as any).time.updated : undefined,
-         };
-      }
-    };
-    // At most 4 sessions in flight, regardless of how many are tracked.
-    await Promise.all(Array.from({ length: Math.min(4, sids.length) }, () => fetchRow()));
-    await this.sendHtml(conv, formatUsageReport(rows, esc, { warnPct: this.cfg.usageWarnPct, maxRows: this.cfg.usageMaxRows, activeHours: this.cfg.usageActiveHours, all }).join("\n"));
-  }
-
-  private async cmdHistory(conv: ConvKey, state: ChatState): Promise<void> {
-    if (!state.sessionID) return this.tg.sendMessage(conv, "No current session. Send /new.");
-    const msgs = await this.oc.listMessages(state.sessionID).catch(() => [] as any[]);
-    const sorted = [...msgs].sort((a: any, b: any) => (a.time?.created ?? 0) - (b.time?.created ?? 0));
-    const recent = sorted.slice(-6);
-    const lines = recent.map((m) => {
-      if (m.type === "user") return "👤 " + esc(trunc(stripTags(m.text ?? ""), 300));
-      if (m.type === "assistant") {
-        const t = (m.content ?? []).filter((c: any) => c?.type === "text").map((c: any) => c.text).join("\n");
-        return "🤖 " + esc(trunc(stripTags(t), 400));
-      }
-      return "· " + m.type;
-    });
-    await this.sendHtml(conv, `<b>Recent messages</b>\n${lines.join("\n")}`);
-  }
-
-  // ── /schedule ────────────────────────────────────────────────────────────
-  // Schedules live in a SEPARATE file (data/schedules.json), never in
-  // state.json: /clear and the per-chat sweeps must not touch them. The
-  // Scheduler (src/scheduler.ts) ticks that file; this is only the command
-  // surface. v1 scope: scheduled runs do read/analyze + report only — the
-  // worker's permission cards still go to the user, nothing is auto-approved.
-
-  /** A fresh 4-char base36 id (fits callback_data) that doesn't collide yet. */
-  private newScheduleId(): string {
-    const existing = new Set(this.scheduleStore.load().map((s) => s.id));
-    for (let i = 0; i < 16; i++) {
-      const id = randomInt(36 ** 4).toString(36).padStart(4, "0");
-      if (!existing.has(id)) return id;
-    }
-    return Date.now().toString(36).slice(-4).padStart(4, "0");
-  }
-
-  /** Re-check a schedule's creator against the allowlist (it can change after creation). */
-  private creatorAllowed(sch: Schedule): boolean {
-    if (this.cfg.allowAny) return true;
-    return this.cfg.allowedUserIds.includes(sch.createdBy);
-  }
-
-  /** The list view: one line + one button row per schedule (⏸/▶ · ▶▶ · 🗑). */
-  private scheduleListMarkup(mine: Schedule[]): { html: string; kb: Keyboard } {
-    const fmtNext = (ms: number) =>
-      new Date(ms).toLocaleString("vi-VN", { dateStyle: "short", timeStyle: "short" });
-    const lines = mine.map((s) => {
-      const paused = s.enabled ? "" : "⏸ ";
-      const status = s.lastStatus ? ` · ${s.lastStatus}` : "";
-      const next = s.enabled ? ` · lần tới: ${fmtNext(s.nextRunAt)}` : "";
-      return `${paused}${formatSchedule(s)}${status}${next}`;
-    });
-    const rows = mine.map((s) => [
-      { text: s.enabled ? "⏸" : "▶", callback_data: `sch:${s.enabled ? "p" : "r"}:${s.id}` },
-      { text: "▶▶", callback_data: `sch:run:${s.id}` },
-      { text: "🗑", callback_data: `sch:d:${s.id}` },
-    ]);
-    return { html: `<b>⏰ Lịch (${mine.length})</b>\n${lines.join("\n")}`, kb: { inline_keyboard: rows } };
-  }
-
-  /** The /schedule usage card, HTML-escaped (sendMessage is parse_mode HTML). */
-  private scheduleUsageText(): string {
-    const usage =
-      "Đặt lịch: /schedule <spec> <prompt> [dir=<đường dẫn> agent=<tên>]\n" +
-      "spec: daily|weekdays HH:MM · weekly mon..sun HH:MM · every <N>h · once YYYY-MM-DD HH:MM\n" +
-      `vd: /schedule daily 08:00 Review commit 24h qua dir=${this.cfg.opencodeDirectory}\n\n` +
-      "Quản lý: /schedule help · pause|resume|run|rm <id>\n" +
-      "Lưu ý: phải có dir= (thư mục ngoài data/manager) — lịch không chạy trong thư mục Manager. Agent mặc định: build.";
-    return esc(usage);
-  }
-
-  private async cmdSchedule(conv: ConvKey, arg: string, state: ChatState, uid?: number): Promise<void> {
-    // Top-level safety net: no /schedule input may drop without a reply — an
-    // unexpected throw (e.g. statSync on a vanishing dir) must never be silent.
-    try {
-      await this.cmdScheduleInner(conv, arg, state, uid);
-    } catch (e) {
-      const m = (e as Error)?.message ?? String(e);
-      try {
-        await this.tg.sendMessage(conv, `❌ Lỗi: ${m}`);
-      } catch {
-        /* swallow — last resort */
-      }
-    }
-  }
-
-  private async cmdScheduleInner(conv: ConvKey, arg: string, state: ChatState, uid?: number): Promise<void> {
-    // No arg → list this conv's schedules with control buttons.
-    if (!arg) {
-      const mine = this.scheduleStore.load().filter((s) => s.conv === conv);
-      if (!mine.length) {
-        await this.tg.sendMessage(conv, "⏰ Chưa có lịch nào cho chat này.\n\n" + this.scheduleUsageText());
-        return;
-      }
-      const v = this.scheduleListMarkup(mine);
-      await this.sendHtml(conv, v.html, { reply_markup: v.kb });
-      return;
-    }
-
-    // Subcommands: pause|resume|run|rm <id>
-    const [sub, ...rest] = arg.split(/\s+/);
-    const subLc = sub.toLowerCase();
-    if (subLc === "help" || subLc === "--help" || subLc === "-h") {
-      await this.tg.sendMessage(conv, "⏰ Cách dùng /schedule\n\n" + this.scheduleUsageText());
-      return;
-    }
-    if (["pause", "resume", "run", "rm", "del", "delete"].includes(subLc)) {
-      const id = (rest.join(" ").trim().split(/\s+/)[0] ?? "").replace(/^#/, "").toLowerCase();
-      if (!/^[a-z0-9]{4}$/.test(id)) {
-        await this.tg.sendMessage(conv, "⏰ Id không hợp lệ — 4 ký tự a-z/0-9. Danh sách: /schedule");
-        return;
-      }
-      if (subLc === "run") return this.scheduleRun(conv, id);
-      const op: "pause" | "resume" | "rm" = subLc === "pause" ? "pause" : subLc === "resume" ? "resume" : "rm";
-      return this.scheduleMutate(conv, id, op);
-    }
-
-    // Add: /schedule <spec> <prompt> [dir=<path> agent=<name>]
-    if (uid === undefined) {
-      await this.tg.sendMessage(conv, "⛔ Không xác định được người dùng.");
-      return;
-    }
-    let spec: SchedSpec;
-    let prompt: string;
-    try {
-      ({ spec, prompt } = parseScheduleSpec(arg, Date.now()));
-    } catch (e) {
-      await this.tg.sendMessage(conv, `❌ ${(e as Error).message.replace(/^schedule:\s*/, "")}`);
-      return;
-    }
-    if (!prompt) {
-      await this.tg.sendMessage(conv, "❌ Thiếu prompt — ví dụ: /schedule daily 08:00 Review commit 24h qua");
-      return;
-    }
-    // Option tokens — parseScheduleSpec strips them from the prompt itself.
-    let dir = state.directory || this.cfg.opencodeDirectory;
-    let agent = "build";
-    for (const t of arg.trim().split(/\s+/)) {
-      if (/^dir=/i.test(t)) dir = t.slice(4);
-      else if (/^agent=/i.test(t)) agent = t.slice(6).toLowerCase();
-    }
-    if (!AGENT_WHITELIST.includes(agent)) {
-      await this.tg.sendMessage(conv, `❌ Agent không hợp lệ — chọn: ${AGENT_WHITELIST.join(", ")}`);
-      return;
-    }
-    if (!isAbsolute(dir)) dir = resolve(this.cfg.opencodeDirectory, dir);
-    if (!existsSync(dir) || !statSync(dir).isDirectory()) {
-      await this.tg.sendMessage(conv, `❌ Không tìm thấy thư mục: <code>${esc(dir)}</code>`);
-      return;
-    }
-    if (this.cfg.browseRoots.length && !isUnderRoot(dir, this.cfg.browseRoots)) {
-      await this.tg.sendMessage(conv, `❌ Thư mục ngoài vùng cho phép (OPENCODE_TG_BROWSE_ROOTS): <code>${esc(dir)}</code>`);
-      return;
-    }
-    if (this.scheduleStore.load().length >= this.cfg.maxSchedules) {
-      await this.tg.sendMessage(conv, `❌ Đã đủ ${this.cfg.maxSchedules} lịch (giới hạn). Xoá bớt trước khi thêm.`);
-      return;
-    }
-    const now = Date.now();
-    const sch: Schedule = {
-      id: this.newScheduleId(),
-      conv,
-      prompt,
-      spec,
-      tz: this.cfg.scheduleTz,
-      dir,
-      agent,
-      nextRunAt: nextRunAfter(spec, now, this.cfg.scheduleTz),
-      createdBy: uid,
-      enabled: true,
-      createdAt: now,
-    };
-    // Spawn the (idle) worker topic FIRST: if the chat can't host a topic the
-    // schedule would be useless, so on failure nothing is kept. The error
-    // message already carries the topic guidance (orchestrator.spawn).
-    try {
-      await this.orch.spawn(conv, { name: "sch-" + sch.id, directory: dir, agent, spawnedBy: "schedule" });
-    } catch (e) {
-      const m = (e as Error).message;
-      const hint = m.includes("thư mục của Manager")
-        ? `\n→ Thêm dir= (thư mục ngoài data/manager). VD: dir=${this.cfg.opencodeDirectory}`
-        : "";
-      await this.tg.sendMessage(conv, `❌ ${m}${hint}`);
-      return;
-    }
-    try {
-      this.scheduleStore.add(sch);
-    } catch (e) {
-      await this.tg.sendMessage(conv, `❌ ${(e as Error).message}`);
-      return;
-    }
-    await this.tg.sendMessage(
-      conv,
-      `⏰ Đã tạo lịch <b>#${sch.id}</b> — ${formatSchedule(sch)}\nlần tới: ${new Date(sch.nextRunAt).toLocaleString("vi-VN", { dateStyle: "short", timeStyle: "short" })}\n📁 <code>${esc(dir)}</code> · agent: ${agent}`,
-    );
-  }
-
-  /** pause/resume/rm — the creator must still be on the allowlist. */
-  private async scheduleMutate(conv: ConvKey, id: string, op: "pause" | "resume" | "rm"): Promise<void> {
-    const sch = this.scheduleStore.get(id);
-    if (!sch || sch.conv !== conv) {
-      await this.tg.sendMessage(conv, `⏰ Không tìm thấy lịch #${id} của chat này.`);
-      return;
-    }
-    if (!this.creatorAllowed(sch)) {
-      await this.tg.sendMessage(conv, `⛔ Người tạo lịch #${id} không còn trong allowlist — không thể thao tác.`);
-      return;
-    }
-    if (op === "rm") {
-      this.scheduleStore.remove(id);
-      await this.tg.sendMessage(conv, `🗑 Đã xoá lịch #${id}. Topic + lịch sử vẫn giữ — /prune để dọn topic.`);
-      return;
-    }
-    const updated = this.scheduleStore.set(id, { enabled: op === "resume" });
-    if (!updated) {
-      await this.tg.sendMessage(conv, `⏰ Không tìm thấy lịch #${id}.`);
-      return;
-    }
-    await this.tg.sendMessage(conv, op === "resume" ? `▶ Đã bật lại lịch #${id}.` : `⏸ Đã tạm dừng lịch #${id}.`);
-  }
-
-  /** Run a schedule now (manual trigger). */
-  private async scheduleRun(conv: ConvKey, id: string): Promise<void> {
-    const sch = this.scheduleStore.get(id);
-    if (!sch || sch.conv !== conv) {
-      await this.tg.sendMessage(conv, `⏰ Không tìm thấy lịch #${id} của chat này.`);
-      return;
-    }
-    if (!this.creatorAllowed(sch)) {
-      await this.tg.sendMessage(conv, `⛔ Người tạo lịch #${id} không còn trong allowlist — không thể chạy.`);
-      return;
-    }
-    try {
-      await this.orch.runScheduled(conv, sch);
-      await this.tg.sendMessage(conv, `▶▶ Đã chạy lịch #${id} — kết quả sẽ hiện trong topic sch-${id}.`);
-    } catch (e) {
-      await this.tg.sendMessage(conv, `❌ Lịch #${id} không chạy được: ${(e as Error).message}`);
-    }
-  }
-
-  /** Schedule button taps: sch:p/sch:r (pause/resume) · sch:run · sch:d/sch:dy (rm, 2-step) · sch:ls (re-list). */
-  private async handleScheduleCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
-    const [, op, id] = (cb.data ?? "").split(":");
-    // Re-list after a confirm/cancel — no schedule id involved.
-    if (op === "ls") {
-      await this.tg.answerCallbackQuery(cb.id);
-      if (!messageId) return;
-      const mine = this.scheduleStore.load().filter((s) => s.conv === conv);
-      const v = mine.length
-        ? this.scheduleListMarkup(mine)
-        : { html: "⏰ Không còn lịch nào.", kb: { inline_keyboard: [] } };
-      await this.tg.editMessageText(conv, messageId, v.html, { reply_markup: v.kb }).catch(() => {});
-      return;
-    }
-    if (!/^[a-z0-9]{4}$/.test(id ?? "")) {
-      await this.tg.answerCallbackQuery(cb.id, "⏰ Id không hợp lệ");
-      return;
-    }
-    const sch = this.scheduleStore.get(id);
-    if (!sch || sch.conv !== conv) {
-      await this.tg.answerCallbackQuery(cb.id, "⏰ Không tìm thấy lịch này của chat");
-      return;
-    }
-    if (!this.creatorAllowed(sch)) {
-      await this.tg.answerCallbackQuery(cb.id, "⛔ Người tạo không còn trong allowlist");
-      return;
-    }
-    switch (op) {
-      case "p":
-      case "r": {
-        const enable = op === "r";
-        this.scheduleStore.set(id, { enabled: enable });
-        await this.tg.answerCallbackQuery(cb.id, enable ? `▶ Đã bật lại #${id}` : `⏸ Đã dừng #${id}`);
-        if (messageId) {
-          const mine = this.scheduleStore.load().filter((s) => s.conv === conv);
-          const v = mine.length
-            ? this.scheduleListMarkup(mine)
-            : { html: "⏰ Không còn lịch nào.", kb: { inline_keyboard: [] } };
-          await this.tg.editMessageText(conv, messageId, v.html, { reply_markup: v.kb }).catch(() => {});
-        }
-        return;
-      }
-      case "run": {
-        await this.tg.answerCallbackQuery(cb.id, `▶▶ Đang chạy #${id}…`);
-        try {
-          await this.orch.runScheduled(conv, sch);
-        } catch (e) {
-          await this.tg.sendMessage(conv, `❌ Lịch #${id} không chạy được: ${(e as Error).message}`).catch(() => {});
-        }
-        return;
-      }
-      case "d": {
-        // Destructive — two-step confirm (like /reboot).
-        await this.tg.answerCallbackQuery(cb.id);
-        if (!messageId) return;
-        const kb: Keyboard = {
-          inline_keyboard: [
-            [
-              { text: `🗑 Xoá #${id}`, callback_data: `sch:dy:${id}` },
-              { text: "↩️ Quay lại", callback_data: "sch:ls" },
-            ],
-          ],
-        };
-        await this.tg
-          .editMessageText(conv, messageId, `⚠️ Xoá lịch <b>#${id}</b> (${formatSchedule(sch)})? Topic + lịch sử vẫn giữ.`, { reply_markup: kb })
-          .catch(() => {});
-        return;
-      }
-      case "dy": {
-        this.scheduleStore.remove(id);
-        await this.tg.answerCallbackQuery(cb.id, `🗑 Đã xoá #${id}`);
-        if (messageId) {
-          await this.tg
-            .editMessageText(conv, messageId, `🗑 Đã xoá lịch <b>#${id}</b>. Dọn topic mồ côi bằng /prune.`, { reply_markup: { inline_keyboard: [] } })
-            .catch(() => {});
-        }
-        return;
-      }
-      default:
-        await this.tg.answerCallbackQuery(cb.id);
-    }
   }
 
   private async cmdClear(conv: ConvKey, state: ChatState): Promise<void> {
