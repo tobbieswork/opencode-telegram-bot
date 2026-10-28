@@ -80,13 +80,18 @@ export async function handleNoteCallback(bot: Bot, cb: CallbackQuery, conv: Conv
 }
 
 /**
- * The deployed version: `git describe --tags --always --dirty` (e.g. `v1.0.2-3-gabc1234`),
- * or the bare short hash when no tag exists yet. Empty string on any failure —
- * /status must never break because git is missing or the repo is not clean.
+ * The deployed version: `git describe --tags --match "v[0-9]*" --always --dirty`
+ * (e.g. `v1.0.2-3-gabc1234`), or the bare short hash when no tag exists yet.
+ * Empty string on any failure — /status must never break because git is missing
+ * or the repo is not clean.
+ *
+ * `--match "v[0-9]*"` limits describe to the clean vX.Y.Z tags: release-please
+ * also keeps a `<component>-vX.Y.Z` anchor tag on the same commit, and without
+ * the filter describe would report that longer name.
  */
 function deployedVersion(): Promise<string> {
   return new Promise((res) =>
-    execFile("git", ["describe", "--tags", "--always", "--dirty"], { timeout: 3000 }, (e, out) =>
+    execFile("git", ["describe", "--tags", "--match", "v[0-9]*", "--always", "--dirty"], { timeout: 3000 }, (e, out) =>
       res(e ? "" : out.trim())
     )
   );
