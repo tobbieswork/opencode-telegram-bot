@@ -7,7 +7,7 @@
  *
  * Run:  npx tsx scripts/test-schedule.ts
  */
-import { parseScheduleSpec, nextRunAfter, decideRun, formatSchedule } from "../src/schedule.js";
+import { parseScheduleSpec, nextRunAfter, decideRun, formatSchedule, isUserAllowed } from "../src/schedule.js";
 import type { Schedule } from "../src/schedule.js";
 
 let failures = 0;
@@ -187,6 +187,15 @@ const NY = "America/New_York";    // DST: 2026 spring 2026-03-08, fall 2026-11-0
   check("format: every", formatSchedule({ ...base, id: "k001", prompt: "", spec: { kind: "every", hours: 6 } as Schedule["spec"] }) === "every 6h · #k001");
   check("format: once", formatSchedule({ ...base, id: "w4", prompt: "", spec: { kind: "once", date: { y: 2026, mo: 12, d: 1 }, time: { h: 8, m: 0 } } as Schedule["spec"] }) === "once 2026-12-01 08:00 · #w4");
   check("format: weekdays", formatSchedule({ ...base, id: "w5", prompt: "", spec: { kind: "weekdays", time: { h: 9, m: 0 } } as Schedule["spec"] }) === "weekdays 09:00 · #w5");
+}
+
+// ── isUserAllowed: allowAny + allow-list (regression: silent schedule skip) ─
+{
+  check("allowed: in list → true", isUserAllowed({ allowAny: false, allowedUserIds: [1] }, 1));
+  check("allowed: not in list → false", !isUserAllowed({ allowAny: false, allowedUserIds: [1] }, 2));
+  check("allowed: allowAny + empty list → true (regression)", isUserAllowed({ allowAny: true, allowedUserIds: [] }, 999));
+  check("allowed: neither allowAny nor list → false", !isUserAllowed({ allowAny: false, allowedUserIds: [] }, 999));
+  check("allowed: uid undefined → false", !isUserAllowed({ allowAny: false, allowedUserIds: [1] }, undefined));
 }
 
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);
