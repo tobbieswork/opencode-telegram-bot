@@ -191,46 +191,63 @@ export class Scheduler {
     this.ticking = true;
     try {
       const now = this.deps.now();
-      const list = this.deps.store.load();
-      for (const sch of list) {
-        if (!sch.enabled) continue;
+      const { store } = this.deps;
+      // The pass awaits dispatches that take seconds, during which /schedule
+      // add|pause|rm may edit the file. So never write back a list loaded at the
+      // start: re-read each schedule just before acting on it, and persist every
+      // change as a per-id patch (store.set → fresh load) — a schedule removed or
+      // paused meanwhile is neither resurrected nor un-paused, a new one is kept.
+      for (const snap of store.load()) {
+        const sch = store.get(snap.id);
+        if (!sch || !sch.enabled) continue; // removed or paused since the snapshot
         if (sch.nextRunAt > now) continue; // not due yet
         const dec = decideRun(sch.nextRunAt, now, this.graceMs);
         if (dec === "skip") {
           // Too late to run: advance past it (don't pile up) and move on.
-          sch.nextRunAt = nextRunAfter(sch.spec, now, sch.tz);
-          sch.lastStatus = "skipped-late";
-          if (sch.spec.kind === "once") sch.enabled = false;
+          this.mark(sch.id, {
+            nextRunAt: nextRunAfter(sch.spec, now, sch.tz),
+            lastStatus: "skipped-late",
+            ...(sch.spec.kind === "once" ? { enabled: false } : {}),
+          });
           continue;
         }
         // run / catchup: advance first, then dispatch.
         try {
-          sch.nextRunAt = nextRunAfter(sch.spec, now, sch.tz);
-          sch.lastRunAt = now;
-          if (sch.spec.kind === "once") sch.enabled = false;
-          // Persist the advance BEFORE dispatch — the double-run guard.
-          this.deps.store.save(list);
+          // Persist the advance BEFORE dispatch — the double-run guard. Not
+          // swallowed: a failed write must surface as a schedule error.
+          store.set(sch.id, {
+            nextRunAt: nextRunAfter(sch.spec, now, sch.tz),
+            lastRunAt: now,
+            ...(sch.spec.kind === "once" ? { enabled: false } : {}),
+          });
 
           if (this.deps.isBusy(sch)) {
-            sch.lastStatus = "skipped-busy";
+            this.mark(sch.id, { lastStatus: "skipped-busy" });
             await this.safeNotify(sch.conv, `⏭ ${formatSchedule(sch)} — bỏ lượt (worker đang bận).`);
           } else if (!this.deps.isAllowed(sch.createdBy)) {
             // Creator was removed from the allowlist since creation.
             warn(`scheduler: #${sch.id} creator ${sch.createdBy} no longer allowed — skipped`);
           } else {
             await this.deps.dispatch(sch);
-            sch.lastStatus = "ok";
+            this.mark(sch.id, { lastStatus: "ok" });
           }
         } catch (e) {
-          sch.lastStatus = "error";
+          this.mark(sch.id, { lastStatus: "error" });
           warn(`scheduler: #${sch.id} error: ${errText(e)}`);
           await this.safeNotify(sch.conv, `⚠️ ${formatSchedule(sch)} — lỗi khi chạy.`);
         }
       }
-      // Persist every status/advance change made this pass.
-      this.deps.store.save(list);
     } finally {
       this.ticking = false;
+    }
+  }
+
+  /** Best-effort status/bookkeeping patch for one schedule (a gone id is a no-op; a disk error must not kill the pass). */
+  private mark(id: string, patch: Partial<Schedule>): void {
+    try {
+      this.deps.store.set(id, patch);
+    } catch (e) {
+      warn(`scheduler: #${id} could not persist ${Object.keys(patch).join("/")}: ${errText(e)}`);
     }
   }
 

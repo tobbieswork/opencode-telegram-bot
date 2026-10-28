@@ -372,6 +372,58 @@ const repo = join(tmp, "repo");
   }
 }
 
+// ── scheduled runs: one at a time, and the timeout belongs to its own run ───
+{
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const created: string[] = [];
+  const removed: string[] = [];
+  const prompted: string[] = [];
+  const st = new StateManager(join(tmp, "sched-state.json"));
+  const host: Host = {
+    tg: { editForumTopic: async () => {}, sendMessage: async () => {} } as any,
+    oc: {
+      createSession: async () => {
+        await sleep(15);
+        const id = `ses_s${created.length + 2}`;
+        created.push(id);
+        return id;
+      },
+      removeSession: async (sid: string) => void removed.push(sid),
+      prompt: async (sid: string) => void prompted.push(sid),
+      interrupt: async () => {},
+    } as any,
+    st,
+    cfg: { scheduleTimeoutMs: 80, browseRoots: [repo], managerDir: join(tmp, "mgr"), maxWorkers: 2 } as any,
+    busyNotes: new BusyNoteStore(),
+    sendHtml: async () => {},
+    applyModelAndVariant: async () => {},
+    startTyping: () => {},
+  };
+  const orch = new Orchestrator(host);
+  const sch: any = { id: "s1", conv: "7", prompt: "go", dir: repo, agent: "build", spec: { kind: "daily" }, tz: "UTC", nextRunAt: 0, createdBy: 1, enabled: true, createdAt: 1 };
+  st.set("7:1", {
+    sessionID: "ses_s1",
+    worker: { name: "sch-s1", status: "running", spawnedBy: "schedule", writes: false, createdAt: 1, updatedAt: 1 },
+  });
+
+  check("busy schedule worker: run is refused", await throws(() => orch.runScheduled("7", sch), /đang chạy/));
+  check("…and the live session is NOT retired", created.length === 0 && removed.length === 0 && prompted.length === 0);
+
+  (orch as any).setStatus("7:1", "done");
+  const results = await Promise.allSettled([orch.runScheduled("7", sch), orch.runScheduled("7", sch)]);
+  check("two overlapping runs: exactly one wins", results.filter((x) => x.status === "fulfilled").length === 1, JSON.stringify(results.map((x) => x.status)));
+  check("…one new session, old one retired once", created.length === 1 && removed.join() === "ses_s1" && prompted.length === 1);
+
+  // Run 1 finishes before its timer; a later run must not be stopped by run 1's timer.
+  await sleep(50);
+  (orch as any).setStatus("7:1", "done");
+  await orch.runScheduled("7", sch); // run 2: its own timer armed now (80ms)
+  await sleep(45); // run 1's timer would have fired by now (~80ms after run 1 started)
+  check("stale timer of a finished run does not stop the next run", st.get("7:1").worker?.status === "running", String(st.get("7:1").worker?.status));
+  await sleep(80);
+  check("the run's own timeout still stops a hung run", st.get("7:1").worker?.status === "stopped", String(st.get("7:1").worker?.status));
+}
+
 // ── #9: removing a worktree retires the session that lived in it ────────────
 {
   const sent: string[] = [];
