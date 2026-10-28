@@ -43,6 +43,11 @@ export const CMD_GROUPS: CmdGroup[] = [
 
 export const COMMANDS: BotCommand[] = [
   // ── session ────────────────────────────────────────────────────────────
+  // `note` intentionally sits above `new` in the "/" autocomplete menu: the
+  // two are adjacent and easy to mistype when tapping fast, and note is the
+  // safe one. The /help card is grouped (note stays in the control group),
+  // so this only affects the flat menu order.
+  { cmd: "note", arg: "[ghi chú]", desc: "Ghi chú khi agent bận (trống = xem ghi chú)", group: "control" },
   { cmd: "new", desc: "Bắt đầu phiên làm việc mới", button: "🆕 Session mới", group: "session" },
   { cmd: "ls", aliases: ["sessions"], desc: "Liệt kê phiên gần đây", button: "📄 Sessions", group: "session" },
   { cmd: "use", arg: "<id>", desc: "Chuyển sang một phiên", group: "session" },
@@ -70,7 +75,6 @@ export const COMMANDS: BotCommand[] = [
 
   // ── control ────────────────────────────────────────────────────────────
   { cmd: "stop", desc: "Dừng task đang chạy", button: "⏹ Dừng", group: "control" },
-  { cmd: "note", arg: "[ghi chú]", desc: "Ghi chú khi agent bận (trống = xem ghi chú)", group: "control" },
   { cmd: "btw", arg: "<câu hỏi>", desc: "Hỏi nhanh trên phiên tạm — không lẫn ngữ cảnh manager", group: "control" },
   { cmd: "context", aliases: ["ctx"], desc: "Ảnh chụp phiên hiện tại (usage + files)", button: "📸 Context", group: "control" },
   { cmd: "usage", desc: "Mức dùng context theo phiên + cảnh báo gần tràn", button: "📊 Usage", group: "control" },
