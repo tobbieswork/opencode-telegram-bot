@@ -1736,6 +1736,31 @@ export class Bot {
   }
 
   private async cmdNew(conv: ConvKey, state: ChatState, keep = false): Promise<void> {
+    if (keep) {
+      await this.doNewSession(conv, state, true);
+      return;
+    }
+    // Destructive (wipes the current context) — two-step confirm by button,
+    // like /reboot. A mistyped fast /new just shows this card instead of
+    // nuking the session; /new --keep skips confirm because it preserves the
+    // recent thread.
+    const kb: Keyboard = {
+      inline_keyboard: [
+        [
+          { text: "🆕 Xác nhận — tạo phiên mới", callback_data: "nw:cf" },
+          { text: "↩️ Huỷ", callback_data: "nw:cx" },
+        ],
+      ],
+    };
+    await this.tg.sendMessage(
+      conv,
+      `⚠️ <b>/new</b> xoá ngữ cảnh hiện tại.\nBấm nút để xác nhận — hoặc gõ <code>/new --keep</code> nếu muốn giữ mạch hội thoại.`,
+      { reply_markup: kb },
+    );
+  }
+
+  /** Actually create the fresh session (cmdNew --keep, or the nw:cf confirm button). */
+  private async doNewSession(conv: ConvKey, state: ChatState, keep: boolean): Promise<void> {
     // --keep: capture a short handoff summary of the CURRENT session before
     // replacing it, then inject it into the fresh session's context so the new
     // session continues with the recent thread (decisions, in-progress work)
@@ -1769,6 +1794,22 @@ export class Bot {
       conv,
       `🆕 New session <code>${sessionID}</code>\ndir: <code>${esc(dir)}</code>${keep ? `\n🔁 carry-over: ${carryover ? "✓" : "(session cũ trống)"}` : ""}`,
     );
+  }
+
+  /** nw:cf / nw:cx — confirm or cancel a bare /new (see cmdNew). */
+  private async handleNewConfirmCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+    const op = (cb.data ?? "").split(":")[1];
+    if (op !== "cf") {
+      await this.tg.answerCallbackQuery(cb.id, "↩️ Đã huỷ");
+      if (messageId) {
+        await this.tg
+          .editMessageText(conv, messageId, "↩️ Đã huỷ — phiên cũ vẫn nguyên vẹn.", { reply_markup: { inline_keyboard: [] } })
+          .catch(() => {});
+      }
+      return;
+    }
+    await this.tg.answerCallbackQuery(cb.id, "🆕 Đang tạo phiên mới…");
+    await this.doNewSession(conv, this.st.get(conv), false); // fresh state at confirm time
   }
 
   /**
@@ -2050,6 +2091,10 @@ export class Bot {
     }
     if (data.startsWith("reboot:")) {
       await this.handleRebootCallback(cb, conv, messageId);
+      return;
+    }
+    if (data.startsWith("nw:")) {
+      await this.handleNewConfirmCallback(cb, conv, messageId);
       return;
     }
     if (data.startsWith("use:")) {
