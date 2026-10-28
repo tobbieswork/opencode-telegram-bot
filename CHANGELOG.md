@@ -99,6 +99,8 @@
 * **release:** approve app-created release PR with owner token ([c9889a6](https://github.com/tobbieswork/opencode-telegram-bot/commit/c9889a6ecac1b84d54775a3860f33a25796ea390))
 * **release:** approve release PR with owner token before merge ([cf798b6](https://github.com/tobbieswork/opencode-telegram-bot/commit/cf798b61e26496674072b3da2ecc06497b2484a5))
 * **release:** check tags via API — runners have no origin remote ([14edb55](https://github.com/tobbieswork/opencode-telegram-bot/commit/14edb55adc0b13f80722459a41081d0b04d0360d))
+* **release:** checkout base branch in merge job ([cb4e6c5](https://github.com/tobbieswork/opencode-telegram-bot/commit/cb4e6c523bf8920bc2411553665c0a1d87be0506))
+* **release:** checkout base branch in merge job ([4314a69](https://github.com/tobbieswork/opencode-telegram-bot/commit/4314a69c7524feba216a30d3ad0dcf841d28df7e))
 * **release:** guard bootstrap tag check via API ([e09626d](https://github.com/tobbieswork/opencode-telegram-bot/commit/e09626d6692832d1c84726f2a7112300c35648eb))
 * **release:** match release PR author via REST login ([59eea03](https://github.com/tobbieswork/opencode-telegram-bot/commit/59eea0373ec1814ea1629087649169e9af736a17))
 * **release:** match release PR author via REST login ([872bad3](https://github.com/tobbieswork/opencode-telegram-bot/commit/872bad3928673fdd3d279beed18279b4a04c29d3))
