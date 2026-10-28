@@ -6,8 +6,13 @@ on:
   pull_request:
 
 jobs:
+  # Release-please PRs (github-actions app, release-please--* refs) are skipped
+  # here: app-created PRs get pull_request workflows blocked pending manual
+  # approval, and their required "Typecheck" check is reported by
+  # auto-merge-release.yml instead.
   typecheck:
     name: Typecheck
+    if: ${{ !startsWith(github.head_ref, 'release-please--') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -25,6 +30,7 @@ jobs:
   test:
     name: Test
     needs: typecheck
+    if: ${{ !startsWith(github.head_ref, 'release-please--') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
