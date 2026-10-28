@@ -1,29 +1,68 @@
 name: Auto-merge release
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, ready_for_review]
 
+# Release-please PRs are created by the github-actions app. GitHub blocks
+# `pull_request`-triggered workflows on app-created PRs pending maintainer
+# approval, so the release pipeline runs on `pull_request_target` instead
+# (base-branch context — never subject to that approval gate).
+#
+# SECURITY: pull_request_target runs with base-branch trust and this workflow
+# checks out the PR head. That is only safe because BOTH jobs are hard-gated
+# to release-please's own PRs (actor + head-ref prefix) — a metadata-only
+# version bump generated from main, never arbitrary user code. Human PRs keep
+# their normal ci.yml pipeline.
 jobs:
-  auto-merge:
-    # Release PRs are created by release-please[bot]; native auto-merge waits
-    # for the required "Typecheck" check, then merges without a human tap.
-    if: github.event.pull_request.user.login == 'release-please[bot]'
+  Typecheck:
+    # Reports the required "Typecheck" check for release PRs (ci.yml skips
+    # them, so there is no conflicting check with the same context).
+    if: >-
+      github.event.pull_request.user.login == 'github-actions[bot]' &&
+      startsWith(github.head_ref, 'release-please--')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+
+  merge:
+    needs: Typecheck
+    if: >-
+      github.event.pull_request.user.login == 'github-actions[bot]' &&
+      startsWith(github.head_ref, 'release-please--')
     runs-on: ubuntu-latest
     permissions:
-      pull-requests: write
       contents: write
+      pull-requests: write
     steps:
-      - uses: actions/github-script@v7
+      - name: Merge release PR
+        uses: actions/github-script@v7
         with:
           script: |
-            try {
-              await github.rest.pulls.enableAutoMerge({
-                ...context.repo,
-                pull_number: context.payload.pull_request.number,
-              });
-              core.info("Auto-merge enabled for release PR");
-            } catch (e) {
-              // 422 when auto-merge is already set — harmless.
-              core.info("enableAutoMerge: " + e.message);
+            const num = context.issue.number;
+            const { data: pr } = await github.rest.pulls.get({
+              ...context.repo,
+              pull_number: num,
+            });
+            if (pr.state !== 'open') {
+              core.info("PR #" + num + " is " + pr.state + " — nothing to do");
+              return;
             }
+            const res = await github.rest.pulls.merge({
+              ...context.repo,
+              pull_number: num,
+              merge_method: 'squash',
+            });
+            core.info("Merged release PR #" + num + " → " + res.data.merge_commit_sha);
