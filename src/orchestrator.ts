@@ -16,7 +16,7 @@ import { log, warn } from "./logger.js";
 import { BUSY_REPLY_TEXT, NOTE_BUTTON_LABEL, noteCallbackData, BusyNoteStore } from "./notes.js";
 import { queueReport } from "./orchestrator/report.js";
 import { purgeConv, cmdPrune, handlePruneCallback } from "./orchestrator/purge.js";
-import { onTopicDeleted, reapPendingTopicDeletes, closeFinishedTopicsAtStartup } from "./orchestrator/topics.js";
+import { onTopicDeleted, reapPendingTopicDeletes } from "./orchestrator/topics.js";
 import type { Schedule } from "./schedule.js";
 
 type Btn = { text: string; callback_data: string };
@@ -152,6 +152,11 @@ interface Approval {
  * Manager agent in the chat's top level, the MCP tool bridge the Manager uses
  * to steer workers, the confirm-before-dispatch cards, and git worktree
  * isolation for parallel writers.
+ *
+ * Members that are `public` without being API (h/prunePending/reports/reportTimers/
+ * pendingTopicDelete/purging/workersOf/clearConvMemory) exist only for the modules in
+ * src/orchestrator/*, which take the Orchestrator as their first argument. Don't use
+ * them elsewhere.
  */
 export class Orchestrator {
   private bridge?: McpBridge;
@@ -1094,24 +1099,7 @@ export class Orchestrator {
     return false;
   }
 
-  /**
-   * Fully retire a conversation: remove its git worktree (if any), its OpenCode
-   * session, and its state entry. Idempotent — safe when the state is already
-   * gone. The worktree is removed before the state is cleared (removal reads the
-   * state); uncommitted work is committed to the worker branch first, and an
-   * unmerged branch is kept (removeWorktree). A worktree still referenced by
-   * ANOTHER conv (e.g. the respawn replacement after an overflow) is NOT removed.
-   * Returns false when the worktree could not be removed — the state is then
-   * KEPT so /prune can retry, instead of orphaning the worktree and branch.
-   * Shared by the /prune confirm and the deleted-topic detection.
-   *
-   * Concurrency-safe: guarded per-conv (this.purging) so the several concurrent
-   * calls a dead topic produces (see the `purging` field) collapse to ONE real
-   * purge — the in-flight one does the git work, the others return false
-   * immediately instead of racing on index.lock. The guard is cleared once the
-   * in-flight purge FINISHES (on both success and failure) so a later
-   * send-failure or /prune can still retry a purge that failed.
-   */
+  /** Delegates to ./orchestrator/purge.ts (kept as a method: tests call it directly). */
   private async purgeConv(conv: ConvKey): Promise<boolean> { return purgeConv(this, conv); }
 
   /** Drop this orchestrator's in-memory per-conv tracking (budget, timers, busy flags). */
@@ -1127,8 +1115,10 @@ export class Orchestrator {
     }
   }
 
+  /** Delegates to ./orchestrator/topics.ts (kept as a method: tests call it directly). */
   async onTopicDeleted(conv: ConvKey): Promise<void> { return onTopicDeleted(this, conv); }
 
+  /** Delegates to ./orchestrator/topics.ts (kept as a method: tests call it directly). */
   async reapPendingTopicDeletes(): Promise<void> { return reapPendingTopicDeletes(this); }
 
   private async handleApprovalCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {

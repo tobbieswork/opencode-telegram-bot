@@ -2,7 +2,7 @@ import { isAbsolute, resolve, dirname, join } from "node:path";
 import { existsSync, statSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
-import { randomBytes, randomInt } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { Telegram, Update, CallbackQuery, Message, MessageGenerationStopped, MessageReactionUpdated } from "./telegram.js";
 import { OpenCodeCtl, newMessageID, assistantText, ModelInfo, SessionBrief } from "./opencode.js";
 import { StateManager, ChatState, MsgPurpose, MACHINE_STATE_KEY } from "./state.js";
@@ -10,7 +10,7 @@ import { ConvKey, convKey, chatOf, parseConv } from "./conv.js";
 import { Orchestrator } from "./orchestrator.js";
 import { closeFinishedTopicsAtStartup } from "./orchestrator/topics.js";
 import { ScheduleStore, Scheduler } from "./scheduler.js";
-import { Schedule, SchedSpec, formatSchedule, isUserAllowed, nextRunAfter, parseScheduleSpec } from "./schedule.js";
+import { isUserAllowed } from "./schedule.js";
 import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, formatTurnFailure } from "./format.js";
 import { richMarkdownChunks } from "./rich.js";
@@ -39,7 +39,7 @@ import { myCommands } from "./commands.js";
 import { dropNotes, prepareNotes, BUSY_REPLY_TEXT, NOTE_BUTTON_LABEL, NOTE_CB_PREFIX, noteCallbackData, BusyNoteStore } from "./notes.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
 import { log, warn, error } from "./logger.js";
-import { AGENT_WHITELIST, QUESTIONS_PREAMBLE, NOTES_KEY } from "./shared.js";
+import { QUESTIONS_PREAMBLE, NOTES_KEY } from "./shared.js";
 import type { Btn, Keyboard } from "./shared.js";
 import { cmdAgents, cmdAgent, handleAgentCallback } from "./commands/agents.js";
 import { cmdSchedule, handleScheduleCallback } from "./commands/schedule.js";
@@ -160,6 +160,10 @@ interface GhPr {
  * Glue between Telegram and OpenCode. Owns per-chat state and the in-flight
  * prompt task, so a running prompt never blocks the polling loop and /stop
  * can interrupt it.
+ *
+ * Members that are `public` without being API (tg/oc/st/cfg/orch/scheduleStore/
+ * inflight/busyNotes/sendHtml/currentMode) exist only for the handler modules in
+ * src/commands/*, which take the Bot as their first argument. Don't use them elsewhere.
  */
 export class Bot {
   public inflight = new Map<ConvKey, AbortController>();
@@ -1721,6 +1725,7 @@ export class Bot {
   // rendered from the shared catalog (src/commands.ts) so they cannot drift
   // apart (drift cost us two follow-up fixes: /agents, /reboot).
 
+  /** Register the Telegram /command menu (autocomplete) — cosmetic, best-effort. */
   private registerCommands(): void {
     void this.tg.setMyCommands(myCommands()).catch((e) => warn("setMyCommands:", e?.message));
   }
