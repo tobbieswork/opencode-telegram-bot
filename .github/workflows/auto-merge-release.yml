@@ -47,9 +47,14 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - name: Merge release PR
+      - name: Approve + merge release PR
         uses: actions/github-script@v7
         with:
+          # Branch protection on main requires 1 approving review. The PR's
+          # author is the github-actions app (which is also the default
+          # GITHUB_TOKEN here), and an author cannot approve its own PR — so
+          # the script runs on the owner's token instead.
+          github-token: ${{ secrets.RELEASE_PAT }}
           script: |
             const num = context.issue.number;
             const { data: pr } = await github.rest.pulls.get({
@@ -60,6 +65,11 @@ jobs:
               core.info("PR #" + num + " is " + pr.state + " — nothing to do");
               return;
             }
+            await github.rest.reviews.create({
+              ...context.repo,
+              pull_number: num,
+              event: 'APPROVE',
+            });
             const res = await github.rest.pulls.merge({
               ...context.repo,
               pull_number: num,
