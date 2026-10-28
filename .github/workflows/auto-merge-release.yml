@@ -65,10 +65,11 @@ jobs:
           gh pr merge "${{ github.event.pull_request.number }}" --squash --admin
       # release-please 17.3.0 tags this repo's releases as
       # <component>-v<version> (the config tag-template is not honored
-      # empirically — v1.1.0 and v1.2.0 both landed with the prefix). This
-      # step normalizes to the v-prefixed name used by v1.0.0 and expected
-      # by `git describe` in /status: creates v<version> on the same commit,
-      # repoints the GitHub Release, deletes the prefixed tag.
+      # empirically — v1.1.0 and v1.2.0 both landed with the prefix). The
+      # prefixed tag is KEPT: it is release-please's commit-boundary anchor
+      # (deleting it once produced a bogus 1.3.0 release re-listing old
+      # commits). This step only adds a clean v<version> alias and repoints
+      # the GitHub Release so the Releases page shows the short name.
       - name: Normalize tag to v<version>
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PAT }}
@@ -96,5 +97,4 @@ jobs:
           git tag -f "v$V" "$SHA"
           git push origin "v$V"
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RID" -f tag_name="v$V" >/dev/null
-          git push origin --delete "opencode-telegram-bot-v$V"
-          echo "Normalized tag to v$V"
+          echo "Normalized tag to v$V (prefixed tag kept as release-please anchor)"

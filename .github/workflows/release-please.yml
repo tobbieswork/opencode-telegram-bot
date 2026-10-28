@@ -64,13 +64,29 @@ jobs:
               tree: head.tree.sha,
               parents: [pr.head.sha],
             });
-            // Push via real git: the @actions/github client bundled with
-            // actions/github-script@v7 URL-encodes the whole `ref` parameter
-            // of git.updateRef as one segment, producing /git/refs/refs%2Fheads%2F…
-            // ("Reference does not exist", 422).
-            const { execSync } = require('child_process');
-            execSync(
-              `git push "https://x-access-token:${process.env.GITHUB_TOKEN}@github.com/${owner}/${repo}.git" ${bump.sha}:refs/heads/${pr.head.ref}`,
-              { stdio: 'pipe' },
+            // Push via a raw API call. Two traps, both hit live:
+            // (1) the @actions/github client bundled with
+            //     actions/github-script@v7 URL-encodes the entire `ref`
+            //     parameter of git.updateRef as ONE path segment
+            //     (/git/refs/refs%2Fheads%2F...), which GitHub rejects
+            //     with 422 "Reference does not exist";
+            // (2) `git push` from this job fails with "not a git
+            //     repository" — there is no checkout, and the commit
+            //     object exists only remotely (created via the API), so
+            //     there is nothing local to push.
+            const res = await fetch(
+              `https://api.github.com/repos/${owner}/${repo}/git/refs/refs/heads/${pr.head.ref}`,
+              {
+                method: 'PATCH',
+                headers: {
+                  Authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
+                  'Content-Type': 'application/json',
+                  Accept: 'application/vnd.github+json',
+                },
+                body: JSON.stringify({ sha: bump.sha }),
+              },
             );
+            if (!res.ok) {
+              throw new Error(`updateRef failed: ${res.status} ${await res.text()}`);
+            }
             core.info('Pushed no-op commit to ' + pr.head.ref);
