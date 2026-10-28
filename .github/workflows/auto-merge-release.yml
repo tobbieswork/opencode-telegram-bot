@@ -63,3 +63,38 @@ jobs:
           # rejected by the policy, but admin=true bypasses it).
           # `needs: Typecheck` above means the PR only merges green.
           gh pr merge "${{ github.event.pull_request.number }}" --squash --admin
+      # release-please 17.3.0 tags this repo's releases as
+      # <component>-v<version> (the config tag-template is not honored
+      # empirically — v1.1.0 and v1.2.0 both landed with the prefix). This
+      # step normalizes to the v-prefixed name used by v1.0.0 and expected
+      # by `git describe` in /status: creates v<version> on the same commit,
+      # repoints the GitHub Release, deletes the prefixed tag.
+      - name: Normalize tag to v<version>
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+        run: |
+          set -e
+          git fetch origin main --tags --quiet
+          V=$(git show origin/main:package.json | node -pe "JSON.parse(require('fs').readFileSync(0)).version")
+          echo "Releasing v$V"
+          if git ls-remote --exit-code --tags origin "v$V" >/dev/null 2>&1; then
+            echo "v$V already exists, nothing to do"; exit 0
+          fi
+          # Wait for release-please to publish the release (it tags +
+          # creates the GitHub Release a few seconds after the merge).
+          RID=""
+          for i in $(seq 1 24); do
+            RID=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/opencode-telegram-bot-v$V" -q .id 2>/dev/null || true)
+            [ -n "$RID" ] && break
+            sleep 5
+          done
+          if [ -z "$RID" ]; then
+            echo "WARN: GitHub release for opencode-telegram-bot-v$V not found, skipping"
+            exit 0
+          fi
+          SHA=$(git rev-parse "opencode-telegram-bot-v$V^{commit}")
+          git tag -f "v$V" "$SHA"
+          git push origin "v$V"
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RID" -f tag_name="v$V" >/dev/null
+          git push origin --delete "opencode-telegram-bot-v$V"
+          echo "Normalized tag to v$V"
