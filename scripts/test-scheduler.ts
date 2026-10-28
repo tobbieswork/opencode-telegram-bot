@@ -289,6 +289,48 @@ function makeDeps(
   check("notdue: future schedule untouched (no status)", store.get("f1")?.lastStatus === undefined, String(store.get("f1")?.lastStatus));
 }
 
+// ── tick: concurrent /schedule edits during a slow dispatch survive ─────────
+{
+  const store = new ScheduleStore(`${T}/concurrent.json`, 10);
+  const c = clock(NOW);
+  const { deps } = makeDeps(store, {
+    clock: c.now,
+    dispatch: async (s) => {
+      if (s.id !== "c1") return;
+      // While c1 is dispatching, the user removes c2, pauses c3 and adds c4.
+      store.remove("c2");
+      store.set("c3", { enabled: false });
+      store.add(mkSch({ id: "c4", nextRunAt: NOW + 3600_000 }));
+      await new Promise((r) => setTimeout(r, 20));
+    },
+  });
+  store.add(mkSch({ id: "c1", nextRunAt: NOW }));
+  store.add(mkSch({ id: "c2", nextRunAt: NOW + 3600_000 }));
+  store.add(mkSch({ id: "c3", nextRunAt: NOW + 3600_000 }));
+  await new Scheduler(deps).tick();
+  check("concurrent: removed schedule is not resurrected", store.get("c2") === undefined);
+  check("concurrent: pause made mid-dispatch is kept", store.get("c3")?.enabled === false);
+  check("concurrent: schedule added mid-dispatch is kept", store.get("c4") !== undefined);
+  check("concurrent: dispatched schedule still advanced + ok", store.get("c1")?.lastStatus === "ok" && (store.get("c1")?.nextRunAt ?? 0) > NOW);
+}
+
+// ── tick: a schedule removed/paused earlier in the same pass is not dispatched ──
+{
+  const store = new ScheduleStore(`${T}/gone.json`, 10);
+  const c = clock(NOW);
+  const { deps, calls } = makeDeps(store, {
+    clock: c.now,
+    dispatch: async (s) => {
+      calls.dispatch.push(s);
+      if (s.id === "g1") store.set("g2", { enabled: false });
+    },
+  });
+  store.add(mkSch({ id: "g1", nextRunAt: NOW }));
+  store.add(mkSch({ id: "g2", nextRunAt: NOW }));
+  await new Scheduler(deps).tick();
+  check("gone: schedule paused mid-pass is not dispatched", calls.dispatch.map((x) => x.id).join() === "g1", calls.dispatch.map((x) => x.id).join());
+}
+
 await rm(T, { recursive: true, force: true });
 
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);

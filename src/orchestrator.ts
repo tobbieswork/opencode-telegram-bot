@@ -167,6 +167,10 @@ export class Orchestrator {
   reportTimers = new Map<ConvKey, ReturnType<typeof setTimeout>>();
   /** Remaining Manager dispatches per chat until the user speaks again. */
   private budget = new Map<ConvKey, number>();
+  /** Anti-hang timer of each schedule worker's CURRENT run (one per conv; see runScheduled). */
+  private schedTimers = new Map<ConvKey, ReturnType<typeof setTimeout>>();
+  /** `chat|worker-name` of scheduled runs between the busy check and "running" (closes the check→set await gap). */
+  private schedStarting = new Set<string>();
   /** Worker convs whose turn-end we are already processing. */
   private finishing = new Set<ConvKey>();
   /**
@@ -684,6 +688,21 @@ export class Orchestrator {
    */
   async runScheduled(chat: ConvKey, sch: Schedule): Promise<void> {
     const name = "sch-" + sch.id;
+    // One run at a time per schedule, for EVERY entry point (tick, /schedule run,
+    // ▶▶ button): a second run would retire the session the first is still using.
+    const startKey = `${chat}|${name}`;
+    if (this.schedStarting.has(startKey) || this.workerBusyByName(chat, name)) {
+      throw new Error(`lịch #${sch.id} đang chạy — chờ nó xong hoặc /kill trước.`);
+    }
+    this.schedStarting.add(startKey);
+    try {
+      await this.runScheduledInner(chat, sch, name);
+    } finally {
+      this.schedStarting.delete(startKey);
+    }
+  }
+
+  private async runScheduledInner(chat: ConvKey, sch: Schedule, name: string): Promise<void> {
     let conv: ConvKey;
     let justSpawned: boolean;
     const existing = this.h.st.findWorker(chat, name);
@@ -720,7 +739,12 @@ export class Orchestrator {
     await this.h.oc.prompt(sessionID, workerPreamble(name) + "\n\n" + sch.prompt);
     this.h.startTyping(conv);
     // Anti-hang timeout: if still BUSY when it fires, stop it and report once.
+    // Tied to THIS run: the timer is cancelled when the worker leaves BUSY (setStatus)
+    // and ignored if a newer run replaced it, so it can never stop a later run.
+    this.clearSchedTimer(conv);
     const timer = setTimeout(() => {
+      if (this.schedTimers.get(conv) !== timer) return;
+      this.schedTimers.delete(conv);
       void (async () => {
         const cur = this.h.st.peek(conv);
         if (cur?.worker && BUSY.includes(cur.worker.status)) {
@@ -730,6 +754,13 @@ export class Orchestrator {
       })();
     }, this.h.cfg.scheduleTimeoutMs);
     timer.unref?.();
+    this.schedTimers.set(conv, timer);
+  }
+
+  private clearSchedTimer(conv: ConvKey): void {
+    const t = this.schedTimers.get(conv);
+    if (t) clearTimeout(t);
+    this.schedTimers.delete(conv);
   }
 
   /**
@@ -783,6 +814,7 @@ export class Orchestrator {
     const changed = s.worker.status !== status;
     const worker: WorkerInfo = { ...s.worker, status, updatedAt: Date.now(), ...(lastResult !== undefined ? { lastResult } : {}) };
     this.h.st.set(conv, { worker });
+    if (!BUSY.includes(status)) this.clearSchedTimer(conv); // the run this timer guarded is over
     if (changed) void this.h.tg.editForumTopic(conv, this.topicName(worker)).catch((e) => warn("editForumTopic:", e?.message));
   }
 
@@ -1105,6 +1137,7 @@ export class Orchestrator {
   /** Drop this orchestrator's in-memory per-conv tracking (budget, timers, busy flags). */
   clearConvMemory(conv: ConvKey): void {
     this.budget.delete(conv);
+    this.clearSchedTimer(conv);
     this.finishing.delete(conv);
     this.dropManagerTurn(conv);
     this.reports.delete(conv);
