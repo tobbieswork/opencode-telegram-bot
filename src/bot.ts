@@ -10,7 +10,7 @@ import { ConvKey, convKey, chatOf, parseConv } from "./conv.js";
 import { Orchestrator } from "./orchestrator.js";
 import { closeFinishedTopicsAtStartup } from "./orchestrator/topics.js";
 import { ScheduleStore, Scheduler } from "./scheduler.js";
-import { Schedule, SchedSpec, formatSchedule, nextRunAfter, parseScheduleSpec } from "./schedule.js";
+import { Schedule, SchedSpec, formatSchedule, isUserAllowed, nextRunAfter, parseScheduleSpec } from "./schedule.js";
 import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, formatTurnFailure } from "./format.js";
 import { richMarkdownChunks } from "./rich.js";
@@ -305,7 +305,7 @@ export class Bot {
         store: this.scheduleStore,
         dispatch: (sch) => this.orch.runScheduled(sch.conv, sch),
         isBusy: (sch) => this.orch.workerBusyByName(sch.conv, "sch-" + sch.id),
-        isAllowed: (uid) => this.cfg.allowedUserIds.includes(uid),
+        isAllowed: (uid) => isUserAllowed(this.cfg, uid),
         notify: (conv, text) => this.tg.sendMessage(conv, text),
         tickMs: 30_000,
         graceMs: this.cfg.scheduleGraceMs,
@@ -565,8 +565,7 @@ export class Bot {
   }
 
   private allowed(uid?: number): boolean {
-    if (this.cfg.allowAny) return true;
-    return uid !== undefined && this.cfg.allowedUserIds.includes(uid);
+    return isUserAllowed(this.cfg, uid);
   }
 
   /** Per-conversation tail of the update queue (see enqueue). */
