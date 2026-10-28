@@ -1,0 +1,29 @@
+name: Auto-merge release
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+
+jobs:
+  auto-merge:
+    # Release PRs are created by release-please[bot]; native auto-merge waits
+    # for the required "Typecheck" check, then merges without a human tap.
+    if: github.event.pull_request.user.login == 'release-please[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: write
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              await github.rest.pulls.enableAutoMerge({
+                ...context.repo,
+                pull_number: context.payload.pull_request.number,
+              });
+              core.info("Auto-merge enabled for release PR");
+            } catch (e) {
+              // 422 when auto-merge is already set — harmless.
+              core.info("enableAutoMerge: " + e.message);
+            }

@@ -1,0 +1,8 @@
+{
+  "packages": {
+    ".": {
+      "component": "opencode-telegram-bot",
+      "release-type": "node"
+    }
+  }
+}
