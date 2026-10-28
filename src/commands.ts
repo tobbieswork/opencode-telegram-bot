@@ -71,6 +71,7 @@ export const COMMANDS: BotCommand[] = [
   // ── control ────────────────────────────────────────────────────────────
   { cmd: "stop", desc: "Dừng task đang chạy", button: "⏹ Dừng", group: "control" },
   { cmd: "note", arg: "[ghi chú]", desc: "Ghi chú khi agent bận (trống = xem ghi chú)", group: "control" },
+  { cmd: "btw", arg: "<câu hỏi>", desc: "Hỏi nhanh trên phiên tạm — không lẫn ngữ cảnh manager", group: "control" },
   { cmd: "context", aliases: ["ctx"], desc: "Ảnh chụp phiên hiện tại (usage + files)", button: "📸 Context", group: "control" },
   { cmd: "usage", desc: "Mức dùng context theo phiên + cảnh báo gần tràn", button: "📊 Usage", group: "control" },
   { cmd: "history", desc: "Xem tin nhắn gần đây", button: "📜 Lịch sử", group: "control" },

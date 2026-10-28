@@ -44,6 +44,7 @@ import type { Btn, Keyboard } from "./shared.js";
 import { cmdAgents, cmdAgent, handleAgentCallback } from "./commands/agents.js";
 import { cmdSchedule, handleScheduleCallback } from "./commands/schedule.js";
 import { cmdHelp, cmdStatus, cmdContext, cmdUsage, cmdHistory, cmdNote, handleNoteCallback } from "./commands/meta.js";
+import { cmdBtw } from "./btw.js";
 
 /** The message carries media (sticker/photo/video/voice/…) — used to acknowledge non-text input. */
 function hasNonTextContent(m: Message): boolean {
@@ -167,6 +168,8 @@ interface GhPr {
  */
 export class Bot {
   public inflight = new Map<ConvKey, AbortController>();
+  /** Convs with a /btw side question running (one at a time per conv). */
+  public btwRunning = new Set<ConvKey>();
   private browsers = new Map<ConvKey, BrowseState>();
   private questionForms = new Map<string, QuestionFormState>();
   private permissionPrompts = new Map<string, PermissionPrompt>();
@@ -1464,6 +1467,8 @@ export class Bot {
         return this.cmdClear(conv, state);
       case "/note":
         return cmdNote(this, conv, arg);
+      case "/btw":
+        return cmdBtw(this, conv, state, arg);
       case "/schedule":
         return cmdSchedule(this, conv, arg, state, uid);
       default:
@@ -2909,7 +2914,10 @@ export class Bot {
     if (this.permissionPrompts.has(requestID)) return;
     const conv = this.st.findChatBySession(sessionID);
     if (!conv) {
-      warn(`permission.asked for session ${sessionID} with no mapped chat — ignoring`);
+      // Orphan session (e.g. a /btw throwaway): the ask can never be relayed,
+      // so auto-reject — the session fails fast instead of hanging on the prompt.
+      warn(`permission.asked for session ${sessionID} with no mapped chat — auto-rejecting`);
+      this.oc.replyPermission(sessionID, requestID, "reject").catch(() => {});
       return;
     }
     this.orch.onWaiting(conv);
