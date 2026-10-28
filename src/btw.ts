@@ -1,7 +1,8 @@
 import type { Bot } from "./bot.js";
 import type { ChatState } from "./state.js";
 import type { ConvKey } from "./conv.js";
-import { esc, trunc } from "./format.js";
+import { esc, trunc, stripTags, mdToHtmlChunks } from "./format.js";
+import { richMarkdownChunks } from "./rich.js";
 
 /**
  * `/btw` — a quick side question (Claude Code's "by the way"), answered on a
@@ -58,7 +59,20 @@ export async function cmdBtw(bot: Bot, conv: ConvKey, state: ChatState, arg: str
     } else if (!res.reply) {
       await bot.sendHtml(conv, "❓ /btw kết thúc mà không có trả lời (có thể phiên tạm bị từ chối quyền chạy tool).");
     } else {
-      await bot.sendHtml(conv, `💬 <b>btw</b>\n${esc(trunc(res.reply, BTW_REPLY_MAX))}`);
+      // Render like any other model reply (rich GFM when enabled, hand-rendered
+      // HTML otherwise) — the reply keeps its formatting instead of a flat esc'd wall.
+      const body = `💬 **btw**\n\n${stripTags(trunc(res.reply, BTW_REPLY_MAX))}`;
+      if (bot.cfg.richReplies) {
+        for (const c of richMarkdownChunks(body)) {
+          try {
+            await bot.tg.sendRich(conv, c);
+          } catch {
+            for (const h of mdToHtmlChunks(c, bot.cfg.replyMaxLen)) await bot.tg.sendMessage(conv, h);
+          }
+        }
+      } else {
+        for (const c of mdToHtmlChunks(body, bot.cfg.replyMaxLen)) await bot.tg.sendMessage(conv, c);
+      }
     }
   } catch (e) {
     // Never drop the turn silently — see the /schedule rule (project memory #105).
