@@ -1,3 +1,9 @@
 {
-  "release-type": "node"
+  "tag-template": "v${version}",
+  "packages": {
+    ".": {
+      "component": "opencode-telegram-bot",
+      "release-type": "node"
+    }
+  }
 }
