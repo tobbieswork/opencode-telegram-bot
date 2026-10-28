@@ -47,6 +47,11 @@ jobs:
       contents: write
       pull-requests: write
     steps:
+      # pull_request_target jobs have NO default workspace checkout — the
+      # directory is empty, and `gh pr merge` needs a git repo to resolve the
+      # current repository. Check out the BASE branch (the pull_request_target
+      # security model: never the PR's code).
+      - uses: actions/checkout@v4
       - name: Merge release PR (owner token, admin merge)
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PAT }}
