@@ -105,6 +105,8 @@ systemctl --user enable --now opencode-bot
 
 ## Usage
 
+> 🇻🇳 Vietnamese user guide: [docs/user-guide-vi.md](docs/user-guide-vi.md)
+
 Send any message to run it. Example:
 
 ```
