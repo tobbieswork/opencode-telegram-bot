@@ -1,11 +1,13 @@
 {
   "name": "opencode-telegram-bot",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "Remotely control a running OpenCode service from Telegram",
   "license": "MIT",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "tsx src/index.ts",
     "start": "tsx src/index.ts",
@@ -28,7 +30,6 @@
     "test:topic-delete": "tsx scripts/test-topic-delete.ts",
     "test:dns-heal": "tsx scripts/test-dns-heal.ts",
     "test:rich": "tsx scripts/test-rich-replies.ts",
-    "test:notes": "tsx scripts/test-notes.ts",
     "test:stream": "tsx scripts/test-stream.ts",
     "test:pr-watch": "tsx scripts/test-pr-watch.ts",
     "test:commands": "tsx scripts/test-commands.ts",
