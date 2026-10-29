@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-REPO_ROOT="$(cd .. && pwd -P)"
+REPO_ROOT="$(cd ../.. && pwd -P)"
 WORKROOT="${MAC_NODE_WORKROOT:-$HOME/mac-node}"
 LABEL="com.tobbies.macnode"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
