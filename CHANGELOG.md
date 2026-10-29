@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.2.5...opencode-telegram-bot-v1.3.0) (2026-10-29)
+
+
+### Features
+
+* **node:** Mac node — Claude CLI on Mac, task queue over git ([#67](https://github.com/tobbieswork/opencode-telegram-bot/issues/67)) ([dbd7bbd](https://github.com/tobbieswork/opencode-telegram-bot/commit/dbd7bbdcd535944378da52c048cab92c514e088e))
+
 ## [1.2.5](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.2.4...opencode-telegram-bot-v1.2.5) (2026-10-29)
 
 
