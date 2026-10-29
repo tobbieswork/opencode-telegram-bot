@@ -51,6 +51,8 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || break
   sleep 0.5
 done
+# The plist holds env (and possibly paths you consider private): owner-only.
+umask 077
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -78,6 +80,7 @@ ${ENV_XML}  </dict>
 </dict>
 </plist>
 EOF
+chmod 600 "$PLIST"
 plutil -lint "$PLIST" >/dev/null || { echo "✗ plist không hợp lệ: $PLIST"; exit 1; }
 
 # One retry: right after bootout launchd can still answer "Input/output error".
