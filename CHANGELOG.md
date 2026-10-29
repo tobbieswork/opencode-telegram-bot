@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.3.5...opencode-telegram-bot-v1.4.0) (2026-10-29)
+
+
+### Features
+
+* **advisor:** Claude advisor — manager consults Claude on the Mac over Tailscale ([#80](https://github.com/tobbieswork/opencode-telegram-bot/issues/80)) ([cc3b6c2](https://github.com/tobbieswork/opencode-telegram-bot/commit/cc3b6c2bbfe4aa0bbb898f55bf6c7887ae6e65d5))
+
 ## [1.3.5](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.3.4...opencode-telegram-bot-v1.3.5) (2026-10-29)
 
 
