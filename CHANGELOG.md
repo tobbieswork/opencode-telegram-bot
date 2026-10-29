@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.3](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.2.2...opencode-telegram-bot-v1.2.3) (2026-10-29)
+
+
+### Bug Fixes
+
+* **release:** push trigger no-op as owner PAT, not the creating app ([#61](https://github.com/tobbieswork/opencode-telegram-bot/issues/61)) ([50c3001](https://github.com/tobbieswork/opencode-telegram-bot/commit/50c300122f62ccfa4f9602646f515ce77cbe3af2))
+
 ## [1.2.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.2.1...opencode-telegram-bot-v1.2.2) (2026-10-29)
 
 
