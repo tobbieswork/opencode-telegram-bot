@@ -29,10 +29,21 @@ Type=simple
 # and auto-spawn the service after a reboot (the bot falls back to ensure() when
 # no running service is discovered).
 Environment=PATH=/home/phatnd12/.opencode/bin:/home/phatnd12/.nvm/versions/node/v24.21.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# The box has no IPv6 route; force IPv4-first DNS so lookups don't hang on IPv6.
+# Kept in parity with the installed unit — deploying from this template must not
+# drop it, or DNS heal / Telegram polling breaks.
+Environment="NODE_OPTIONS=--dns-result-order=ipv4first"
 WorkingDirectory=/home/phatnd12/fpt/opencode-telegram-bot
 ExecStart=/home/phatnd12/.nvm/versions/node/v24.21.0/bin/node /home/phatnd12/fpt/opencode-telegram-bot/node_modules/.bin/tsx src/index.ts
 Restart=always
 RestartSec=3
+# Graceful drain: on stop, SIGTERM goes to the main (bot) process ONLY. The
+# OpenCode child service (spawned inside the bot's cgroup) stays up so the bot
+# can finish in-flight turns and relay their final replies before exiting.
+# The bot's drain cap (45s, see src/index.ts) stays below TimeoutStopSec; past
+# that systemd escalates to SIGKILL as the backstop.
+KillMode=mixed
+TimeoutStopSec=90s
 
 [Install]
 WantedBy=default.target

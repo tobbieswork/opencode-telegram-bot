@@ -43,15 +43,40 @@ async function main(): Promise<void> {
   // relayed. Fire-and-forget so polling starts immediately.
   void bot.recoverOrphanedReplies().catch((e) => warn("reply recovery:", e?.message));
 
+  // Graceful shutdown: the FIRST signal starts a drain (stop polling, let
+  // in-flight turns finish and their final replies be sent); a SECOND signal
+  // while draining exits immediately. The drain cap must stay below the unit's
+  // TimeoutStopSec (90s) so systemd's SIGKILL escalation is always the backstop,
+  // never the normal path.
+  const DRAIN_TIMEOUT_MS = 45_000;
   let shuttingDown = false;
   const shutdown = (sig: string): void => {
-    if (shuttingDown) return;
+    if (shuttingDown) {
+      log(`${sig} received while draining — exiting immediately`);
+      process.exit(0);
+    }
     shuttingDown = true;
-    log(`\n${sig} received, stopping…`);
-    bot.stopScheduler();
-    bot.stopNode();
+    log(`${sig} received — draining in-flight turns (cap ${DRAIN_TIMEOUT_MS / 1000}s)…`);
+    // 1. Stop polling first: unacked updates get redelivered on the next start
+    //    instead of being acked by a process that is about to die.
     tg.stop();
-    setTimeout(() => process.exit(0), 500).unref();
+    // 2. No new scheduled work.
+    bot.stopScheduler();
+    // 3. Keep the OpenCode service + event stream ALIVE for the drain (no
+    //    stopNode yet): in-flight turns finish and their terminal events
+    //    arrive over the stream; the final send only needs Telegram.
+    void bot
+      .drainInflight({ timeoutMs: DRAIN_TIMEOUT_MS })
+      .then((settled) => {
+        log(settled ? "drain: all turns settled — exiting" : "drain: cap reached — exiting");
+        bot.stopNode();
+        process.exit(0);
+      })
+      .catch((e) => {
+        error("drain failed:", (e as Error)?.message ?? e);
+        bot.stopNode();
+        process.exit(0);
+      });
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
