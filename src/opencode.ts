@@ -7,6 +7,7 @@ import { ScheduledObserver } from "./scheduled-observer.js";
 import type { RunBinding, ScheduledRun } from "./scheduled-run.js";
 import { ScheduledReadinessError } from "./scheduled-run.js";
 import type { NewSessionTopic, TopicSession, TopicSessionInfo } from "./session-topics.js";
+import type { DashboardObservation } from "./session-dashboard.js";
 
 /** Tool names that modify files (their input carries the target at `.path`). */
 const MUTATING_TOOLS = new Set(["write", "edit", "apply_patch", "delete_file", "create_file", "move"]);
@@ -383,6 +384,28 @@ export class OpenCodeCtl {
     const session = unwrap<any>(await this.client.session.get({ sessionID }, { signal: AbortSignal.timeout(10_000) }));
     return { id: session.id, title: session.title, projectID: session.projectID, directory: session.location.directory,
       createdAt: session.time.created, source: this.scheduledSource(), archived: session.time.archived !== undefined };
+  }
+
+  /** Nguồn chỉ đọc cho bảng điều khiển; không tải hội thoại hoặc thay tài nguyên. */
+  async dashboardObservation(sessionID: string, signal: AbortSignal): Promise<DashboardObservation> {
+    this.ensureClient();
+    const [raw, active, forms, permissions] = await Promise.all([
+      this.client.session.get({ sessionID }, { signal }),
+      this.client.session.active({ signal }).then((value: unknown) => unwrap<Record<string, unknown>>(value)).catch(() => undefined),
+      this.client.session.form.list({ sessionID }, { signal }).then((value: unknown) => unwrap<any[]>(value)).catch(() => undefined),
+      this.client.permission.list({ sessionID }, { signal }).then((value: unknown) => unwrap<any[]>(value)).catch(() => undefined),
+    ]);
+    const session = unwrap<any>(raw);
+    const idle = session.time?.idle;
+    const settled = active !== undefined && !active[sessionID] && typeof idle === "number" && idle >= (session.time?.updated ?? 0);
+    const work = active?.[sessionID] ? "running" : !settled ? "unknown" :
+      session.outcome === "failed" ? "failed" : session.outcome === "succeeded" ? "done" :
+        session.outcome === "interrupted" ? "stopped" : "idle";
+    return { info: { id: session.id, title: session.title, directory: session.location.directory, projectID: session.projectID,
+      createdAt: session.time.created, source: this.scheduledSource(), archived: session.time.archived !== undefined }, work,
+      forms: Array.isArray(forms) ? forms.map(form => String(form.id)) : undefined,
+      permissions: Array.isArray(permissions) ? permissions.map(permission => String(permission.id)) : undefined,
+      reason: work === "unknown" ? "Chưa có bằng chứng hiện tại về trạng thái thực thi." : undefined };
   }
 
   async setModel(sessionID: string, model: { id: string; providerID: string; variant?: string }): Promise<void> {

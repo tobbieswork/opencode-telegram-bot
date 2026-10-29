@@ -60,6 +60,7 @@ const server = createServer(async (req, res) => {
   }
   if (path === "/api/session/active") return json({ data: running ? { ses_topic: { started: 3 } } : {} });
   if (path === "/api/session/ses_topic/inbox") return json({ data: [] });
+  if (path === "/api/session/ses_topic/form" || path === "/api/session/ses_topic/permission") return json({ data: [] });
   if (path === "/api/session/ses_topic/message") return json({ data: dropped ? [] : [
     { id: "msg_user", type: "user", time: { created: 2 }, text: "test" },
     { id: "msg_idle", type: "idle", time: { created: 3 }, outcome: "succeeded" },
@@ -86,6 +87,14 @@ try {
   assert.equal(title.title, "Phiên gốc");
   assert.equal(title.projectID, "project");
   assert.deepEqual(requests.slice(beforeTitle), ["/api/session/ses_topic"], "Đọc tiêu đề chỉ lấy metadata, không tải lịch sử hoặc trạng thái thực thi");
+  const beforeDashboard = requests.length;
+  const observation = await oc.dashboardObservation("ses_topic", AbortSignal.timeout(1000));
+  assert.equal(observation.info.id, "ses_topic");
+  assert.equal(observation.work, "done");
+  assert.deepEqual(observation.forms, []);
+  assert.deepEqual(observation.permissions, []);
+  assert.equal(requests.slice(beforeDashboard).length, 4);
+  assert.ok(!requests.slice(beforeDashboard).some(path => /message|interrupt|prompt/.test(path)));
   await oc.archiveSession("ses_topic", true);
   const snapshot = await oc.topicSession("ses_topic");
   assert.equal(snapshot.archived, true);

@@ -6,8 +6,8 @@ khi bắt đầu đầu việc tiếp theo. Không bật chính sách mới trê
 
 | Đầu việc | Trạng thái | Bằng chứng hoặc giới hạn |
 | --- | --- | --- |
-| CV00 | Đã triển khai, chờ chốt commit và khởi động lại | [Mốc và dữ liệu kiểm thử](workflow-foundations.md); kiểm tra kiểu và đơn vị đạt |
-| CV01 | Chưa bắt đầu | Mô hình đọc trạng thái |
+| CV00 | Hoàn thành | `d216950`; kiểu, đơn vị, đầu-cuối đạt; đã khởi động lại, giữ 4 liên kết |
+| CV01 | Đã triển khai, chờ chốt commit và khởi động lại | Mô hình đọc chỉ đọc, bộ nhớ tạm 30 giây/tối đa 1000 bản ghi, tối đa 2 phiên đọc đồng thời, thời hạn 8 giây; kiểm thử module và adapter |
 | CV02 | Chưa bắt đầu | Bảng điều khiển và bộ lọc |
 | CV03 | Chưa bắt đầu | Đang chờ bạn |
 | CV04 | Chưa bắt đầu | Hoạt động gần nhất |

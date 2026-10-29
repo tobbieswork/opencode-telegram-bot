@@ -1,6 +1,7 @@
 # Đầu việc 1 — Bảng điều khiển và danh sách Đang chờ bạn
 
-**Trạng thái:** chưa triển khai. **Thứ tự:** CV01 → CV02 → CV03 → CV04.
+**Trạng thái:** CV01 đã triển khai; CV02–CV04 chưa triển khai.
+**Thứ tự:** CV01 → CV02 → CV03 → CV04.
 **Điều kiện bắt đầu:** CV00 trong [kế hoạch tổng](../plan-session-workflow-improvements.md).
 
 ## Mục tiêu và phạm vi
@@ -17,29 +18,29 @@ mã tin Telegram; các bộ nhớ câu hỏi/quyền đang hoạt động còn n
 
 ### Công việc
 
-- [ ] Thiết kế module đọc danh sách phiên theo nhóm; vị trí dự kiến
+- [x] Thiết kế module đọc danh sách phiên theo nhóm; vị trí dự kiến
   `src/session-dashboard.ts`. Module chỉ đọc, không sở hữu liên kết hoặc điều
   kiện nhận công việc.
-- [ ] Kết hợp liên kết từ `SessionTopics`, thông tin hội thoại, tác vụ, câu
+- [x] Kết hợp liên kết từ `SessionTopics`, thông tin hội thoại, tác vụ, câu
   hỏi/quyền và dữ liệu OpenCode đã đối chiếu; không coi một trường cục bộ là
   nguồn đúng tuyệt đối cho mọi chiều trạng thái.
-- [ ] Tách rõ: vòng đời; thực thi; chờ người dùng; lỗi đồng bộ tên; độ mới dữ
+- [x] Tách rõ: vòng đời; thực thi; chờ người dùng; lỗi đồng bộ tên; độ mới dữ
   liệu. Có trạng thái **Chưa xác minh**, kèm mốc kiểm tra và lý do khi cần.
-- [ ] Quy tắc chờ người dùng dựa trên câu hỏi/quyền còn tồn tại. Truy vấn lỗi
+- [x] Quy tắc chờ người dùng dựa trên câu hỏi/quyền còn tồn tại. Truy vấn lỗi
   giữ trạng thái chưa rõ; chỉ danh sách lấy thành công mới chứng minh yêu cầu
   đã biến mất. Không dùng `waiting` của tác vụ để suy ra một câu hỏi cụ thể.
-- [ ] Đọc nhanh từ dữ liệu đã biết; làm mới có giới hạn số lời gọi đồng thời,
+- [x] Đọc nhanh từ dữ liệu đã biết; làm mới có giới hạn số lời gọi đồng thời,
   thời hạn và bộ nhớ tạm. Không gọi `topicSession()` cho mọi phiên ở mỗi lần bấm
   bộ lọc, vì lời gọi đó hiện tải nhiều nguồn dữ liệu.
-- [ ] Mỗi hàng có mã nhóm, liên kết, phiên và mốc quan sát để phía hiển thị
+- [x] Mỗi hàng có mã nhóm, liên kết, phiên và mốc quan sát để phía hiển thị
   không tự ghép hoặc đoán lại danh tính.
 
 ### Kiểm thử và nghiệm thu
 
-- [ ] Dữ liệu cũ, mất sự kiện và lỗi đối chiếu không tạo trạng thái hoàn tất giả.
-- [ ] Hai nhóm có cùng tên phiên không dùng chung dữ liệu.
-- [ ] Đọc danh sách không mở/đóng phiên, gửi yêu cầu, đổi tên hay thay mốc nhắc.
-- [ ] Lỗi đồng bộ tên không biến công việc thành thất bại.
+- [x] Dữ liệu cũ, mất sự kiện và lỗi đối chiếu không tạo trạng thái hoàn tất giả.
+- [x] Hai nhóm có cùng tên phiên không dùng chung dữ liệu.
+- [x] Đọc danh sách không mở/đóng phiên, gửi yêu cầu, đổi tên hay thay mốc nhắc.
+- [x] Lỗi đồng bộ tên không biến công việc thành thất bại.
 
 **Tệp liên quan:** `src/session-topics.ts`, `src/state.ts`, `src/opencode.ts`,
 `src/bot.ts`. Kiểm thử dự kiến: `scripts/test-session-dashboard.ts`.
