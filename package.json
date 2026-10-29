@@ -18,6 +18,8 @@
     "test:activity": "tsx scripts/test-activity.ts",
     "test:reminders": "tsx scripts/test-reminders.ts",
     "test:schedule": "tsx scripts/test-schedule.ts",
+    "test:node": "tsx scripts/test-node.ts",
+    "test:node-io": "tsx scripts/test-node-io.ts",
     "test:scheduler": "tsx scripts/test-scheduler.ts",
     "test:continue": "tsx scripts/test-continue.ts",
     "test:prune": "tsx scripts/test-prune.ts",
@@ -34,7 +36,7 @@
     "test:pr-watch": "tsx scripts/test-pr-watch.ts",
     "test:commands": "tsx scripts/test-commands.ts",
     "test:reactions": "tsx scripts/test-reactions.ts",
-    "test:unit": "npm run test:format && npm run test:fsbrowser && npm run test:state && npm run test:multi && npm run test:activity && npm run test:reminders && npm run test:schedule && npm run test:scheduler && npm run test:prune && npm run test:config && npm run test:rich && npm run test:stream && npm run test:continue && npm run test:dns-heal && npm run test:recovery && npm run test:topic-delete && npm run test:uptime && npm run test:usage && npm run test:notes && npm run test:notes-callback && npm run test:pr-watch && npm run test:reactions && npm run test:commands",
+    "test:unit": "npm run test:format && npm run test:fsbrowser && npm run test:state && npm run test:multi && npm run test:activity && npm run test:reminders && npm run test:schedule && npm run test:node && npm run test:node-io && npm run test:scheduler && npm run test:prune && npm run test:config && npm run test:rich && npm run test:stream && npm run test:continue && npm run test:dns-heal && npm run test:recovery && npm run test:topic-delete && npm run test:uptime && npm run test:usage && npm run test:notes && npm run test:notes-callback && npm run test:pr-watch && npm run test:reactions && npm run test:commands",
     "typecheck": "tsc --noEmit",
     "test:multi": "tsx scripts/test-multi.ts",
     "smoke:multi": "tsx scripts/smoke-multi.ts"
