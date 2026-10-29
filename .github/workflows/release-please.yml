@@ -40,6 +40,14 @@ jobs:
   # workflow can't rely on the `opened` event. A push to the release branch
   # (`synchronize`) DOES fire it — this job pushes a no-op commit right after
   # release-please creates (or updates) the release PR.
+  #
+  # The no-op MUST be pushed with a NON-APP identity (the owner's PAT):
+  # pushes made by the same app that created the PR (github-actions[bot]
+  # via GITHUB_TOKEN) are suppressed the same way — no `synchronize` event
+  # is emitted at all (observed live 2026-10-29 on the v1.2.2 release PR,
+  # while the identical push from a git client on a different identity did
+  # fire the event). With the owner PAT the event actor is the human owner,
+  # which always fires `pull_request_target`.
   trigger-auto-merge:
     needs: release-please
     if: ${{ always() && needs.release-please.result == 'success' }}
@@ -47,6 +55,8 @@ jobs:
     permissions:
       contents: write
       pull-requests: read
+    env:
+      RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
     steps:
       - name: Fire synchronize on the release PR
         uses: actions/github-script@v7
@@ -64,15 +74,26 @@ jobs:
               tree: head.tree.sha,
               parents: [pr.head.sha],
             });
-            // Update the branch ref through the authenticated client. The
-            // {ref} path param must be `heads/<branch>` — WITHOUT the refs/
-            // prefix. The handler builds the full ref itself; sending
-            // refs/heads/<branch> (what git.updateRef does) makes it look
-            // up refs/refs/heads/<branch> → 422 "Reference does not exist".
-            // Verified live 2026-10-28 against a throwaway branch.
-            const { data: updated } = await github.request({
-              method: 'PATCH',
-              url: `/repos/${owner}/${repo}/git/refs/heads/${pr.head.ref}`,
-              sha: bump.sha,
-            });
-            core.info('Ref now at ' + updated.ref + ' → ' + updated.object.sha);
+            // Update the branch ref through a raw API call authenticated as
+            // the owner (see job comment — must not be the creating app).
+            // The {ref} path param must be `heads/<branch>` — WITHOUT the
+            // refs/ prefix (GitHub builds the full ref itself; sending
+            // refs/heads/<branch> makes it look up refs/refs/heads/<branch>
+            // → 422 "Reference does not exist"). Verified live 2026-10-28.
+            const res = await fetch(
+              `https://api.github.com/repos/${owner}/${repo}/git/refs/heads/${pr.head.ref}`,
+              {
+                method: 'PATCH',
+                headers: {
+                  Authorization: `Bearer ${process.env.RELEASE_PAT}`,
+                  'Content-Type': 'application/json',
+                  Accept: 'application/vnd.github+json',
+                  'X-GitHub-Api-Version': '2022-11-28',
+                },
+                body: JSON.stringify({ sha: bump.sha }),
+              },
+            );
+            if (!res.ok) {
+              throw new Error(`updateRef failed: ${res.status} ${await res.text()}`);
+            }
+            core.info('Ref now at ' + pr.head.ref + ' → ' + bump.sha);
