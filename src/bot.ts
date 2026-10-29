@@ -48,6 +48,7 @@ import { Advisor } from "./node/advisor.js";
 import type { NodeDone } from "./node/node-github.js";
 import { cmdHelp, cmdStatus, cmdContext, cmdUsage, cmdHistory, cmdNote, handleNoteCallback } from "./commands/meta.js";
 import { cmdBtw } from "./btw.js";
+import { cmdAsk } from "./ask.js";
 
 /** The message carries media (sticker/photo/video/voice/…) — used to acknowledge non-text input. */
 function hasNonTextContent(m: Message): boolean {
@@ -683,7 +684,7 @@ export class Bot {
     // "got it" 🤔 when a real prompt (not a command) starts a turn.
     if (msg.message_id) this.indexUserMessage(conv, msg.message_id, text);
     const state = this.st.get(conv);
-    if (!state.directory) {
+    if (!state.directory && !state.advisor) {
       // A topic the user opened by hand starts where the chat's main session works
       // (unless that is the Manager, whose folder is not a project).
       const top = this.st.peek(chatOf(conv));
@@ -691,6 +692,11 @@ export class Bot {
     }
 
     if (text.startsWith("/")) await this.handleCommand(conv, text, state, uid);
+    else if (state.advisor && this.advisor) {
+      // A Claude advisor thread: the user's message is a follow-up question
+      // (resumes the session on the Mac). No OpenCode session is involved here.
+      await this.advisor.followUp(conv, text);
+    }
     else {
       // (The "🤔 thinking" body-react on the user's message was removed 2026-10-27:
       // the working indicator now covers "the bot is working" on new prompts.)
@@ -1510,6 +1516,8 @@ export class Bot {
         return cmdNote(this, conv, arg);
       case "/btw":
         return cmdBtw(this, conv, state, arg);
+      case "/ask":
+        return cmdAsk(this, conv, arg);
       case "/schedule":
         return cmdSchedule(this, conv, arg, state, uid);
       case "/node":
