@@ -85,8 +85,16 @@ jobs:
           # creates the GitHub Release a few seconds after the merge).
           RID=""
           for i in $(seq 1 24); do
-            RID=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/opencode-telegram-bot-v$V" -q .id 2>/dev/null || true)
-            [ -n "$RID" ] && break
+            CANDIDATE=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/opencode-telegram-bot-v$V" -q .id 2>/dev/null || true)
+            # gh api prints the raw error body to stdout on HTTP errors
+            # (verified: a 404 yields {"message":"Not Found",...}, exit 1),
+            # so only a numeric ID counts as "found" — otherwise the loop
+            # breaks on the first 404 and the PATCH below gets a JSON body
+            # as the release id (observed on the v1.2.4 chain, 2026-10-29).
+            if [[ "$CANDIDATE" =~ ^[0-9]+$ ]]; then
+              RID="$CANDIDATE"
+              break
+            fi
             sleep 5
           done
           if [ -z "$RID" ]; then
