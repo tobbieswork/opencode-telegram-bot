@@ -137,6 +137,17 @@ export interface Config {
   scheduleGraceMs: number;
   /** A scheduled run still running/waiting after this long is interrupted (slice 3). */
   scheduleTimeoutMs: number;
+  /**
+   * Mac node (Claude CLI): queue tasks to a Mac machine over the `node/mac`
+   * git branch and relay its reports back to chat. Default ON; "0" disables.
+   */
+  nodeMac: boolean;
+  /** Local single-branch clone the hub uses for the node/mac branch. */
+  nodeMacDir: string;
+  /** The repo whose `origin` hosts the node/mac branch (the Mac clones it too). */
+  nodeRepoDir: string;
+  /** Poll interval for node task results, ms (floor 10s). */
+  nodePollMs: number;
 }
 
 export function loadConfig(root: string): Config {
@@ -214,6 +225,11 @@ export function loadConfig(root: string): Config {
     // Minute-valued env → ms (the scheduler works in ms; decideRun/nextRunAfter too).
     scheduleGraceMs: parseIntSetting("OPENCODE_TG_SCHEDULE_GRACE_MIN", 60, 1) * 60_000,
     scheduleTimeoutMs: parseIntSetting("OPENCODE_TG_SCHEDULE_TIMEOUT_MIN", 30, 1) * 60_000,
+    // --- Mac node (task queue over the node/mac git branch) ---
+    nodeMac: process.env.OPENCODE_TG_NODE_MAC !== "0",
+    nodeMacDir: resolve(process.env.OPENCODE_TG_NODE_MAC_DIR?.trim() || resolve(root, "data/node/mac")),
+    nodeRepoDir: resolve(process.env.OPENCODE_TG_NODE_REPO_DIR?.trim() || process.cwd()),
+    nodePollMs: parseIntSetting("OPENCODE_TG_NODE_POLL_MS", 30_000, 10_000),
   };
   const agent = process.env.OPENCODE_DEFAULT_AGENT?.trim();
   if (agent) cfg.defaultAgent = agent;
