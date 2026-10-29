@@ -23,6 +23,7 @@ import { git, pushBranch, resolveCloneUrl } from "./git.js";
 import {
   buildDoneFile,
   claimPath,
+  codeBranchFor,
   DONE_DIR,
   NODE_BRANCH,
   parseTaskFile,
@@ -165,7 +166,7 @@ async function runTask(id: string): Promise<void> {
     await git(REPO_CLONE, ["fetch", "-q", "origin", task.base], 300_000).catch(() => {});
     await mkdir(WT_ROOT, { recursive: true });
     await git(REPO_CLONE, ["worktree", "add", "-q", wtDir, "FETCH_HEAD"], 120_000);
-    await git(wtDir, ["checkout", "-q", "-b", `node/mac/${id}`]);
+    await git(wtDir, ["checkout", "-q", "-b", codeBranchFor(id)]);
 
     // run claude
     const r = await runClaude({
@@ -183,8 +184,8 @@ async function runTask(id: string): Promise<void> {
     if (changed.trim()) {
       await git(wtDir, ["add", "-A"]);
       await git(wtDir, ["commit", "-q", "-m", `node(${id}): ${task.prompt.slice(0, 60).replace(/\n/g, " ")}`]);
-      await pushBranch(wtDir, `node/mac/${id}`);
-      done.codeBranch = `node/mac/${id}`;
+      await pushBranch(wtDir, codeBranchFor(id));
+      done.codeBranch = codeBranchFor(id);
       done.report += `\n\n🌿 Đã sửa code — branch \`${done.codeBranch}\` đã push (merge tay nếu cần).`;
     }
   } catch (e) {

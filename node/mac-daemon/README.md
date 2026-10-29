@@ -52,6 +52,6 @@ launchctl print gui/$(id -u)/com.tobbies.macnode | head -20   # trạng thái
 - Claude chạy với permission profile cố định: sửa file trong worktree +
   allowlist lệnh bash (git/npm/node/ls/cat…) — không sudo, không network,
   không có prompt nào treo được (chạy headless, không ai trả lời).
-- Code chỉ push lên branch `node/mac/<id>` — không bao giờ đụng main.
+- Code chỉ push lên branch `node-code/<id>` — không bao giờ đụng main.
 - Daemon dùng clone riêng trong `~/mac-node/repo` — không chạm clone
   làm việc của bạn.
