@@ -93,6 +93,22 @@ jobs:
             echo "WARN: GitHub release for opencode-telegram-bot-v$V not found, skipping"
             exit 0
           fi
+          # The initial fetch ran BEFORE the anchor tag existed, and waiting
+          # on the Release object is not enough — the tag can lag it. Wait
+          # for the tag on the remote, then fetch it into this clone, so
+          # rev-parse below resolves (observed failure 2026-10-29: v1.2.2
+          # normalize died with "unknown revision" on the stale local tag).
+          for i in $(seq 1 12); do
+            if git ls-remote --exit-code --tags origin "opencode-telegram-bot-v$V" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 5
+          done
+          if ! git ls-remote --exit-code --tags origin "opencode-telegram-bot-v$V" >/dev/null 2>&1; then
+            echo "WARN: anchor tag opencode-telegram-bot-v$V not found, skipping normalize"
+            exit 0
+          fi
+          git fetch origin --tags --quiet
           SHA=$(git rev-parse "opencode-telegram-bot-v$V^{commit}")
           git tag -f "v$V" "$SHA"
           git push origin "v$V"
