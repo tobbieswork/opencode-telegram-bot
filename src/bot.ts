@@ -44,6 +44,7 @@ import type { Btn, Keyboard } from "./shared.js";
 import { cmdAgents, cmdAgent, handleAgentCallback } from "./commands/agents.js";
 import { cmdSchedule, handleScheduleCallback } from "./commands/schedule.js";
 import { cmdNode, MacNode } from "./node/mac-node.js";
+import { Advisor } from "./node/advisor.js";
 import type { NodeDone } from "./node/node-github.js";
 import { cmdHelp, cmdStatus, cmdContext, cmdUsage, cmdHistory, cmdNote, handleNoteCallback } from "./commands/meta.js";
 import { cmdBtw } from "./btw.js";
@@ -243,6 +244,8 @@ export class Bot {
   private scheduler?: Scheduler;
   /** Mac node poller — public because cmdNode (node/mac-node.ts) reads it. */
   public node?: MacNode;
+  /** Claude advisor (topic + Claude session on the Mac) — present only when enabled. */
+  public advisor?: Advisor;
 
   constructor(
     public tg: Telegram,
@@ -256,12 +259,19 @@ export class Bot {
       join(dirname(this.cfg.stateFile), "schedules.json"),
       this.cfg.maxSchedules,
     );
+    if (this.cfg.advisor) {
+      this.advisor = new Advisor(
+        { tg, st, cfg, sendHtml: (c, h) => this.sendHtml(c, h), startTyping: (c) => this.startTyping(c) },
+        { url: this.cfg.advisorUrl, token: this.cfg.advisorToken },
+      );
+    }
     this.orch = new Orchestrator({
       tg,
       oc,
       st,
       cfg,
       busyNotes: this.busyNotes,
+      advisor: this.advisor,
       sendHtml: (conv, html, opts) => this.sendHtml(conv, html, opts),
       applyModelAndVariant: (sid, state) => this.applyModelAndVariant(sid, state),
       prepareNotes: (conv, sid) => this.prepareNotesTurn(conv, sid),
