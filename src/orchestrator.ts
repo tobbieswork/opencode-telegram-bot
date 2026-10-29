@@ -231,9 +231,33 @@ export class Orchestrator {
     if (!this.healTimer) {
       // Events can also be lost while connected (a dropped frame, a server
       // hiccup); a slow sweep keeps a missed turn-end from pinning a worker
-      // as busy forever.
-      this.healTimer = setInterval(() => void this.healWorkers().catch((e) => warn("heal workers:", e?.message)), 60_000);
+      // as busy forever. It also re-registers the tg-bridge when OpenCode
+      // drops the runtime-only MCP entry without a disconnect (see healBridge).
+      this.healTimer = setInterval(() => {
+        void this.healWorkers().catch((e) => warn("heal workers:", e?.message));
+        void this.healBridge().catch((e) => warn("heal bridge:", e?.message));
+      }, 60_000);
       (this.healTimer as any).unref?.();
+    }
+  }
+
+  /**
+   * Re-register the Manager's tg-bridge when it is no longer connected.
+   * The registration is runtime-only (never written to any config file) and
+   * OpenCode drops such entries when it reloads a session's project context
+   * WITHOUT dropping the bot's connection — in that case onConnect does not
+   * fire, and the Manager silently loses its tg-bridge_* tools until the next
+   * bot restart. A status check every sweep catches that; a failing
+   * mcpStatus (client not ready) is skipped, not re-registered.
+   */
+  async healBridge(): Promise<void> {
+    for (const [conv, s] of Object.entries(this.h.st.all())) {
+      if (!s.manager) continue;
+      const chat = chatOf(conv);
+      const st = await this.h.oc.mcpStatus(this.managerDir(chat), BRIDGE_NAME).catch(() => undefined);
+      if (!st || st.status === "connected") continue;
+      log(`[chat ${chat}] tg-bridge ${st.status} — re-registering`);
+      await this.ensureManagerTooling(chat).catch((e) => warn("bridge heal:", e?.message));
     }
   }
 
