@@ -245,7 +245,7 @@ export function loadConfig(root: string): Config {
     nodeRepoDir: resolve(process.env.OPENCODE_TG_NODE_REPO_DIR?.trim() || process.cwd()),
     nodePollMs: parseIntSetting("OPENCODE_TG_NODE_POLL_MS", 30_000, 10_000),
     // --- Claude advisor (consult Claude on the Mac over Tailscale) ---
-    advisorUrl: process.env.MAC_ADVISOR_URL?.trim() ?? "",
+    advisorUrl: normalizeAdvisorUrl(process.env.MAC_ADVISOR_URL ?? ""),
     advisorToken: process.env.MAC_ADVISOR_TOKEN?.trim() ?? "",
     advisor: Boolean(process.env.MAC_ADVISOR_URL?.trim() && process.env.MAC_ADVISOR_TOKEN?.trim()),
     advisorMaxTurnsPerSession: parseIntSetting("MAC_ADVISOR_MAX_TURNS_PER_SESSION", 10, 1),
@@ -265,9 +265,17 @@ function parseIntSetting(name: string, fallback: number, min: number): number {
   const raw = process.env[name]?.trim();
   if (!raw) return fallback;
   const n = Number(raw);
-  if (Number.isInteger(n) && n >= min) return n;
-  warn(`${name}=${raw} is not a whole number >= ${min} — using ${fallback}`);
-  return fallback;
+   if (Number.isInteger(n) && n >= min) return n;
+   warn(`${name}=${raw} is not a whole number >= ${min} — using ${fallback}`);
+   return fallback;
+}
+
+/** MAC_ADVISOR_URL may be a bare host:port (no scheme); the client fetches
+ *  `${url}${path}`, so a missing scheme would be read as a relative URL. */
+function normalizeAdvisorUrl(raw: string): string {
+  const u = raw.trim();
+  if (!u) return "";
+  return /^https?:\/\//i.test(u) ? u : `http://${u}`;
 }
 
 /** A float setting; anything non-finite or below `min` falls back to the default (with a warning). */
