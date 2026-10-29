@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.4](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.3.3...opencode-telegram-bot-v1.3.4) (2026-10-29)
+
+
+### Bug Fixes
+
+* **bridge:** self-heal tg-bridge after OpenCode context reload ([#76](https://github.com/tobbieswork/opencode-telegram-bot/issues/76)) ([d943bde](https://github.com/tobbieswork/opencode-telegram-bot/commit/d943bdeb5a3454783a1ca8b1f8d0b643c8535769))
+
 ## [1.3.3](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.3.2...opencode-telegram-bot-v1.3.3) (2026-10-29)
 
 
