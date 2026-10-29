@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.4](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.2.3...opencode-telegram-bot-v1.2.4) (2026-10-29)
+
+
+### Bug Fixes
+
+* **release:** normalize step waits for anchor tag before rev-parse ([#63](https://github.com/tobbieswork/opencode-telegram-bot/issues/63)) ([ae8bc9d](https://github.com/tobbieswork/opencode-telegram-bot/commit/ae8bc9de1872b12d5aa31709e256ae58a62d5b9d))
+
 ## [1.2.3](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.2.2...opencode-telegram-bot-v1.2.3) (2026-10-29)
 
 
