@@ -238,6 +238,38 @@ const repo = join(tmp, "repo");
   check("stale approval tap is refused", (await orch.handleCallback({ id: "c2", data: okBtn![0] } as any, "42", 9)) && sessions === before + 1);
   check("an old card's id (pre-restart counter) matches nothing", (await orch.handleCallback({ id: "c3", data: "ap:1:ok" } as any, "42", 9)) && /hết hạn/.test(sent.join("\n") + ""));
 
+  // Claude advisor tools: present only when the host has an advisor; start vs resume.
+  {
+    const advCalls: { kind: string; a: any }[] = [];
+    const fakeAdvisor: any = {
+      listThreads: () => [],
+      startThread: async (o: any) => {
+        advCalls.push({ kind: "start", a: o });
+        return { conv: "42:900", threadId: 900, answer: { answer: "ADVICE-1", status: "done", sessionId: "cs1", costUsd: 0, tokensIn: 0, tokensOut: 0, durationMs: 0, incomplete: false } };
+      },
+      followUp: async (conv: string, msg: string) => {
+        advCalls.push({ kind: "follow", a: { conv, msg } });
+        return { answer: { answer: `ADVICE-2: ${msg}`, status: "done", sessionId: "cs1", costUsd: 0, tokensIn: 0, tokensOut: 0, durationMs: 0, incomplete: false }, capped: false };
+      },
+    };
+    const host2: Host = { ...host, advisor: fakeAdvisor };
+    const orch2 = new Orchestrator(host2);
+    const t2 = (orch2 as any).toolsFor("42") as { name: string; run: (a: any) => Promise<string> }[];
+    const byName = (n: string) => t2.find((t) => t.name === n)!;
+    check("list_advisor_threads present", !!byName("list_advisor_threads"));
+    check("consult present", !!byName("consult"));
+    check("list_advisor_threads empty", /No open advisor threads/.test(await byName("list_advisor_threads").run({})));
+    const c1 = await byName("consult").run({ question: "postgres hay mysql", context: "big table" });
+    check("consult starts a new thread", advCalls.some((c) => c.kind === "start" && c.a.message === "postgres hay mysql" && c.a.context === "big table"), JSON.stringify(advCalls));
+    check("consult returns the answer + thread id", /ADVICE-1/.test(c1) && /thread id 900/.test(c1), c1);
+    st.set("42:900", { advisor: { title: "db", sessionId: "cs1", turns: 1, lastActive: Date.now(), createdAt: Date.now() } });
+    const c2 = await byName("consult").run({ question: "hả?", threadId: 900 });
+    check("consult reuses the thread via followUp", advCalls.some((c) => c.kind === "follow" && c.a.conv === "42:900" && c.a.msg === "hả?"), JSON.stringify(advCalls));
+    check("reuse returns the resumed answer", /ADVICE-2: hả\?/.test(c2), c2);
+    check("consult unknown threadId is a clear error", await throws(() => byName("consult").run({ question: "x", threadId: 404 }), /No advisor thread/));
+    check("consult requires a question", await throws(() => byName("consult").run({}), /question is required/));
+  }
+
   st.set("42", { auto: true });
   const auto = await tool("send_to_worker").run({ name: "api-fix", message: "also do Y" });
   check("auto mode: send goes straight through", /^Sent/.test(auto) && prompts.at(-1)?.text === "also do Y");

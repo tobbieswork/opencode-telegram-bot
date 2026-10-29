@@ -18,6 +18,7 @@ import { queueReport } from "./orchestrator/report.js";
 import { purgeConv, cmdPrune, handlePruneCallback } from "./orchestrator/purge.js";
 import { onTopicDeleted, reapPendingTopicDeletes } from "./orchestrator/topics.js";
 import type { Schedule } from "./schedule.js";
+import type { Advisor } from "./node/advisor.js";
 
 type Btn = { text: string; callback_data: string };
 type Keyboard = { inline_keyboard: Btn[][] };
@@ -30,6 +31,8 @@ export interface Host {
   cfg: Config;
   /** Shared retention for the busy-reply "Thêm vào note" button (owned by the Bot). */
   busyNotes: BusyNoteStore;
+  /** Claude advisor (topic + Claude session on the Mac). Present only when enabled. */
+  advisor?: Advisor;
   sendHtml(conv: ConvKey, html: string, opts?: { reply_markup?: Keyboard }): Promise<void>;
   applyModelAndVariant(sessionID: string, state: ChatState): Promise<void>;
   startTyping(conv: ConvKey): void;
@@ -1298,7 +1301,7 @@ export class Orchestrator {
       const r = this.h.cfg.browseRoots.find((root) => p === root || p.startsWith(root + sep));
       return r ? `${p} (root ${r}${p === r ? "" : ", rel " + relative(r, p)})` : p;
     };
-    return [
+    const tools: BridgeTool[] = [
       {
         name: "list_directories",
         description:
@@ -1421,5 +1424,56 @@ export class Orchestrator {
         },
       },
     ];
+    if (this.h.advisor) {
+      const adv = this.h.advisor;
+      const cap = this.h.cfg.advisorMaxTurnsPerSession;
+      tools.push(
+        {
+          name: "list_advisor_threads",
+          description:
+            "List open Claude advisor threads in this chat: id, title, turns used. Pass an id to consult(threadId=...) to continue it.",
+          inputSchema: { type: "object", properties: {} },
+          run: async () => {
+            const ts = adv.listThreads(chat);
+            if (!ts.length) return "No open advisor threads.";
+            return ts
+              .map((t) => `- id ${parseConv(t.conv).threadId} · ${t.title} · ${t.turns}/${cap} turns · ${timeAgo(t.lastActive)}`)
+              .join("\n");
+          },
+        },
+        {
+          name: "consult",
+          description:
+            "Ask Claude (on the Mac, a different model) for a second opinion — a hard design decision, a risky assumption, or a plan review. " +
+            "It advises only and does NOT run code, so put any relevant context (code snippets, constraints, prior decisions) in `context`. " +
+            "It opens a topic the user can also join. To continue a previous thread pass its `threadId` (from list_advisor_threads); omit for a fresh one.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              question: { type: "string", description: "The question or decision you want a second opinion on" },
+              context: { type: "string", description: "Relevant context: code snippets, constraints, prior decisions" },
+              threadId: { type: "number", description: "Continue an existing advisor thread (id from list_advisor_threads)" },
+            },
+            required: ["question"],
+          },
+          run: async (a) => {
+            const question = String(a.question ?? "").trim();
+            if (!question) throw new Error("question is required");
+            const context = a.context ? String(a.context) : undefined;
+            if (a.threadId !== undefined) {
+              const want = Number(a.threadId);
+              const conv = this.h.st.convsOfChat(chat).find(([c]) => parseConv(c).threadId === want && this.h.st.peek(c)?.advisor)?.[0];
+              if (!conv) throw new Error(`No advisor thread with id ${want}. Call list_advisor_threads.`);
+              const { answer, capped } = await adv.followUp(conv, question);
+              const tid = parseConv(conv).threadId;
+              return `${answer.answer}\n\n[advisor thread id ${tid}${capped ? " — CAP REACHED: start a new thread (no threadId) for the next question" : ""}]`;
+            }
+            const r = await adv.startThread({ chat, title: question.replace(/\s+/g, " ").slice(0, 60), message: question, context });
+            return `${r.answer.answer}\n\n[advisor thread id ${r.threadId} — pass it as threadId to continue this thread]`;
+          },
+        },
+      );
+    }
+    return tools;
   }
 }
