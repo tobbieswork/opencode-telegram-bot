@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 import { chatOf, convKey, parseConv, type ConvKey } from "./conv.js";
 import { StateManager, type ChatState } from "./state.js";
 import { topicTitle } from "./format.js";
@@ -26,6 +26,7 @@ export interface TopicTitlePolicy {
   revision: number;
   customName?: string;
 }
+export const TITLE_POLICY_LABELS: Record<TopicTitlePolicy["mode"], string> = { follow: "Theo OpenCode", keep: "Giữ tên hiện tại", custom: "Tên riêng" };
 export interface TitlePolicies {
   version: 1;
   groups: Record<string, { enabled: boolean; revision: number }>;
@@ -44,7 +45,7 @@ export interface SessionTopic {
   step?: string;
   configured: boolean;
   error?: string;
-  titleSync?: { pending: boolean; error?: string; retryAt?: number; attempts?: number };
+  titleSync?: { pending: boolean; error?: string; retryAt?: number; attempts?: number; desiredName?: string; desiredStamp?: string };
   titlePolicy?: TopicTitlePolicy;
 }
 
@@ -136,7 +137,10 @@ export class SessionTopics {
       if (link.titleSync !== undefined && (!record(link.titleSync) || typeof link.titleSync.pending !== "boolean" ||
         (link.titleSync.error !== undefined && typeof link.titleSync.error !== "string") ||
         (link.titleSync.retryAt !== undefined && (!Number.isFinite(link.titleSync.retryAt) || link.titleSync.retryAt < 0)) ||
-        (link.titleSync.attempts !== undefined && (!Number.isSafeInteger(link.titleSync.attempts) || link.titleSync.attempts < 0)))) {
+        (link.titleSync.attempts !== undefined && (!Number.isSafeInteger(link.titleSync.attempts) || link.titleSync.attempts < 0)) ||
+        (link.titleSync.desiredName !== undefined && (typeof link.titleSync.desiredName !== "string" || !link.titleSync.desiredName || topicTitle(link.titleSync.desiredName) !== link.titleSync.desiredName)) ||
+        (link.titleSync.desiredStamp !== undefined && (typeof link.titleSync.desiredStamp !== "string" || !link.titleSync.desiredStamp || link.titleSync.desiredStamp.length > 128)) ||
+        ((link.titleSync.desiredName === undefined) !== (link.titleSync.desiredStamp === undefined)))) {
         throw new Error("Dữ liệu đồng bộ tên không hợp lệ; giữ nguyên để kiểm tra.");
       }
       if (link.titlePolicy !== undefined && (!data.titlePolicies || !record(link.titlePolicy) || !["follow", "keep", "custom"].includes(link.titlePolicy.mode as string) ||
@@ -185,6 +189,39 @@ export class SessionTopics {
     return `${group.enabled}:${group.revision}:${policy.mode}:${policy.revision}`;
   }
 
+  titleScopeStamp(chat: ConvKey, id?: string): string {
+    const data = this.data();
+    if (chat !== chatOf(chat) || !data.groups[chat]) throw new Error("Đọc chính sách tên từ đúng General.");
+    const links = Object.values(data.links).filter(link => link.chat === chat && (!id || link.id === id)).sort((a, b) => a.id.localeCompare(b.id));
+    if (id && !links.length) throw new Error("Chủ đề không thuộc nhóm này.");
+    const group = data.titlePolicies?.groups[chat] ?? { enabled: data.titlePolicies ? false : data.titleSyncGroups?.[chat] === true, revision: 0 };
+    return createHash("sha256").update(JSON.stringify([group.enabled, group.revision, links.map(link => [link.id,
+      link.sessionID, link.conv, link.phase, link.identity?.source, link.identity?.projectID, link.identity?.createdAt,
+      link.titlePolicy?.mode ?? "follow", link.titlePolicy?.revision ?? 0])])).digest("hex");
+  }
+
+  titleStatus(chat: ConvKey, id: string) {
+    const link = this.require(chat, id);
+    const group = this.titleGroupPolicy(chat);
+    const policy = this.titlePolicy(chat, id);
+    const retryAt = Math.max(link.titleSync?.retryAt ?? 0, this.data().titleRetryAt?.[chat] ?? 0, this.titleWriteAfter.get(chat) ?? 0);
+    return { group, policy, confirmedName: link.title, error: link.titleSync?.error,
+      pendingName: link.titleSync?.desiredStamp === this.titlePolicyStamp(chat, id) ? link.titleSync.desiredName : undefined,
+      pending: group.enabled && policy.mode === "follow" && Boolean(link.titleSync?.pending || this.titleTimers.has(id) || this.titleJobs.has(id)),
+      retryAt: retryAt > this.titleNow() ? retryAt : undefined };
+  }
+
+  private cancelTitleTimers(chat: ConvKey, id?: string): void {
+    for (const link of this.list(chat)) {
+      if (id && link.id !== id) continue;
+      const timer = this.titleTimers.get(link.id);
+      if (timer) clearTimeout(timer);
+      this.titleTimers.delete(link.id);
+      this.titleForces.delete(link.id);
+      this.titleAgain.delete(link.id);
+    }
+  }
+
   private policyData(data: SessionTopicsData): TitlePolicies {
     data.titlePolicies ??= { version: 1, groups: Object.fromEntries(Object.keys(data.groups).map(chat =>
       [chat, { enabled: data.titleSyncGroups?.[chat] === true, revision: 0 }])) };
@@ -197,12 +234,17 @@ export class SessionTopics {
     if (chat !== chatOf(chat) || !this.enabled(chat) || typeof enabled !== "boolean") throw new Error("Đổi chính sách tên từ General của nhóm được quản lý.");
     const data = this.data();
     const existing = data.titlePolicies?.groups[chat];
-    if (existing?.enabled === enabled && !Object.keys(data.titleSyncGroups ?? {}).length) return;
+    if (existing?.enabled === enabled && !Object.keys(data.titleSyncGroups ?? {}).length) {
+      if (!enabled) this.cancelTitleTimers(chat);
+      return;
+    }
     const policies = this.policyData(data);
     const before = policies.groups[chat] ?? { enabled: false, revision: 0 };
     if (before.enabled !== enabled && before.revision === Number.MAX_SAFE_INTEGER) throw new Error("Mốc chính sách tên đã hết phạm vi; giữ nguyên để kiểm tra.");
     policies.groups[chat] = { enabled, revision: before.revision + Number(before.enabled !== enabled) };
+    if (!enabled) for (const link of Object.values(data.links)) if (link.chat === chat && link.titleSync) link.titleSync = { ...link.titleSync, pending: false };
     this.store.commitSessionTopics(data);
+    if (!enabled) this.cancelTitleTimers(chat);
   }
 
   setTitlePolicy(chat: ConvKey, id: string, input: { mode: TopicTitlePolicy["mode"]; customName?: string }): TopicTitlePolicy {
@@ -217,6 +259,7 @@ export class SessionTopics {
         this.policyData(data);
         this.store.commitSessionTopics(data);
       }
+      if (input.mode !== "follow") this.cancelTitleTimers(chat, id);
       return current;
     }
     const revision = link.titlePolicy?.revision ?? 0;
@@ -226,6 +269,7 @@ export class SessionTopics {
     const policy: TopicTitlePolicy = { mode: input.mode, revision: revision + 1, ...(customName ? { customName } : {}) };
     data.links[id] = { ...data.links[id], titlePolicy: policy, titleSync: { pending: false } };
     this.store.commitSessionTopics(data);
+    if (input.mode !== "follow") this.cancelTitleTimers(chat, id);
     return policy;
   }
 
@@ -249,29 +293,40 @@ export class SessionTopics {
     return session;
   }
 
+  async previewOpenCodeTitle(chat: ConvKey, id: string): Promise<TopicTitlePreview> {
+    const link = this.require(chat, id);
+    try {
+      const session = await this.inspectTitle(link);
+      return { id, before: link.title, after: topicTitle(session.title ?? "") || undefined,
+        deferred: link.phase !== "open" || !link.configured || session.archived };
+    } catch (error) { return { id, before: link.title, error: (error as Error).message, deferred: true }; }
+  }
+
   async previewTitles(chat: ConvKey): Promise<TopicTitlePreview[]> {
     if (chat !== chatOf(chat) || !this.enabled(chat)) throw new Error("Xem trước tên trong General của nhóm được quản lý.");
-    const rows: TopicTitlePreview[] = [];
-    for (const link of this.list(chat)) {
-      try {
+    const links = this.list(chat);
+    const rows: TopicTitlePreview[] = new Array(links.length);
+    let cursor = 0;
+    await Promise.all(Array.from({ length: Math.min(2, links.length) }, async () => {
+      while (cursor < links.length) {
+        const index = cursor++;
+        const link = links[index];
         if (link.titlePolicy && link.titlePolicy.mode !== "follow") {
-          rows.push({ id: link.id, before: link.title, after: link.title, deferred: true,
-            reason: link.titlePolicy.mode === "custom" ? "Đang dùng tên riêng; không ghi đè theo OpenCode." : "Đang giữ tên hiện tại; không ghi đè theo OpenCode." });
+          rows[index] = { id: link.id, before: link.title, after: link.title, deferred: true,
+            reason: link.titlePolicy.mode === "custom" ? "Đang dùng tên riêng; không ghi đè theo OpenCode." : "Đang giữ tên hiện tại; không ghi đè theo OpenCode." };
           continue;
         }
-        const session = await this.inspectTitle(link);
-        rows.push({ id: link.id, before: link.title, after: topicTitle(session.title ?? "") || undefined,
-          deferred: link.phase !== "open" || !link.configured || session.archived });
-      } catch (error) {
-        rows.push({ id: link.id, before: link.title, error: (error as Error).message, deferred: true });
+        try { rows[index] = await this.previewOpenCodeTitle(chat, link.id); }
+        catch (error) { rows[index] = { id: link.id, before: link.title, error: (error as Error).message, deferred: true }; }
       }
-    }
+    }));
     return rows;
   }
 
   /** Hàng đợi đổi tên tách khỏi vòng đời: không làm canPrompt thành false. */
   syncTitle(chat: ConvKey, id: string, force = false): Promise<TopicTitleResult> {
     this.require(chat, id);
+    if (this.titleStopped || !this.followsOpenCode(chat, id)) return Promise.resolve({ id, status: "disabled" });
     const existing = this.titleJobs.get(id);
     if (existing) {
       this.titleAgain.add(id);
@@ -279,7 +334,8 @@ export class SessionTopics {
       return existing;
     }
     const previous = this.titleQueues.get(chat) ?? Promise.resolve();
-    const task = previous.catch(() => {}).then(() => this.applyTitle(chat, id, force));
+    const stamp = this.titlePolicyStamp(chat, id);
+    const task = previous.catch(() => {}).then(() => this.titlePolicyStamp(chat, id) === stamp ? this.applyTitle(chat, id, force) : { id, status: "disabled" as const });
     this.titleQueues.set(chat, task);
     const result = task.finally(() => {
       if (this.titleQueues.get(chat) === task) this.titleQueues.delete(chat);
@@ -294,6 +350,7 @@ export class SessionTopics {
     let link = this.require(chat, id);
     if (this.titleStopped || !this.followsOpenCode(chat, id)) return { id, status: "disabled" };
     const policyStamp = this.titlePolicyStamp(chat, id);
+    let desiredName: string | undefined;
     if (link.phase !== "open" || !link.configured || this.operations.has(id)) return { id, status: "waiting" };
     const now = this.titleNow();
     const retryAt = Math.max(link.titleSync?.retryAt ?? 0, this.titleWriteAfter.get(chat) ?? 0, this.data().titleRetryAt?.[chat] ?? 0);
@@ -304,9 +361,12 @@ export class SessionTopics {
     try {
       const session = await this.inspectTitle(link);
       const name = topicTitle(session.title ?? "");
-      if (session.archived || !name) return { id, status: "waiting" };
       link = this.require(chat, id);
       if (this.titlePolicyStamp(chat, id) !== policyStamp || !this.followsOpenCode(chat, id)) return { id, status: "disabled" };
+      if (session.archived || !name) {
+        this.patch(id, { titleSync: { ...link.titleSync, pending: false, desiredName: undefined, desiredStamp: undefined } });
+        return { id, status: "waiting" };
+      }
       if (this.titleStopped || link.phase !== "open" || !link.configured || this.operations.has(id)) return { id, status: "waiting" };
       if (!this.canInteract(link.conv!, session.id) || link.sessionID !== session.id || link.identity?.projectID !== session.projectID ||
         link.identity.createdAt !== session.createdAt || link.identity.source !== session.source) {
@@ -314,7 +374,8 @@ export class SessionTopics {
       }
       if (!force && name === link.title && !link.titleSync?.pending) return { id, status: "unchanged" };
       if (!this.ports.renameTopic) throw new Error("Chưa cấu hình đổi tên chủ đề.");
-      this.patch(id, { titleSync: { ...link.titleSync, pending: true, error: undefined, retryAt: undefined } });
+      desiredName = name;
+      this.patch(id, { titleSync: { ...link.titleSync, pending: true, error: undefined, retryAt: undefined, desiredName: name, desiredStamp: policyStamp } });
       this.titleWriteAfter.set(chat, this.titleNow() + 1000);
       await this.ports.renameTopic(link.conv!, name);
       this.titleWriteAfter.set(chat, this.titleNow() + 1000);
@@ -334,7 +395,9 @@ export class SessionTopics {
         this.store.commitSessionTopics(data);
       }
       if (this.titlePolicyStamp(chat, id) !== policyStamp || !this.followsOpenCode(chat, id)) return { id, status: "disabled" };
-      this.patch(id, { titleSync: { pending: true, attempts, retryAt: next, error: (error as Error).message } });
+      const intendedName = desiredName ?? (link.titleSync?.desiredStamp === policyStamp ? link.titleSync.desiredName : undefined);
+      this.patch(id, { titleSync: { pending: true, attempts, retryAt: next, error: (error as Error).message,
+        ...(intendedName ? { desiredName: intendedName, desiredStamp: policyStamp } : {}) } });
       this.scheduleTitle(id, force, delay);
       return { id, status: "failed" };
     }

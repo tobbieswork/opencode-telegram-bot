@@ -82,6 +82,22 @@ try {
   assert.equal((await pending).status, "disabled");
   assert.equal(writes.length, 1, "Đổi chính sách trong lúc đọc chặn công việc cũ trước khi ghi Telegram");
   assert.equal(topics.titlePolicy("-1001", id).mode, "keep");
+  topics.setTitlePolicy("-1001", id, { mode: "follow" });
+  now += 2000;
+  const queuedStart = deferred<void>();
+  const queuedEnd = deferred<void>();
+  let queuedReads = 0;
+  titleRead = async () => { queuedReads++; queuedStart.resolve(); await queuedEnd.promise; };
+  const first = topics.syncTitle("-1001", id, true);
+  await queuedStart.promise;
+  const second = topics.syncTitle("-1001", "0000000000000002", true);
+  topics.setTitleGroupSync("-1001", false);
+  topics.setTitleGroupSync("-1001", true);
+  queuedEnd.resolve();
+  assert.equal((await first).status, "disabled");
+  assert.equal((await second).status, "disabled");
+  assert.equal(queuedReads, 1, "Công việc đã xếp hàng trước khi tắt/bật không được đọc lại rồi ghi dưới mốc mới");
+  assert.equal(writes.length, 1);
   console.log("Đạt: chính sách nhóm/chủ đề, dữ liệu cũ, mặc định, khởi động lại, quay về mã cũ an toàn và chặn thao tác lỗi thời.");
 
   const invalidFile = join(root, "invalid.json");

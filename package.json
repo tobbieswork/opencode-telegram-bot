@@ -22,7 +22,7 @@
     "test:scheduled-run": "tsx scripts/test-scheduled-run.ts && tsx scripts/test-scheduled-observer.ts && tsx scripts/test-scheduled-client.ts && tsx scripts/test-scheduled-commands.ts",
     "test:session-topics": "tsx scripts/test-session-topics.ts && tsx scripts/test-topic-adapters.ts && tsx scripts/test-session-topic-commands.ts && npm run test:manager-entry && npm run test:topic-titles && npm run test:telegram-command-html && npm run test:session-picker",
     "test:manager-entry": "tsx scripts/test-manager-entry.ts",
-    "test:topic-titles": "tsx scripts/test-topic-titles.ts && tsx scripts/test-topic-title-commands.ts && tsx scripts/test-topic-title-policies.ts",
+    "test:topic-titles": "tsx scripts/test-topic-titles.ts && tsx scripts/test-topic-title-commands.ts && tsx scripts/test-topic-title-policies.ts && tsx scripts/test-topic-title-settings.ts",
     "test:session-picker": "tsx scripts/test-session-picker.ts",
     "test:telegram-command-html": "tsx scripts/test-telegram-command-html.ts",
     "test:continue": "tsx scripts/test-continue.ts",

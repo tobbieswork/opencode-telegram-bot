@@ -1,6 +1,6 @@
 # Đầu việc 2 — Kiểm soát đồng bộ tên chủ đề
 
-**Trạng thái:** CV05 đã triển khai; CV06–CV07 chưa triển khai.
+**Trạng thái:** CV05–CV06 đã triển khai; CV07 chưa triển khai.
 **Thứ tự:** CV05 → CV06 → CV07.
 **Điều kiện bắt đầu:** CV04 đã nghiệm thu theo
 [kế hoạch tổng](../plan-session-workflow-improvements.md).
@@ -74,26 +74,41 @@ lỗi ghi đĩa trước thao tác ngoài và giữ nguyên vòng đời.
 
 ### Công việc
 
-- [ ] Thêm trang cấu hình tên trong General với trạng thái công tắc nhóm;
+- [x] Thêm trang cấu hình tên trong General với trạng thái công tắc nhóm;
   thẻ từng phiên hiển thị chế độ tên đang áp dụng.
-- [ ] Bật toàn nhóm và bật lại Theo OpenCode có xem trước phạm vi đổi tên,
+- [x] Bật toàn nhóm và bật lại Theo OpenCode có xem trước phạm vi đổi tên,
   xác nhận theo đúng người/nhóm, có thời hạn, giống nguyên tắc đang có.
-- [ ] Tắt nhóm hoặc chuyển một chủ đề sang Giữ tên hiện tại phải lưu thành
+- [x] Tắt nhóm hoặc chuyển một chủ đề sang Giữ tên hiện tại phải lưu thành
   công trước khi báo đã tắt; hủy bộ hẹn giờ và vô hiệu hóa công việc chưa ghi.
-- [ ] Hiện tên đã xác nhận, tên đang chờ nếu có, lỗi gần nhất và thời điểm thử
+- [x] Hiện tên đã xác nhận, tên đang chờ nếu có, lỗi gần nhất và thời điểm thử
   lại. Không quảng cáo bản ghi cục bộ là kết quả đọc lại tên thực tế Telegram.
-- [ ] Nút thử lại chỉ đổi tên theo chính sách hiện tại, không tự bật nhóm, bỏ
+- [x] Nút thử lại chỉ đổi tên theo chính sách hiện tại, không tự bật nhóm, bỏ
   ngoại lệ hoặc vượt qua thời gian chờ Telegram đã yêu cầu.
-- [ ] Khi lời gọi Telegram đã được gửi trước thao tác tắt, thông báo đúng giới
+- [x] Khi lời gọi Telegram đã được gửi trước thao tác tắt, thông báo đúng giới
   hạn: không bảo đảm rút lại lời gọi đang bay; xử lý phản hồi muộn theo CV07,
   không báo rằng mọi thao tác ngoài đã bị hủy tức thì.
 
 ### Kiểm thử và nghiệm thu
 
-- [ ] Bấm lặp, nút cũ, tắt trong lúc chờ metadata, tắt khi đang chờ thử lại,
+- [x] Bấm lặp, nút cũ, tắt trong lúc chờ metadata, tắt khi đang chờ thử lại,
   tắt rồi khởi động lại đều giữ đúng chính sách.
-- [ ] Người dùng/nhóm khác không dùng được bản xem trước hoặc sửa ngoại lệ.
-- [ ] Thay đổi cấu hình không dừng phiên hay tự mở lại chủ đề đã đóng.
+- [x] Người dùng/nhóm khác không dùng được bản xem trước hoặc sửa ngoại lệ.
+- [x] Thay đổi cấu hình không dừng phiên hay tự mở lại chủ đề đã đóng.
+
+Lối vào: `/sessions` → **Thiết lập tên** cho cả nhóm; thẻ phiên →
+**Thiết lập tên** cho từng chủ đề. Thẻ cấu hình và xem trước có người sở hữu,
+thời hạn 10 phút, dấu nhận diện nhóm/liên kết/chính sách. Đổi phạm vi, vòng đời
+hoặc chính sách làm thẻ cũ mất hiệu lực; sau khởi động lại phải mở thẻ mới.
+
+Ý định tên sau khi đọc metadata nằm trong `titleSync.desiredName`, gắn
+`desiredStamp` với chính sách. Đây không phải tên đã được Telegram xác nhận.
+Lỗi vẫn giữ tên cũ, ý định, lỗi và hạn thử lại. Nút thử lại giữ nguyên ngoại lệ
+và giới hạn tần suất. Tắt chỉ hủy việc chưa gửi; phản hồi đã gửi xử lý theo mốc,
+không giả định có thể thu hồi lời gọi HTTP.
+
+Kiểm thử công khai bổ sung: `scripts/test-topic-title-settings.ts`; kiểm thử
+chính sách kiểm tra cả công việc còn nằm trong hàng đợi khi tắt/bật qua lại;
+kiểm thử adapter Telegram thật xác minh HTML của trang cấu hình/xem trước.
 
 **Tệp liên quan:** `src/bot.ts`, `src/session-topics.ts`, `src/commands.ts`
 nếu cần; `scripts/test-topic-title-commands.ts`, kiểm thử HTML.

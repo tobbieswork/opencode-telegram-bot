@@ -133,6 +133,15 @@ try {
   assert.equal(st.sessionTopics()?.titleSyncGroups?.["-1002"], undefined);
   console.log("Đạt: xem trước có phân trang, cách ly nhóm và hủy không bật chính sách.");
 
+  await bot.handle(tap(`tc:open:${link.id}`));
+  assert.ok(sent.at(-1)?.text.includes("Theo OpenCode"));
+  sessions.get(link.sessionID!)!.title = "Tên <mới> & an toàn";
+  const previewControl = sent.at(-1)?.reply_markup?.inline_keyboard.flat().find((b: any) => b.callback_data?.endsWith(":preview"))?.callback_data;
+  await bot.handle(tap(previewControl));
+  assert.ok(sent.at(-1)?.text.includes("Tên &lt;mới&gt; &amp; an toàn"));
+  await bot.handle(tap(sent.at(-1)?.reply_markup?.inline_keyboard.flat().find((b: any) => b.callback_data?.endsWith(":cancel"))?.callback_data));
+  console.log("Đạt: thiết lập và xem trước từng chủ đề đi qua adapter Telegram thật, giữ an toàn HTML.");
+
   errorDescription = "TOPIC_NOT_MODIFIED";
   await tg.editForumTopic("-1001:201", "Tên");
   errorDescription = "Bad Request: not enough rights to manage topics";

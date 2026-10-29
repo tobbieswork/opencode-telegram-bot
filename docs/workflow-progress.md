@@ -11,8 +11,8 @@ khi bắt đầu đầu việc tiếp theo. Không bật chính sách mới trê
 | CV02 | Hoàn thành | `7d490f2`; kiểu, đơn vị, đầu-cuối đạt; đã khởi động lại, giữ 4 liên kết; bảng điều khiển 10 hàng/trang |
 | CV03 | Đã triển khai và áp dụng | `980450f`; kiểu, đơn vị, đầu-cuối đạt; khởi động lại giữ 4 liên kết; thử mở liên kết trên thiết bị Telegram thật để nghiệm thu ở CV15 |
 | CV04 | Hoàn thành | `ba59ed1`; kiểu, đơn vị và ghép đầu vào OpenCode thật đạt; đã khởi động lại, giữ 5 liên kết |
-| CV05 | Đã triển khai, chờ chốt commit và khởi động lại | Mô hình chính sách có phiên bản, công tắc nhóm, ngoại lệ chủ đề và mốc chống thao tác cũ; dữ liệu cũ giữ nguyên đến khi có thao tác ghi chính sách |
-| CV06 | Chưa bắt đầu | Bật/tắt theo nhóm/chủ đề |
+| CV05 | Hoàn thành | `026f3ec`; kiểu, đơn vị và đầu-cuối đạt; đã khởi động lại, giữ 5 liên kết |
+| CV06 | Đã triển khai, chờ chốt commit và khởi động lại | Thiết lập nhóm/chủ đề, xem trước đúng phạm vi, hủy hàng đợi cũ, giữ giới hạn thử lại và tên đã xác nhận khi lỗi |
 | CV07 | Chưa bắt đầu | Tên riêng và cạnh tranh |
 | CV08 | Chưa bắt đầu | Tóm tắt chỉ đọc |
 | CV09 | Chưa bắt đầu | Tiếp tục có xác nhận |

@@ -110,12 +110,29 @@ hội thoại để đọc tên, không gọi mô hình AI, không dừng công 
 kết. Chủ đề đóng chỉ được đồng bộ sau khi được mở lại bằng luồng quản lý bình
 thường; đổi tên không tự mở chủ đề. Kiểm thử riêng: `npm run test:topic-titles`.
 
+**Điều khiển từ CV06:**
+
+- `/sessions` → **Thiết lập tên** để tắt tự đồng bộ toàn nhóm hoặc xem trước
+  bật lại. Thao tác bật lại không bỏ ngoại lệ từng chủ đề.
+- Thẻ phiên → **Thiết lập tên** để chọn **Giữ tên hiện tại** hoặc xem trước,
+  xác nhận **Theo OpenCode**. Khi nhóm tắt, lựa chọn Theo OpenCode chỉ được lưu,
+  không tự bật nhóm và không tự đổi tên.
+- Thẻ phiên và trang cấu hình hiển thị chế độ, công tắc nhóm, tên đã xác nhận,
+  ý định tên đã lưu nếu đang chờ, lỗi gần nhất và hạn thử lại khi biết. Ý định
+  không được coi là tên đã áp dụng; đây vẫn là bản lưu cục bộ, không phải đọc
+  lại toàn bộ tên Telegram.
+- **Thử đồng bộ lại** không vượt `retry_after`, không tự bật nhóm hoặc bỏ
+  ngoại lệ. Tắt nhóm hủy bộ hẹn giờ và vô hiệu hóa việc chưa gửi; lời gọi
+  Telegram đang bay không thể bảo đảm rút lại. Công việc OpenCode không bị dừng.
+- Thẻ hết hạn sau 10 phút hoặc khi phạm vi/chính sách/vòng đời thay đổi; thẻ
+  trước khởi động lại không dùng lại được. Mở trang mới để thao tác tiếp.
+
 **Quay về bản mã cũ:** khi ghi chính sách từ CV05, toàn bộ trạng thái bật/tắt
 cũ được giữ trong bản ghi mới, còn bản đồ `titleSyncGroups` được để rỗng. Nếu
 quay về mã CV00–CV04, tự đổi tên mặc định dừng an toàn; không dùng nút bật tên
 của bản cũ vì chưa hiểu ngoại lệ. Giữ nguyên tệp trạng thái mới để không mất
-công việc/lịch sử. Giao diện bật/tắt theo chủ đề và đặt tên riêng lần lượt
-được bổ sung ở CV06–CV07.
+công việc/lịch sử. Giao diện bật/tắt theo chủ đề đã có ở CV06; đặt tên riêng
+được bổ sung ở CV07.
 
 ## Existing sessions
 

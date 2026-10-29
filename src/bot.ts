@@ -10,7 +10,7 @@ import { ConvKey, convKey, chatOf, parseConv } from "./conv.js";
 import { Orchestrator } from "./orchestrator.js";
 import { ScheduleStore } from "./scheduler.js";
 import { ScheduledRuns } from "./scheduled-run.js";
-import { SessionTopics, type SessionTopic, type TopicTitlePreview } from "./session-topics.js";
+import { SessionTopics, TITLE_POLICY_LABELS, type SessionTopic, type TopicTitlePreview } from "./session-topics.js";
 import { SessionDashboard, dashboardPage, DASHBOARD_FILTERS, DASHBOARD_WORK_LABELS, DASHBOARD_PHASE_LABELS, type DashboardFilter } from "./session-dashboard.js";
 import { SessionActivityLog, ACTIVITY_SOURCE_LABELS } from "./session-activity.js";
 import { Schedule, SchedSpec, formatSchedule, nextRunAfter, parseScheduleSpec } from "./schedule.js";
@@ -264,7 +264,8 @@ export class Bot {
   private topicSync?: Promise<void>;
   private topicSyncAgain = false;
   private topicAnnouncements = new Map<string, string>();
-  private titlePreviews = new Map<ConvKey, { token: string; user: number; expires: number; rows: TopicTitlePreview[] }>();
+  private titlePreviews = new Map<ConvKey, { token: string; user: number; expires: number; rows: TopicTitlePreview[]; stamp: string }>();
+  private titleSettings = new Map<string, { chat: ConvKey; user: number; expires: number; id?: string; stamp: string; preview?: TopicTitlePreview }>();
 
   constructor(
     private tg: Telegram,
@@ -434,6 +435,7 @@ export class Bot {
     this.orch.shutdown();
     this.topics.stopTitleSync();
     this.titlePreviews.clear();
+    this.titleSettings.clear();
     this.dashboardCards.clear();
     this.pendingCards.clear();
     if (this.topicTimer) clearInterval(this.topicTimer);
@@ -945,6 +947,7 @@ export class Bot {
     keyboard.push([{ text: "Làm mới", callback_data: `db:${token}:refresh:0` }, { text: "Gắn phiên có sẵn", callback_data: "st:list:0" }]);
     keyboard.push([{ text: "➕ Tạo phiên mới", callback_data: "cmd:new" }, { text: "Mở phiên quản lý", callback_data: "mgr:open" }]);
     keyboard.push([{ text: "Đồng bộ tên chủ đề", callback_data: "st:title-preview:0" }]);
+    keyboard.push([{ text: "Thiết lập tên", callback_data: "tc:open:group" }]);
     const text = ["<b>Phiên đang quản lý</b>", `${DASHBOARD_FILTERS[filter]} · ${page.total} phiên · Trang ${page.page + 1}/${page.pages}`,
       ...page.rows.flatMap((row, index) => [
         `${page.page * 10 + index + 1}. <b>${esc(trunc(row.title, 48))}</b> · ${DASHBOARD_PHASE_LABELS[row.lifecycle]} · ${DASHBOARD_WORK_LABELS[row.work]}`,
@@ -1026,14 +1029,24 @@ export class Bot {
       { text: "Mở lại phiên", callback_data: `st:restore:${link.id}` }]);
     if (!["open", "closed"].includes(link.phase)) rows.push([{ text: "Kiểm tra trạng thái", callback_data: `st:sync:${link.id}` }]);
     if (link.conv && link.sessionID && link.identity) rows.push([{ text: "Đồng bộ tên", callback_data: `st:title-sync:${link.id}` }]);
+    if (link.conv && link.sessionID && link.identity) rows.push([{ text: "Thiết lập tên", callback_data: `tc:open:${link.id}` }]);
     if (link.conv && link.sessionID) rows.push([{ text: "Xem yêu cầu đang chờ", callback_data: `pa:list:${link.id}:0` }]);
-    const titleStatus = link.titleSync?.pending ? `\nTên chủ đề: đang chờ đồng bộ${link.titleSync.error ? ` — ${esc(link.titleSync.error)}` : ""}` : "";
+    const nameStatus = link.conv && link.sessionID && link.identity ? this.topics.titleStatus(conv, link.id) : undefined;
+    const retryDate = nameStatus?.retryAt ? new Date(nameStatus.retryAt) : undefined;
+    const titleLines = nameStatus ? [
+      `Chế độ tên: ${TITLE_POLICY_LABELS[nameStatus.policy.mode]} · nhóm ${nameStatus.group.enabled ? "Bật" : "Tắt"}`,
+      nameStatus.pending ? "Đang chờ xử lý tên." : "",
+      nameStatus.pending && nameStatus.pendingName ? `Ý định tên đã lưu: ${esc(nameStatus.pendingName)}` : "",
+      nameStatus.error ? `Lỗi tên đã lưu: ${esc(trunc(nameStatus.error, 160))}` : "",
+      retryDate ? `Thử lại không sớm hơn: ${Number.isFinite(retryDate.getTime()) ? retryDate.toISOString() : "mốc chờ quá xa"}` : "",
+    ].filter(Boolean) : [];
+    const titleStatus = titleLines.length ? "\n" + titleLines.join("\n") : "";
     let activityText = "";
     if (link.conv) try {
       const activity = this.sessionActivity.read(link.conv);
       if (activity && activity.sessionID === link.sessionID) activityText = `\n\n<b>Yêu cầu gần nhất</b> · ${ACTIVITY_SOURCE_LABELS[activity.input.source]} · ${esc(timeAgo(activity.input.receivedAt))}\n${esc(trunc(activity.input.snippet, 480))}\n${activity.input.observed ? "Đã đối chiếu đầu vào" : "Bot đã nhận; chưa đối chiếu việc gửi"}${activity.uncertainty ? ` · ${esc(activity.uncertainty)}` : ""}${activity.result ? `\n<b>Đoạn phản hồi đã quan sát</b>\n${esc(trunc(activity.result.snippet, 700))}\nĐây là nội dung phản hồi, không phải bằng chứng đã kiểm thử.` : "\nChưa có kết quả đối chiếu đúng đầu vào."}`;
     } catch { activityText = "\nKhông đọc được bản ghi hoạt động; giữ nguyên để kiểm tra."; }
-    await this.tg.sendMessage(conv, `<b>${esc(link.title)}</b> · ${esc(link.phase)}\nSession: <code>${esc(link.sessionID ?? "unconfirmed")}</code>\nLink: <code>${esc(link.id)}</code>${link.step ? `\nStep: ${esc(link.step)}` : ""}${link.error ? `\n${esc(link.error)}` : ""}${titleStatus}${activityText}`,
+    await this.tg.sendMessage(conv, `<b>${esc(trunc(link.title, 160))}</b> · ${esc(link.phase)}\nSession: <code>${esc(link.sessionID ?? "unconfirmed")}</code>\nLink: <code>${esc(link.id)}</code>${link.step ? `\nStep: ${esc(link.step)}` : ""}${link.error ? `\n${esc(trunc(link.error, 280))}` : ""}${titleStatus}${activityText}`,
       { reply_markup: { inline_keyboard: rows } });
     this.topicAnnouncements.set(link.id, this.topicSignature(link));
     if (link.phase === "open") this.resumePromptReminders();
@@ -1041,11 +1054,104 @@ export class Bot {
 
   private topicSignature(link: SessionTopic): string { return `${link.phase}:${link.step ?? ""}:${link.error ?? ""}`; }
 
+  private newTitleSettings(conv: ConvKey, user: number, id?: string, preview?: TopicTitlePreview): string {
+    for (const [key, value] of this.titleSettings) if (value.expires < Date.now()) this.titleSettings.delete(key);
+    while (this.titleSettings.size >= 500) this.titleSettings.delete(this.titleSettings.keys().next().value!);
+    const token = randomBytes(6).toString("hex");
+    this.titleSettings.set(token, { chat: conv, user, id, preview, expires: Date.now() + 10 * 60_000,
+      stamp: this.topics.titleScopeStamp(conv, id) });
+    return token;
+  }
+
+  private async showTitleSettings(conv: ConvKey, user: number, id?: string): Promise<void> {
+    const link = id ? this.topics.get(id) : undefined;
+    if (id && (!link || link.chat !== conv)) throw new Error("Chủ đề không thuộc nhóm này.");
+    const group = this.topics.titleGroupPolicy(conv);
+    const token = this.newTitleSettings(conv, user, id);
+    const lines = ["<b>Thiết lập tên</b>", `Tự đồng bộ toàn nhóm: <b>${group.enabled ? "Bật" : "Tắt"}</b>`];
+    const keyboard: Btn[][] = [];
+    if (id && link) {
+      const status = this.topics.titleStatus(conv, id);
+      const mode = TITLE_POLICY_LABELS[status.policy.mode];
+      lines.push(`Chủ đề: <b>${esc(trunc(link.title, 160))}</b> · ${DASHBOARD_PHASE_LABELS[link.phase]}`, `Phiên: <code>${esc(link.sessionID!)}</code>`, `Chế độ: <b>${mode}</b>`,
+        `Tên đã nhận xác nhận: ${esc(trunc(status.confirmedName, 160))}`,
+        status.policy.customName ? `Tên riêng yêu cầu: ${esc(status.policy.customName)}` : "",
+        status.pending ? "Đang chờ xử lý tên theo chính sách hiện tại." : "Không có yêu cầu tự đổi tên đang chờ.");
+      if (status.error) lines.push(`Lỗi gần nhất: ${esc(trunc(status.error, 200))}`);
+      if (status.pending && status.pendingName) lines.push(`Ý định tên đã lưu: ${esc(status.pendingName)}`);
+      if (status.retryAt) {
+        const date = new Date(status.retryAt);
+        lines.push(`Thử lại không sớm hơn: ${Number.isFinite(date.getTime()) ? date.toISOString() : "mốc chờ quá xa"}`);
+      }
+      keyboard.push([{ text: "Theo OpenCode · xem trước", callback_data: `tc:${token}:preview` },
+        { text: "Giữ tên hiện tại", callback_data: `tc:${token}:keep` }]);
+      if (group.enabled && status.policy.mode === "follow") keyboard.push([{ text: "Thử đồng bộ lại", callback_data: `tc:${token}:retry` }]);
+      keyboard.push([{ text: "Thiết lập toàn nhóm", callback_data: "tc:open:group" }]);
+    } else {
+      lines.push("Tắt nhóm dừng tự đổi tên của mọi chủ đề. Bật lại có xem trước; ngoại lệ giữ tên/tên riêng không bị bỏ qua.");
+      if (group.enabled) keyboard.push([{ text: "Tắt tự đồng bộ toàn nhóm", callback_data: `tc:${token}:off` }]);
+      keyboard.push([{ text: group.enabled ? "Xem trước đồng bộ lại" : "Xem trước bật đồng bộ", callback_data: "st:title-preview:0" }]);
+    }
+    lines.push("Tên là bản bot đã lưu, không phải truy vấn lại mọi tên Telegram. Không đổi tiêu đề OpenCode, không dừng công việc hoặc mở lại chủ đề.");
+    keyboard.push([{ text: "Bảng điều khiển phiên", callback_data: "cmd:ls" }]);
+    await this.tg.sendMessage(conv, lines.filter(Boolean).join("\n"), { reply_markup: { inline_keyboard: keyboard } });
+  }
+
+  private async handleTitleSettings(conv: ConvKey, cb: CallbackQuery): Promise<void> {
+    const parts = (cb.data ?? "").split(":");
+    if (parts.length !== 3) throw new Error("Dữ liệu nút không hợp lệ; mở lại Thiết lập tên.");
+    const [, token, action] = parts;
+    const user = cb.from!.id;
+    if (token === "open") { await this.showTitleSettings(conv, user, action === "group" ? undefined : action); return; }
+    const card = this.titleSettings.get(token);
+    if (!card || card.chat !== conv || card.user !== user || card.expires < Date.now() || this.topics.titleScopeStamp(conv, card.id) !== card.stamp) {
+      throw new Error("Thẻ đã hết hạn, chính sách đã đổi hoặc không thuộc bạn/nhóm này. Mở lại Thiết lập tên.");
+    }
+    if (card.preview && !["confirm", "cancel"].includes(action)) throw new Error("Dùng đúng nút xác nhận hoặc hủy của bản xem trước.");
+    if (action === "off" && !card.id) {
+      this.titleSettings.delete(token);
+      this.topics.setTitleGroupSync(conv, false);
+      this.titlePreviews.delete(conv);
+      await this.tg.sendMessage(conv, "Đã tắt tự đồng bộ tên và hủy việc chưa gửi. Lời gọi Telegram đã gửi không thể rút lại; công việc OpenCode không bị dừng.");
+    } else if (action === "keep" && card.id) {
+      this.titleSettings.delete(token);
+      this.topics.setTitlePolicy(conv, card.id, { mode: "keep" });
+      this.titlePreviews.delete(conv);
+    } else if (action === "preview" && card.id) {
+      const preview = await this.topics.previewOpenCodeTitle(conv, card.id);
+      if (this.topics.titleScopeStamp(conv, card.id) !== card.stamp) throw new Error("Chính sách hoặc phiên đã đổi trong lúc xem trước; mở lại Thiết lập tên.");
+      const next = this.newTitleSettings(conv, user, card.id, preview);
+      const keyboard: Btn[][] = [];
+      if (!preview.error) keyboard.push([{ text: "Xác nhận theo OpenCode", callback_data: `tc:${next}:confirm` }]);
+      keyboard.push([{ text: "Hủy", callback_data: `tc:${next}:cancel` }]);
+      await this.tg.sendMessage(conv, [`<b>Xem trước tên chủ đề</b>`, `${esc(trunc(preview.before, 160))} → ${esc(preview.after ?? "giữ tên hiện tại vì tiêu đề phiên trống")}`,
+        preview.error ? esc(preview.error) : "Xác nhận bỏ ngoại lệ giữ tên/tên riêng cho chủ đề này; khi xử lý bot đọc lại tiêu đề mới nhất.",
+        this.topics.titleSyncEnabled(conv) ? "Chủ đề đóng chỉ đổi tên sau khi được mở lại bằng luồng quản lý." : "Nhóm đang tắt; xác nhận chỉ lưu lựa chọn, chưa tự đổi tên.",
+      ].join("\n"), { reply_markup: { inline_keyboard: keyboard } });
+      return;
+    } else if (action === "confirm" && card.id && card.preview && !card.preview.error) {
+      this.titleSettings.delete(token);
+      const link = this.topics.get(card.id)!;
+      this.topics.setTitlePolicy(conv, card.id, { mode: "follow" });
+      this.titlePreviews.delete(conv);
+      this.topics.requestTitleSync(link.sessionID, true, conv);
+      await this.tg.sendMessage(conv, "Đã chọn Theo OpenCode. Tên sẽ được xử lý khi nhóm bật và chủ đề mở; không tự mở lại hoặc gửi yêu cầu mô hình.");
+    } else if (action === "retry" && card.id && this.topics.followsOpenCode(conv, card.id)) {
+      const result = await this.topics.syncTitle(conv, card.id, true);
+      await this.tg.sendMessage(conv, ["synced", "unchanged"].includes(result.status) ? "Đã xác nhận đồng bộ tên." : "Chưa đồng bộ xong; giữ thời gian chờ, quyền và vòng đời hiện tại.");
+    } else if (action === "cancel") this.titleSettings.delete(token);
+    else throw new Error("Thao tác không phù hợp với chính sách hiện tại; không tự bật nhóm hoặc bỏ ngoại lệ.");
+    await this.showTitleSettings(conv, user, card.id);
+  }
+
   private async showTitlePreview(conv: ConvKey, user: number, token?: string, requestedPage = 0): Promise<void> {
     let preview = this.titlePreviews.get(conv);
     if (!token) {
+      const stamp = this.topics.titleScopeStamp(conv);
+      const rows = await this.topics.previewTitles(conv);
+      if (this.topics.titleScopeStamp(conv) !== stamp) throw new Error("Chính sách hoặc liên kết đã đổi trong lúc xem trước; mở lại bằng /sessions.");
       preview = { token: randomBytes(8).toString("hex"), user, expires: Date.now() + 10 * 60_000,
-        rows: await this.topics.previewTitles(conv) };
+        rows, stamp };
       this.titlePreviews.set(conv, preview);
     }
     if (!preview || preview.token !== (token ?? preview.token) || preview.user !== user || preview.expires < Date.now()) {
@@ -1067,6 +1173,7 @@ export class Bot {
     if (nav.length) rows.push(nav);
     rows.push([{ text: this.topics.titleSyncEnabled(conv) ? "Đồng bộ lại tên trong nhóm" : "Bật đồng bộ tên cho nhóm", callback_data: `st:title-enable:${preview.token}` }]);
     rows.push([{ text: "Hủy", callback_data: `st:title-cancel:${preview.token}` }]);
+    rows.push([{ text: "Thiết lập tên", callback_data: "tc:open:group" }]);
     await this.tg.sendMessage(conv, text, { reply_markup: { inline_keyboard: rows } });
   }
 
@@ -2575,6 +2682,14 @@ export class Bot {
         await this.orch.handleCommand(conv, "/manager", "on");
         return;
       }
+      if (data.startsWith("tc:")) {
+        if (conv !== chatOf(conv)) { await this.tg.answerCallbackQuery(cb.id, "Thiết lập tên trong General."); return; }
+        await this.tg.answerCallbackQuery(cb.id);
+        try { await this.handleTitleSettings(conv, cb); }
+        catch (error) { await this.tg.sendMessage(conv, esc((error as Error).message),
+          { reply_markup: { inline_keyboard: [[{ text: "Thiết lập tên", callback_data: "tc:open:group" }]] } }); }
+        return;
+      }
       if (data.startsWith("pa:")) {
         if (conv !== chatOf(conv)) { await this.tg.answerCallbackQuery(cb.id, "Mở danh sách đang chờ trong General."); return; }
         await this.tg.answerCallbackQuery(cb.id);
@@ -2631,7 +2746,7 @@ export class Bot {
               await this.showTitlePreview(conv, cb.from!.id, id, Number(page));
             } else if (action === "title-sync") {
               if (this.topics.get(id)?.chat !== conv) throw new Error("Chủ đề không thuộc nhóm này.");
-              if (!this.topics.titleSyncEnabled(conv)) await this.showTitlePreview(conv, cb.from!.id);
+              if (!this.topics.followsOpenCode(conv, id)) await this.showTitleSettings(conv, cb.from!.id, id);
               else {
                 const result = await this.topics.syncTitle(conv, id, true);
                 await this.tg.sendMessage(conv, result.status === "synced" || result.status === "unchanged" ? "Đã đồng bộ tên chủ đề." : "Tên chưa được đồng bộ; đang chờ mở phiên, kiểm tra hoặc thử lại. Công việc hiện tại không bị dừng.");
@@ -2639,7 +2754,7 @@ export class Bot {
               }
             } else if (action === "title-enable" || action === "title-cancel") {
               const preview = this.titlePreviews.get(conv);
-              if (!preview || preview.token !== id || preview.user !== cb.from!.id || preview.expires < Date.now()) {
+              if (!preview || preview.token !== id || preview.user !== cb.from!.id || preview.expires < Date.now() || preview.stamp !== this.topics.titleScopeStamp(conv)) {
                 throw new Error("Bản xem trước đã hết hạn hoặc không thuộc bạn. Mở lại bằng /sessions.");
               }
               this.titlePreviews.delete(conv);
