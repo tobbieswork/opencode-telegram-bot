@@ -64,29 +64,15 @@ jobs:
               tree: head.tree.sha,
               parents: [pr.head.sha],
             });
-            // Push via a raw API call. Two traps, both hit live:
-            // (1) the @actions/github client bundled with
-            //     actions/github-script@v7 URL-encodes the entire `ref`
-            //     parameter of git.updateRef as ONE path segment
-            //     (/git/refs/refs%2Fheads%2F...), which GitHub rejects
-            //     with 422 "Reference does not exist";
-            // (2) `git push` from this job fails with "not a git
-            //     repository" — there is no checkout, and the commit
-            //     object exists only remotely (created via the API), so
-            //     there is nothing local to push.
-            const res = await fetch(
-              `https://api.github.com/repos/${owner}/${repo}/git/refs/refs/heads/${pr.head.ref}`,
-              {
-                method: 'PATCH',
-                headers: {
-                  Authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
-                  'Content-Type': 'application/json',
-                  Accept: 'application/vnd.github+json',
-                },
-                body: JSON.stringify({ sha: bump.sha }),
-              },
-            );
-            if (!res.ok) {
-              throw new Error(`updateRef failed: ${res.status} ${await res.text()}`);
-            }
-            core.info('Pushed no-op commit to ' + pr.head.ref);
+            // Update the branch ref through the authenticated client. The
+            // {ref} path param must be `heads/<branch>` — WITHOUT the refs/
+            // prefix. The handler builds the full ref itself; sending
+            // refs/heads/<branch> (what git.updateRef does) makes it look
+            // up refs/refs/heads/<branch> → 422 "Reference does not exist".
+            // Verified live 2026-10-28 against a throwaway branch.
+            const { data: updated } = await github.request({
+              method: 'PATCH',
+              url: `/repos/${owner}/${repo}/git/refs/heads/${pr.head.ref}`,
+              sha: bump.sha,
+            });
+            core.info('Ref now at ' + updated.ref + ' → ' + updated.object.sha);
