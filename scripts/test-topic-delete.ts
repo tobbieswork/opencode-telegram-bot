@@ -48,6 +48,13 @@ async function main(): Promise<void> {
 
   const st = new StateManager(join(base, "state.json"));
   const removed: string[] = [];
+  const forgotten: string[] = [];
+  const advisor: any = {
+    listThreads: () => [],
+    startThread: async () => { throw new Error("unused"); },
+    followUp: async () => { throw new Error("unused"); },
+    forget: async (conv: string) => { const a = st.peek(conv)?.advisor; if (a) forgotten.push(a.sessionId); },
+  };
   const orch = new Orchestrator({
     tg: {},
     oc: { removeSession: async (id: string) => { removed.push(id); } },
@@ -57,6 +64,7 @@ async function main(): Promise<void> {
     sendHtml: async () => {},
     applyModelAndVariant: async () => {},
     startTyping: () => {},
+    advisor,
   } as any);
 
   try {
@@ -121,6 +129,13 @@ async function main(): Promise<void> {
       threw2 = true;
     }
     check("unknown conv: no-op, no throw", !threw2);
+
+    // ── Case 5b: an advisor thread → deleting it tells the Mac to forget the session ──
+    const convAdv = "1:120";
+    st.set(convAdv, { advisor: { title: "db", sessionId: "cs_adv", turns: 3, lastActive: Date.now(), createdAt: 0 } });
+    await orch.onTopicDeleted(convAdv);
+    check("advisor topic deleted → Mac forgets the Claude session", forgotten.includes("cs_adv"), JSON.stringify(forgotten));
+    check("advisor topic deleted → state cleared", st.peek(convAdv) === undefined);
 
     // ── Case 6: worktree SHARED with another conv (overflow respawn) → kept ──
     const wt3 = await addWorktree(repo, repo, "shared-worker");

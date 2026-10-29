@@ -39,6 +39,9 @@ export async function onTopicDeleted(o: Orchestrator, conv: ConvKey): Promise<vo
     log(`topic deleted for running worker ${w.name} (${conv}) — purging when the worker ends`);
     return;
   }
+  // An advisor thread: tell the Mac to drop the Claude session (best-effort —
+  // the Mac's own 24h TTL is the safety net if it's offline when this fires).
+  if (s.advisor) await o.h.advisor?.forget(conv).catch(() => {});
   // Purge now: the topic is gone and nothing is running in it. First stop any
   // lingering bot-side turn for a normal/manager topic (a turn can still be
   // live here — typing, inflight, activity — and would keep failing sends),
