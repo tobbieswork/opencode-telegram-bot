@@ -1,6 +1,7 @@
 # Đầu việc 1 — Bảng điều khiển và danh sách Đang chờ bạn
 
-**Trạng thái:** CV01–CV03 đã triển khai; CV04 chưa triển khai.
+**Trạng thái:** CV01–CV04 đã triển khai; thử mở liên kết trên thiết bị thật
+còn chờ bước nghiệm thu CV15.
 **Thứ tự:** CV01 → CV02 → CV03 → CV04.
 **Điều kiện bắt đầu:** CV00 trong [kế hoạch tổng](../plan-session-workflow-improvements.md).
 
@@ -123,35 +124,54 @@ tài liệu không cam kết giữ các câu trả lời chưa gửi qua lần k
 
 ### Công việc
 
-- [ ] Bổ sung bản ghi hoạt động nhỏ theo đúng phiên: đoạn yêu cầu gần nhất,
+- [x] Bổ sung bản ghi hoạt động nhỏ theo đúng phiên: đoạn yêu cầu gần nhất,
   đoạn kết quả đã có, mã đầu vào/lượt thực thi nếu có, thời gian và nguồn.
-- [ ] Không lấy `WorkerInfo.task` làm yêu cầu mới nhất; không coi `msgIndex`
+- [x] Không lấy `WorkerInfo.task` làm yêu cầu mới nhất; không coi `msgIndex`
   phục vụ phản ứng biểu tượng là lịch sử bền vững vì nó bị cắt theo giới hạn.
-- [ ] Chỉ cập nhật kết quả cho đúng đầu vào/lượt đã quan sát; không để phản hồi
+- [x] Chỉ cập nhật kết quả cho đúng đầu vào/lượt đã quan sát; không để phản hồi
   muộn của lượt A ghi đè thông tin lượt B. Thiếu bằng chứng thì ghi chưa rõ.
-- [ ] Giới hạn từng đoạn và tổng kích thước; không lưu thêm toàn bộ hội thoại,
+- [x] Giới hạn từng đoạn và tổng kích thước; không lưu thêm toàn bộ hội thoại,
   đầu vào công cụ hoặc dữ liệu nhạy cảm không cần hiển thị trong General.
-- [ ] Lưu qua `StateManager`, tương thích dữ liệu thiếu bản ghi mới. Với phiên
+- [x] Lưu qua `StateManager`, tương thích dữ liệu thiếu bản ghi mới. Với phiên
   cũ, không tự tải toàn bộ lịch sử để lấp dữ liệu; chỉ bổ sung khi được quan sát
   hoặc khi người dùng mở chi tiết với truy vấn có giới hạn.
-- [ ] Đưa các đoạn và mốc dữ liệu vào thẻ chi tiết; đây là dữ liệu đầu vào dùng
+- [x] Đưa các đoạn và mốc dữ liệu vào thẻ chi tiết; đây là dữ liệu đầu vào dùng
   chung cho tóm tắt quay lại và tìm kiếm ở các đầu việc sau.
 
 ### Kiểm thử và nghiệm thu
 
-- [ ] Yêu cầu từ chủ đề, từ phiên quản lý, từ lượt lịch và thay đổi ngoài
+- [x] Yêu cầu từ chủ đề, từ phiên quản lý, từ lượt lịch và thay đổi ngoài
   Telegram không bị gán nhầm nguồn. Nguồn không quan sát được phải ghi rõ.
-- [ ] Khởi động lại, ghi lỗi, phản hồi muộn và dữ liệu quá dài không làm mất
+- [x] Khởi động lại, ghi lỗi, phản hồi muộn và dữ liệu quá dài không làm mất
   liên kết hoặc thay đổi trạng thái nhận công việc.
-- [ ] Không xuất hiện nội dung phiên khác nhóm trong bản ghi hoặc giao diện.
+- [x] Không xuất hiện nội dung phiên khác nhóm trong bản ghi hoặc giao diện.
+
+`src/session-activity.ts` lưu một bản ghi phiên bản 1 trong
+`ChatState.sessionActivity`: mã đầu vào, nguồn, đoạn yêu cầu tối đa 1200 ký tự,
+mã phản hồi và đoạn kết quả tối đa 1800 ký tự, mốc nhận/quan sát/tạo tại nguồn
+nếu biết, phiên bản mốc và lý do chưa đối chiếu. Chỉ dữ liệu quan sát ở đúng
+ranh giới tin user mới được ghép; V2 không có mã đầu vào trên mọi tin assistant
+hoặc mã lượt trên sự kiện kết thúc. Truy vấn yêu cầu `order: "desc"` rõ ràng.
+
+Luồng chủ đề, quản lý và lịch ghi ý định bằng đúng mã gửi; báo cáo tự động có
+nguồn riêng. Sự kiện giao đầu vào/kết thúc chỉ đánh thức đọc metadata và tối đa
+40 tin mới nhất của phiên đó, thời hạn 3 giây, gộp các lần đánh thức cùng phiên;
+không tự đọc lại lịch sử mọi phiên khi khởi động. Đọc trả về muộn chỉ được ghi
+nếu phiên bản mốc chưa đổi. Thiếu nguồn hoặc thiếu đầu vào thì giữ chưa rõ.
+
+Lưu lỗi được hoàn tác ở `StateManager`; lỗi của bản ghi phụ không tạo yêu cầu
+mới, sửa dung lượng hoặc phát lại lịch. Có che một số mẫu bí mật phổ biến,
+nhưng không cam kết tự nhận diện mọi bí mật; không lưu đầu vào công cụ hoặc
+toàn bộ phản hồi. Tệp trạng thái vẫn cần được bảo vệ như dữ liệu hội thoại.
 
 **Tệp liên quan:** `src/state.ts`, `src/bot.ts`, `src/orchestrator.ts`,
 `src/opencode.ts`; kiểm thử bản ghi hoạt động và dữ liệu lưu cũ/mới.
 
 ## Điều kiện bàn giao nhóm tính năng
 
-- [ ] CV01–CV04 đạt; `/sessions` vẫn tìm/gắn được phiên cũ như trước.
-- [ ] Danh sách Đang chờ bạn dùng được hoàn toàn qua nút Telegram.
-- [ ] Cập nhật hướng dẫn và ghi rõ độ trễ làm mới, giới hạn dữ liệu đã biết.
+- [x] CV01–CV04 được triển khai và kiểm thử; `/sessions` vẫn tìm/gắn được phiên
+  cũ như trước. Phần thao tác mở liên kết thật còn chờ CV15, không coi là đã nghiệm thu.
+- [x] Danh sách Đang chờ bạn có đủ lối vào và thao tác bằng nút Telegram.
+- [x] Cập nhật hướng dẫn và ghi rõ độ trễ làm mới, giới hạn dữ liệu đã biết.
 
 **Tiếp theo:** [CV05–CV07 — Kiểm soát tên chủ đề](02-topic-title-controls.md).

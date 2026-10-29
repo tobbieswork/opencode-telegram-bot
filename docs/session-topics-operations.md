@@ -28,6 +28,11 @@ and all command/button handlers enforce General versus work-topic scope.
   chủ đề gốc; không trả lời, cấp quyền hoặc tạo yêu cầu OpenCode từ General.
   Lỗi truy vấn giữ trạng thái chưa rõ, không coi là hết chờ. Số lần nhắc được
   giữ nguyên; tắt nhắc vẫn lưu mã tin để điều hướng sau khi khởi động lại.
+- Thẻ chi tiết hiển thị đoạn yêu cầu/kết quả gần nhất có mã đối chiếu và nguồn.
+  Bản ghi thiếu bằng chứng sẽ ghi chưa đối chiếu, không lấy yêu cầu ban đầu
+  của tác vụ làm yêu cầu mới nhất. Đây là đoạn phản hồi đã quan sát, không phải
+  xác nhận độc lập rằng mô hình đã sửa tệp hoặc kiểm thử thành công. Phiên cũ
+  không bị tự quét toàn bộ lịch sử; cập nhật từ công việc mới/sự kiện đã biết.
 - **Gắn phiên có sẵn**, `/attach` hoặc `/use` không có mã mở danh sách chọn
   có tên. Danh sách chỉ đọc, không gửi lại thẻ của mọi phiên đã quản lý.
   Saved legacy sessions of this group are included, even outside the

@@ -9,8 +9,8 @@ khi bắt đầu đầu việc tiếp theo. Không bật chính sách mới trê
 | CV00 | Hoàn thành | `d216950`; kiểu, đơn vị, đầu-cuối đạt; đã khởi động lại, giữ 4 liên kết |
 | CV01 | Hoàn thành | `4237cde`; kiểu, đơn vị, đầu-cuối đạt; đã khởi động lại, giữ 4 liên kết; bộ nhớ tạm 30 giây, tối đa 1000 bản ghi |
 | CV02 | Hoàn thành | `7d490f2`; kiểu, đơn vị, đầu-cuối đạt; đã khởi động lại, giữ 4 liên kết; bảng điều khiển 10 hàng/trang |
-| CV03 | Đã triển khai, chờ chốt commit và khởi động lại | Liên kết câu hỏi/quyền, hiển thị lại, kiểm tra nguồn trước trả lời; thử mở liên kết trên thiết bị Telegram thật để nghiệm thu ở CV15 |
-| CV04 | Chưa bắt đầu | Hoạt động gần nhất |
+| CV03 | Đã triển khai và áp dụng | `980450f`; kiểu, đơn vị, đầu-cuối đạt; khởi động lại giữ 4 liên kết; thử mở liên kết trên thiết bị Telegram thật để nghiệm thu ở CV15 |
+| CV04 | Đã triển khai, chờ chốt commit và khởi động lại | Yêu cầu/kết quả có mã ghép và nguồn; đoạn lưu 1200/1800 ký tự; đọc mới nhất tối đa 40 tin, không quét toàn bộ lịch sử |
 | CV05 | Chưa bắt đầu | Mô hình chính sách tên |
 | CV06 | Chưa bắt đầu | Bật/tắt theo nhóm/chủ đề |
 | CV07 | Chưa bắt đầu | Tên riêng và cạnh tranh |

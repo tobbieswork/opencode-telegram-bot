@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { loadConfig } from "../src/config.js";
 import { OpenCodeCtl } from "../src/opencode.js";
 import { StateManager } from "../src/state.js";
+import { SessionActivityLog } from "../src/session-activity.js";
 import { Bot } from "../src/bot.js";
 import { Telegram, Update } from "../src/telegram.js";
 
@@ -123,6 +124,8 @@ async function main(): Promise<void> {
   const done = await waitFor((a) => a.some((m) => /· \d+(\.\d+)?s/.test(m)), mock.out);
   console.log("\n(prompt task completed:", done, ")");
   checks.push(["hoàn tất prompt đầu", done]);
+  const activity = new SessionActivityLog(st).read("42");
+  checks.push(["hoạt động ghép đúng đầu vào thật", activity?.input.source === "topic" && activity.input.snippet === "Reply with exactly the single word: HELLO. Nothing else." && activity.result?.inputID === activity.input.id && activity.result?.snippet === "HELLO"]);
   show("prompt reply");
 
   await bot.handle(upd("/status"));

@@ -12,6 +12,7 @@ import { ScheduleStore } from "./scheduler.js";
 import { ScheduledRuns } from "./scheduled-run.js";
 import { SessionTopics, type SessionTopic, type TopicTitlePreview } from "./session-topics.js";
 import { SessionDashboard, dashboardPage, DASHBOARD_FILTERS, DASHBOARD_WORK_LABELS, DASHBOARD_PHASE_LABELS, type DashboardFilter } from "./session-dashboard.js";
+import { SessionActivityLog, ACTIVITY_SOURCE_LABELS } from "./session-activity.js";
 import { Schedule, SchedSpec, formatSchedule, nextRunAfter, parseScheduleSpec } from "./schedule.js";
 import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure } from "./format.js";
@@ -251,6 +252,11 @@ export class Bot {
   private scheduler?: ScheduledRuns;
   private topics: SessionTopics;
   private dashboard: SessionDashboard;
+  private sessionActivity: SessionActivityLog;
+  private activityReads = new Map<ConvKey, Promise<void>>();
+  private activityAgain = new Set<ConvKey>();
+  private activityAborts = new Map<ConvKey, AbortController>();
+  private activityStopped = false;
   private dashboardCards = new Map<string, { chat: ConvKey; user: number; expires: number; filter: DashboardFilter; page: number }>();
   private pendingCards = new Map<string, { chat: ConvKey; user: number; expires: number; linkID: string; sessionID: string; identity: string;
     items: Array<{ id: string; kind: "form" | "permission" }> }>();
@@ -272,6 +278,7 @@ export class Bot {
       join(dirname(this.cfg.stateFile), "schedules.json"),
       this.cfg.maxSchedules,
     );
+    this.sessionActivity = new SessionActivityLog(st);
     this.topics = new SessionTopics(st, {
       createSession: (input) => oc.createTopicSession(input),
       session: (id) => oc.topicSession(id),
@@ -324,6 +331,7 @@ export class Bot {
       st,
       cfg,
       topics: this.topics,
+      activity: this.sessionActivity,
       stopTopicWork: (conv) => this.stopManagedTopic(conv),
       busyNotes: this.busyNotes,
       sendHtml: (conv, html, opts) => this.sendHtml(conv, html, opts),
@@ -379,6 +387,7 @@ export class Bot {
 
   /** Begin relaying OpenCode question forms to Telegram. Called once from index.ts. */
   start(): void {
+    this.activityStopped = false;
     this.oc.subscribeEvents(
       (ev) => this.onOpenCodeEvent(ev),
       (e) => warn("event stream:", e?.message ?? e),
@@ -418,6 +427,9 @@ export class Bot {
 
   /** Stop the /schedule tick engine (called from index.ts during shutdown). */
   stopScheduler(): void {
+    this.activityStopped = true;
+    for (const controller of this.activityAborts.values()) controller.abort();
+    this.activityAgain.clear();
     this.scheduler?.stop();
     this.orch.shutdown();
     this.topics.stopTitleSync();
@@ -1016,7 +1028,12 @@ export class Bot {
     if (link.conv && link.sessionID && link.identity) rows.push([{ text: "Đồng bộ tên", callback_data: `st:title-sync:${link.id}` }]);
     if (link.conv && link.sessionID) rows.push([{ text: "Xem yêu cầu đang chờ", callback_data: `pa:list:${link.id}:0` }]);
     const titleStatus = link.titleSync?.pending ? `\nTên chủ đề: đang chờ đồng bộ${link.titleSync.error ? ` — ${esc(link.titleSync.error)}` : ""}` : "";
-    await this.tg.sendMessage(conv, `<b>${esc(link.title)}</b> · ${esc(link.phase)}\nSession: <code>${esc(link.sessionID ?? "unconfirmed")}</code>\nLink: <code>${esc(link.id)}</code>${link.step ? `\nStep: ${esc(link.step)}` : ""}${link.error ? `\n${esc(link.error)}` : ""}${titleStatus}`,
+    let activityText = "";
+    if (link.conv) try {
+      const activity = this.sessionActivity.read(link.conv);
+      if (activity && activity.sessionID === link.sessionID) activityText = `\n\n<b>Yêu cầu gần nhất</b> · ${ACTIVITY_SOURCE_LABELS[activity.input.source]} · ${esc(timeAgo(activity.input.receivedAt))}\n${esc(trunc(activity.input.snippet, 480))}\n${activity.input.observed ? "Đã đối chiếu đầu vào" : "Bot đã nhận; chưa đối chiếu việc gửi"}${activity.uncertainty ? ` · ${esc(activity.uncertainty)}` : ""}${activity.result ? `\n<b>Đoạn phản hồi đã quan sát</b>\n${esc(trunc(activity.result.snippet, 700))}\nĐây là nội dung phản hồi, không phải bằng chứng đã kiểm thử.` : "\nChưa có kết quả đối chiếu đúng đầu vào."}`;
+    } catch { activityText = "\nKhông đọc được bản ghi hoạt động; giữ nguyên để kiểm tra."; }
+    await this.tg.sendMessage(conv, `<b>${esc(link.title)}</b> · ${esc(link.phase)}\nSession: <code>${esc(link.sessionID ?? "unconfirmed")}</code>\nLink: <code>${esc(link.id)}</code>${link.step ? `\nStep: ${esc(link.step)}` : ""}${link.error ? `\n${esc(link.error)}` : ""}${titleStatus}${activityText}`,
       { reply_markup: { inline_keyboard: rows } });
     this.topicAnnouncements.set(link.id, this.topicSignature(link));
     if (link.phase === "open") this.resumePromptReminders();
@@ -1990,7 +2007,7 @@ export class Bot {
       this.inflight.set(conv, ac);
       log(`[chat ${conv}] prompt on ${sid} (${text.length} chars)`);
       // Fire-and-forget: don't block the polling loop; /stop aborts `ac`.
-      void this.runPromptTask(conv, sid, promptText, ac, userMsgId).catch((e) => error("prompt task:", e?.message)).finally(() => releaseWorker?.());
+      void this.runPromptTask(conv, sid, promptText, ac, userMsgId, text).catch((e) => error("prompt task:", e?.message)).finally(() => releaseWorker?.());
     } catch (e) {
       this.stopTyping(conv); // don't leave "typing…" running if the prompt never started
       releaseWorker?.();
@@ -1998,11 +2015,12 @@ export class Bot {
     }
   }
 
-  private async runPromptTask(conv: ConvKey, sid: string, text: string, ac: AbortController, userMsgId?: number): Promise<void> {
+  private async runPromptTask(conv: ConvKey, sid: string, text: string, ac: AbortController, userMsgId?: number, originalText = text): Promise<void> {
     // One id for this user message, reused by the reconnect retry below: the
     // server dedupes on it, so the retry waits on the same turn instead of
     // running the instruction a second time.
     const messageID = newMessageID();
+    this.recordSessionActivity(() => this.sessionActivity.begin(conv, { sessionID: sid, inputID: messageID, text: originalText, source: "topic" }));
     // Bump the turn generation: invalidates any preview state from a previous
     // turn (its wrapper may still linger to absorb late deltas) and starts the
     // streaming wrapper for this turn fresh.
@@ -2026,6 +2044,9 @@ export class Bot {
         }
       }
       if (this.topics.enabled(conv) && ac.signal.aborted) return;
+      if (res.replyID && res.replyInputID === messageID) this.recordSessionActivity(() => this.sessionActivity.complete(conv,
+        { sessionID: sid, inputID: messageID, messageID: res.replyID!, text: res.reply, outcome: res.replyOutcome, createdAt: res.replyTime }));
+      else this.recordSessionActivity(() => this.sessionActivity.uncertain(conv, sid, messageID, "Chưa đối chiếu được phản hồi với đúng đầu vào."));
       this.stopTyping(conv);
       // Drop the live preview before the final message lands (group transport
       // keeps a real, self-editing message that must not outlive the reply).
@@ -2057,6 +2078,7 @@ export class Bot {
       if (!res.interrupted && res.reply) await this.maybeOfferPlanToBuild(conv);
     } catch (e) {
       if (this.topics.enabled(conv) && ac.signal.aborted) return;
+      this.recordSessionActivity(() => this.sessionActivity.uncertain(conv, sid, messageID, "Kết quả gửi hoặc thực thi chưa được đối chiếu."));
       this.stopTyping(conv);
       await this.dropPreview(conv);
       error("prompt error:", (e as Error)?.message);
@@ -3836,8 +3858,47 @@ export class Bot {
 
   // ── question forms (the agent's `question` tool) ──────────────────────────
   /** Entry point for every OpenCode event; only question forms interest us. */
+  private recordSessionActivity(record: () => unknown): void {
+    if (this.activityStopped) return;
+    try { record(); } catch (error) { warn("Không lưu được bản ghi hoạt động:", (error as Error).message); }
+  }
+
+  private observeSessionActivity(conv: ConvKey): Promise<void> {
+    const existing = this.activityReads.get(conv);
+    if (existing) { this.activityAgain.add(conv); return existing; }
+    const task = (async () => {
+      for (let attempt = 0; attempt < 2 && !this.activityStopped; attempt++) {
+        this.activityAgain.delete(conv);
+        const sid = this.st.peek(conv)?.sessionID;
+        if (!sid) return;
+        const link = this.topics.forTopic(conv);
+        if (this.topics.enabled(conv) && !this.topics.canInteract(conv, sid)) return;
+        const revision = this.sessionActivity.read(conv)?.revision;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 3000);
+        this.activityAborts.set(conv, controller);
+        try {
+          const snapshot = await this.oc.activitySnapshot(sid, controller.signal);
+          if (this.activityStopped || controller.signal.aborted || this.st.peek(conv)?.sessionID !== sid) return;
+          if (link && (snapshot.info.id !== sid || snapshot.info.source !== link.identity?.source ||
+            snapshot.info.projectID !== link.identity?.projectID || snapshot.info.createdAt !== link.identity?.createdAt ||
+            this.topics.forTopic(conv)?.id !== link.id || JSON.stringify(this.topics.forTopic(conv)?.identity) !== JSON.stringify(link.identity) ||
+            !this.topics.canInteract(conv, sid))) throw new Error("Danh tính phiên đổi trong lúc đọc hoạt động.");
+          this.sessionActivity.observe(conv, sid, revision, snapshot.messages);
+        } finally { clearTimeout(timer); this.activityAborts.delete(conv); }
+        if (!this.activityAgain.has(conv)) break;
+      }
+    })().finally(() => { this.activityReads.delete(conv); this.activityAgain.delete(conv); });
+    this.activityReads.set(conv, task);
+    return task;
+  }
+
   private onOpenCodeEvent(ev: any): void {
     const t = ev?.type;
+    if (["session.inbox.delivered", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"].includes(t)) {
+      const conv = ev?.data?.sessionID ? this.st.findChatBySession(ev.data.sessionID) : undefined;
+      if (conv) void this.observeSessionActivity(conv).catch(error => warn("Không đối chiếu được hoạt động phiên:", error?.message));
+    }
     if (t === "session.renamed" && typeof ev?.data?.sessionID === "string") {
       this.topics.requestTitleSync(ev.data.sessionID);
       return;

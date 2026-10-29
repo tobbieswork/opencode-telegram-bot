@@ -18,6 +18,7 @@ import { addWorktree, diffSummary, gitRoot, mergeWorktree, removeWorktree } from
 import { Orchestrator, Host } from "../src/orchestrator.js";
 import { BusyNoteStore } from "../src/notes.js";
 import { loadConfig, type Config } from "../src/config.js";
+import { SessionActivityLog } from "../src/session-activity.js";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: string): void {
@@ -138,7 +139,7 @@ const repo = join(tmp, "repo");
   const closedTopics: string[] = [];
   const removedSessions: string[] = [];
   const topics: string[] = [];
-  const prompts: { sid: string; text: string }[] = [];
+  const prompts: { sid: string; text: string; id?: string }[] = [];
   const replyOpts: any[] = [];
   let sessions = 0;
   const tg: any = {
@@ -153,7 +154,7 @@ const repo = join(tmp, "repo");
   };
   const oc: any = {
     createSession: async () => `ses_${++sessions}`,
-    prompt: async (sid: string, text: string) => (prompts.push({ sid, text }), "msg_x"),
+    prompt: async (sid: string, text: string, opts?: { messageID?: string }) => (prompts.push({ sid, text, id: opts?.messageID }), opts?.messageID ?? "msg_x"),
     interrupt: async () => {},
     removeSession: async (sid: string) => void removedSessions.push(sid),
     latestReply: async (_sid: string, _after: number, opts: any) => (replyOpts.push(opts), { text: "did it\nSUMMARY: ok", time: 5 }),
@@ -179,6 +180,7 @@ const repo = join(tmp, "repo");
     oc,
     st,
     cfg,
+    activity: new SessionActivityLog(st),
     busyNotes: new BusyNoteStore(),
     sendHtml: async (_conv, html, opts) => {
       sent.push(html);
@@ -186,6 +188,7 @@ const repo = join(tmp, "repo");
     },
     applyModelAndVariant: async () => {},
     startTyping: () => {},
+    startWorking: () => {}, stopWorking: () => {},
   };
   const orch = new Orchestrator(host);
   const spawn = (name: string, directory: string, extra: object = {}) =>
@@ -195,6 +198,7 @@ const repo = join(tmp, "repo");
   check("spawn opens a topic named with status", topics[0] === "🟢 api-fix" && r.conv === "42:101");
   check("spawn binds a session to the topic", st.get("42:101").sessionID === "ses_1" && st.findChatBySession("ses_1") === "42:101");
   check("task is prompted with the worker preamble", prompts[0]?.sid === "ses_1" && /worker "api-fix"/.test(prompts[0].text) && /do X$/.test(prompts[0].text));
+  check("Ghi đúng yêu cầu gốc và mã gửi của tác vụ", host.activity?.read(r.conv)?.input.snippet === "do X" && host.activity?.read(r.conv)?.input.id === prompts[0].id);
   check("rejects a bad name", await throws(() => spawn("Bad Name!", root), /không hợp lệ/));
   check("rejects a duplicate name", await throws(() => spawn("api-fix", root), /Đã có worker/));
   check("rejects a dir outside the roots", await throws(() => spawn("w2", join(tmp, "outside")), /ngoài vùng/));
@@ -221,6 +225,9 @@ const repo = join(tmp, "repo");
 
   // Manager tools: confirm mode puts a card in front of the user.
   st.set("42", { manager: true, sessionID: "ses_mgr" });
+  await orch.promptManager("42", "Lập kế hoạch cải tiến");
+  check("Yêu cầu quản lý có nguồn và mã gửi riêng", host.activity?.read("42")?.input.source === "manager" && host.activity?.read("42")?.input.id === prompts.at(-1)?.id);
+  orch.onExecution("42", "session.execution.succeeded");
   const tools = (orch as any).toolsFor("42") as { name: string; run: (a: any) => Promise<string> }[];
   const tool = (n: string) => tools.find((t) => t.name === n)!;
   orch.onExecution(a.conv, "session.execution.succeeded");

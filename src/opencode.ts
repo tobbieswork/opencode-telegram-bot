@@ -8,6 +8,7 @@ import type { RunBinding, ScheduledRun } from "./scheduled-run.js";
 import { ScheduledReadinessError } from "./scheduled-run.js";
 import type { NewSessionTopic, TopicSession, TopicSessionInfo } from "./session-topics.js";
 import type { DashboardObservation } from "./session-dashboard.js";
+import type { ActivityMessage } from "./session-activity.js";
 
 /** Tool names that modify files (their input carries the target at `.path`). */
 const MUTATING_TOOLS = new Set(["write", "edit", "apply_patch", "delete_file", "create_file", "move"]);
@@ -41,6 +42,9 @@ export interface PromptResult {
   elapsedMs: number;
   /** time.created of the assistant message that produced `reply` (0 if none). */
   replyTime?: number;
+  replyID?: string;
+  replyInputID?: string;
+  replyOutcome?: string;
   /** Provider/turn error from the newest assistant/idle/compaction message (present on a failed turn). */
   error?: { type?: string; message?: string };
 }
@@ -379,9 +383,9 @@ export class OpenCodeCtl {
   }
 
   /** Đọc tên và danh tính bằng một yêu cầu, không tải lịch sử hay trạng thái thực thi. */
-  async topicSessionTitle(sessionID: string): Promise<TopicSessionInfo> {
+  async topicSessionTitle(sessionID: string, signal?: AbortSignal): Promise<TopicSessionInfo> {
     this.ensureClient();
-    const session = unwrap<any>(await this.client.session.get({ sessionID }, { signal: AbortSignal.timeout(10_000) }));
+    const session = unwrap<any>(await this.client.session.get({ sessionID }, { signal: signal ?? AbortSignal.timeout(10_000) }));
     return { id: session.id, title: session.title, projectID: session.projectID, directory: session.location.directory,
       createdAt: session.time.created, source: this.scheduledSource(), archived: session.time.archived !== undefined };
   }
@@ -425,10 +429,19 @@ export class OpenCodeCtl {
 
   async listMessages(sessionID: string, limit?: number): Promise<any[]> {
     this.ensureClient();
-    const input: any = { sessionID };
+    const input: any = { sessionID, order: "desc" };
     if (limit) input.limit = limit;
     const arr = (unwrap<any[]>(await retryTransient(() => this.client.message.list(input))) ?? []) as any[];
     return arr;
+  }
+
+  async activitySnapshot(sessionID: string, signal: AbortSignal): Promise<{ info: TopicSessionInfo; messages: ActivityMessage[] }> {
+    this.ensureClient();
+    const [info, raw] = await Promise.all([this.topicSessionTitle(sessionID, signal),
+      this.client.message.list({ sessionID, limit: 40, order: "desc" }, { signal })]);
+    const messages = unwrap<ActivityMessage[]>(raw);
+    if (!Array.isArray(messages)) throw new Error("Dữ liệu hoạt động OpenCode không phải danh sách hợp lệ.");
+    return { info, messages };
   }
 
   async getSession(sessionID: string): Promise<any> {
@@ -595,6 +608,9 @@ export class OpenCodeCtl {
     // final message is listed, so re-check a few times before giving up.
     let reply = "";
     let replyTime = 0;
+    let replyID: string | undefined;
+    let replyInputID: string | undefined;
+    let replyOutcome: string | undefined;
     let error: { type?: string; message?: string } | undefined;
     for (let attempt = 0; attempt < 4; attempt++) {
       const messages = (await this.listMessages(sessionID, 200).catch(() => [])) as any[];
@@ -611,6 +627,13 @@ export class OpenCodeCtl {
         if (t) {
           reply = t;
           replyTime = m.time?.created ?? 0;
+          replyID = m.id;
+          const position = messages.indexOf(m);
+          const boundary = messages.findIndex((message, index) => index > position && message?.type === "user");
+          replyInputID = boundary >= 0 ? messages[boundary].id : undefined;
+          let newerInput = -1;
+          for (let index = 0; index < position; index++) if (messages[index]?.type === "user") newerInput = index;
+          if (boundary >= 0) replyOutcome = messages.slice(newerInput + 1, boundary).find(message => message?.type === "idle")?.outcome;
           break; // messages are newest-first, so the first hit is the latest
         }
       }
@@ -623,7 +646,7 @@ export class OpenCodeCtl {
     } catch {
       /* ignore */
     }
-    return { reply, outcome, interrupted, elapsedMs: Date.now() - t0, replyTime, error };
+    return { reply, outcome, interrupted, elapsedMs: Date.now() - t0, replyTime, replyID, replyInputID, replyOutcome, error };
   }
 
   /**

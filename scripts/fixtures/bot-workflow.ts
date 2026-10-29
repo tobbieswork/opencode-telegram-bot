@@ -35,6 +35,7 @@ export function workflowBot() {
   const record = async (conv: string, text: string, opts?: any) => { sent.push({ conv, text, opts }); return sent.length; };
   const forbidden = async () => { effects.push("thay đổi tài nguyên"); throw new Error("Không được đổi tài nguyên khi đọc"); };
   const tg = { sendMessage: record, sendMessageId: record,
+    sendChatAction: async () => {},
     editMessageText: async (conv: string, _id: number, text: string, opts?: any) => { await record(conv, text, opts); },
     answerCallbackQuery: async (_id: string, text?: string) => { if (text) answers.push(text); },
     setMyCommands: async () => {}, createForumTopic: forbidden, editForumTopic: forbidden,
@@ -56,8 +57,9 @@ export function workflowBot() {
     archiveSession: forbidden, interruptTopicSession: forbidden } as unknown as OpenCodeCtl;
   const bot = new Bot(tg, oc, st, cfg);
   let update = 0;
-  const message = (text: string, user = 1, chat = -1001): Update => ({ update_id: ++update,
-    message: { message_id: update, chat: { id: chat, type: "supergroup", is_forum: true }, from: { id: user }, text } });
+  const message = (text: string, user = 1, chat = -1001, topic?: number): Update => ({ update_id: ++update,
+    message: { message_id: update, chat: { id: chat, type: "supergroup", is_forum: true }, from: { id: user }, text,
+      ...(topic ? { message_thread_id: topic, is_topic_message: true } : {}) } });
   const tap = (data: string, user = 1, chat = -1001, topic?: number): Update => ({ update_id: ++update,
     callback_query: { id: `cb-${update}`, data, from: { id: user }, message: { message_id: update,
       chat: { id: chat }, ...(topic ? { message_thread_id: topic, is_topic_message: true } : {}) } } });

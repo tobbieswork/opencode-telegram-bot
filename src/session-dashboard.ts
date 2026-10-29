@@ -1,6 +1,7 @@
 import { chatOf, type ConvKey } from "./conv.js";
 import type { StateManager, PendingPrompt } from "./state.js";
 import type { SessionTopic, SessionTopics, TopicSessionInfo } from "./session-topics.js";
+import { SessionActivityLog, type SessionActivity } from "./session-activity.js";
 
 export type DashboardWork = "unknown" | "idle" | "running" | "done" | "failed" | "stopped";
 export interface DashboardObservation {
@@ -35,6 +36,8 @@ export interface DashboardRow {
   pending: PendingAction[];
   reason?: string;
   titleError?: string;
+  activity?: SessionActivity;
+  activityError?: string;
 }
 
 export const DASHBOARD_FILTERS = { all: "Tất cả", waiting: "Đang chờ bạn", running: "Đang chạy", error: "Gặp lỗi", closed: "Đã đóng" } as const;
@@ -171,6 +174,10 @@ export class SessionDashboard {
   private row(link: SessionTopic): DashboardRow {
     const valid = this.binding(link);
     const state = valid ? this.deps.store.peek(link.conv!) : undefined;
+    let activity: SessionActivity | undefined;
+    let activityError: string | undefined;
+    if (valid) try { activity = new SessionActivityLog(this.deps.store).read(link.conv!); }
+    catch (error) { activityError = (error as Error).message; }
     const snap = valid ? this.cache.get(this.key(link)) : undefined;
     const fresh = (at?: number) => at !== undefined && this.now() - at <= this.ttl;
     const workVerified = link.phase === "open" && !snap?.error && fresh(snap?.workAt);
@@ -194,10 +201,10 @@ export class SessionDashboard {
     return { id: link.id, chat: link.chat, conv: link.conv, sessionID: link.sessionID,
       title: link.title, directory: link.directory, lifecycle: link.phase, work,
       lastKnownWork: snap?.work, checkedAt: snap?.workAt,
-      lastActivityAt: state?.worker?.updatedAt ?? link.identity?.createdAt ?? 0,
+      lastActivityAt: activity ? Math.max(activity.input.createdAt ?? activity.input.receivedAt, activity.result?.createdAt ?? activity.result?.observedAt ?? 0) : state?.worker?.updatedAt ?? link.identity?.createdAt ?? 0,
       stale: work === "unknown" || !pendingVerified, pendingVerified, pending,
       reason: !valid ? "Liên kết phiên chưa đầy đủ hoặc xung đột." : snap?.error ?? snap?.reason ??
         (!workVerified ? "Chưa xác minh trạng thái thực thi." : !pendingVerified ? "Chưa xác minh đủ câu hỏi và quyền." : undefined),
-      titleError: link.titleSync?.error };
+      titleError: link.titleSync?.error, activity, activityError };
   }
 }

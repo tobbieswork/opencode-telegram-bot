@@ -9,6 +9,7 @@ import { ScheduleStore } from "../src/scheduler.js";
 import type { ScheduledRun } from "../src/scheduled-run.js";
 import type { OpenCodeCtl } from "../src/opencode.js";
 import type { Telegram, Update } from "../src/telegram.js";
+import { SessionActivityLog } from "../src/session-activity.js";
 
 mkdirSync(join(tmpdir(), "opencode"), { recursive: true });
 const root = mkdtempSync(join(tmpdir(), "opencode/scheduled-commands-"));
@@ -59,6 +60,11 @@ try {
   await bot.handle(message("/schedule run abcd"));
   await bot.handle(button);
   assert.equal(submitted, 1, "lệnh và nút cùng dùng guard chống trùng");
+  const run = store.runs()[0];
+  const activity = new SessionActivityLog(st).read(run.binding!.conv)!;
+  assert.equal(activity.input.id, run.messageID);
+  assert.equal(activity.input.source, "schedule");
+  assert.equal(activity.input.snippet, "Kiểm tra dự án");
   assert.equal(store.get("abcd")?.enabled, false, "manual không bật lịch paused");
   assert.equal(store.get("abcd")?.nextRunAt, nextRunAt, "manual không thay lịch tự động");
   const bound = st.peek("1:9")?.sessionID;

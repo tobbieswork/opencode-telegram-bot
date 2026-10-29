@@ -2,7 +2,7 @@ import { mkdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Telegram, CallbackQuery, TOPIC_COLORS } from "./telegram.js";
-import { OpenCodeCtl, userText } from "./opencode.js";
+import { OpenCodeCtl, userText, newMessageID } from "./opencode.js";
 import { StateManager, ChatState, WorkerInfo, WorkerStatus } from "./state.js";
 import { Config } from "./config.js";
 import { ConvKey, chatOf, convKey, parseConv } from "./conv.js";
@@ -18,6 +18,7 @@ import { BUSY_REPLY_TEXT, NOTE_BUTTON_LABEL, noteCallbackData, BusyNoteStore } f
 import type { Schedule } from "./schedule.js";
 import type { ScheduledExecution, ScheduledRun } from "./scheduled-run.js";
 import type { SessionTopic, SessionTopics } from "./session-topics.js";
+import type { SessionActivityLog, ActivitySource } from "./session-activity.js";
 
 type Btn = { text: string; callback_data: string; url?: never } | { text: string; url: string; callback_data?: never };
 type Keyboard = { inline_keyboard: Btn[][] };
@@ -29,6 +30,7 @@ export interface Host {
   st: StateManager;
   cfg: Config;
   topics?: SessionTopics;
+  activity?: SessionActivityLog;
   stopTopicWork?: (conv: ConvKey) => Promise<boolean>;
   /** Shared retention for the busy-reply "Thêm vào note" button (owned by the Bot). */
   busyNotes: BusyNoteStore;
@@ -725,6 +727,13 @@ export class Orchestrator {
     return `${ICON[w.status]} ${w.name}`;
   }
 
+  private async dispatchObserved(conv: ConvKey, sessionID: string, text: string, source: ActivitySource, originalText = text): Promise<string> {
+    const messageID = newMessageID();
+    try { this.h.activity?.begin(conv, { sessionID, inputID: messageID, text: originalText, source }); }
+    catch (error) { warn("Không lưu được bản ghi hoạt động:", (error as Error).message); }
+    return this.h.oc.prompt(sessionID, text, { messageID });
+  }
+
   /** Resolve and vet a directory a worker may run in: real path, existing dir, under the browse roots, not the Manager's. */
   private vetDirectory(dir: string): string {
     const expanded = dir.startsWith("~") ? join(process.env.HOME ?? "", dir.slice(1)) : dir;
@@ -853,7 +862,7 @@ export class Orchestrator {
       await this.h.sendHtml(link.conv, `Worker <b>${esc(bound.worker?.name ?? name)}</b> · ${esc(agent)}\n<code>${esc(directory)}</code>`).catch(() => {});
       if (spec.task) {
         this.setStatus(link.conv, "running");
-        await this.h.oc.prompt(link.sessionID, `${workerPreamble(name)}\n\n${spec.task}`);
+        await this.dispatchObserved(link.conv, link.sessionID, `${workerPreamble(name)}\n\n${spec.task}`, spec.spawnedBy === "schedule" ? "schedule" : spec.spawnedBy === "manager" ? "manager" : "topic", spec.task);
         this.h.startTyping(link.conv);
       }
       return { conv: link.conv, worker: this.h.st.get(link.conv).worker! };
@@ -918,7 +927,7 @@ export class Orchestrator {
     await this.h.sendHtml(conv, intro.join("\n")).catch(() => {});
 
     if (spec.task) {
-      await this.h.oc.prompt(sessionID, `${workerPreamble(name)}\n\n${spec.task}`);
+      await this.dispatchObserved(conv, sessionID, `${workerPreamble(name)}\n\n${spec.task}`, spec.spawnedBy === "schedule" ? "schedule" : spec.spawnedBy === "manager" ? "manager" : "topic", spec.task);
       this.h.startTyping(conv);
     }
     return { conv, worker };
@@ -935,7 +944,7 @@ export class Orchestrator {
     const release = this.beginWorkerTurn(conv);
     try {
       await this.h.sendHtml(conv, `📨 <b>Manager:</b> ${esc(trunc(message, 1500))}`).catch(() => {});
-      await this.h.oc.prompt(s.sessionID, message);
+      await this.dispatchObserved(conv, s.sessionID, message, "manager");
       this.h.startTyping(conv);
     } finally { release?.(); }
   }
@@ -1024,6 +1033,8 @@ export class Orchestrator {
       submit: async (run) => {
         if (this.h.st.peek(run.binding!.conv)?.sessionID !== run.binding!.sessionID) throw new Error("Session không còn thuộc lượt chạy.");
         this.setStatus(run.binding!.conv, "running");
+        try { this.h.activity?.begin(run.binding!.conv, { sessionID: run.binding!.sessionID, inputID: run.messageID, text: run.schedule.prompt, source: "schedule" }); }
+        catch (error) { warn("Không lưu được bản ghi lượt lịch:", (error as Error).message); }
         await this.h.oc.submitScheduled(run, workerPreamble("sch-" + run.schedule.id) + "\n\n" + run.schedule.prompt);
         this.h.startTyping(run.binding!.conv);
       },
@@ -1356,7 +1367,7 @@ export class Orchestrator {
     this.budget.set(chatOf(conv), DISPATCH_BUDGET); // the user spoke: refill the dispatch budget
     await this.h.prepareNotes?.(conv, this.h.st.get(conv).sessionID!); // /note: surface pending notes this turn
     try {
-      await this.h.oc.prompt(this.h.st.get(conv).sessionID!, text);
+      await this.dispatchObserved(conv, this.h.st.get(conv).sessionID!, text, "manager");
     } catch (e) {
       this.dropManagerTurn(conv); // the prompt was never accepted — don't stay busy forever
       throw e;
@@ -1401,7 +1412,7 @@ export class Orchestrator {
     const entry = this.managerEntry(chat);
     const sid = entry?.[1].sessionID;
     if (!sid || !body) return;
-    await this.h.oc.prompt(sid, `[Bot event — not from the user]\n${body}`);
+    await this.dispatchObserved(entry![0], sid, `[Bot event — not from the user]\n${body}`, "report", body);
     this.h.startTyping(entry![0]);
   }
 

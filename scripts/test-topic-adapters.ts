@@ -46,6 +46,7 @@ let running = false;
 let creates = 0;
 let dropped = false;
 const requests: string[] = [];
+let prompted = false;
 const server = createServer(async (req, res) => {
   const path = new URL(req.url!, "http://test").pathname;
   requests.push(path);
@@ -61,6 +62,15 @@ const server = createServer(async (req, res) => {
   if (path === "/api/session/active") return json({ data: running ? { ses_topic: { started: 3 } } : {} });
   if (path === "/api/session/ses_topic/inbox") return json({ data: [] });
   if (path === "/api/session/ses_topic/form" || path === "/api/session/ses_topic/permission") return json({ data: [] });
+  if (path === "/api/session/ses_topic/prompt") { prompted = true; return json({ data: { id: "input_own" } }); }
+  if (path === "/api/experimental/session/ses_topic/wait") { res.statusCode = 204; res.end(); return; }
+  if (path === "/api/session/ses_topic/message" && prompted) return json({ data: [
+    { id: "idle_other", type: "idle", outcome: "failed", time: { created: 6 } },
+    { id: "input_other", type: "user", text: "Yêu cầu khác", time: { created: 5 } },
+    { id: "idle_own", type: "idle", outcome: "succeeded", time: { created: 4 } },
+    { id: "reply_own", type: "assistant", content: [{ type: "text", text: "Kết quả đúng đầu vào" }], time: { created: 3 } },
+    { id: "input_own", type: "user", text: "Yêu cầu gốc", time: { created: 2 } },
+  ] });
   if (path === "/api/session/ses_topic/message") return json({ data: dropped ? [] : [
     { id: "msg_user", type: "user", time: { created: 2 }, text: "test" },
     { id: "msg_idle", type: "idle", time: { created: 3 }, outcome: "succeeded" },
@@ -95,6 +105,15 @@ try {
   assert.deepEqual(observation.permissions, []);
   assert.equal(requests.slice(beforeDashboard).length, 4);
   assert.ok(!requests.slice(beforeDashboard).some(path => /message|interrupt|prompt/.test(path)));
+  const result = await oc.promptAndWait("ses_topic", "Yêu cầu gốc", { messageID: "input_own" });
+  assert.equal(result.replyID, "reply_own");
+  assert.equal(result.replyInputID, "input_own");
+  assert.equal(result.replyOutcome, "succeeded", "Không lấy kết quả của đầu vào mới hơn để gán cho phản hồi cũ");
+  const snapshotStart = requests.length;
+  const activity = await oc.activitySnapshot("ses_topic", AbortSignal.timeout(1000));
+  assert.equal(activity.messages[1].id, "input_other");
+  assert.deepEqual(requests.slice(snapshotStart).sort(), ["/api/session/ses_topic", "/api/session/ses_topic/message"]);
+  prompted = false;
   await oc.archiveSession("ses_topic", true);
   const snapshot = await oc.topicSession("ses_topic");
   assert.equal(snapshot.archived, true);
