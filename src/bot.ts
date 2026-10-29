@@ -15,7 +15,7 @@ import { SessionDashboard, dashboardPage, DASHBOARD_FILTERS, DASHBOARD_WORK_LABE
 import { SessionActivityLog, ACTIVITY_SOURCE_LABELS } from "./session-activity.js";
 import { Schedule, SchedSpec, formatSchedule, nextRunAfter, parseScheduleSpec } from "./schedule.js";
 import { Config } from "./config.js";
-import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure } from "./format.js";
+import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure, topicTitle } from "./format.js";
 import { richMarkdownChunks } from "./rich.js";
 import { scheduleForRegistration, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
 import {
@@ -265,7 +265,8 @@ export class Bot {
   private topicSyncAgain = false;
   private topicAnnouncements = new Map<string, string>();
   private titlePreviews = new Map<ConvKey, { token: string; user: number; expires: number; rows: TopicTitlePreview[]; stamp: string }>();
-  private titleSettings = new Map<string, { chat: ConvKey; user: number; expires: number; id?: string; stamp: string; preview?: TopicTitlePreview }>();
+  private titleSettings = new Map<string, { chat: ConvKey; user: number; expires: number; id?: string; stamp: string; preview?: TopicTitlePreview; customName?: string }>();
+  private titleInputs = new Map<string, { chat: ConvKey; id: string; token: string; expires: number; messageID: number; stamp: string }>();
 
   constructor(
     private tg: Telegram,
@@ -436,6 +437,7 @@ export class Bot {
     this.topics.stopTitleSync();
     this.titlePreviews.clear();
     this.titleSettings.clear();
+    this.titleInputs.clear();
     this.dashboardCards.clear();
     this.pendingCards.clear();
     if (this.topicTimer) clearInterval(this.topicTimer);
@@ -769,6 +771,7 @@ export class Bot {
     }
     // Remember the user's top-level chat so proactive notices (e.g. DNS heal)
     // have a destination even mid-polling-failure.
+    if (uid !== undefined && this.topics.enabled(conv) && conv === chatOf(conv) && await this.handleTitleInput(conv, uid, msg, text)) return;
     this.lastActiveConv = chatOf(conv);
     // Reaction UX: index every user message so a reaction on it can be
     // resolved (the update carries no topic info) — and give the user a quick
@@ -1054,11 +1057,11 @@ export class Bot {
 
   private topicSignature(link: SessionTopic): string { return `${link.phase}:${link.step ?? ""}:${link.error ?? ""}`; }
 
-  private newTitleSettings(conv: ConvKey, user: number, id?: string, preview?: TopicTitlePreview): string {
+  private newTitleSettings(conv: ConvKey, user: number, id?: string, preview?: TopicTitlePreview, customName?: string): string {
     for (const [key, value] of this.titleSettings) if (value.expires < Date.now()) this.titleSettings.delete(key);
     while (this.titleSettings.size >= 500) this.titleSettings.delete(this.titleSettings.keys().next().value!);
     const token = randomBytes(6).toString("hex");
-    this.titleSettings.set(token, { chat: conv, user, id, preview, expires: Date.now() + 10 * 60_000,
+    this.titleSettings.set(token, { chat: conv, user, id, preview, customName, expires: Date.now() + 10 * 60_000,
       stamp: this.topics.titleScopeStamp(conv, id) });
     return token;
   }
@@ -1075,7 +1078,7 @@ export class Bot {
       const mode = TITLE_POLICY_LABELS[status.policy.mode];
       lines.push(`Chủ đề: <b>${esc(trunc(link.title, 160))}</b> · ${DASHBOARD_PHASE_LABELS[link.phase]}`, `Phiên: <code>${esc(link.sessionID!)}</code>`, `Chế độ: <b>${mode}</b>`,
         `Tên đã nhận xác nhận: ${esc(trunc(status.confirmedName, 160))}`,
-        status.policy.customName ? `Tên riêng yêu cầu: ${esc(status.policy.customName)}` : "",
+        status.policy.customName ? `Tên riêng đã chọn qua bot: ${esc(status.policy.customName)}` : "",
         status.pending ? "Đang chờ xử lý tên theo chính sách hiện tại." : "Không có yêu cầu tự đổi tên đang chờ.");
       if (status.error) lines.push(`Lỗi gần nhất: ${esc(trunc(status.error, 200))}`);
       if (status.pending && status.pendingName) lines.push(`Ý định tên đã lưu: ${esc(status.pendingName)}`);
@@ -1085,16 +1088,54 @@ export class Bot {
       }
       keyboard.push([{ text: "Theo OpenCode · xem trước", callback_data: `tc:${token}:preview` },
         { text: "Giữ tên hiện tại", callback_data: `tc:${token}:keep` }]);
-      if (group.enabled && status.policy.mode === "follow") keyboard.push([{ text: "Thử đồng bộ lại", callback_data: `tc:${token}:retry` }]);
+      keyboard.push([{ text: "Đặt tên riêng", callback_data: `tc:${token}:custom` }]);
+      if (status.policy.mode === "custom") keyboard.push([{ text: "Xem trước áp dụng lại tên riêng", callback_data: `tc:${token}:custom-preview` }]);
+      if ((group.enabled && status.policy.mode === "follow") || (status.policy.mode === "custom" && status.pending)) keyboard.push([{ text: "Thử xử lý tên đang chờ", callback_data: `tc:${token}:retry` }]);
       keyboard.push([{ text: "Thiết lập toàn nhóm", callback_data: "tc:open:group" }]);
     } else {
       lines.push("Tắt nhóm dừng tự đổi tên của mọi chủ đề. Bật lại có xem trước; ngoại lệ giữ tên/tên riêng không bị bỏ qua.");
-      if (group.enabled) keyboard.push([{ text: "Tắt tự đồng bộ toàn nhóm", callback_data: `tc:${token}:off` }]);
+      if (group.enabled || this.topics.list(conv).some(link => link.titleSync?.pending)) keyboard.push([{ text: group.enabled ? "Tắt tự đồng bộ toàn nhóm" : "Hủy việc đặt tên đang chờ", callback_data: `tc:${token}:off` }]);
       keyboard.push([{ text: group.enabled ? "Xem trước đồng bộ lại" : "Xem trước bật đồng bộ", callback_data: "st:title-preview:0" }]);
     }
     lines.push("Tên là bản bot đã lưu, không phải truy vấn lại mọi tên Telegram. Không đổi tiêu đề OpenCode, không dừng công việc hoặc mở lại chủ đề.");
     keyboard.push([{ text: "Bảng điều khiển phiên", callback_data: "cmd:ls" }]);
     await this.tg.sendMessage(conv, lines.filter(Boolean).join("\n"), { reply_markup: { inline_keyboard: keyboard } });
+  }
+
+  private async showCustomTitlePreview(conv: ConvKey, user: number, id: string, name: string, stamp: string): Promise<void> {
+    const preview = { ...await this.topics.previewOpenCodeTitle(conv, id), after: name };
+    if (this.topics.titleScopeStamp(conv, id) !== stamp) throw new Error("Phiên hoặc chính sách đã đổi; nhập lại tên từ Thiết lập tên.");
+    const token = this.newTitleSettings(conv, user, id, preview, name);
+    const keyboard: Btn[][] = [];
+    if (!preview.error) keyboard.push([{ text: "Xác nhận đặt tên riêng", callback_data: `tc:${token}:confirm` }]);
+    else keyboard.push([{ text: "Thử xem trước lại", callback_data: `tc:${token}:custom-preview` }]);
+    keyboard.push([{ text: "Hủy", callback_data: `tc:${token}:cancel` }]);
+    await this.tg.sendMessage(conv, [`<b>Xem trước tên riêng</b>`, `${esc(trunc(preview.before, 160))} → ${esc(name)}`,
+      `Phiên: <code>${esc(this.topics.get(id)!.sessionID!)}</code>`,
+      preview.error ? esc(preview.error) : "Đây là yêu cầu đặt tên thủ công một lần, vẫn thực hiện khi tự đồng bộ nhóm tắt. Không đổi tiêu đề OpenCode.",
+      "Lỗi sẽ giữ ý định và thử lại theo giới hạn; tắt nhóm hoặc chọn Giữ tên hiện tại để hủy việc chưa gửi. Chủ đề đóng chờ bạn mở lại, bot không tự mở.",
+    ].join("\n"), { reply_markup: { inline_keyboard: keyboard } });
+  }
+
+  private async handleTitleInput(conv: ConvKey, user: number, msg: Message, text: string): Promise<boolean> {
+    const key = `${conv}:${user}`;
+    const input = this.titleInputs.get(key);
+    if (!input) return false;
+    if (/^\/cancel(?:@\w+)?$/i.test(text)) {
+      this.titleInputs.delete(key);
+      await this.tg.sendMessage(conv, "Đã hủy nhập tên riêng; không đổi tên.");
+      return true;
+    }
+    if (msg.reply_to_message?.message_id !== input.messageID || text.startsWith("/")) return false;
+    this.titleInputs.delete(key);
+    try {
+      if (input.expires < Date.now() || this.topics.titleScopeStamp(conv, input.id) !== input.stamp) throw new Error("Yêu cầu nhập tên đã hết hạn hoặc phiên/chính sách đã đổi. Mở lại Thiết lập tên.");
+      const name = topicTitle(text);
+      if (!name) throw new Error("Tên riêng không được trống; mở lại Đặt tên riêng để nhập tên khác.");
+      await this.showCustomTitlePreview(conv, user, input.id, name, input.stamp);
+    } catch (error) { await this.tg.sendMessage(conv, esc((error as Error).message),
+      { reply_markup: { inline_keyboard: [[{ text: "Thiết lập tên", callback_data: `tc:open:${input.id}` }]] } }); }
+    return true;
   }
 
   private async handleTitleSettings(conv: ConvKey, cb: CallbackQuery): Promise<void> {
@@ -1103,11 +1144,20 @@ export class Bot {
     const [, token, action] = parts;
     const user = cb.from!.id;
     if (token === "open") { await this.showTitleSettings(conv, user, action === "group" ? undefined : action); return; }
+    if (action === "cancel-input") {
+      const key = `${conv}:${user}`;
+      const input = this.titleInputs.get(key);
+      if (!input || input.token !== token) throw new Error("Không có yêu cầu nhập tên thuộc bạn trên thẻ này.");
+      this.titleInputs.delete(key);
+      await this.tg.sendMessage(conv, "Đã hủy nhập tên riêng; không đổi tên.");
+      await this.showTitleSettings(conv, user, input.id);
+      return;
+    }
     const card = this.titleSettings.get(token);
     if (!card || card.chat !== conv || card.user !== user || card.expires < Date.now() || this.topics.titleScopeStamp(conv, card.id) !== card.stamp) {
       throw new Error("Thẻ đã hết hạn, chính sách đã đổi hoặc không thuộc bạn/nhóm này. Mở lại Thiết lập tên.");
     }
-    if (card.preview && !["confirm", "cancel"].includes(action)) throw new Error("Dùng đúng nút xác nhận hoặc hủy của bản xem trước.");
+    if (card.preview && !["confirm", "cancel", ...(card.customName && card.preview.error ? ["custom-preview"] : [])].includes(action)) throw new Error("Dùng đúng nút xác nhận hoặc hủy của bản xem trước.");
     if (action === "off" && !card.id) {
       this.titleSettings.delete(token);
       this.topics.setTitleGroupSync(conv, false);
@@ -1117,6 +1167,20 @@ export class Bot {
       this.titleSettings.delete(token);
       this.topics.setTitlePolicy(conv, card.id, { mode: "keep" });
       this.titlePreviews.delete(conv);
+    } else if (action === "custom" && card.id) {
+      for (const [key, value] of this.titleInputs) if (value.expires < Date.now()) this.titleInputs.delete(key);
+      while (this.titleInputs.size >= 100) this.titleInputs.delete(this.titleInputs.keys().next().value!);
+      const inputToken = randomBytes(6).toString("hex");
+      const messageID = await this.tg.sendMessageId(conv, `<b>Nhập tên riêng</b>\nPhiên: <code>${esc(this.topics.get(card.id)!.sessionID!)}</code>\nTrả lời trực tiếp tin nhắn này bằng tên mới trong 10 phút. Bot sẽ chuẩn hóa một dòng, tối đa 128 ký tự rồi cho xem trước; chưa đổi tên ngay.`,
+        { reply_markup: { inline_keyboard: [[{ text: "Hủy nhập tên", callback_data: `tc:${inputToken}:cancel-input` }]] } });
+      if (!Number.isSafeInteger(messageID) || messageID <= 0 || this.topics.titleScopeStamp(conv, card.id) !== card.stamp) throw new Error("Không xác nhận được tin nhập hoặc phạm vi đã đổi; mở lại Thiết lập tên.");
+      this.titleInputs.set(`${conv}:${user}`, { chat: conv, id: card.id, token: inputToken, expires: Date.now() + 10 * 60_000, messageID, stamp: card.stamp });
+      return;
+    } else if (action === "custom-preview" && card.id) {
+      const name = card.customName ?? this.topics.titlePolicy(conv, card.id).customName;
+      if (!name) throw new Error("Chưa có tên riêng để áp dụng lại; dùng Đặt tên riêng.");
+      await this.showCustomTitlePreview(conv, user, card.id, name, card.stamp);
+      return;
     } else if (action === "preview" && card.id) {
       const preview = await this.topics.previewOpenCodeTitle(conv, card.id);
       if (this.topics.titleScopeStamp(conv, card.id) !== card.stamp) throw new Error("Chính sách hoặc phiên đã đổi trong lúc xem trước; mở lại Thiết lập tên.");
@@ -1132,11 +1196,12 @@ export class Bot {
     } else if (action === "confirm" && card.id && card.preview && !card.preview.error) {
       this.titleSettings.delete(token);
       const link = this.topics.get(card.id)!;
-      this.topics.setTitlePolicy(conv, card.id, { mode: "follow" });
+      if (card.customName) this.topics.queueCustomTitle(conv, card.id, card.customName, card.stamp);
+      else this.topics.setTitlePolicy(conv, card.id, { mode: "follow" });
       this.titlePreviews.delete(conv);
-      this.topics.requestTitleSync(link.sessionID, true, conv);
-      await this.tg.sendMessage(conv, "Đã chọn Theo OpenCode. Tên sẽ được xử lý khi nhóm bật và chủ đề mở; không tự mở lại hoặc gửi yêu cầu mô hình.");
-    } else if (action === "retry" && card.id && this.topics.followsOpenCode(conv, card.id)) {
+      if (!card.customName) this.topics.requestTitleSync(link.sessionID, true, conv);
+      await this.tg.sendMessage(conv, card.customName ? "Đã lưu yêu cầu tên riêng; đang chờ xử lý đúng chủ đề. Tên chỉ được xác nhận sau khi Telegram chấp nhận; không mở lại phiên hoặc gọi mô hình." : "Đã chọn Theo OpenCode. Tên sẽ được xử lý khi nhóm bật và chủ đề mở; không tự mở lại hoặc gửi yêu cầu mô hình.");
+    } else if (action === "retry" && card.id && (this.topics.followsOpenCode(conv, card.id) || this.topics.titleStatus(conv, card.id).pending)) {
       const result = await this.topics.syncTitle(conv, card.id, true);
       await this.tg.sendMessage(conv, ["synced", "unchanged"].includes(result.status) ? "Đã xác nhận đồng bộ tên." : "Chưa đồng bộ xong; giữ thời gian chờ, quyền và vòng đời hiện tại.");
     } else if (action === "cancel") this.titleSettings.delete(token);

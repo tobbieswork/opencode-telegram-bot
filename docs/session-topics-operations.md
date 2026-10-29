@@ -127,12 +127,28 @@ thường; đổi tên không tự mở chủ đề. Kiểm thử riêng: `npm r
 - Thẻ hết hạn sau 10 phút hoặc khi phạm vi/chính sách/vòng đời thay đổi; thẻ
   trước khởi động lại không dùng lại được. Mở trang mới để thao tác tiếp.
 
+**Tên riêng từ CV07:** thẻ phiên → **Thiết lập tên** → **Đặt tên riêng**.
+Trả lời trực tiếp tin hỏi tên trong General bằng tên mới; chỉ đúng người mở và
+đúng tin mới được nhận. Sau chuẩn hóa có xem trước; xác nhận mới xếp hàng.
+Nút Hủy hoặc `/cancel` bỏ bản nhập mà không đổi tên.
+
+Đặt tên riêng là thao tác thủ công một lần, không bật công tắc nhóm và không
+đổi tiêu đề OpenCode. Bản xem trước nói rõ thao tác vẫn được xử lý khi tự đồng
+bộ nhóm tắt. Lỗi giữ ý định đã xác nhận qua khởi động lại, tôn trọng thời gian
+chờ; chủ đề đóng chỉ đổi sau khi bạn mở lại bình thường. Tắt nhóm hoặc chọn
+Giữ tên hiện tại để hủy việc chưa gửi; nhóm đã tắt có nút hủy yêu cầu thủ công
+đang chờ. Lời gọi đã gửi vẫn không thể bảo đảm rút lại.
+
+Sau khi đặt xong, bot không tự ép lại tên riêng khi bạn sửa Telegram và không
+đổi theo OpenCode. **Xem trước áp dụng lại tên riêng** cần xác nhận mới. Tên
+đã chọn qua bot và tên bot đã nhận xác nhận là hai trường riêng; không dùng
+chúng để khẳng định tên sửa tay hiện tại khi bot không có khả năng đọc lại.
+
 **Quay về bản mã cũ:** khi ghi chính sách từ CV05, toàn bộ trạng thái bật/tắt
 cũ được giữ trong bản ghi mới, còn bản đồ `titleSyncGroups` được để rỗng. Nếu
 quay về mã CV00–CV04, tự đổi tên mặc định dừng an toàn; không dùng nút bật tên
 của bản cũ vì chưa hiểu ngoại lệ. Giữ nguyên tệp trạng thái mới để không mất
-công việc/lịch sử. Giao diện bật/tắt theo chủ đề đã có ở CV06; đặt tên riêng
-được bổ sung ở CV07.
+công việc/lịch sử. Giao diện bật/tắt theo chủ đề có ở CV06; đặt tên riêng có ở CV07.
 
 ## Existing sessions
 

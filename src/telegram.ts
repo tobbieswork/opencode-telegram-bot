@@ -29,6 +29,7 @@ export type Message = {
   text?: string;
   chat: { id: number; type?: string; is_forum?: boolean };
   from?: { id: number; first_name?: string; username?: string };
+  reply_to_message?: { message_id: number };
   /** Forum topic the message belongs to (only meaningful when is_topic_message). */
   message_thread_id?: number;
   is_topic_message?: boolean;

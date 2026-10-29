@@ -1,6 +1,7 @@
 # Đầu việc 2 — Kiểm soát đồng bộ tên chủ đề
 
-**Trạng thái:** CV05–CV06 đã triển khai; CV07 chưa triển khai.
+**Trạng thái:** CV05–CV07 đã triển khai; kiểm tra thao tác trên thiết bị/nhóm
+thật còn chờ CV15, không coi phần đó là đã nghiệm thu.
 **Thứ tự:** CV05 → CV06 → CV07.
 **Điều kiện bắt đầu:** CV04 đã nghiệm thu theo
 [kế hoạch tổng](../plan-session-workflow-improvements.md).
@@ -117,30 +118,30 @@ nếu cần; `scripts/test-topic-title-commands.ts`, kiểm thử HTML.
 
 ### Công việc
 
-- [ ] Cho nhập tên riêng bằng luồng trong General có người sở hữu, nhóm,
+- [x] Cho nhập tên riêng bằng luồng trong General có người sở hữu, nhóm,
   phiên đích và thời hạn rõ ràng; có nút Hủy. Không lấy tin nhắn trong chủ đề
   làm tên riêng ngoài ý muốn.
-- [ ] Chuẩn hóa tên bằng helper hiện có: một dòng, không trống, đúng giới hạn,
+- [x] Chuẩn hóa tên bằng helper hiện có: một dòng, không trống, đúng giới hạn,
   không cắt cụm ký tự. Hiển thị xem trước trước khi ghi Telegram.
-- [ ] Lưu chính sách và ý định; đổi đúng chủ đề; chỉ cập nhật tên đã xác nhận
+- [x] Lưu chính sách và ý định; đổi đúng chủ đề; chỉ cập nhật tên đã xác nhận
   sau thành công. Lỗi mạng/quyền giữ nguyên tên đã xác nhận và tên mong muốn.
-- [ ] Đọc lại chính sách, phiên bản và danh tính sau mỗi bước chờ trước khi
+- [x] Đọc lại chính sách, phiên bản và danh tính sau mỗi bước chờ trước khi
   ghi. Phản hồi công việc cũ không được ghi đè tên mong muốn/chế độ mới.
-- [ ] Nếu thay đổi xảy ra sau khi yêu cầu Telegram đã gửi, ghi nhận kết quả
+- [x] Nếu thay đổi xảy ra sau khi yêu cầu Telegram đã gửi, ghi nhận kết quả
   đã biết riêng và lên lịch áp dụng chính sách hiện tại nếu phù hợp; không lặp
   vô hạn giữa tên OpenCode và tên riêng.
-- [ ] Thông báo sửa tay từ Telegram không được đổi chế độ một cách ngầm định:
+- [x] Thông báo sửa tay từ Telegram không được đổi chế độ một cách ngầm định:
   Theo OpenCode đưa về nguồn chuẩn; Giữ tên/Tên riêng không bị ép về OpenCode.
   Không tuyên bố phát hiện được thông báo đã mất khi không có cách đọc lại tên.
-- [ ] Khi chọn trở lại Theo OpenCode, đọc metadata mới nhất và yêu cầu xem
+- [x] Khi chọn trở lại Theo OpenCode, đọc metadata mới nhất và yêu cầu xem
   trước/xác nhận nếu sẽ ghi đè tên riêng. Không cập nhật ngược tiêu đề OpenCode.
 
 ### Kiểm thử và nghiệm thu
 
-- [ ] Lời gọi cũ A hoàn tất sau khi đã chọn tên B; lỗi 400 khác
+- [x] Lời gọi cũ A hoàn tất sau khi đã chọn tên B; lỗi 400 khác
   `TOPIC_NOT_MODIFIED`; lỗi 429; mất phản hồi; khởi động lại giữa đổi chính sách
   và ghi tên; chủ đề đóng hoặc danh tính thay đổi trong lúc chờ.
-- [ ] Hàng đợi không khóa gửi yêu cầu/trả lời câu hỏi; bộ giới hạn tần suất
+- [x] Hàng đợi không khóa gửi yêu cầu/trả lời câu hỏi; bộ giới hạn tần suất
   hiện có tiếp tục được tôn trọng ở mọi chế độ.
 - [ ] Kiểm thử thực tế tên dài, tiếng Việt, biểu tượng và chuyển chế độ trên
   nhóm thử nghiệm; nhóm chưa bật quản lý giữ hành vi cũ.
@@ -148,10 +149,41 @@ nếu cần; `scripts/test-topic-title-commands.ts`, kiểm thử HTML.
 **Tệp liên quan:** `src/session-topics.ts`, `src/bot.ts`, `src/telegram.ts`,
 `src/format.ts`; mở rộng hai bộ kiểm thử tên và kiểm thử tương thích OpenCode.
 
+### Quy tắc đặt tên riêng
+
+- Từ thẻ phiên → **Thiết lập tên** → **Đặt tên riêng**, trả lời trực tiếp tin
+  hỏi tên trong General. Chỉ đúng người mở, đúng tin, đúng nhóm và mốc phiên
+  mới được nhận tên; hạn 10 phút. Có nút Hủy hoặc `/cancel`. Tin trong chủ đề
+  làm việc và trả lời của người khác không trở thành tên riêng.
+- Nhập chỉ tạo xem trước; **Xác nhận đặt tên riêng** mới ghi đồng thời chính
+  sách và ý định, rồi xếp hàng. Đây là thao tác thủ công một lần, được thông
+  báo rõ là vẫn có thể thực hiện khi tự đồng bộ nhóm tắt; không bật nhóm.
+- Ý định lưu `desiredName`, `desiredStamp`, `desiredBinding` cùng `pending`;
+  ràng buộc danh tính không gồm trạng thái mở/đóng để ý định đã được xác nhận
+  cho chủ đề đóng có thể chờ thao tác mở lại bình thường. Không mở chủ đề để
+  phục vụ đổi tên. Đổi danh tính phải xem trước/xác nhận mới.
+- Ý định đã xác nhận được khôi phục sau khởi động lại; giữ thời gian chờ 429.
+  Tắt nhóm hoặc Giữ tên hiện tại hủy việc chưa gửi. Với nhóm đã tắt nhưng có
+  yêu cầu thủ công mới, trang nhóm có **Hủy việc đặt tên đang chờ**.
+- Sau khi đặt xong, chế độ Tên riêng không tự ép lại tên nếu người dùng sửa
+  Telegram, cũng không theo các đổi tên OpenCode sau đó. Muốn áp dụng lại tên
+  đã chọn qua bot phải xem trước và xác nhận. Không suy rằng bot biết tên sửa
+  tay khi không thể đọc lại mọi chủ đề.
+- Phản hồi A đến muộn chỉ cập nhật tên đã biết của đúng liên kết; giữ nguyên
+  ý định B, giới hạn tần suất và chính sách hiện tại. Mất phản hồi giữ chưa xác
+  nhận, thử lại cùng tên theo tính lặp an toàn của thao tác đổi tên.
+
+Kiểm thử: `scripts/test-custom-topic-titles.ts` cho phản hồi thành công/lỗi cũ,
+429, mất phản hồi, đổi danh tính, đóng, khởi động lại trước lần ghi đầu;
+`scripts/test-custom-topic-title-input.ts` cho quyền sở hữu, tin trả lời, thời
+hạn, hủy và mốc thay đổi. Adapter Telegram thật với HTTP giả kiểm tra tên tiếng
+Việt, HTML, cụm biểu tượng và không gọi đổi tiêu đề OpenCode. Phần bấm thử trên
+thiết bị Telegram thật được giữ riêng cho CV15.
+
 ## Điều kiện bàn giao nhóm tính năng
 
 - [ ] CV05–CV07 đạt; người dùng tự tắt/bật và đặt tên riêng hoàn toàn qua nút.
-- [ ] Tài liệu mô tả thứ tự ưu tiên, lời gọi đang bay, dữ liệu cũ và cách quay
+- [x] Tài liệu mô tả thứ tự ưu tiên, lời gọi đang bay, dữ liệu cũ và cách quay
   lại Theo OpenCode; không thay đổi mặc định các nhóm đã cấu hình.
 
 **Tiếp theo:** [CV08–CV09 — Quay lại công việc](03-session-resume.md).

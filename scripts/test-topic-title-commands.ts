@@ -142,6 +142,24 @@ try {
   await bot.handle(tap(sent.at(-1)?.reply_markup?.inline_keyboard.flat().find((b: any) => b.callback_data?.endsWith(":cancel"))?.callback_data));
   console.log("Đạt: thiết lập và xem trước từng chủ đề đi qua adapter Telegram thật, giữ an toàn HTML.");
 
+  await bot.handle(tap(`tc:open:${link.id}`));
+  await bot.handle(tap(sent.at(-1)?.reply_markup?.inline_keyboard.flat().find((b: any) => b.callback_data?.endsWith(":custom"))?.callback_data));
+  const promptID = sent.length;
+  await bot.handle({ update_id: ++update, message: { message_id: update, from: { id: 1 }, chat: { id: -1001, type: "supergroup", is_forum: true },
+    reply_to_message: { message_id: promptID }, text: "  Tên <riêng> &\n👨‍👩‍👧‍👦  " } });
+  assert.ok(sent.at(-1)?.text.includes("Tên &lt;riêng&gt; &amp;"));
+  await bot.handle(tap(sent.at(-1)?.reply_markup?.inline_keyboard.flat().find((b: any) => b.callback_data?.endsWith(":confirm"))?.callback_data));
+  await waitFor(() => edits.at(-1)?.name === "Tên <riêng> & 👨‍👩‍👧‍👦");
+  assert.equal(sessions.get(link.sessionID!)!.title, "Tên <mới> & an toàn");
+  const customEdits = edits.length;
+  events!({ type: "session.renamed", data: { sessionID: link.sessionID } });
+  await bot.handle({ update_id: ++update, message: { message_id: update, chat: { id: -1001 }, message_thread_id: 201,
+    is_topic_message: true, forum_topic_edited: { name: "Tên đổi thủ công ở Telegram" } } });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(edits.length, customEdits);
+  assert.equal(st.sessionTopics()?.links[link.id].titlePolicy?.mode, "custom");
+  console.log("Đạt: tên riêng tiếng Việt/biểu tượng qua adapter thật, không cập nhật ngược OpenCode.");
+
   errorDescription = "TOPIC_NOT_MODIFIED";
   await tg.editForumTopic("-1001:201", "Tên");
   errorDescription = "Bad Request: not enough rights to manage topics";
