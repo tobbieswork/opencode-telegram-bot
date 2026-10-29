@@ -19,6 +19,13 @@ import { randomInt } from "node:crypto";
 
 /** The single branch that carries the node/mac task files. */
 export const NODE_BRANCH = "node/mac";
+/**
+ * Per-task code branch. Must NOT live under `node/mac/…`: git cannot hold both
+ * the ref `node/mac` and `node/mac/<id>` (file/directory conflict).
+ */
+export function codeBranchFor(id: string): string {
+  return `node-code/${id}`;
+}
 /** Human-readable node label used in chat reports. */
 export const NODE_NAME = "mac";
 

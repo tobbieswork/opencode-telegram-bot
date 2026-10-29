@@ -11,6 +11,7 @@ import {
   buildTaskFile,
   claimPath,
   classifyTask,
+  codeBranchFor,
   donePath,
   newTaskId,
   parseDoneFile,
@@ -49,13 +50,16 @@ const DONE: NodeDone = {
   tokensOut: 678,
   durationMs: 45_000,
   sessionId: "124156f9-7273-4536-94ff-00d11cb30164",
-  codeBranch: "node/mac/nmac-a1b2",
+  codeBranch: "node-code/nmac-a1b2",
   report: "**Kết quả:** xanh.\n\nChi tiết ở đây.",
 };
 
 // ── id + branch constants ───────────────────────────────────────────────────
 {
   check("branch constant", NODE_BRANCH === "node/mac");
+  // git cannot hold refs `node/mac` and `node/mac/<id>` at once (D/F conflict)
+  check("code branch is not under the queue branch", !codeBranchFor("nmac-a1b2").startsWith(NODE_BRANCH + "/"));
+  check("code branch name", codeBranchFor("nmac-a1b2") === "node-code/nmac-a1b2");
   const ids = new Set(Array.from({ length: 50 }, () => newTaskId()));
   check("newTaskId format", [...ids].every((s) => /^nmac-[0-9a-z]{4}$/.test(s)));
   check("newTaskId no collisions (50)", ids.size === 50);
