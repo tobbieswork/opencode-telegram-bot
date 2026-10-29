@@ -93,7 +93,8 @@ try {
   await bot.handle(tap(confirmation, -1001, 201));
   assert.equal(st.sessionTopics()?.titleSyncGroups?.["-1001"], undefined);
   await bot.handle(tap(confirmation));
-  assert.equal(st.sessionTopics()?.titleSyncGroups?.["-1001"], true);
+  assert.equal(st.sessionTopics()?.titlePolicies?.groups["-1001"].enabled, true);
+  assert.equal(st.sessionTopics()?.titleSyncGroups?.["-1001"], undefined);
   await waitFor(() => edits.length === 1);
   assert.equal(edits[0].name, "Sửa <đăng nhập> & kiểm tra");
   assert.equal(st.peek("-1001")?.sessionID, undefined, "Đồng bộ tên không cần phiên quản lý/phiên General");

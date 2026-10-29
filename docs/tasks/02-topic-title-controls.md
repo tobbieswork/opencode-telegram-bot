@@ -1,6 +1,7 @@
 # Đầu việc 2 — Kiểm soát đồng bộ tên chủ đề
 
-**Trạng thái:** chưa triển khai phần mở rộng. **Thứ tự:** CV05 → CV06 → CV07.
+**Trạng thái:** CV05 đã triển khai; CV06–CV07 chưa triển khai.
+**Thứ tự:** CV05 → CV06 → CV07.
 **Điều kiện bắt đầu:** CV04 đã nghiệm thu theo
 [kế hoạch tổng](../plan-session-workflow-improvements.md).
 
@@ -18,28 +19,53 @@ theo nhóm, chưa có ngoại lệ hoặc tên riêng. Mọi thay đổi phải 
 
 ### Công việc
 
-- [ ] Định nghĩa giao diện chính sách trong `SessionTopics`: công tắc tự đồng
+- [x] Định nghĩa giao diện chính sách trong `SessionTopics`: công tắc tự đồng
   bộ toàn nhóm và lựa chọn theo chủ đề gồm **Theo OpenCode**, **Giữ tên hiện tại**,
   **Tên riêng**. Dữ liệu cũ không có lựa chọn thì kế thừa hành vi hiện tại.
-- [ ] Chốt thứ tự ưu tiên: tắt toàn nhóm dừng mọi tự đồng bộ; khi nhóm bật,
+- [x] Chốt thứ tự ưu tiên: tắt toàn nhóm dừng mọi tự đồng bộ; khi nhóm bật,
   chỉ chủ đề chọn Theo OpenCode được tự theo tên phiên. Tên riêng/giữ tên không
   được nguồn OpenCode ghi đè. Đặt tên riêng là thao tác rõ ràng của người dùng,
   không phải tự đồng bộ ngầm khi nhóm tắt.
-- [ ] Phân biệt tên mong muốn theo chính sách với tên đã được Telegram xác
+- [x] Phân biệt tên mong muốn theo chính sách với tên đã được Telegram xác
   nhận, kể cả khi phản hồi đến muộn hoặc lần ghi trước chưa rõ kết quả.
-- [ ] Bổ sung số phiên bản chính sách hoặc mốc tương đương để một công việc đổi
+- [x] Bổ sung số phiên bản chính sách hoặc mốc tương đương để một công việc đổi
   tên cũ không xác nhận thay cho chính sách mới.
-- [ ] Chọn cách lưu tương thích trước khi sửa bộ kiểm tra dữ liệu; không ghi
+- [x] Chọn cách lưu tương thích trước khi sửa bộ kiểm tra dữ liệu; không ghi
   `false` vào bản đồ hiện tại khi chưa nâng bộ đọc/ghi. Không bật nhóm đang tắt
   hoặc xóa thời gian chờ do giới hạn tần suất trong lúc nâng dữ liệu.
-- [ ] Xác định hành vi khi quay về bản mã cũ; nếu không thể đọc dữ liệu mới,
+- [x] Xác định hành vi khi quay về bản mã cũ; nếu không thể đọc dữ liệu mới,
   báo rõ giới hạn và cách khôi phục đã kiểm thử, không âm thầm bỏ trường.
 
 ### Kiểm thử và nghiệm thu
 
-- [ ] Bảng đầy đủ giữa công tắc nhóm, lựa chọn chủ đề và dữ liệu thiếu trường.
-- [ ] Đọc/ghi dữ liệu cũ; chính sách hỏng/không hỗ trợ; lỗi lưu trước thao tác ngoài.
-- [ ] Không đổi `sessionID`, danh tính, vòng đời hoặc điều kiện nhận công việc.
+- [x] Bảng đầy đủ giữa công tắc nhóm, lựa chọn chủ đề và dữ liệu thiếu trường.
+- [x] Đọc/ghi dữ liệu cũ; chính sách hỏng/không hỗ trợ; lỗi lưu trước thao tác ngoài.
+- [x] Không đổi `sessionID`, danh tính, vòng đời hoặc điều kiện nhận công việc.
+
+### Quyết định dữ liệu của CV05
+
+- `SessionTopicsData.titlePolicies` là bản ghi phiên bản 1, có
+  `groups[chat] = { enabled, revision }`.
+- `link.titlePolicy` lưu `mode: follow | keep | custom`, `revision` và
+  `customName` khi dùng tên riêng. Không có trường thì là Theo OpenCode, mốc 0.
+- `link.title` vẫn là tên bot đã nhận xác nhận; `customName` là ý định riêng,
+  không tự ghi đè tên đã xác nhận khi mới đổi chính sách. CV07 bổ sung thao tác
+  thực sự đặt tên riêng sau xem trước/xác nhận.
+- Đọc không tự nâng dữ liệu. Lần ghi chính sách đầu tiên sao chép đầy đủ trạng
+  thái bật/tắt cũ sang bản ghi mới và xóa các khóa ở `titleSyncGroups`; không
+  ghi giá trị `false` vào cấu trúc cũ. Giữ nguyên `titleRetryAt` và liên kết.
+- Vì bản mã CV00–CV04 chỉ đọc `titleSyncGroups`, khi quay về các bản đó, tự
+  đồng bộ tên mặc định dừng thay vì ghi đè ngoại lệ. Không dùng nút bật tên của
+  bản cũ: bản đó chưa hiểu ngoại lệ. Trở lại bản mới giữ được chính sách đã lưu.
+  Không khôi phục tệp trạng thái cũ đè lên lịch sử phát sinh trong lúc triển khai.
+- Mốc nhóm/chủ đề được kiểm tra lại sau khi chờ metadata; bật/tắt qua lại vẫn
+  vô hiệu hóa công việc cũ. Lời gọi Telegram đã gửi không thể rút lại: chỉ ghi
+  tên đã xác nhận, không báo đã áp dụng chính sách mới nếu mốc đã đổi.
+
+Kiểm thử bổ sung: `scripts/test-topic-title-policies.ts`, gồm ma trận công tắc
+và ngoại lệ, dữ liệu cũ, bấm lặp, phạm vi nhóm, khởi động lại, bộ đọc tên cũ và
+thay chính sách trong lúc đọc metadata. Kiểm thử tên hiện có tiếp tục kiểm tra
+lỗi ghi đĩa trước thao tác ngoài và giữ nguyên vòng đời.
 
 **Tệp liên quan:** `src/session-topics.ts`, `src/state.ts`;
 `scripts/test-topic-titles.ts` và dữ liệu mẫu tương thích.

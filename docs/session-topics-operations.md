@@ -96,8 +96,10 @@ khi nhận thông báo sửa chủ đề; khởi động lại hoặc nút đồ
 một thông báo sửa tay đã mất; không tuyên bố bộ nhớ cục bộ là bằng chứng tên đang
 hiển thị trên Telegram.
 
-Chính sách lưu trong `__machine__.sessionTopics.titleSyncGroups`; kết quả đồng
-bộ nằm ở tên liên kết, ý định/lỗi/thời điểm thử lại nằm ở `link.titleSync` và thời
+Chính sách mới lưu trong `__machine__.sessionTopics.titlePolicies` phiên bản 1,
+ngoại lệ ở `link.titlePolicy`; dữ liệu cũ ở `titleSyncGroups` vẫn được đọc mà
+không tự nâng khi khởi động. Kết quả đồng bộ nằm ở tên liên kết,
+ý định/lỗi/thời điểm thử lại nằm ở `link.titleSync` và thời
 gian chờ do giới hạn tần suất của nhóm ở `titleRetryAt`. Chỉ ghi tên mới sau khi
 Telegram xác nhận; chỉ `TOPIC_NOT_MODIFIED` được coi là thành công không thay
 đổi. Lỗi khác giữ tên đã xác nhận và hiển thị đang chờ trên thẻ phiên.
@@ -107,6 +109,13 @@ tôn trọng `retry_after` và giữ thời gian chờ qua khởi động lại.
 hội thoại để đọc tên, không gọi mô hình AI, không dừng công việc hay đổi liên
 kết. Chủ đề đóng chỉ được đồng bộ sau khi được mở lại bằng luồng quản lý bình
 thường; đổi tên không tự mở chủ đề. Kiểm thử riêng: `npm run test:topic-titles`.
+
+**Quay về bản mã cũ:** khi ghi chính sách từ CV05, toàn bộ trạng thái bật/tắt
+cũ được giữ trong bản ghi mới, còn bản đồ `titleSyncGroups` được để rỗng. Nếu
+quay về mã CV00–CV04, tự đổi tên mặc định dừng an toàn; không dùng nút bật tên
+của bản cũ vì chưa hiểu ngoại lệ. Giữ nguyên tệp trạng thái mới để không mất
+công việc/lịch sử. Giao diện bật/tắt theo chủ đề và đặt tên riêng lần lượt
+được bổ sung ở CV06–CV07.
 
 ## Existing sessions
 

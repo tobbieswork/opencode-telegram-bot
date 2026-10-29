@@ -1055,9 +1055,9 @@ export class Bot {
     const page = Math.min(Math.max(0, requestedPage), pages - 1);
     const text = ["<b>Xem trước đồng bộ tên chủ đề</b>",
       "Tên bot đã lưu → tiêu đề OpenCode. Telegram không cung cấp cách đọc lại tên mọi chủ đề; tên đã sửa tay có thể khác bản lưu.",
-      ...preview.rows.slice(page * 10, page * 10 + 10).map(row => `${esc(trunc(row.before, 100))} → ${esc(trunc(row.after ?? "giữ tên hiện tại", 100))}${row.error ? ` · ${esc(trunc(row.error, 100))}` : row.deferred ? " · hoãn đến khi phiên/chủ đề mở" : ""}`),
+      ...preview.rows.slice(page * 10, page * 10 + 10).map(row => `${esc(trunc(row.before, 100))} → ${esc(trunc(row.after ?? "giữ tên hiện tại", 100))}${row.error ? ` · ${esc(trunc(row.error, 100))}` : row.reason ? ` · ${esc(row.reason)}` : row.deferred ? " · hoãn đến khi phiên/chủ đề mở" : ""}`),
       `Trang ${page + 1}/${pages} · ${preview.rows.length} chủ đề.`,
-      "Xác nhận áp dụng cho cả nhóm, gồm các chủ đề tạo sau này. OpenCode là nguồn tên chuẩn; không giữ tên sửa riêng ở Telegram.",
+      "Xác nhận bật cho nhóm và các chủ đề tạo sau này. Chỉ chủ đề chọn Theo OpenCode được ghi đè; ngoại lệ giữ tên/tên riêng được giữ nguyên.",
       "Chỉ đổi tên, không dừng công việc hay mở lại chủ đề đã đóng. Khi thực hiện bot đọc lại tiêu đề mới nhất.",
     ].join("\n");
     const rows: Btn[][] = [];
