@@ -10,7 +10,7 @@
     "dev": "tsx src/index.ts",
     "start": "tsx src/index.ts",
     "restart:local": "tsx scripts/restart-local-bot.ts",
-    "test:workflow": "tsx scripts/test-workflow-foundations.ts && tsx scripts/test-session-dashboard.ts",
+    "test:workflow": "tsx scripts/test-workflow-foundations.ts && tsx scripts/test-session-dashboard.ts && tsx scripts/test-session-dashboard-commands.ts",
     "smoke": "tsx scripts/smoke.ts",
     "test:format": "tsx scripts/test-format.ts",
     "test:fsbrowser": "tsx scripts/test-fsbrowser.ts",

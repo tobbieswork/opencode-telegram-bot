@@ -36,7 +36,7 @@ try {
     message_id: 1, from: { id: 1 }, text: "/sessions" } });
   assert.equal(sideEffects, 0);
   assert.deepEqual(st.sessionTopics(), before);
-  assert.ok(messages.some(text => text.includes("đang chọn")));
+  assert.ok(messages.some(text => text.includes("Phiên đang quản lý")));
   assert.equal(st.peek("-1001:202")?.pendingPrompts?.form_fixture.remindersSent, 1);
   assert.equal(st.peek("-1001:206")?.worker?.spawnedBy, "schedule");
   assert.equal(fixture.runs[0].phase, "recovering");

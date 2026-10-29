@@ -60,6 +60,10 @@ try {
   await bot.handle(message("/setup"));
   for (const command of ["/sessions", "/ls", "/ls@opencode_blue_bot", "/attach", "/use"]) {
     await bot.handle(message(command));
+    if (command.startsWith("/sessions") || command.startsWith("/ls")) {
+      assert.ok(buttons().some(item => item.callback_data === "st:list:0"));
+      await bot.handle(button("st:list:0"));
+    }
     assert.ok(buttons().some((item) => item.callback_data === "use:ses_legacy"), `${command}: chọn phiên cũ bằng nút, không cần biết ID`);
     assert.ok(buttons().some((item) => item.callback_data === "use:ses_free"));
     assert.ok(buttons().some((item) => item.callback_data === "cmd:new"));

@@ -1,6 +1,6 @@
 # Đầu việc 1 — Bảng điều khiển và danh sách Đang chờ bạn
 
-**Trạng thái:** CV01 đã triển khai; CV02–CV04 chưa triển khai.
+**Trạng thái:** CV01–CV02 đã triển khai; CV03–CV04 chưa triển khai.
 **Thứ tự:** CV01 → CV02 → CV03 → CV04.
 **Điều kiện bắt đầu:** CV00 trong [kế hoạch tổng](../plan-session-workflow-improvements.md).
 
@@ -49,30 +49,30 @@ mã tin Telegram; các bộ nhớ câu hỏi/quyền đang hoạt động còn n
 
 ### Công việc
 
-- [ ] Nâng cấp `/sessions` thành điểm vào có hai phần rõ ràng: **Phiên đang
+- [x] Nâng cấp `/sessions` thành điểm vào có hai phần rõ ràng: **Phiên đang
   quản lý** và **Gắn phiên có sẵn**. Giữ các bí danh/lối vào đang có.
-- [ ] Thêm bộ lọc **Tất cả**, **Đang chờ bạn**, **Đang chạy**, **Gặp lỗi**,
+- [x] Thêm bộ lọc **Tất cả**, **Đang chờ bạn**, **Đang chạy**, **Gặp lỗi**,
   **Đã đóng**; **Tất cả** vẫn cho thấy các phiên chưa xác minh/cần can thiệp.
-- [ ] Mỗi hàng hiển thị tên, thư mục rút gọn, trạng thái theo các chiều cần
+- [x] Mỗi hàng hiển thị tên, thư mục rút gọn, trạng thái theo các chiều cần
   thiết và mốc hoạt động; xem chi tiết mới mở thẻ đầy đủ.
-- [ ] Hiển thị số lượng theo bộ lọc và phân trang tối đa 10 phiên/trang; không
+- [x] Hiển thị số lượng theo bộ lọc và phân trang tối đa 10 phiên/trang; không
   gửi lại hàng loạt thẻ ở mỗi lần mở danh sách.
-- [ ] Quy định thứ tự ổn định: chờ người dùng trước, sau đó mốc hoạt động và
+- [x] Quy định thứ tự ổn định: chờ người dùng trước, sau đó mốc hoạt động và
   mã liên kết để phân xử. Lưu bộ lọc/trang gắn với đúng thẻ, không dùng một biến
   toàn cục khiến người này đổi giao diện của người khác ngoài ý muốn.
-- [ ] Nút làm mới kiểm tra lại quyền và phạm vi. Khi dữ liệu thay đổi giữa hai
+- [x] Nút làm mới kiểm tra lại quyền và phạm vi. Khi dữ liệu thay đổi giữa hai
   trang, đưa trang về phạm vi hợp lệ hoặc yêu cầu làm mới, không rơi sang nhóm khác.
-- [ ] Trạng thái trống/lỗi vẫn có đường quay lại, làm mới và tạo/gắn phiên theo
+- [x] Trạng thái trống/lỗi vẫn có đường quay lại, làm mới và tạo/gắn phiên theo
   quyền hiện tại; không yêu cầu người dùng nhập mã phiên.
 
 ### Kiểm thử và nghiệm thu
 
-- [ ] Đủ dữ liệu 0, 1, 10, 11 và nhiều phiên; số lượng và phân trang nhất quán.
-- [ ] Các lối vào `/sessions`, `/ls`, `/attach`, `/use` không có mã vẫn hoạt động
+- [x] Đủ dữ liệu 0, 1, 10, 11 và nhiều phiên; số lượng và phân trang nhất quán.
+- [x] Các lối vào `/sessions`, `/ls`, `/attach`, `/use` không có mã vẫn hoạt động
   đúng hoặc dẫn rõ ràng đến phần chọn phiên tương ứng.
-- [ ] Gắn phiên vẫn qua `SessionTopics.attach`, kiểm tra lại danh tính/quyền và
+- [x] Gắn phiên vẫn qua `SessionTopics.attach`, kiểm tra lại danh tính/quyền và
   điều kiện nghỉ; không gắn phiên ngay khi chỉ xem danh sách.
-- [ ] Kiểm thử qua `Bot.handle` và adapter Telegram thật với máy chủ giả lập
+- [x] Kiểm thử qua `Bot.handle` và adapter Telegram thật với máy chủ giả lập
   kiểm tra HTML và kích thước dữ liệu nút.
 
 **Tệp liên quan:** `src/bot.ts`, `src/commands.ts`; mở rộng

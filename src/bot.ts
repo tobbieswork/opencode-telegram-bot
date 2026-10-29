@@ -11,6 +11,7 @@ import { Orchestrator } from "./orchestrator.js";
 import { ScheduleStore } from "./scheduler.js";
 import { ScheduledRuns } from "./scheduled-run.js";
 import { SessionTopics, type SessionTopic, type TopicTitlePreview } from "./session-topics.js";
+import { SessionDashboard, dashboardPage, DASHBOARD_FILTERS, DASHBOARD_WORK_LABELS, DASHBOARD_PHASE_LABELS, type DashboardFilter } from "./session-dashboard.js";
 import { Schedule, SchedSpec, formatSchedule, nextRunAfter, parseScheduleSpec } from "./schedule.js";
 import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure } from "./format.js";
@@ -249,6 +250,8 @@ export class Bot {
   /** Khôi phục lượt cũ luôn chạy; cfg.schedule chỉ chặn nhận lượt mới. */
   private scheduler?: ScheduledRuns;
   private topics: SessionTopics;
+  private dashboard: SessionDashboard;
+  private dashboardCards = new Map<string, { chat: ConvKey; user: number; expires: number; filter: DashboardFilter; page: number }>();
   private topicTimer?: ReturnType<typeof setInterval>;
   private topicSync?: Promise<void>;
   private topicSyncAgain = false;
@@ -311,6 +314,8 @@ export class Bot {
         return true;
       },
     });
+    this.dashboard = new SessionDashboard({ store: st, topics: this.topics,
+      observe: (id, signal) => oc.dashboardObservation(id, signal), timeoutMs: 3000 });
     this.orch = new Orchestrator({
       tg,
       oc,
@@ -415,6 +420,7 @@ export class Bot {
     this.orch.shutdown();
     this.topics.stopTitleSync();
     this.titlePreviews.clear();
+    this.dashboardCards.clear();
     if (this.topicTimer) clearInterval(this.topicTimer);
     this.topicTimer = undefined;
   }
@@ -760,7 +766,7 @@ export class Bot {
     }
 
     if (text.startsWith("/")) {
-      if (await this.handleTopicCommand(conv, text, `message:${msg.chat.id}:${msg.message_id ?? u.update_id}`)) return;
+      if (await this.handleTopicCommand(conv, text, `message:${msg.chat.id}:${msg.message_id ?? u.update_id}`, uid)) return;
       await this.handleCommand(conv, text, state, uid);
     }
     else {
@@ -777,7 +783,7 @@ export class Bot {
     }
   }
 
-  private async handleTopicCommand(conv: ConvKey, raw: string, operationID?: string): Promise<boolean> {
+  private async handleTopicCommand(conv: ConvKey, raw: string, operationID?: string, userID?: number): Promise<boolean> {
     if (!this.topics.enabled(conv)) return false;
     const [name, ...args] = raw.split(/\s+/);
     const cmd = name.replace(/@\w+$/, "").toLowerCase();
@@ -819,7 +825,12 @@ export class Bot {
         await this.showTopicLink(conv, await this.topics.attach(conv, arg));
         return true;
       }
-      if (["/sessions", "/ls", "/use", "/attach"].includes(cmd)) {
+      if (["/sessions", "/ls"].includes(cmd)) {
+        if (userID === undefined) throw new Error("Chưa xác minh được người mở bảng điều khiển.");
+        await this.showSessionDashboard(conv, userID);
+        return true;
+      }
+      if (["/use", "/attach"].includes(cmd)) {
         await this.showSessionTopics(conv);
         return true;
       }
@@ -846,8 +857,6 @@ export class Bot {
   }
 
   private async showSessionTopics(conv: ConvKey, requestedPage = 0): Promise<void> {
-    const links = this.topics.list(conv);
-    if (requestedPage === 0) for (const link of links) await this.showTopicLink(conv, link);
     const directory = resolve(this.st.peek(conv)?.directory || this.cfg.opencodeDirectory);
     let sessions: SessionBrief[] = [];
     let failed = false;
@@ -883,6 +892,7 @@ export class Bot {
     rows.push([{ text: "➕ Tạo phiên mới", callback_data: "cmd:new" }, { text: "🔄 Làm mới", callback_data: "st:list:0" }]);
     rows.push([{ text: "Mở phiên quản lý", callback_data: "mgr:open" }]);
     rows.push([{ text: "Đồng bộ tên chủ đề", callback_data: "st:title-preview:0" }]);
+    rows.push([{ text: "Phiên đang quản lý", callback_data: "cmd:ls" }]);
     const text = ["<b>📂 Chọn phiên để gắn vào chủ đề</b>",
       `Thư mục đang chọn: <code>${esc(directory)}</code>`,
       failed ? "⚠️ Không tải được danh sách OpenCode. Vẫn hiển thị các phiên cũ đã lưu của nhóm; bấm Làm mới để thử lại." : "",
@@ -892,6 +902,43 @@ export class Bot {
       "Bot chỉ kiểm tra và gắn khi bạn chọn; phiên đang chạy cần chờ kết thúc. Không tự tạo lại hay chuyển phiên của chat khác.",
     ].filter(Boolean).join("\n");
     await this.tg.sendMessage(conv, text, { reply_markup: { inline_keyboard: rows } });
+  }
+
+  private async showSessionDashboard(conv: ConvKey, user: number, token?: string, filter: DashboardFilter = "all", requestedPage = 0, force = false): Promise<void> {
+    if (!token) {
+      for (const [key, value] of this.dashboardCards) if (value.expires < Date.now()) this.dashboardCards.delete(key);
+      while (this.dashboardCards.size >= 500) this.dashboardCards.delete(this.dashboardCards.keys().next().value!);
+      token = randomBytes(6).toString("hex");
+      this.dashboardCards.set(token, { chat: conv, user, expires: Date.now() + 10 * 60_000, filter, page: requestedPage });
+    }
+    const card = this.dashboardCards.get(token);
+    if (!card || card.chat !== conv || card.user !== user || card.expires < Date.now()) {
+      throw new Error("Thẻ đã hết hạn hoặc không thuộc bạn/nhóm này. Mở lại bằng /sessions.");
+    }
+    const prior = dashboardPage(await this.dashboard.read(conv), filter, requestedPage);
+    const rows = await this.dashboard.read(conv, { refresh: true, force, ids: prior.rows.map(row => row.id) });
+    const page = dashboardPage(rows, filter, prior.page);
+    card.filter = filter;
+    card.page = page.page;
+    const keyboard: Btn[][] = page.rows.map(row => [{ text: trunc(row.title || "Phiên chưa đặt tên", 48), callback_data: `db:${token}:detail:${row.id}` }]);
+    const filters = Object.entries(DASHBOARD_FILTERS).map(([key, label]) => ({ text: `${label} (${page.counts[key as DashboardFilter]})`, callback_data: `db:${token}:${key}:0` }));
+    for (let index = 0; index < filters.length; index += 2) keyboard.push(filters.slice(index, index + 2));
+    const navigation: Btn[] = [];
+    if (page.page > 0) navigation.push({ text: "⬅️ Trang trước", callback_data: `db:${token}:${filter}:${page.page - 1}` });
+    if (page.page + 1 < page.pages) navigation.push({ text: "Trang sau ➡️", callback_data: `db:${token}:${filter}:${page.page + 1}` });
+    if (navigation.length) keyboard.push(navigation);
+    keyboard.push([{ text: "Làm mới", callback_data: `db:${token}:refresh:0` }, { text: "Gắn phiên có sẵn", callback_data: "st:list:0" }]);
+    keyboard.push([{ text: "➕ Tạo phiên mới", callback_data: "cmd:new" }, { text: "Mở phiên quản lý", callback_data: "mgr:open" }]);
+    keyboard.push([{ text: "Đồng bộ tên chủ đề", callback_data: "st:title-preview:0" }]);
+    const text = ["<b>Phiên đang quản lý</b>", `${DASHBOARD_FILTERS[filter]} · ${page.total} phiên · Trang ${page.page + 1}/${page.pages}`,
+      ...page.rows.flatMap((row, index) => [
+        `${page.page * 10 + index + 1}. <b>${esc(trunc(row.title, 48))}</b> · ${DASHBOARD_PHASE_LABELS[row.lifecycle]} · ${DASHBOARD_WORK_LABELS[row.work]}`,
+        `<code>${esc(trunc(row.directory, 60))}</code> · ${row.checkedAt ? `Đã kiểm tra ${esc(timeAgo(row.checkedAt))}` : "Chưa kiểm tra"}${row.pending.length ? ` · ${row.pending.length} yêu cầu${row.pendingVerified ? "" : " cần đối chiếu"}` : ""}${row.titleError ? " · Lỗi đồng bộ tên" : ""}`,
+      ]),
+      !page.rows.length ? "Chưa có phiên phù hợp. Có thể làm mới, đổi bộ lọc, tạo mới hoặc gắn phiên có sẵn." : "Bấm tên phiên để xem chi tiết và đi tới chủ đề.",
+      page.unverified ? `${page.unverified} phiên chưa xác minh đủ. Số đang chạy/chờ chỉ tính dữ liệu đã xác minh; làm mới từng trang khi cần.` : "Trạng thái là dữ liệu đã quan sát, không tự thay đổi vòng đời.",
+    ].join("\n");
+    await this.tg.sendMessage(conv, text, { reply_markup: { inline_keyboard: keyboard } });
   }
 
   private async showTopicLink(conv: ConvKey, link: SessionTopic): Promise<void> {
@@ -2442,11 +2489,32 @@ export class Bot {
         await this.orch.handleCommand(conv, "/manager", "on");
         return;
       }
+      if (data.startsWith("db:")) {
+        if (conv !== chatOf(conv)) { await this.tg.answerCallbackQuery(cb.id, "Dùng bảng điều khiển trong General."); return; }
+        await this.tg.answerCallbackQuery(cb.id);
+        const [, token, action, value] = data.split(":");
+        try {
+          const card = this.dashboardCards.get(token);
+          if (!card || card.chat !== conv || card.user !== cb.from?.id || card.expires < Date.now()) {
+            throw new Error("Thẻ đã hết hạn hoặc không thuộc bạn/nhóm này. Mở lại bằng /sessions.");
+          }
+          if (action === "detail") {
+            const link = this.topics.get(value);
+            if (!link || link.chat !== conv) throw new Error("Phiên không còn thuộc nhóm này. Mở lại /sessions.");
+            await this.showTopicLink(conv, link);
+          } else if (action === "refresh") await this.showSessionDashboard(conv, cb.from!.id, token, card.filter, card.page, true);
+          else {
+            if (!Object.hasOwn(DASHBOARD_FILTERS, action) || !/^(?:0|[1-9]\d{0,5})$/.test(value ?? "")) throw new Error("Bộ lọc hoặc trang không hợp lệ.");
+            await this.showSessionDashboard(conv, cb.from!.id, token, action as DashboardFilter, Number(value));
+          }
+        } catch (error) { await this.tg.sendMessage(conv, esc((error as Error).message)); }
+        return;
+      }
       if (conv === chatOf(conv) && (/^(?:pb:|cont:|fq:|perm:)/.test(data) || data.startsWith(NOTE_CB_PREFIX))) {
         await this.tg.answerCallbackQuery(cb.id, "Work and questions belong in the session topic, not General.");
         return;
       }
-      if (data.startsWith("cmd:") && await this.handleTopicCommand(conv, `/${data.slice(4)}`, `button:${conv}:${messageId}:${data}`)) {
+      if (data.startsWith("cmd:") && await this.handleTopicCommand(conv, `/${data.slice(4)}`, `button:${conv}:${messageId}:${data}`, cb.from?.id)) {
         await this.tg.answerCallbackQuery(cb.id);
         return;
       }
@@ -2510,7 +2578,7 @@ export class Bot {
         return;
       }
       if (data.startsWith("use:") && data !== "use:close") {
-        await this.handleTopicCommand(conv, data === "use:ls" ? "/sessions" : `/use ${data.slice(4)}`);
+        await this.handleTopicCommand(conv, data === "use:ls" ? "/sessions" : `/use ${data.slice(4)}`, undefined, cb.from?.id);
         await this.tg.answerCallbackQuery(cb.id);
         return;
       }

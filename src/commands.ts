@@ -48,7 +48,7 @@ export const COMMANDS: BotCommand[] = [
   // ── session ────────────────────────────────────────────────────────────
   { cmd: "setup", desc: "Enable General/topic session management in this forum group", group: "session", scope: "general" },
   { cmd: "new", desc: "Bắt đầu phiên làm việc mới", button: "🆕 Session mới", group: "session", scope: "general" },
-  { cmd: "ls", aliases: ["sessions"], desc: "Liệt kê phiên gần đây", button: "📄 Sessions", group: "session", scope: "general" },
+  { cmd: "ls", aliases: ["sessions"], desc: "Bảng điều khiển phiên; bộ lọc và lối gắn phiên có sẵn", button: "📄 Phiên", group: "session", scope: "general" },
   { cmd: "use", aliases: ["attach"], arg: "<id>", desc: "Open or attach an existing session topic", group: "session", scope: "general" },
   { cmd: "close", arg: "<session-id>", desc: "Stop, archive and close a managed session topic", group: "session", scope: "general" },
   { cmd: "restore", arg: "<session-id>", desc: "Restore the original session and topic", group: "session", scope: "general" },

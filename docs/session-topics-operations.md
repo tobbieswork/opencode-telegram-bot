@@ -16,8 +16,15 @@ and all command/button handlers enforce General versus work-topic scope.
 
 - General: `/sessions`, `/new [title]`, `/attach <session-id>`, `/close <id>`,
   `/restore <id>`, `/sync`; session cards link to the work topic.
-- `/sessions`, `/ls`, `/attach` and `/use` without an ID open a named button
-  picker. Saved legacy sessions of this group are included, even outside the
+- `/sessions` và `/ls` mở bảng điều khiển gọn, tối đa 10 phiên/trang, có bộ lọc
+  theo công việc, yêu cầu chờ, lỗi và vòng đời. Bấm tên mới mở thẻ chi tiết.
+  Mỗi thẻ bảng điều khiển gắn người/nhóm, hết hạn sau 10 phút; không dùng thẻ
+  của người khác. Số đang chạy/chờ chỉ tính dữ liệu đã xác minh; nguồn chưa rõ
+  được ghi rõ, không suy thành hoàn tất. Bộ nhớ tạm 30 giây, làm mới từng trang,
+  tối đa 2 phiên cùng lúc và thời hạn 3 giây/phiên ở giao diện.
+- **Gắn phiên có sẵn**, `/attach` hoặc `/use` không có mã mở danh sách chọn
+  có tên. Danh sách chỉ đọc, không gửi lại thẻ của mọi phiên đã quản lý.
+  Saved legacy sessions of this group are included, even outside the
   selected directory. Unowned OpenCode sessions are discovered only in the
   directory selected with `/dir` or `/browse`; other chats' sessions, archived
   sessions and child sessions are excluded. Pagination, refresh and a create-new

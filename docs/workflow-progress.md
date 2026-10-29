@@ -7,8 +7,8 @@ khi bắt đầu đầu việc tiếp theo. Không bật chính sách mới trê
 | Đầu việc | Trạng thái | Bằng chứng hoặc giới hạn |
 | --- | --- | --- |
 | CV00 | Hoàn thành | `d216950`; kiểu, đơn vị, đầu-cuối đạt; đã khởi động lại, giữ 4 liên kết |
-| CV01 | Đã triển khai, chờ chốt commit và khởi động lại | Mô hình đọc chỉ đọc, bộ nhớ tạm 30 giây/tối đa 1000 bản ghi, tối đa 2 phiên đọc đồng thời, thời hạn 8 giây; kiểm thử module và adapter |
-| CV02 | Chưa bắt đầu | Bảng điều khiển và bộ lọc |
+| CV01 | Hoàn thành | `4237cde`; kiểu, đơn vị, đầu-cuối đạt; đã khởi động lại, giữ 4 liên kết; bộ nhớ tạm 30 giây, tối đa 1000 bản ghi |
+| CV02 | Đã triển khai, chờ chốt commit và khởi động lại | Bảng điều khiển 10 hàng/trang, 5 bộ lọc, thẻ theo người/nhóm và lối gắn phiên riêng; kiểm thử đường vào công khai |
 | CV03 | Chưa bắt đầu | Đang chờ bạn |
 | CV04 | Chưa bắt đầu | Hoạt động gần nhất |
 | CV05 | Chưa bắt đầu | Mô hình chính sách tên |

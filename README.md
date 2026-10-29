@@ -121,7 +121,7 @@ bot:   The last commit adds retry logic but…
 | `/help` | Show help + a tappable command menu |
 | `/setup` | Enable fixed session/topic management from General of a forum supergroup |
 | `/new [title]` | In managed General: create a new session **and topic**; legacy chats keep their old behavior |
-| `/ls`, `/sessions` | In managed General: show session/topic lifecycle cards |
+| `/ls`, `/sessions` | Trong General: bảng điều khiển, bộ lọc, phân trang và lối gắn phiên có sẵn |
 | `/use <id>`, `/attach <id>` | In managed General: attach an idle existing session or find its existing topic |
 | `/close <id>` | General: confirm stop, archive the session, then close its topic; keep history |
 | `/restore <id>` | General: unarchive the original session and reopen the original topic |
