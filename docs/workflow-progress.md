@@ -8,8 +8,8 @@ khi bắt đầu đầu việc tiếp theo. Không bật chính sách mới trê
 | --- | --- | --- |
 | CV00 | Hoàn thành | `d216950`; kiểu, đơn vị, đầu-cuối đạt; đã khởi động lại, giữ 4 liên kết |
 | CV01 | Hoàn thành | `4237cde`; kiểu, đơn vị, đầu-cuối đạt; đã khởi động lại, giữ 4 liên kết; bộ nhớ tạm 30 giây, tối đa 1000 bản ghi |
-| CV02 | Đã triển khai, chờ chốt commit và khởi động lại | Bảng điều khiển 10 hàng/trang, 5 bộ lọc, thẻ theo người/nhóm và lối gắn phiên riêng; kiểm thử đường vào công khai |
-| CV03 | Chưa bắt đầu | Đang chờ bạn |
+| CV02 | Hoàn thành | `7d490f2`; kiểu, đơn vị, đầu-cuối đạt; đã khởi động lại, giữ 4 liên kết; bảng điều khiển 10 hàng/trang |
+| CV03 | Đã triển khai, chờ chốt commit và khởi động lại | Liên kết câu hỏi/quyền, hiển thị lại, kiểm tra nguồn trước trả lời; thử mở liên kết trên thiết bị Telegram thật để nghiệm thu ở CV15 |
 | CV04 | Chưa bắt đầu | Hoạt động gần nhất |
 | CV05 | Chưa bắt đầu | Mô hình chính sách tên |
 | CV06 | Chưa bắt đầu | Bật/tắt theo nhóm/chủ đề |

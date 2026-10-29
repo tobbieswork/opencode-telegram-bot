@@ -40,6 +40,18 @@ export function workflowBot() {
     setMyCommands: async () => {}, createForumTopic: forbidden, editForumTopic: forbidden,
     closeForumTopic: forbidden, openForumTopic: forbidden } as unknown as Telegram;
   const oc = { dashboardObservation: async (id: string) => { reads.push(id); return structuredClone(observations.get(id)!); },
+    listForms: async (id: string) => {
+      const forms = observations.get(id)?.forms;
+      if (!forms) throw new Error("Chưa xác minh câu hỏi");
+      return forms.map(form => ({ id: form, sessionID: id, fields: [{ key: "pick", type: "string", title: "Chọn",
+        options: [{ label: "Một", value: "one" }], custom: true }] }));
+    },
+    listPermissions: async (id: string) => {
+      const permissions = observations.get(id)?.permissions;
+      if (!permissions) throw new Error("Chưa xác minh quyền");
+      return permissions.map(permission => ({ id: permission, sessionID: id, action: "edit", resources: ["a.txt"] }));
+    },
+    replyForm: forbidden, cancelForm: forbidden, replyPermission: forbidden,
     listSessions: async () => [], createTopicSession: forbidden, promptAndWait: forbidden,
     archiveSession: forbidden, interruptTopicSession: forbidden } as unknown as OpenCodeCtl;
   const bot = new Bot(tg, oc, st, cfg);

@@ -3,7 +3,7 @@ import { existsSync, statSync, readFileSync, mkdirSync, writeFileSync } from "no
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { randomBytes, randomInt } from "node:crypto";
-import { Telegram, Update, CallbackQuery, Message, MessageGenerationStopped, MessageReactionUpdated } from "./telegram.js";
+import { Telegram, Update, CallbackQuery, Message, MessageGenerationStopped, MessageReactionUpdated, topicMessageUrl } from "./telegram.js";
 import { OpenCodeCtl, newMessageID, assistantText, ModelInfo, SessionBrief } from "./opencode.js";
 import { StateManager, ChatState, MsgPurpose, MACHINE_STATE_KEY } from "./state.js";
 import { ConvKey, convKey, chatOf, parseConv } from "./conv.js";
@@ -252,6 +252,8 @@ export class Bot {
   private topics: SessionTopics;
   private dashboard: SessionDashboard;
   private dashboardCards = new Map<string, { chat: ConvKey; user: number; expires: number; filter: DashboardFilter; page: number }>();
+  private pendingCards = new Map<string, { chat: ConvKey; user: number; expires: number; linkID: string; sessionID: string; identity: string;
+    items: Array<{ id: string; kind: "form" | "permission" }> }>();
   private topicTimer?: ReturnType<typeof setInterval>;
   private topicSync?: Promise<void>;
   private topicSyncAgain = false;
@@ -421,6 +423,7 @@ export class Bot {
     this.topics.stopTitleSync();
     this.titlePreviews.clear();
     this.dashboardCards.clear();
+    this.pendingCards.clear();
     if (this.topicTimer) clearInterval(this.topicTimer);
     this.topicTimer = undefined;
   }
@@ -941,6 +944,66 @@ export class Bot {
     await this.tg.sendMessage(conv, text, { reply_markup: { inline_keyboard: keyboard } });
   }
 
+  private async showPendingActions(conv: ConvKey, user: number, id: string, requestedPage = 0): Promise<void> {
+    const link = this.topics.get(id);
+    if (!link || link.chat !== conv || !link.sessionID) throw new Error("Không tìm thấy phiên trong nhóm này.");
+    if (link.phase !== "open" || !link.conv || !this.topics.canInteract(link.conv, link.sessionID)) {
+      await this.tg.sendMessage(conv, "Phiên chưa mở hoặc cần kiểm tra; bot không tự mở lại để đọc/hiển thị câu hỏi.");
+      return;
+    }
+    const row = (await this.dashboard.read(conv, { refresh: true, force: true, ids: [id] })).find(row => row.id === id);
+    if (!row || row.lifecycle !== "open" || row.sessionID !== link.sessionID) throw new Error("Phiên đã đổi trạng thái trong lúc đọc; hãy mở lại danh sách.");
+    const items = [...row.pending].sort((a, b) => Number(b.verified) - Number(a.verified) ||
+      (a.firstShownAt ?? a.checkedAt ?? 0) - (b.firstShownAt ?? b.checkedAt ?? 0) || `${a.kind}:${a.id}`.localeCompare(`${b.kind}:${b.id}`));
+    for (const [key, card] of this.pendingCards) if (card.expires < Date.now()) this.pendingCards.delete(key);
+    while (this.pendingCards.size >= 500) this.pendingCards.delete(this.pendingCards.keys().next().value!);
+    const token = randomBytes(6).toString("hex");
+    const pages = Math.max(1, Math.ceil(items.length / 10));
+    const page = Math.min(Math.max(0, requestedPage), pages - 1);
+    const visible = items.slice(page * 10, page * 10 + 10);
+    this.pendingCards.set(token, { chat: conv, user, expires: Date.now() + 10 * 60_000, linkID: id,
+      sessionID: link.sessionID, identity: JSON.stringify(link.identity), items: visible.map(item => ({ id: item.id, kind: item.kind })) });
+    const keyboard: Btn[][] = [];
+    const lines = [`<b>Đang chờ bạn · ${esc(trunc(link.title, 70))}</b>`, `${items.length} yêu cầu đã biết · Trang ${page + 1}/${pages}${row.pendingVerified ? "" : " · Chưa xác minh đầy đủ"}`];
+    visible.forEach((item, index) => {
+      const label = item.kind === "form" ? "Câu hỏi" : "Yêu cầu cấp quyền";
+      lines.push(`${index + 1}. ${label} · ${item.verified ? "Đã xác minh" : "Chưa xác minh"}${item.checkedAt ? ` · ${esc(timeAgo(item.checkedAt))}` : ""}${item.firstShownAt ? ` · xuất hiện ${esc(timeAgo(item.firstShownAt))}` : ""}`);
+      if (item.messageId && item.messageId > 0) keyboard.push([{ text: item.kind === "form" ? "Đến câu hỏi" : "Đến yêu cầu cấp quyền", url: topicMessageUrl(link.conv!, item.messageId)! }]);
+      else lines.push("Không có mã tin gốc; hãy mở chủ đề hoặc hiển thị lại thẻ.");
+      if (item.verified) keyboard.push([{ text: `Hiển thị lại ${item.kind === "form" ? "câu hỏi" : "yêu cầu quyền"} ${index + 1}`, callback_data: `pa:relay:${token}:${index}` }]);
+    });
+    const navigation: Btn[] = [];
+    if (page > 0) navigation.push({ text: "⬅️ Trang trước", callback_data: `pa:list:${id}:${page - 1}` });
+    if (page + 1 < pages) navigation.push({ text: "Trang sau ➡️", callback_data: `pa:list:${id}:${page + 1}` });
+    if (navigation.length) keyboard.push(navigation);
+    keyboard.push([{ text: "Mở chủ đề", url: topicMessageUrl(link.conv)! }, { text: "Làm mới", callback_data: `pa:list:${id}:${page}` }]);
+    lines.push("Liên kết dùng mã tin đã lưu; nếu tin bị xóa, dùng Mở chủ đề hoặc Hiển thị lại. Không trả lời/cấp quyền từ General.");
+    await this.tg.sendMessage(conv, lines.join("\n"), { reply_markup: { inline_keyboard: keyboard } });
+  }
+
+  private async relayPendingAction(conv: ConvKey, user: number, token: string, index: number): Promise<void> {
+    const card = this.pendingCards.get(token);
+    const item = card?.items[index];
+    if (!card || !item || card.chat !== conv || card.user !== user || card.expires < Date.now()) throw new Error("Thẻ đã hết hạn hoặc không thuộc bạn; mở lại yêu cầu đang chờ.");
+    const valid = () => {
+      const link = this.topics.get(card.linkID);
+      if (!link || link.chat !== conv || link.sessionID !== card.sessionID || JSON.stringify(link.identity) !== card.identity ||
+        !link.conv || !this.topics.canInteract(link.conv, card.sessionID)) throw new Error("Phiên đã đổi trạng thái; không hiển thị lại thẻ cũ.");
+      return link;
+    };
+    valid();
+    const live = item.kind === "form" ? await this.oc.listForms(card.sessionID, AbortSignal.timeout(3000)) :
+      await this.oc.listPermissions(card.sessionID, AbortSignal.timeout(3000));
+    const request = live.find(request => request.id === item.id);
+    if (!request) throw new Error("Yêu cầu đã hết chờ. Làm mới danh sách để xem trạng thái mới.");
+    valid();
+    if (item.kind === "form") await this.onFormCreated({ ...request, sessionID: card.sessionID }, true);
+    else await this.onPermissionAsked({ ...request, sessionID: card.sessionID }, true);
+    const messageID = item.kind === "form" ? this.questionForms.get(item.id)?.messageId : this.permissionPrompts.get(item.id)?.messageId;
+    if (!messageID || messageID < 1) throw new Error("Chưa xác nhận được việc hiển thị lại thẻ; không tạo yêu cầu mới.");
+    await this.tg.sendMessage(conv, "Đã hiển thị lại thẻ trong đúng chủ đề. Không đặt lại số lần nhắc đã có.");
+  }
+
   private async showTopicLink(conv: ConvKey, link: SessionTopic): Promise<void> {
     const rows: Array<Array<{ text: string; callback_data?: string; url?: string }>> = [];
     if (link.conv) {
@@ -951,6 +1014,7 @@ export class Bot {
       { text: "Mở lại phiên", callback_data: `st:restore:${link.id}` }]);
     if (!["open", "closed"].includes(link.phase)) rows.push([{ text: "Kiểm tra trạng thái", callback_data: `st:sync:${link.id}` }]);
     if (link.conv && link.sessionID && link.identity) rows.push([{ text: "Đồng bộ tên", callback_data: `st:title-sync:${link.id}` }]);
+    if (link.conv && link.sessionID) rows.push([{ text: "Xem yêu cầu đang chờ", callback_data: `pa:list:${link.id}:0` }]);
     const titleStatus = link.titleSync?.pending ? `\nTên chủ đề: đang chờ đồng bộ${link.titleSync.error ? ` — ${esc(link.titleSync.error)}` : ""}` : "";
     await this.tg.sendMessage(conv, `<b>${esc(link.title)}</b> · ${esc(link.phase)}\nSession: <code>${esc(link.sessionID ?? "unconfirmed")}</code>\nLink: <code>${esc(link.id)}</code>${link.step ? `\nStep: ${esc(link.step)}` : ""}${link.error ? `\n${esc(link.error)}` : ""}${titleStatus}`,
       { reply_markup: { inline_keyboard: rows } });
@@ -1672,13 +1736,12 @@ export class Bot {
    * out (`base * factor^n`) — deliberately NOT a fixed interval.
    */
   private startPromptReminder(conv: ConvKey, promptId: string, kind: "form" | "permission", text: string, keyboard?: unknown, messageId?: number): void {
-    if (!this.cfg.remind) return;
     if (this.topics.enabled(conv) && !this.topics.canInteract(conv, this.st.peek(conv)?.sessionID ?? "")) return;
     const prev = this.st.get(conv).pendingPrompts?.[promptId];
     const sched = scheduleForRegistration(prev, kind, this.cfg.remindBaseMs, Date.now());
     const pp = { kind, text, keyboard, messageId: messageId ?? prev?.messageId, ...sched };
     this.st.set(conv, { pendingPrompts: { ...this.st.get(conv).pendingPrompts, [promptId]: pp } });
-    this.armReminderTimer(conv, promptId);
+    if (this.cfg.remind) this.armReminderTimer(conv, promptId);
   }
 
   /** (Re)arm the one-shot reminder timer for one prompt from its persisted schedule. */
@@ -1686,6 +1749,7 @@ export class Bot {
     const key = this.reminderKey(conv, promptId);
     const existing = this.reminders.get(key);
     if (existing) clearTimeout(existing);
+    if (!this.cfg.remind) { this.reminders.delete(key); return; }
     if (this.topics.enabled(conv) && !this.topics.canInteract(conv, this.st.peek(conv)?.sessionID ?? "")) { this.reminders.delete(key); return; }
     const pp = this.st.get(conv).pendingPrompts?.[promptId];
     if (!pp) return;
@@ -2487,6 +2551,18 @@ export class Bot {
         }
         await this.tg.answerCallbackQuery(cb.id);
         await this.orch.handleCommand(conv, "/manager", "on");
+        return;
+      }
+      if (data.startsWith("pa:")) {
+        if (conv !== chatOf(conv)) { await this.tg.answerCallbackQuery(cb.id, "Mở danh sách đang chờ trong General."); return; }
+        await this.tg.answerCallbackQuery(cb.id);
+        const [, action, target, value] = data.split(":");
+        try {
+          if (!/^(?:0|[1-9]\d{0,5})$/.test(value ?? "")) throw new Error("Trang hoặc yêu cầu không hợp lệ.");
+          if (action === "list") await this.showPendingActions(conv, cb.from!.id, target, Number(value));
+          else if (action === "relay") await this.relayPendingAction(conv, cb.from!.id, target, Number(value));
+          else throw new Error("Thao tác không hợp lệ.");
+        } catch (error) { await this.tg.sendMessage(conv, esc((error as Error).message)); }
         return;
       }
       if (data.startsWith("db:")) {
@@ -3846,16 +3922,26 @@ export class Bot {
   }
 
   /** A new question form appeared — relay its first field to the owning chat. */
-  private async onFormCreated(form: any): Promise<void> {
+  private async onFormCreated(form: any, resurface = false): Promise<void> {
     const sessionID = form.sessionID as string;
     const formID = form.id as string;
-    if (this.questionForms.has(formID)) return;
+    const existing = this.questionForms.get(formID);
+    if (existing && !resurface) return;
     const conv = this.st.findChatBySession(sessionID);
     if (!conv) {
       warn(`form.created for session ${sessionID} with no mapped chat — ignoring`);
       return;
     }
     if (this.topics.enabled(conv) && !this.topics.canInteract(conv, sessionID)) return;
+    if (existing) {
+      if (existing.conv !== conv || existing.sessionID !== sessionID) return;
+      const view = this.renderQuestion(existing);
+      let messageId = existing.messageId ? await this.editCardInPlace(conv, existing.messageId, view.text, view.keyboard) : -1;
+      if (messageId < 0) messageId = await this.tg.sendMessageId(conv, view.text, { reply_markup: view.keyboard }).catch(() => -1);
+      existing.messageId = messageId;
+      if (messageId > 0) this.startPromptReminder(conv, formID, "form", view.text, view.keyboard, messageId);
+      return;
+    }
     const fields: QField[] = (form.fields ?? [])
       .filter((f: any) => !f.hidden)
       .map((f: any) => ({
@@ -3929,15 +4015,15 @@ export class Bot {
     const rows: Btn[][] = [];
     const fd = qf.formId;
     if (qf.waitingCustom !== undefined) {
-      rows.push([{ text: "❌ Huỷ", callback_data: `fq:${fd}:x` }]);
+      rows.push([{ text: "❌ Huỷ", callback_data: `fq:${fd}:x:${qf.index}` }]);
     } else {
       (f.options ?? []).forEach((opt, i) => {
-        rows.push([{ text: `▪️ ${trunc(opt.label, 60)}`, callback_data: `fq:${fd}:o${i}` }]);
+        rows.push([{ text: `▪️ ${trunc(opt.label, 60)}`, callback_data: `fq:${fd}:o${i}:${qf.index}` }]);
       });
       if (f.custom || !f.options?.length || f.type === "string") {
-        rows.push([{ text: "✍️ Gõ tự do…", callback_data: `fq:${fd}:c` }]);
+        rows.push([{ text: "✍️ Gõ tự do…", callback_data: `fq:${fd}:c:${qf.index}` }]);
       }
-      rows.push([{ text: "❌ Huỷ", callback_data: `fq:${fd}:x` }]);
+      rows.push([{ text: "❌ Huỷ", callback_data: `fq:${fd}:x:${qf.index}` }]);
     }
     return { text: lines.join("\n"), keyboard: { inline_keyboard: rows } };
   }
@@ -3949,11 +4035,17 @@ export class Bot {
     const formID = parts[1];
     const op = parts[2] ?? "";
     const qf = this.questionForms.get(formID);
-    if (!qf) {
+    if (!qf || qf.conv !== conv || this.st.peek(conv)?.sessionID !== qf.sessionID || parts[3] !== String(qf.index)) {
       await this.tg.answerCallbackQuery(cb.id, "Phiên hỏi đã kết thúc.");
       return;
     }
     try {
+      const live = await this.oc.listForms(qf.sessionID, AbortSignal.timeout(3000));
+      if (!live.some(form => form.id === formID) || this.questionForms.get(formID) !== qf || parts[3] !== String(qf.index)) {
+        if (!live.some(form => form.id === formID)) await this.onFormResolved(formID, "form.submitted");
+        await this.tg.answerCallbackQuery(cb.id, "Câu hỏi hoặc lựa chọn đã hết hạn; mở thẻ mới nhất.");
+        return;
+      }
       if (op === "x") {
         await this.oc.cancelForm(qf.sessionID, qf.formId, "Cancelled by user via Telegram.");
         this.questionForms.delete(formID);
@@ -4025,6 +4117,11 @@ export class Bot {
   private async handleFormText(conv: ConvKey, text: string): Promise<boolean> {
     for (const qf of this.questionForms.values()) {
       if (qf.conv === conv && qf.waitingCustom !== undefined) {
+        const live = await this.oc.listForms(qf.sessionID, AbortSignal.timeout(3000));
+        if (this.st.peek(conv)?.sessionID !== qf.sessionID || this.questionForms.get(qf.formId) !== qf || !live.some(form => form.id === qf.formId)) {
+          await this.tg.sendMessage(conv, "Câu hỏi đã đổi hoặc hết chờ; không gửi câu trả lời cũ.");
+          return true;
+        }
         const f = qf.fields[qf.index];
         qf.answers[f.key] = text;
         await this.advanceOrSubmit(qf, conv, qf.messageId);
@@ -4036,16 +4133,18 @@ export class Bot {
 
   // ── permission prompts (OpenCode tool permission asks) ────────────────────
   /** A permission request is pending — relay it to the owning chat as buttons. */
-  private async onPermissionAsked(d: any): Promise<void> {
+  private async onPermissionAsked(d: any, resurface = false): Promise<void> {
     const requestID = d.id as string;
     const sessionID = d.sessionID as string;
-    if (this.permissionPrompts.has(requestID)) return;
+    const existing = this.permissionPrompts.get(requestID);
+    if (existing && !resurface) return;
     const conv = this.st.findChatBySession(sessionID);
     if (!conv) {
       warn(`permission.asked for session ${sessionID} with no mapped chat — ignoring`);
       return;
     }
     if (this.topics.enabled(conv) && !this.topics.canInteract(conv, sessionID)) return;
+    if (existing && (existing.conv !== conv || existing.sessionID !== sessionID)) return;
     this.orch.onWaiting(conv);
     const lines: string[] = ["🔐 <b>OpenCode xin quyền</b>"];
     lines.push(`action: <code>${esc(d.action ?? "?")}</code>`);
@@ -4065,7 +4164,7 @@ export class Bot {
     };
     // Re-registration after a restart (reconcile): refresh the original card in
     // place instead of posting a duplicate permission prompt.
-    const prevId = this.st.get(conv).pendingPrompts?.[requestID]?.messageId;
+    const prevId = existing?.messageId ?? this.st.get(conv).pendingPrompts?.[requestID]?.messageId;
     let messageId = prevId ? await this.editCardInPlace(conv, prevId, lines.join("\n"), kb) : -1;
     if (messageId < 0) messageId = await this.tg.sendMessageId(conv, lines.join("\n"), { reply_markup: kb }).catch(() => -1);
     if (messageId > 0) {
@@ -4103,7 +4202,7 @@ export class Bot {
     const requestID = parts[1];
     const decision = parts[2];
     const p = this.permissionPrompts.get(requestID);
-    if (!p) {
+    if (!p || p.conv !== conv || this.st.peek(conv)?.sessionID !== p.sessionID) {
       await this.tg.answerCallbackQuery(cb.id, "Yêu cầu quyền này đã hết hạn.");
       return;
     }
@@ -4113,7 +4212,13 @@ export class Bot {
       reject: "❌ Đã từ chối.",
     };
     try {
-      if (!labels[decision]) throw new Error("Lựa chọn không hợp lệ.");
+      if (!Object.hasOwn(labels, decision)) throw new Error("Lựa chọn không hợp lệ.");
+      const live = await this.oc.listPermissions(p.sessionID, AbortSignal.timeout(3000));
+      if (!live.some(permission => permission.id === requestID) || this.permissionPrompts.get(requestID) !== p) {
+        if (!live.some(permission => permission.id === requestID)) await this.onPermissionResolved(requestID, "resolved");
+        await this.tg.answerCallbackQuery(cb.id, "Yêu cầu này đã hết chờ; không gửi quyết định cũ.");
+        return;
+      }
       await this.oc.replyPermission(p.sessionID, p.requestID, decision as "once" | "always" | "reject");
       this.permissionPrompts.delete(requestID);
       this.cancelReminder(conv, requestID); // answered → stop nudging
@@ -4121,7 +4226,7 @@ export class Bot {
       if (messageId) await this.tg.editMessageText(conv, messageId, labels[decision]).catch(() => {});
     } catch (e) {
       const msg = (e as Error)?.message ?? "";
-      if (/not found|permission/i.test(msg)) {
+      if (/not[ _-]?found/i.test(msg)) {
         this.permissionPrompts.delete(requestID);
         this.cancelReminder(conv, requestID); // answered elsewhere → stop nudging
         await this.tg.answerCallbackQuery(cb.id, "Yêu cầu này đã được xử lý ở nơi khác.");

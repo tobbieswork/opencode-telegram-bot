@@ -180,7 +180,7 @@ export class SessionDashboard {
       const at = kind === "form" ? snap?.formsAt : snap?.permissionsAt;
       const known = kind === "form" ? snap?.forms : snap?.permissions;
       const unknown = kind === "form" ? snap?.formsUnknown : snap?.permissionsUnknown;
-      const verified = Boolean(valid && snap && !snap.error && !unknown && fresh(at));
+      const verified = Boolean(valid && link.phase === "open" && snap && !snap.error && !unknown && fresh(at));
       pendingVerified &&= verified;
       const local = Object.entries(state?.pendingPrompts ?? {}).filter(([, prompt]) => prompt.kind === kind);
       const newerLocal = local.filter(([, prompt]) => at === undefined || prompt.firstShownAt > at).map(([id]) => id);

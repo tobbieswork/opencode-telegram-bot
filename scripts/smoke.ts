@@ -299,7 +299,7 @@ async function main(): Promise<void> {
   checks.push(["hiện câu hỏi", qok]);
   show("q: question message");
   const kb = mock.keyboards[mock.keyboards.length - 1];
-  const qBtn = JSON.stringify(kb).match(/fq:[A-Za-z0-9_]+:o0/);
+  const qBtn = JSON.stringify(kb).match(/fq:[A-Za-z0-9_]+:o0:\d+/);
   console.log("form option button:", qBtn ? qBtn[0] : "NOT FOUND");
   checks.push(["nút trả lời câu hỏi", !!qBtn]);
   if (qBtn) {

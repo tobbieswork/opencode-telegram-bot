@@ -2,6 +2,14 @@ import { exec as execCb } from "node:child_process";
 import { log, warn, error } from "./logger.js";
 import { ConvKey, parseConv } from "./conv.js";
 import { topicTitle } from "./format.js";
+
+/** Liên kết tin trong chủ đề theo định dạng chính thức t.me/c/channel/id?thread=topic. */
+export function topicMessageUrl(conv: ConvKey, messageID?: number): string | undefined {
+  const { chatId, threadId } = parseConv(conv);
+  if (!String(chatId).startsWith("-100") || !threadId || threadId <= 1) return undefined;
+  const base = `https://t.me/c/${String(chatId).slice(4)}`;
+  return Number.isSafeInteger(messageID) && messageID! > 0 ? `${base}/${messageID}?thread=${threadId}` : `${base}/${threadId}`;
+}
 import {
   DnsHealConfig,
   HealState,

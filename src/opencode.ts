@@ -782,9 +782,10 @@ export class OpenCodeCtl {
   }
 
   /** Pending permission requests of one session (to re-surface after a missed event). */
-  async listPermissions(sessionID: string): Promise<any[]> {
+  async listPermissions(sessionID: string, signal?: AbortSignal): Promise<any[]> {
     this.ensureClient();
-    const raw = (await retryTransient(() => this.client.permission.list({ sessionID }))) as any;
+    const read = () => this.client.permission.list({ sessionID }, signal ? { signal } : undefined);
+    const raw = (signal ? await read() : await retryTransient(read)) as any;
     return (Array.isArray(raw) ? raw : (raw?.data ?? [])) as any[];
   }
 
@@ -821,9 +822,10 @@ export class OpenCodeCtl {
    * "transport" error). The bot therefore subscribes to events and relays each
    * form to Telegram.
    */
-  async listForms(sessionID: string): Promise<any[]> {
+  async listForms(sessionID: string, signal?: AbortSignal): Promise<any[]> {
     this.ensureClient();
-    const raw = (await retryTransient(() => this.client.session.form.list({ sessionID }))) as any;
+    const read = () => this.client.session.form.list({ sessionID }, signal ? { signal } : undefined);
+    const raw = (signal ? await read() : await retryTransient(read)) as any;
     return (Array.isArray(raw) ? raw : (raw?.data ?? [])) as any[];
   }
 

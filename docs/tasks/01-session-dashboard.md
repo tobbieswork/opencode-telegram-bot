@@ -1,6 +1,6 @@
 # Đầu việc 1 — Bảng điều khiển và danh sách Đang chờ bạn
 
-**Trạng thái:** CV01–CV02 đã triển khai; CV03–CV04 chưa triển khai.
+**Trạng thái:** CV01–CV03 đã triển khai; CV04 chưa triển khai.
 **Thứ tự:** CV01 → CV02 → CV03 → CV04.
 **Điều kiện bắt đầu:** CV00 trong [kế hoạch tổng](../plan-session-workflow-improvements.md).
 
@@ -83,25 +83,37 @@ mã tin Telegram; các bộ nhớ câu hỏi/quyền đang hoạt động còn n
 
 ### Công việc
 
-- [ ] Tạo hàng đọc cho từng câu hỏi/quyền: loại, tên phiên, mốc xuất hiện, mốc
+- [x] Tạo hàng đọc cho từng câu hỏi/quyền: loại, tên phiên, mốc xuất hiện, mốc
   xác minh và mã tin Telegram nếu biết. Một phiên có nhiều yêu cầu phải có thể
   xem đủ, không ghi đè yêu cầu này bằng yêu cầu khác.
 - [ ] Thêm nút **Đến câu hỏi** hoặc **Đến yêu cầu cấp quyền**. Dùng mã tin đã
   lưu; kiểm tra đường dẫn trên nhóm thử nghiệm. Nếu chưa có/đã mất tin, chỉ dẫn
   đến chủ đề và ghi rõ không tìm được thẻ gốc.
-- [ ] Nếu cần hiển thị lại thẻ, dùng luồng câu hỏi/quyền hiện có ở đúng chủ đề;
+
+  Đã triển khai và kiểm thử giao thức theo tài liệu chính thức
+  <https://core.telegram.org/api/links#message-links>, dùng dạng
+  `https://t.me/c/<nhóm>/<tin>?thread=<chủ-đề>`. Phần thử mở trên thiết bị
+  Telegram thật chưa nghiệm thu; thực hiện ở CV15 trên nhóm thử nghiệm được phép.
+
+- [x] Nếu cần hiển thị lại thẻ, dùng luồng câu hỏi/quyền hiện có ở đúng chủ đề;
   không tạo yêu cầu OpenCode mới hoặc cấp quyền trực tiếp từ General.
-- [ ] Khi yêu cầu được trả lời/hủy từ nơi khác, làm mới danh sách để bỏ hoặc
+- [x] Khi yêu cầu được trả lời/hủy từ nơi khác, làm mới danh sách để bỏ hoặc
   đánh dấu đã giải quyết. Nút cũ không được trả lời thay cho yêu cầu mới.
-- [ ] Sau khởi động lại, đối chiếu với OpenCode trước khi khẳng định còn chờ;
+- [x] Sau khởi động lại, đối chiếu với OpenCode trước khi khẳng định còn chờ;
   không coi bộ nhớ trong tiến trình là toàn bộ danh sách.
 
 ### Kiểm thử và nghiệm thu
 
-- [ ] Đồng thời có câu hỏi và xin quyền; yêu cầu được giải quyết ngoài Telegram;
+- [x] Đồng thời có câu hỏi và xin quyền; yêu cầu được giải quyết ngoài Telegram;
   mất tin gốc; phiên đóng trong lúc làm mới; lỗi truy vấn một loại yêu cầu.
-- [ ] Không trả lời, cấp quyền, mở lại hoặc tạo phiên do bấm nút điều hướng.
-- [ ] Quy tắc một câu hỏi mỗi lần và quy tắc xin quyền hiện tại không thay đổi.
+- [x] Không trả lời, cấp quyền, mở lại hoặc tạo phiên do bấm nút điều hướng.
+- [x] Quy tắc một câu hỏi mỗi lần và quy tắc xin quyền hiện tại không thay đổi.
+
+Kiểm thử thêm: thẻ câu hỏi gắn chỉ số trường, không dùng lựa chọn của câu trước
+cho câu sau; câu hỏi/quyền được kiểm tra nguồn trước khi trả lời và bị chặn nếu
+dùng ở chủ đề khác. Tắt nhắc vẫn lưu mã tin; hiển thị lại giữ số lần nhắc đã có.
+Đang nhập câu trả lời nhiều trường vẫn là trạng thái trong tiến trình như trước;
+tài liệu không cam kết giữ các câu trả lời chưa gửi qua lần khởi động lại.
 
 **Tệp liên quan:** `src/bot.ts` tại các luồng câu hỏi/quyền, đối chiếu và nhắc;
 `src/state.ts`, `src/telegram.ts`. Kiểm thử dự kiến:

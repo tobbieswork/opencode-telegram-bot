@@ -22,6 +22,12 @@ and all command/button handlers enforce General versus work-topic scope.
   của người khác. Số đang chạy/chờ chỉ tính dữ liệu đã xác minh; nguồn chưa rõ
   được ghi rõ, không suy thành hoàn tất. Bộ nhớ tạm 30 giây, làm mới từng trang,
   tối đa 2 phiên cùng lúc và thời hạn 3 giây/phiên ở giao diện.
+- Thẻ chi tiết có **Xem yêu cầu đang chờ**: câu hỏi và xin quyền có từng liên
+  kết đến tin gốc. Nếu tin đã mất hoặc chưa biết mã, dùng **Mở chủ đề** hoặc
+  **Hiển thị lại**. Bot kiểm tra yêu cầu còn tồn tại rồi mới hiển thị lại trong
+  chủ đề gốc; không trả lời, cấp quyền hoặc tạo yêu cầu OpenCode từ General.
+  Lỗi truy vấn giữ trạng thái chưa rõ, không coi là hết chờ. Số lần nhắc được
+  giữ nguyên; tắt nhắc vẫn lưu mã tin để điều hướng sau khi khởi động lại.
 - **Gắn phiên có sẵn**, `/attach` hoặc `/use` không có mã mở danh sách chọn
   có tên. Danh sách chỉ đọc, không gửi lại thẻ của mọi phiên đã quản lý.
   Saved legacy sessions of this group are included, even outside the
