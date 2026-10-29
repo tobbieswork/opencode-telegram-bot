@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.5](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.3.4...opencode-telegram-bot-v1.3.5) (2026-10-29)
+
+
+### Bug Fixes
+
+* **node:** đổi branch code sang node-code/&lt;id&gt; (xung đột ref) + plist 0600 ([#75](https://github.com/tobbieswork/opencode-telegram-bot/issues/75)) ([f7ddffc](https://github.com/tobbieswork/opencode-telegram-bot/commit/f7ddffc87bd1d7634f2a1ef54c963217f071a445))
+
 ## [1.3.4](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.3.3...opencode-telegram-bot-v1.3.4) (2026-10-29)
 
 
