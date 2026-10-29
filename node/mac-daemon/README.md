@@ -20,7 +20,15 @@ cd node/mac-daemon
 Yêu cầu: Node ≥ 20, `claude` đã login (`claude /login`), repo đã `git pull`.
 Daemon tự chạy khi máy khởi động, tự sống lại khi crash (launchd).
 
-Tùy chỉnh (env, sửa trong plist sau khi install):
+Tùy chỉnh: đặt env **trước khi chạy** `./install.sh` (script ghi vào plist;
+chạy lại sẽ ghi đè plist, nên đừng sửa tay):
+
+```bash
+MAC_NODE_POLL_MS=15000 ./install.sh
+```
+
+`PATH` và đường dẫn `claude` được chốt lúc install — đổi phiên bản Node hoặc
+dời `claude` thì chạy lại `./install.sh`.
 
 | Env | Mặc định | Ý nghĩa |
 |---|---|---|
