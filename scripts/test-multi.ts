@@ -314,6 +314,27 @@ const repo = join(tmp, "repo");
     for (const [k] of st.convsOfChat("42").filter(([, x]) => x.worker)) (orch as any).setStatus(k, "done");
   }
 
+  // Lượt chạy lịch và worker thường phải tranh cùng giới hạn theo chat chính.
+  {
+    const execution = orch.scheduledExecution();
+    const sch = { id: "slot", conv: "42:77", prompt: "Kiểm tra", dir: root, agent: "plan",
+      spec: { kind: "daily" as const, time: { h: 9, m: 0 } }, tz: "UTC", nextRunAt: Date.now(), enabled: true,
+      createdBy: 1, createdAt: 1 };
+    const lease = { id: "scheduled-slot", schedule: sch, mode: "manual" as const, messageID: "msg_slot",
+      admittedAt: Date.now(), deadline: Date.now() + 60_000, phase: "preparing" as const };
+    execution.claim(sch, lease.id);
+    await spawn("slot-peer", root, { task: "Kiểm tra" });
+    check("lịch trong topic và worker thường dùng chung capacity của chat", await throws(
+      () => spawn("slot-over", root, { task: "Kiểm tra" }), /tối đa 2/));
+    check("lượt lịch thứ hai không chiếm slot đang được giữ", await throws(async () => {
+      execution.claim({ ...sch, id: "more" }, "another-slot");
+    }, /tối đa 2/));
+    execution.release(lease);
+    check("nhả reservation lịch mở đúng một slot cho worker thường", !!(await spawn("slot-after", root, { task: "Kiểm tra" })).conv);
+    await orch.handleCommand("42", "/kill", "slot-peer");
+    await orch.handleCommand("42", "/kill", "slot-after");
+  }
+
   // #7: a failed session create leaves no topic, no worktree, and the name free.
   {
     const ok = oc.createSession;

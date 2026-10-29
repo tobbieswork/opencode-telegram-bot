@@ -13,6 +13,7 @@
  */
 
 export type CmdGroupId = "session" | "model" | "manager" | "control";
+export type CommandScope = "general" | "topic" | "both";
 
 export interface CmdGroup {
   id: CmdGroupId;
@@ -32,6 +33,8 @@ export interface BotCommand {
   /** When set, the command gets a tappable button in the /help grid. */
   button?: string;
   group: CmdGroupId;
+  /** Lifecycle management is only available in General after /setup. */
+  scope?: CommandScope;
 }
 
 export const CMD_GROUPS: CmdGroup[] = [
@@ -43,11 +46,15 @@ export const CMD_GROUPS: CmdGroup[] = [
 
 export const COMMANDS: BotCommand[] = [
   // ── session ────────────────────────────────────────────────────────────
-  { cmd: "new", desc: "Bắt đầu phiên làm việc mới", button: "🆕 Session mới", group: "session" },
-  { cmd: "ls", aliases: ["sessions"], desc: "Liệt kê phiên gần đây", button: "📄 Sessions", group: "session" },
-  { cmd: "use", arg: "<id>", desc: "Chuyển sang một phiên", group: "session" },
-  { cmd: "dir", arg: "[path]", desc: "Xem/đặt thư mục làm việc", button: "📍 Thư mục", group: "session" },
-  { cmd: "browse", aliases: ["b"], arg: "[path]", desc: "Duyệt thư mục bằng nút bấm", button: "📁 Duyệt", group: "session" },
+  { cmd: "setup", desc: "Enable General/topic session management in this forum group", group: "session", scope: "general" },
+  { cmd: "new", desc: "Bắt đầu phiên làm việc mới", button: "🆕 Session mới", group: "session", scope: "general" },
+  { cmd: "ls", aliases: ["sessions"], desc: "Liệt kê phiên gần đây", button: "📄 Sessions", group: "session", scope: "general" },
+  { cmd: "use", aliases: ["attach"], arg: "<id>", desc: "Open or attach an existing session topic", group: "session", scope: "general" },
+  { cmd: "close", arg: "<session-id>", desc: "Stop, archive and close a managed session topic", group: "session", scope: "general" },
+  { cmd: "restore", arg: "<session-id>", desc: "Restore the original session and topic", group: "session", scope: "general" },
+  { cmd: "sync", desc: "Reconcile pending session/topic lifecycle operations", group: "session", scope: "general" },
+  { cmd: "dir", arg: "[path]", desc: "Xem/đặt thư mục làm việc", button: "📍 Thư mục", group: "session", scope: "general" },
+  { cmd: "browse", aliases: ["b"], arg: "[path]", desc: "Duyệt thư mục bằng nút bấm", button: "📁 Duyệt", group: "session", scope: "general" },
 
   // ── model ──────────────────────────────────────────────────────────────
   { cmd: "mode", aliases: ["modes"], desc: "Chọn mode: build / plan / general / explore", button: "🎛 Mode", group: "model" },
@@ -59,27 +66,32 @@ export const COMMANDS: BotCommand[] = [
   { cmd: "variant", arg: "<tên>", desc: "Đặt reasoning variant", group: "model" },
 
   // ── manager ────────────────────────────────────────────────────────────
-  { cmd: "spawn", arg: "<tên> [dir]", desc: "Tạo worker: topic + session riêng", group: "manager" },
+  { cmd: "spawn", arg: "<tên> [dir]", desc: "Tạo worker: topic + session riêng", group: "manager", scope: "general" },
   { cmd: "board", aliases: ["workers"], desc: "Trạng thái mọi worker", group: "manager" },
-  { cmd: "kill", arg: "<tên>", desc: "Dừng một worker", group: "manager" },
-  { cmd: "stopall", desc: "Dừng mọi worker", group: "manager" },
-  { cmd: "manager", arg: "on|off", desc: "Manager nhận việc ở chat chính và giao cho worker", group: "manager" },
-  { cmd: "auto", arg: "on|off", desc: "Manager tự giao việc hay chờ duyệt", group: "manager" },
-  { cmd: "wt", desc: "Worktree: diff / merge / xoá (trong topic worker)", group: "manager" },
-  { cmd: "prune", arg: "[số_ngày]", desc: "Dọn topic worker đã xong (mặc định >7 ngày)", group: "manager" },
+  { cmd: "kill", arg: "<tên>", desc: "Dừng một worker", group: "manager", scope: "general" },
+  { cmd: "stopall", desc: "Dừng mọi worker", group: "manager", scope: "general" },
+  { cmd: "manager", arg: "[on|off]", desc: "Mở phiên quản lý bằng nút; off để đóng và giữ lịch sử", group: "manager", scope: "general" },
+  { cmd: "auto", arg: "on|off", desc: "Manager tự giao việc hay chờ duyệt", group: "manager", scope: "general" },
+  { cmd: "wt", desc: "Worktree: diff / merge / xoá (trong topic worker)", group: "manager", scope: "topic" },
+  { cmd: "prune", arg: "[số_ngày]", desc: "Dọn topic worker đã xong (mặc định >7 ngày)", group: "manager", scope: "general" },
 
   // ── control ────────────────────────────────────────────────────────────
-  { cmd: "stop", desc: "Dừng task đang chạy", button: "⏹ Dừng", group: "control" },
-  { cmd: "note", arg: "[ghi chú]", desc: "Ghi chú khi agent bận (trống = xem ghi chú)", group: "control" },
-  { cmd: "context", aliases: ["ctx"], desc: "Ảnh chụp phiên hiện tại (usage + files)", button: "📸 Context", group: "control" },
+  { cmd: "stop", desc: "Dừng task đang chạy", button: "⏹ Dừng", group: "control", scope: "topic" },
+  { cmd: "note", arg: "[ghi chú]", desc: "Ghi chú khi agent bận (trống = xem ghi chú)", group: "control", scope: "topic" },
+  { cmd: "context", aliases: ["ctx"], desc: "Ảnh chụp phiên hiện tại (usage + files)", button: "📸 Context", group: "control", scope: "topic" },
   { cmd: "usage", desc: "Mức dùng context theo phiên + cảnh báo gần tràn", button: "📊 Usage", group: "control" },
-  { cmd: "history", desc: "Xem tin nhắn gần đây", button: "📜 Lịch sử", group: "control" },
+  { cmd: "history", desc: "Xem tin nhắn gần đây", button: "📜 Lịch sử", group: "control", scope: "topic" },
   { cmd: "status", desc: "Trạng thái kết nối", button: "🔌 Trạng thái", group: "control" },
-  { cmd: "reboot", desc: "Reboot máy (2 bước xác nhận)", button: "🔄 Reboot", group: "control" },
-  { cmd: "clear", desc: "Xoá state của chat này", button: "🧹 Xoá state", group: "control" },
-  { cmd: "schedule", arg: "<spec> <prompt>", desc: "Đặt lịch chạy prompt tự động", button: "⏰ Lịch", group: "control" },
+  { cmd: "reboot", desc: "Reboot máy (2 bước xác nhận)", button: "🔄 Reboot", group: "control", scope: "general" },
+  { cmd: "clear", desc: "Xoá state của chat này", button: "🧹 Xoá state", group: "control", scope: "general" },
+  { cmd: "schedule", arg: "<spec> <prompt>", desc: "Đặt lịch chạy prompt tự động", button: "⏰ Lịch", group: "control", scope: "general" },
   { cmd: "help", desc: "Danh sách lệnh + nút bấm", button: "📖 Help", group: "control" },
 ];
+
+export function commandScope(command: string): CommandScope {
+  const name = command.replace(/^\//, "").replace(/@\w+$/, "").toLowerCase();
+  return COMMANDS.find((entry) => entry.cmd === name || entry.aliases?.includes(name))?.scope ?? "both";
+}
 
 /** Escape < > & for Telegram HTML (descriptions are trusted, args are not). */
 function esc(s: string): string {
@@ -107,21 +119,24 @@ export function myCommands(): Array<{ command: string; description: string }> {
  * The /help card body (Telegram HTML). Sent via sendHtml, so <b>/<code>
  * markup is expected and raw <>& are escaped by esc().
  */
-export function helpText(): string {
+export function helpText(scope?: "general" | "topic"): string {
   const parts: string[] = [
     "<b>🤖 OpenCode Remote</b>",
-    "Gửi tin nhắn cho tôi — tôi chạy bằng OpenCode và trả kết quả.",
+    scope === "general" ? "General manages sessions; work belongs in each session's topic." :
+      scope === "topic" ? "This topic stays bound to one session. Manage its lifecycle in General." :
+        "Gửi tin nhắn cho tôi — tôi chạy bằng OpenCode và trả kết quả.",
     "",
   ];
   for (const g of CMD_GROUPS) {
-    const inGroup = COMMANDS.filter((c) => c.group === g.id);
+    const inGroup = visibleCommands(scope).filter((c) => c.group === g.id);
     if (!inGroup.length) continue;
     parts.push(`<b>${g.title}</b>`);
     parts.push(...inGroup.map(cmdLine));
     parts.push("");
   }
   parts.push(
-    "💡 <b>Mẹo:</b> gõ <code>/</code> để hiện menu lệnh · khi tôi cần hỏi, chọn đáp án bằng nút hoặc tự gõ · 🔥 vào tin của tôi để giao worker · 👍/👎 vào báo cáo worker để duyệt/bác",
+    scope ? "Use commands/buttons in General for lifecycle management; reactions never create or delete managed sessions." :
+      "💡 <b>Mẹo:</b> gõ <code>/</code> để hiện menu lệnh · khi tôi cần hỏi, chọn đáp án bằng nút hoặc tự gõ · 🔥 vào tin của tôi để giao worker · 👍/👎 vào báo cáo worker để duyệt/bác",
     "",
     "Bấm một nút bên dưới để chạy lệnh ngay:",
   );
@@ -132,10 +147,10 @@ export function helpText(): string {
  * The tappable button grid under /help — two buttons per row, in catalog
  * order. Button callback data is `cmd:<name>`, handled by runCommandButton.
  */
-export function commandGrid(): { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } {
+export function commandGrid(scope?: "general" | "topic"): { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } {
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
   let row: Array<{ text: string; callback_data: string }> = [];
-  for (const c of COMMANDS) {
+  for (const c of visibleCommands(scope)) {
     if (!c.button) continue;
     row.push({ text: c.button, callback_data: `cmd:${c.cmd}` });
     if (row.length === 2) {
@@ -145,6 +160,11 @@ export function commandGrid(): { inline_keyboard: Array<Array<{ text: string; ca
   }
   if (row.length) rows.push(row);
   return { inline_keyboard: rows };
+}
+
+function visibleCommands(scope?: "general" | "topic"): BotCommand[] {
+  return COMMANDS.filter((entry) => !scope || ((entry.scope ?? "both") === "both" || entry.scope === scope) &&
+    !["setup", "clear", "prune"].includes(entry.cmd));
 }
 
 /** Every command name (canonical + aliases) the dispatcher accepts. */

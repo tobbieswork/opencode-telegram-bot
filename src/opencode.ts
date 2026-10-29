@@ -3,6 +3,10 @@ import { Service } from "@opencode/client/service";
 import { newestAssistantInfo, AssistantInfo } from "./usage.js";
 import { existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
+import { ScheduledObserver } from "./scheduled-observer.js";
+import type { RunBinding, ScheduledRun } from "./scheduled-run.js";
+import { ScheduledReadinessError } from "./scheduled-run.js";
+import type { NewSessionTopic, TopicSession, TopicSessionInfo } from "./session-topics.js";
 
 /** Tool names that modify files (their input carries the target at `.path`). */
 const MUTATING_TOOLS = new Set(["write", "edit", "apply_patch", "delete_file", "create_file", "move"]);
@@ -25,6 +29,9 @@ export interface SessionBrief {
   id: string;
   title?: string;
   updated?: number;
+  directory?: string;
+  archived?: boolean;
+  parentID?: string;
 }
 export interface PromptResult {
   reply: string;
@@ -186,6 +193,8 @@ export class OpenCodeCtl {
   private version?: string;
   private discoverArgs?: { serviceUrl?: string; user?: string; password?: string };
   private eventCbs?: { onEvent: (ev: any) => void; onError?: (e: any) => void; onConnect?: () => void };
+  private headers: Record<string, string> = {};
+  private reconnecting?: Promise<void>;
 
   /** Discover the shared background service (or start one), or use an explicit URL. */
   async connect(
@@ -205,15 +214,19 @@ export class OpenCodeCtl {
    * persistently; it also restarts the event subscription so the question relay
    * keeps working after the reconnect.
    */
-  async reconnect(): Promise<void> {
+  async reconnect(allowStart = true): Promise<void> {
     if (!this.discoverArgs) return;
-    this.stopEvents();
-    await this.establishClient();
-    this.modelsCache = undefined; // the service may have restarted; refetch models
-    if (this.eventCbs) this.subscribeEvents(this.eventCbs.onEvent, this.eventCbs.onError, this.eventCbs.onConnect);
+    if (this.reconnecting) return this.reconnecting;
+    this.reconnecting = (async () => {
+      this.stopEvents();
+      await this.establishClient(allowStart);
+      this.modelsCache = undefined;
+      if (this.eventCbs) this.subscribeEvents(this.eventCbs.onEvent, this.eventCbs.onError, this.eventCbs.onConnect);
+    })();
+    try { await this.reconnecting; } finally { this.reconnecting = undefined; }
   }
 
-  private async establishClient(): Promise<void> {
+  private async establishClient(allowStart = true): Promise<void> {
     const { serviceUrl, user, password } = this.discoverArgs ?? {};
     let url: string;
     let headers: Record<string, string>;
@@ -235,7 +248,7 @@ export class OpenCodeCtl {
       // spawns `opencode serve --service` when missing and waits (up to
       // ~2 min) for it to become ready — this is what brings the bot back
       // after a machine reboot without any manual intervention.
-      if (!ep) {
+      if (!ep && allowStart) {
         ep = await Service.ensure();
       }
       if (!ep) {
@@ -245,8 +258,9 @@ export class OpenCodeCtl {
       headers = Service.headers(ep) as Record<string, string>;
     }
     this.url = url;
+    this.headers = headers;
     this.client = OpenCode.make({ baseUrl: url, headers });
-    const info = (await retryTransient(() => this.client.server.info(), { attempts: 3 })) as any;
+    const info = (await retryTransient(() => this.client.server.info({ signal: AbortSignal.timeout(10_000) }), { attempts: 3 })) as any;
     this.version = (info?.data ?? info)?.version;
   }
 
@@ -292,7 +306,8 @@ export class OpenCodeCtl {
   async listSessions(): Promise<SessionBrief[]> {
     this.ensureClient();
     const arr = (unwrap<any[]>(await retryTransient(() => this.client.session.list())) ?? []) as any[];
-    return arr.map((s) => ({ id: s.id, title: s.title, updated: s.time?.updated }));
+    return arr.map((s) => ({ id: s.id, title: s.title, updated: s.time?.updated ?? s.time?.created,
+      directory: s.location?.directory, archived: s.time?.archived !== undefined, parentID: s.parentID }));
   }
 
   async createSession(
@@ -318,6 +333,56 @@ export class OpenCodeCtl {
   async removeSession(sessionID: string): Promise<void> {
     this.ensureClient();
     await retryTransient(() => this.client.session.remove({ sessionID }));
+  }
+
+  /** A lifecycle-owned creation is attempted once; ambiguous responses require recovery. */
+  async createTopicSession(input: NewSessionTopic & { linkID: string }): Promise<string> {
+    this.ensureClient();
+    const session = unwrap<any>(await this.client.session.create({ location: { directory: resolve(input.directory) },
+      title: input.title, ...(input.agent ? { agent: input.agent } : {}),
+      metadata: { ...input.metadata, tgTopicLink: input.linkID, tgChat: input.chat } }, { signal: AbortSignal.timeout(10_000) }));
+    if (!session?.id) throw new Error("Session creation was not confirmed.");
+    return session.id;
+  }
+
+  async archiveSession(sessionID: string, archived: boolean): Promise<void> {
+    this.ensureClient();
+    await this.client.session.update({ sessionID, archived }, { signal: AbortSignal.timeout(10_000) });
+  }
+
+  async interruptTopicSession(sessionID: string): Promise<void> {
+    this.ensureClient();
+    await this.client.session.interrupt({ sessionID, resume: false }, { signal: AbortSignal.timeout(10_000) });
+  }
+
+  async topicSession(sessionID: string): Promise<TopicSession> {
+    this.ensureClient();
+    const options = () => ({ signal: AbortSignal.timeout(10_000) });
+    const [raw, active, inbox, page] = await Promise.all([
+      this.client.session.get({ sessionID }, options()), this.client.session.active(options()),
+      this.client.session.inbox.list({ sessionID }, options()), this.client.message.list({ sessionID, limit: 100 }, options()),
+    ]);
+    const session = unwrap<any>(raw);
+    const messages = unwrap<any[]>(page) ?? [];
+    const pending = unwrap<any[]>(inbox) ?? [];
+    const executing = Boolean(unwrap<Record<string, unknown>>(active)?.[sessionID]);
+    const relevant = messages.filter((message) => ["user", "assistant", "synthetic", "shell", "compaction"].includes(message.type));
+    const newestInput = Math.max(0, ...relevant.map((message) => message.time?.created ?? 0));
+    const idle = messages.filter((message) => message.type === "idle" &&
+      ["succeeded", "failed", "interrupted"].includes(message.outcome))
+      .sort((a, b) => (b.time?.created ?? 0) - (a.time?.created ?? 0))[0];
+    const busy = executing || pending.length > 0;
+    return { id: session.id, title: session.title, projectID: session.projectID, directory: session.location.directory,
+      createdAt: session.time.created, source: this.scheduledSource(), archived: session.time.archived !== undefined,
+      busy, terminal: !busy && (!relevant.length || Boolean(idle && idle.time.created >= newestInput)) };
+  }
+
+  /** Đọc tên và danh tính bằng một yêu cầu, không tải lịch sử hay trạng thái thực thi. */
+  async topicSessionTitle(sessionID: string): Promise<TopicSessionInfo> {
+    this.ensureClient();
+    const session = unwrap<any>(await this.client.session.get({ sessionID }, { signal: AbortSignal.timeout(10_000) }));
+    return { id: session.id, title: session.title, projectID: session.projectID, directory: session.location.directory,
+      createdAt: session.time.created, source: this.scheduledSource(), archived: session.time.archived !== undefined };
   }
 
   async setModel(sessionID: string, model: { id: string; providerID: string; variant?: string }): Promise<void> {
@@ -550,6 +615,114 @@ export class OpenCodeCtl {
     return id;
   }
 
+  private scheduledSource(): string {
+    if (!this.discoverArgs?.serviceUrl) return "managed";
+    const url = new URL(this.discoverArgs.serviceUrl);
+    return `explicit:${url.origin}${url.pathname}`;
+  }
+
+  scheduledObserver(): ScheduledObserver {
+    const options = () => ({ signal: AbortSignal.timeout(10_000) });
+    return new ScheduledObserver({
+      source: () => this.scheduledSource(),
+      session: (id) => this.client.session.get({ sessionID: id }, options()),
+      active: () => this.client.session.active(options()),
+      inbox: (id) => this.client.session.inbox.list({ sessionID: id }, options()),
+      message: async (sessionID, messageID) => {
+        try { return await this.client.session.message.get({ sessionID, messageID }, options()); }
+        catch (e) {
+          if ((e as Error)?.name === "MessageNotFoundError") return undefined;
+          throw e;
+        }
+      },
+      log: (id, after) => this.client.session.log({ sessionID: id, ...(after !== undefined ? { after } : {}), follow: false }, options()),
+      interrupt: async (id) => { await this.client.session.interrupt({ sessionID: id, resume: false }, options()); },
+      cancel: async (id, messageID) => { await this.client.session.inbox.cancel({ sessionID: id, inboxID: messageID }, options()); },
+    });
+  }
+
+  async scheduledReady(sessionID?: string, directory?: string): Promise<void> {
+    try { await this.checkScheduledReady(sessionID, directory); }
+    catch (e) {
+      if (!isTransientNetworkError(e)) throw e;
+      await this.reconnect(false);
+      await this.checkScheduledReady(sessionID, directory);
+    }
+  }
+
+  private async checkScheduledReady(sessionID?: string, directory?: string): Promise<void> {
+    this.ensureClient();
+    const base = new URL(this.url!);
+    if (!base.pathname.endsWith("/")) base.pathname += "/";
+    const response = await fetch(new URL("openapi.json", base), { headers: this.headers, signal: AbortSignal.timeout(10_000) });
+    if (!response.ok) throw new ScheduledReadinessError(`Không đọc được mô tả capability OpenCode (mã HTTP ${response.status}).`);
+    const spec = await response.json() as { paths?: Record<string, unknown> };
+    for (const path of ["/api/session/active", "/api/experimental/session/{sessionID}/log", "/api/session/{sessionID}/message/{messageID}",
+      "/api/session/{sessionID}/inbox", "/api/session/{sessionID}/inbox/{inboxID}", "/api/session/{sessionID}/interrupt"]) {
+      if (!spec.paths?.[path]) throw new ScheduledReadinessError(`OpenCode thiếu capability ${path}.`);
+    }
+    const active = await this.client.session.active({ signal: AbortSignal.timeout(10_000) });
+    if (!active || typeof active !== "object" || Array.isArray(active)) throw new ScheduledReadinessError("Máy chủ trả trạng thái execution không hợp lệ.");
+    if (sessionID) {
+      try {
+        await this.scheduledObserver().baseline(sessionID);
+        await this.client.session.inbox.list({ sessionID }, { signal: AbortSignal.timeout(10_000) });
+        directory ??= (await this.client.session.get({ sessionID }, { signal: AbortSignal.timeout(10_000) })).location.directory;
+      } catch (e) {
+        if ((e as Error)?.name !== "SessionNotFoundError") throw e;
+      }
+    }
+    if (!directory) throw new ScheduledReadinessError("Không xác định được thư mục để kiểm chứng phát lại lịch sử.");
+    const probe = await this.createSession(directory, { title: "tg:kiểm-tra-khôi-phục", metadata: { tgRecoveryProbe: true } });
+    try {
+      const before = await this.scheduledObserver().baseline(probe);
+      await this.client.session.update({ sessionID: probe, title: "tg:đã-đổi-tên-kiểm-tra-khôi-phục" }, { signal: AbortSignal.timeout(10_000) });
+      let replayed = false;
+      let synced = false;
+      for await (const item of this.client.session.log({ sessionID: probe, after: before, follow: false }, { signal: AbortSignal.timeout(10_000) })) {
+        if (item.type === "log.synced") {
+          synced = item.aggregateID === probe && item.seq !== undefined && item.seq > before;
+          break;
+        }
+        if (item.type === "session.renamed" && item.data.sessionID === probe &&
+          item.durable.aggregateID === probe && item.durable.seq > before) replayed = true;
+      }
+      if (!replayed || !synced) throw new ScheduledReadinessError("Máy chủ không phát lại được lịch sử session. Chặn lượt mới để tránh mất khả năng khôi phục; cần máy chủ có lưu durable event payload.");
+      await this.client.session.inbox.list({ sessionID: probe }, { signal: AbortSignal.timeout(10_000) });
+    } finally { await this.retireScheduledSession(probe); }
+  }
+
+  async scheduledBinding(run: ScheduledRun, conv: string, sessionID: string): Promise<RunBinding> {
+    const session = await this.client.session.get({ sessionID }, { signal: AbortSignal.timeout(10_000) });
+    if (session.metadata?.tgScheduledRun !== run.id || session.location.directory !== run.schedule.dir) {
+      throw new Error("Session mới không khớp identity hoặc thư mục của lượt chạy.");
+    }
+    const sequence = await this.scheduledObserver().baseline(sessionID);
+    return { conv, sessionID, projectID: session.projectID, createdAt: session.time.created, source: this.scheduledSource(), sequence };
+  }
+
+  async retireScheduledSession(sessionID: string): Promise<void> {
+    try { await this.client.session.remove({ sessionID }, { signal: AbortSignal.timeout(10_000) }); }
+    catch (e) { if ((e as Error)?.name !== "SessionNotFoundError") throw e; }
+  }
+
+  async submitScheduled(run: ScheduledRun, text: string): Promise<void> {
+    if (!run.binding || Date.now() >= run.deadline) throw new Error("Lượt chạy chưa sẵn sàng hoặc đã hết thời hạn.");
+    // Chỉ gửi một request; mất phản hồi phải tìm lại input, không retry prompt.
+    await this.client.session.prompt({ sessionID: run.binding.sessionID, id: run.messageID, text }, {
+      signal: AbortSignal.timeout(Math.max(1, Math.min(10_000, run.deadline - Date.now()))),
+    });
+  }
+
+  async observeScheduled(run: ScheduledRun) {
+    try { return await this.scheduledObserver().inspect(run); }
+    catch (e) {
+      if (!isTransientNetworkError(e)) throw e;
+      await this.reconnect(false);
+      return this.scheduledObserver().inspect(run);
+    }
+  }
+
   /**
    * Newest assistant text in a session created after `afterTime` (0 = any),
    * with its time. With `lastTurn`, only replies after the newest user message
@@ -716,17 +889,14 @@ export class OpenCodeCtl {
     while (alive()) {
       try {
         const stream = this.client.event.subscribe({ signal: this.eventAbort?.signal }) as AsyncIterable<any>;
-        delay = 1000; // reset backoff after a clean (re)connect
-        // The stream has no replay: anything emitted while we were away (a
-        // question, a permission ask, a finished turn) is gone. Let the bot
-        // reconcile from the API on every (re)connect.
-        try {
-          this.eventCbs?.onConnect?.();
-        } catch (e) {
-          onError?.(e);
-        }
+        let connected = false;
         for await (const ev of stream) {
           if (!alive()) break;
+          if (!connected) {
+            connected = true;
+            delay = 1000;
+            try { this.eventCbs?.onConnect?.(); } catch (e) { onError?.(e); }
+          }
           try {
             onEvent(ev);
           } catch (e) {

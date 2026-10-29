@@ -1,6 +1,7 @@
 import { exec as execCb } from "node:child_process";
 import { log, warn, error } from "./logger.js";
 import { ConvKey, parseConv } from "./conv.js";
+import { topicTitle } from "./format.js";
 import {
   DnsHealConfig,
   HealState,
@@ -24,6 +25,7 @@ export type Message = {
   message_thread_id?: number;
   is_topic_message?: boolean;
   forum_topic_created?: { name: string };
+  forum_topic_edited?: { name?: string };
   /** Caption on media (photo/sticker/video/voice/document); counts as text. */
   caption?: string;
   sticker?: { file_id?: string; type?: string };
@@ -137,7 +139,7 @@ const THREAD_TARGETING_METHODS = new Set([
   "editMessageText",
   "deleteMessage",
   "createForumTopic",
-  "openForumTopic",
+  "reopenForumTopic",
   "closeForumTopic",
   "deleteForumTopic",
   "answerCallbackQuery",
@@ -232,6 +234,19 @@ export class Telegram {
   /** `has_topics_enabled` tells whether this bot has topic mode in private chats. */
   getMe(): Promise<{ id: number; username?: string; first_name?: string; has_topics_enabled?: boolean }> {
     return this.api("getMe");
+  }
+
+  async assertForumManagement(chatId: number): Promise<void> {
+    const signal = AbortSignal.timeout(10_000);
+    const [chat, me] = await Promise.all([
+      this.api<{ type: string; is_forum?: boolean }>("getChat", { chat_id: chatId }, signal),
+      this.api<{ id: number }>("getMe", {}, signal),
+    ]);
+    if (chat.type !== "supergroup" || !chat.is_forum) throw new Error("Use a supergroup with Topics enabled.");
+    const member = await this.api<{ status: string; can_manage_topics?: boolean }>("getChatMember", { chat_id: chatId, user_id: me.id }, signal);
+    if (member.status !== "creator" && !(member.status === "administrator" && member.can_manage_topics)) {
+      throw new Error("The bot needs administrator access with Manage Topics enabled.");
+    }
   }
 
   /** Register the /command autocomplete menu shown while the user types "/". */
@@ -405,9 +420,9 @@ export class Telegram {
   async createForumTopic(chatId: number, name: string, iconColor?: number): Promise<number> {
     const res = await this.api<{ message_thread_id: number }>("createForumTopic", {
       chat_id: chatId,
-      name: name.slice(0, 128),
+      name: topicTitle(name),
       ...(iconColor ? { icon_color: iconColor } : {}),
-    });
+    }, AbortSignal.timeout(10_000));
     return res.message_thread_id;
   }
 
@@ -416,25 +431,27 @@ export class Telegram {
     const { chatId, threadId } = parseConv(to);
     if (!threadId) return;
     try {
-      await this.api("editForumTopic", { chat_id: chatId, message_thread_id: threadId, name: name.slice(0, 128) });
+      await this.api("editForumTopic", { chat_id: chatId, message_thread_id: threadId, name: topicTitle(name) }, AbortSignal.timeout(10_000));
     } catch (e) {
       // 400 TOPIC_NOT_MODIFIED (same name) is harmless.
-      if ((e as any)?.code !== 400) throw e;
+      if ((e as any)?.code !== 400 || !/\bTOPIC_NOT_MODIFIED\b/.test((e as Error).message)) throw e;
     }
   }
 
-  /** Close a topic. Only supergroups support this; private chats just keep it open. */
+  /** Close a supergroup topic; only an already-applied state is a successful no-op. */
   async closeForumTopic(to: ConvKey): Promise<void> {
     const { chatId, threadId } = parseConv(to);
     if (!threadId) return;
-    await this.api("closeForumTopic", { chat_id: chatId, message_thread_id: threadId }).catch(() => {});
+    try { await this.api("closeForumTopic", { chat_id: chatId, message_thread_id: threadId }, AbortSignal.timeout(10_000)); }
+    catch (error) { if ((error as { code?: number }).code !== 400 || !/\bTOPIC_NOT_MODIFIED\b/.test((error as Error).message)) throw error; }
   }
 
   /** Reopen a closed topic. A no-op if it is already open, so it is safe to call often. */
   async openForumTopic(to: ConvKey): Promise<void> {
     const { chatId, threadId } = parseConv(to);
     if (!threadId) return;
-    await this.api("openForumTopic", { chat_id: chatId, message_thread_id: threadId }).catch(() => {});
+    try { await this.api("reopenForumTopic", { chat_id: chatId, message_thread_id: threadId }, AbortSignal.timeout(10_000)); }
+    catch (error) { if ((error as { code?: number }).code !== 400 || !/\bTOPIC_NOT_MODIFIED\b/.test((error as Error).message)) throw error; }
   }
 
   async deleteForumTopic(to: ConvKey): Promise<void> {

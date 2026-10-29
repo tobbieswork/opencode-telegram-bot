@@ -23,7 +23,7 @@ function check(name: string, cond: boolean, detail?: string): void {
 // built-in, not part of the surface). Update deliberately when adding a command.
 const GOLDEN = new Set([
   // session
-  "new", "ls", "use", "dir", "browse",
+  "setup", "new", "ls", "use", "close", "restore", "sync", "dir", "browse",
   // model
   "mode", "models", "model", "agents", "agent", "variants", "variant",
   // manager
@@ -31,9 +31,16 @@ const GOLDEN = new Set([
   // control
   "stop", "note", "context", "usage", "history", "status", "reboot", "clear", "schedule", "help",
 ]);
-const GOLDEN_ALIASES = new Set(["sessions", "b", "modes", "ctx", "workers"]);
+const GOLDEN_ALIASES = new Set(["sessions", "attach", "b", "modes", "ctx", "workers"]);
 
 const cmds = COMMANDS.map((c) => c.cmd);
+
+{
+  const topicHelp = helpText("topic");
+  check("topic help does not advertise session replacement", !topicHelp.includes("/new ") && !topicHelp.includes("/use "));
+  check("topic menu omits lifecycle actions", !commandGrid("topic").inline_keyboard.flat().some((button) => ["cmd:new", "cmd:clear", "cmd:browse", "cmd:schedule"].includes(button.callback_data)));
+  check("General help describes management, not an implicit LLM session", helpText("general").includes("General manages"));
+}
 
 // ── catalog integrity ────────────────────────────────────────────────────────
 {

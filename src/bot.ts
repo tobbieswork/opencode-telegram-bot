@@ -8,7 +8,9 @@ import { OpenCodeCtl, newMessageID, assistantText, ModelInfo, SessionBrief } fro
 import { StateManager, ChatState, MsgPurpose, MACHINE_STATE_KEY } from "./state.js";
 import { ConvKey, convKey, chatOf, parseConv } from "./conv.js";
 import { Orchestrator } from "./orchestrator.js";
-import { ScheduleStore, Scheduler } from "./scheduler.js";
+import { ScheduleStore } from "./scheduler.js";
+import { ScheduledRuns } from "./scheduled-run.js";
+import { SessionTopics, type SessionTopic, type TopicTitlePreview } from "./session-topics.js";
 import { Schedule, SchedSpec, formatSchedule, nextRunAfter, parseScheduleSpec } from "./schedule.js";
 import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure } from "./format.js";
@@ -34,7 +36,7 @@ import { PrSnapshot, PrState, diffSnapshots, renderEvent } from "./pr-watch.js";
 import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, SAFE_REBOOT_BIN, rebootTokenFile, buildTokenLine, rebootGoData, isRebootConfirmFresh } from "./uptime.js";
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
 import { DraftState, DraftAction, onTextDelta, onToolStart, isDmConv, EDIT_BUDGET } from "./stream.js";
-import { myCommands, helpText, commandGrid } from "./commands.js";
+import { myCommands, helpText, commandGrid, commandScope } from "./commands.js";
 import { UsageRow, formatUsageReport } from "./usage.js";
 import { appendNote, dropNotes, noteEntryText, prepareNotes, showNotes, BUSY_REPLY_TEXT, NOTE_BUTTON_LABEL, NOTE_CB_PREFIX, noteCallbackData, parseNoteCallback, BusyNoteStore } from "./notes.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
@@ -103,7 +105,7 @@ function isTransportError(e: any): boolean {
   );
 }
 
-type Btn = { text: string; callback_data: string };
+type Btn = { text: string; callback_data: string; url?: never } | { text: string; url: string; callback_data?: never };
 type Keyboard = { inline_keyboard: Btn[][] };
 
 /** In-memory state of the folder browser, one per chat. */
@@ -244,8 +246,14 @@ export class Bot {
   private orch: Orchestrator;
   /** Schedules, in their own file (data/schedules.json) — /clear must never touch them. */
   private scheduleStore: ScheduleStore;
-  /** /schedule tick engine — only constructed/started when cfg.schedule is on. */
-  private scheduler?: Scheduler;
+  /** Khôi phục lượt cũ luôn chạy; cfg.schedule chỉ chặn nhận lượt mới. */
+  private scheduler?: ScheduledRuns;
+  private topics: SessionTopics;
+  private topicTimer?: ReturnType<typeof setInterval>;
+  private topicSync?: Promise<void>;
+  private topicSyncAgain = false;
+  private topicAnnouncements = new Map<string, string>();
+  private titlePreviews = new Map<ConvKey, { token: string; user: number; expires: number; rows: TopicTitlePreview[] }>();
 
   constructor(
     private tg: Telegram,
@@ -259,11 +267,57 @@ export class Bot {
       join(dirname(this.cfg.stateFile), "schedules.json"),
       this.cfg.maxSchedules,
     );
+    this.topics = new SessionTopics(st, {
+      createSession: (input) => oc.createTopicSession(input),
+      session: (id) => oc.topicSession(id),
+      sessionTitle: (id) => oc.topicSessionTitle(id),
+      renameTopic: (conv, title) => tg.editForumTopic(conv, title),
+      createTopic: (chat, title) => tg.createForumTopic(Number(chat), title),
+      archive: (id, archived) => oc.archiveSession(id, archived),
+      closeTopic: (conv) => tg.closeForumTopic(conv),
+      openTopic: (conv) => tg.openForumTopic(conv),
+      configure: (id, state) => this.applyModelAndVariant(id, state),
+      stop: async (link) => {
+        if (!link.conv || !link.sessionID) return false;
+        const scheduler = this.scheduler;
+        const scheduled = scheduler?.owns(link.conv);
+        if (scheduled && scheduler) {
+          await scheduler.requestStop(link.conv);
+          await scheduler.recover(true, link.sessionID);
+          if (scheduler.owns(link.conv)) return false;
+        }
+        let snapshot = await oc.topicSession(link.sessionID);
+        const matches = () => snapshot.id === link.sessionID && snapshot.projectID === link.identity?.projectID &&
+          snapshot.source === link.identity.source && snapshot.createdAt === link.identity.createdAt;
+        if (!matches()) return false;
+        if (snapshot.busy || !snapshot.terminal) {
+          if (scheduled) return false;
+          await oc.interruptTopicSession(link.sessionID);
+          snapshot = await oc.topicSession(link.sessionID);
+        }
+        if (!matches()) return false;
+        if (snapshot.busy || !snapshot.terminal) return false;
+        this.inflight.get(link.conv)?.abort();
+        this.stopTyping(link.conv);
+        this.stopWorking(link.conv);
+        this.clearActivity(link.conv);
+        void this.dropPreview(link.conv).catch(() => {});
+        this.cancelAllReminders(link.conv);
+        for (const [id, form] of this.questionForms) if (form.conv === link.conv && form.sessionID === link.sessionID) this.questionForms.delete(id);
+        for (const [id, prompt] of this.permissionPrompts) if (prompt.conv === link.conv && prompt.sessionID === link.sessionID) this.permissionPrompts.delete(id);
+        this.orch.clearManagerBusy(link.conv);
+        const worker = this.st.peek(link.conv)?.worker;
+        if (worker) this.st.set(link.conv, { worker: { ...worker, status: "stopped", updatedAt: Date.now() } });
+        return true;
+      },
+    });
     this.orch = new Orchestrator({
       tg,
       oc,
       st,
       cfg,
+      topics: this.topics,
+      stopTopicWork: (conv) => this.stopManagedTopic(conv),
       busyNotes: this.busyNotes,
       sendHtml: (conv, html, opts) => this.sendHtml(conv, html, opts),
       applyModelAndVariant: (sid, state) => this.applyModelAndVariant(sid, state),
@@ -271,6 +325,13 @@ export class Bot {
       startTyping: (conv) => this.startTyping(conv),
       startWorking: (conv) => this.startWorking(conv),
       stopWorking: (conv) => this.stopWorking(conv),
+      scheduledStop: (conv) => this.scheduler?.requestStop(conv) ?? Promise.resolve(false),
+      onScheduledFinished: async (conv) => {
+        this.stopTyping(conv);
+        this.clearActivity(conv);
+        await this.dropPreview(conv);
+        await this.sweepUnrelayedReplies(conv, "lượt chạy lịch đã kết thúc");
+      },
       onTopicGone: async (conv) => {
         // The topic is gone and the conv is being purged NOW (not the deferred
         // running-worker case, where the worker is allowed to finish). Fully stop
@@ -297,6 +358,16 @@ export class Bot {
     };
     // Reaction UX (OPENCODE_TG_REACT): user reactions on indexed messages.
     this.tg.onMessageReaction = (ev) => this.onMessageReaction(ev);
+    try {
+      this.scheduler = new ScheduledRuns({
+        now: () => Date.now(), store: this.scheduleStore, execution: this.orch.scheduledExecution(),
+        enabled: () => this.cfg.schedule, isAllowed: (uid) => this.cfg.allowAny || this.cfg.allowedUserIds.includes(uid),
+        notify: (conv, text) => this.tg.sendMessage(conv, text),
+        timeoutMs: this.cfg.scheduleTimeoutMs, graceMs: this.cfg.scheduleGraceMs,
+      });
+    } catch {
+      warn("Không đọc được dữ liệu lượt chạy; tạm chặn chạy lịch, giữ nguyên file để kiểm tra.");
+    }
   }
 
   /** Begin relaying OpenCode question forms to Telegram. Called once from index.ts. */
@@ -305,26 +376,25 @@ export class Bot {
       (ev) => this.onOpenCodeEvent(ev),
       (e) => warn("event stream:", e?.message ?? e),
       () => {
+        this.topics.requestTitleSync(undefined, true);
+        void this.reconcileTopics().catch(() => warn("Session/topic reconciliation failed."));
+        void this.scheduler?.recover().catch((e) => warn("khôi phục lượt chạy:", e?.name));
         void this.orch.onConnect().catch((e) => warn("orchestrator:", e?.message));
         void this.reconcile().catch((e) => warn("reconcile:", e?.message));
       },
     );
     // Resume any pending-prompt reminder nudges that were scheduled before a restart.
     this.resumePromptReminders();
-    // Start the /schedule tick engine alongside the reminder re-arm (both are
-    // startup "re-arm" concerns). Guarded on the cfg.schedule toggle.
-    if (this.cfg.schedule) {
-      this.scheduler = new Scheduler({
-        now: () => Date.now(),
-        store: this.scheduleStore,
-        dispatch: (sch) => this.orch.runScheduled(sch.conv, sch),
-        isBusy: (sch) => this.orch.workerBusyByName(sch.conv, "sch-" + sch.id),
-        isAllowed: (uid) => this.cfg.allowedUserIds.includes(uid),
-        notify: (conv, text) => this.tg.sendMessage(conv, text),
-        tickMs: 30_000,
-        graceMs: this.cfg.scheduleGraceMs,
-      });
-      this.scheduler.start();
+    // Deadline của lượt đã nhận vẫn phải được khôi phục khi công tắc lịch tắt.
+    this.scheduler?.start();
+    this.topics.requestTitleSync(undefined, true);
+    void this.reconcileTopics().catch(() => warn("Session/topic reconciliation failed."));
+    if (!this.topicTimer) {
+      this.topicTimer = setInterval(() => {
+        this.topics.requestTitleSync();
+        void this.reconcileTopics().catch(() => warn("Session/topic reconciliation failed."));
+      }, 60_000);
+      this.topicTimer.unref?.();
     }
     // Close topics left open by workers that finished before auto-close existed
     // (or while the service was down). Fire-and-forget; never fails startup.
@@ -342,6 +412,11 @@ export class Bot {
   /** Stop the /schedule tick engine (called from index.ts during shutdown). */
   stopScheduler(): void {
     this.scheduler?.stop();
+    this.orch.shutdown();
+    this.topics.stopTitleSync();
+    this.titlePreviews.clear();
+    if (this.topicTimer) clearInterval(this.topicTimer);
+    this.topicTimer = undefined;
   }
 
   // ── Uptime monitor + reboot ─────────────────────────────────────────────────
@@ -539,6 +614,7 @@ export class Bot {
    * (that is the classic "bot went silent and never reported back" gap).
    */
   private async sweepUnrelayedReplies(conv: ConvKey, reason: string, succeeded?: boolean): Promise<void> {
+    if (this.topics.enabled(conv) && !this.topics.canInteract(conv, this.st.peek(conv)?.sessionID ?? "")) return;
     if (this.sweeping.has(conv)) return; // a sweep for this chat is already running
     this.sweeping.add(conv);
     const st = this.st.get(conv);
@@ -566,6 +642,7 @@ export class Bot {
       }
       if (!replies.length) return;
       for (const r of replies) {
+        if (this.topics.enabled(conv) && !this.topics.canInteract(conv, st.sessionID)) return;
         await this.sendReply(conv, r.text);
         this.st.set(conv, { lastRelayedTime: r.time });
       }
@@ -607,7 +684,8 @@ export class Bot {
   /** The conversation a message belongs to: its forum topic if any, else the chat. */
   private convOf(m: { chat: { id: number }; message_thread_id?: number; is_topic_message?: boolean }): ConvKey {
     // message_thread_id is also set on plain reply threads; only topics count.
-    return convKey(m.chat.id, m.is_topic_message ? m.message_thread_id : undefined);
+    const thread = m.chat.id < 0 && m.message_thread_id === 1 && this.topics.enabled(String(m.chat.id)) ? undefined : m.message_thread_id;
+    return convKey(m.chat.id, m.is_topic_message ? thread : undefined);
   }
 
   async handle(u: Update): Promise<void> {
@@ -624,6 +702,10 @@ export class Bot {
     if (!msg) return;
     const conv = this.convOf(msg);
     const uid = msg.from?.id as number | undefined;
+    if (typeof msg.forum_topic_edited?.name === "string") {
+      this.topics.observeTopicTitle(conv, msg.forum_topic_edited.name);
+      return;
+    }
     // A media caption counts as text: it goes through the same dispatch as a plain message.
     const text = (msg.text ?? msg.caption ?? "").trim();
     if (!text) {
@@ -642,6 +724,26 @@ export class Bot {
         .catch(() => {});
       return;
     }
+    if (/^\/setup(?:@\w+)?$/i.test(text)) {
+      const general = String(msg.chat.id);
+      if (msg.chat.type !== "supergroup" || !msg.chat.is_forum || (conv !== general && msg.message_thread_id !== 1)) {
+        await this.tg.sendMessage(conv, "Use /setup in General of a forum supergroup.");
+      } else {
+        try {
+          await this.tg.assertForumManagement(msg.chat.id);
+          if (this.inflight.has(general) || this.inflight.has(`${general}:1`)) throw new Error("Wait for the legacy turn and its delivery to settle before /setup.");
+          const legacySIDs = new Set([this.st.peek(general)?.sessionID, this.st.peek(`${general}:1`)?.sessionID]);
+          for (const oldSID of legacySIDs) if (oldSID) {
+            const old = await this.oc.topicSession(oldSID);
+            if (old.busy || !old.terminal) throw new Error("Finish or explicitly stop the legacy General session before /setup. No sessions have been moved or stopped.");
+          }
+          this.topics.enable(general);
+          await this.tg.sendMessage(conv, "General now manages sessions. Use /new to create a session with its own topic, /sessions to manage them. Existing sessions are unchanged.");
+          await this.orch.showManagerEntry(general);
+        } catch (error) { await this.tg.sendMessage(conv, `Setup not confirmed: ${esc((error as Error).message)}`); }
+      }
+      return;
+    }
     // Remember the user's top-level chat so proactive notices (e.g. DNS heal)
     // have a destination even mid-polling-failure.
     this.lastActiveConv = chatOf(conv);
@@ -657,14 +759,223 @@ export class Bot {
       state.directory = top && !top.manager && top.directory ? top.directory : this.cfg.opencodeDirectory;
     }
 
-    if (text.startsWith("/")) await this.handleCommand(conv, text, state, uid);
+    if (text.startsWith("/")) {
+      if (await this.handleTopicCommand(conv, text, `message:${msg.chat.id}:${msg.message_id ?? u.update_id}`)) return;
+      await this.handleCommand(conv, text, state, uid);
+    }
     else {
+      if (this.topics.enabled(conv) && (conv === chatOf(conv) || !this.topics.canPrompt(conv))) {
+        if (conv === chatOf(conv)) await this.orch.showManagerEntry(conv);
+        else await this.tg.sendMessage(conv, "Phiên này chưa mở. Về General và dùng /sessions để kiểm tra hoặc mở lại.");
+        return;
+      }
       // (The "🤔 thinking" body-react on the user's message was removed 2026-10-27:
       // the working indicator now covers "the bot is working" on new prompts.)
       if (await this.handleFormText(conv, text)) return;
       else if (state.manager) await this.orch.promptManager(conv, text, msg.message_id);
       else await this.runPrompt(conv, text, state, msg.message_id);
     }
+  }
+
+  private async handleTopicCommand(conv: ConvKey, raw: string, operationID?: string): Promise<boolean> {
+    if (!this.topics.enabled(conv)) return false;
+    const [name, ...args] = raw.split(/\s+/);
+    const cmd = name.replace(/@\w+$/, "").toLowerCase();
+    const arg = args.join(" ");
+    if (conv !== chatOf(conv)) {
+      if (commandScope(cmd) === "general") {
+        await this.tg.sendMessage(conv, "Manage sessions in General; this topic stays bound to its original session.");
+        return true;
+      }
+      if (!this.topics.canPrompt(conv) && !["/help", "/status", "/context", "/ctx", "/history", "/usage", "/stop"].includes(cmd)) {
+        await this.tg.sendMessage(conv, "This session is not open. Reconcile or restore it from General.");
+        return true;
+      }
+      return false;
+    }
+    try {
+      if (["/stop", "/note", "/context", "/ctx", "/history", "/wt"].includes(cmd)) {
+        await this.tg.sendMessage(conv, esc("General is for management. Use the session topic for work, or /kill <worker> here to stop a selected worker."));
+        return true;
+      }
+      if (cmd === "/status") {
+        const links = this.topics.list(conv);
+        await this.tg.sendMessage(conv, `General manages ${links.length} session topics. No LLM session runs here. Use /sessions for per-session status.`);
+        return true;
+      }
+      if (cmd === "/new") {
+        if (arg.includes("--keep")) throw new Error("Use a separate session/topic; carry-over is not implicit.");
+        const state = this.st.get(conv);
+        const now = Date.now();
+        const suffix = randomBytes(4).toString("hex");
+        const link = await this.topics.create({ chat: conv, directory: state.directory || this.cfg.opencodeDirectory,
+          title: arg.slice(0, 128) || `Session ${suffix}`, operationID, agent: state.agent || this.cfg.defaultAgent,
+          state: { model: state.model, variant: state.variant,
+            worker: { name: `session-${suffix}`, status: "idle", spawnedBy: "user", createdAt: now, updatedAt: now } } });
+        await this.showTopicLink(conv, link);
+        return true;
+      }
+      if (["/use", "/attach"].includes(cmd) && arg) {
+        await this.showTopicLink(conv, await this.topics.attach(conv, arg));
+        return true;
+      }
+      if (["/sessions", "/ls", "/use", "/attach"].includes(cmd)) {
+        await this.showSessionTopics(conv);
+        return true;
+      }
+      if (["/close", "/restore"].includes(cmd)) {
+        const link = this.topics.list(conv).find((item) => item.id === arg || item.sessionID === arg);
+        if (!link) throw new Error("Choose a session with /sessions, or supply its link/session ID.");
+        await this.showTopicLink(conv, cmd === "/close" ? await this.topics.close(conv, link.id) : await this.topics.restore(conv, link.id));
+        return true;
+      }
+      if (cmd === "/sync") {
+        await this.reconcileTopics();
+        await this.tg.sendMessage(conv, "Session/topic states checked. Pending operations remain visible in /sessions.");
+        return true;
+      }
+      if (cmd === "/clear") {
+        await this.tg.sendMessage(conv, esc("General cannot clear session bindings. Use /close <session-id> to archive a session without deleting history."));
+        return true;
+      }
+    } catch (error) {
+      await this.tg.sendMessage(conv, esc((error as Error).message));
+      return true;
+    }
+    return false;
+  }
+
+  private async showSessionTopics(conv: ConvKey, requestedPage = 0): Promise<void> {
+    const links = this.topics.list(conv);
+    if (requestedPage === 0) for (const link of links) await this.showTopicLink(conv, link);
+    const directory = resolve(this.st.peek(conv)?.directory || this.cfg.opencodeDirectory);
+    let sessions: SessionBrief[] = [];
+    let failed = false;
+    try { sessions = await this.oc.listSessions(); } catch { failed = true; }
+    const linked = new Set(this.topics.list().map((link) => link.sessionID));
+    const owners = new Map<string, ConvKey[]>();
+    for (const [key, state] of Object.entries(this.st.all())) if (state.sessionID) {
+      owners.set(state.sessionID, [...(owners.get(state.sessionID) ?? []), key]);
+    }
+    const byID = new Map(sessions.map((session) => [session.id, session]));
+    const candidates = new Map<string, SessionBrief>();
+    for (const [key, state] of this.st.convsOfChat(conv)) {
+      if (!state.sessionID || linked.has(state.sessionID) || owners.get(state.sessionID)?.length !== 1) continue;
+      const session = byID.get(state.sessionID);
+      if (session?.archived || session?.parentID) continue;
+      candidates.set(state.sessionID, { ...session, id: state.sessionID,
+        title: session?.title || state.worker?.name || (parseConv(key).threadId && parseConv(key).threadId! > 1 ? "Phiên cũ trong chủ đề" : "Phiên cũ ở General") });
+    }
+    for (const session of [...sessions].sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0))) {
+      if (linked.has(session.id) || owners.has(session.id) || session.archived || session.parentID ||
+        !session.directory || resolve(session.directory) !== directory) continue;
+      candidates.set(session.id, session);
+    }
+    const choices = [...candidates.values()].filter((session) => Buffer.byteLength(`use:${session.id}`) <= 64);
+    const pages = Math.max(1, Math.ceil(choices.length / 10));
+    const page = Math.max(0, Math.min(requestedPage, pages - 1));
+    const visible = choices.slice(page * 10, (page + 1) * 10);
+    const rows: Btn[][] = visible.map((session) => [{ text: `📎 ${trunc(session.title || "Phiên chưa đặt tên", 45)}`, callback_data: `use:${session.id}` }]);
+    const navigation: Btn[] = [];
+    if (page > 0) navigation.push({ text: "⬅️ Trang trước", callback_data: `st:list:${page - 1}` });
+    if (page + 1 < pages) navigation.push({ text: "Trang sau ➡️", callback_data: `st:list:${page + 1}` });
+    if (navigation.length) rows.push(navigation);
+    rows.push([{ text: "➕ Tạo phiên mới", callback_data: "cmd:new" }, { text: "🔄 Làm mới", callback_data: "st:list:0" }]);
+    rows.push([{ text: "Mở phiên quản lý", callback_data: "mgr:open" }]);
+    rows.push([{ text: "Đồng bộ tên chủ đề", callback_data: "st:title-preview:0" }]);
+    const text = ["<b>📂 Chọn phiên để gắn vào chủ đề</b>",
+      `Thư mục đang chọn: <code>${esc(directory)}</code>`,
+      failed ? "⚠️ Không tải được danh sách OpenCode. Vẫn hiển thị các phiên cũ đã lưu của nhóm; bấm Làm mới để thử lại." : "",
+      choices.length ? `Trang ${page + 1}/${pages} · ${choices.length} phiên chưa gắn. Bấm tên phiên bên dưới, không cần nhập ID.` : "Chưa tìm thấy phiên cũ phù hợp. Bấm Tạo phiên mới để bắt đầu, không cần ID.",
+      ...visible.map((session, index) => `${page * 10 + index + 1}. ${esc(trunc(session.title || "Phiên chưa đặt tên", 90))}`),
+      "Chỉ hiện phiên cũ của nhóm này và phiên chưa thuộc chat nào trong thư mục đang chọn. Dùng /dir hoặc /browse để đổi thư mục.",
+      "Bot chỉ kiểm tra và gắn khi bạn chọn; phiên đang chạy cần chờ kết thúc. Không tự tạo lại hay chuyển phiên của chat khác.",
+    ].filter(Boolean).join("\n");
+    await this.tg.sendMessage(conv, text, { reply_markup: { inline_keyboard: rows } });
+  }
+
+  private async showTopicLink(conv: ConvKey, link: SessionTopic): Promise<void> {
+    const rows: Array<Array<{ text: string; callback_data?: string; url?: string }>> = [];
+    if (link.conv) {
+      const { chatId, threadId } = parseConv(link.conv);
+      rows.push([{ text: "Mở chủ đề", url: `https://t.me/c/${String(chatId).replace(/^-100/, "")}/${threadId}` }]);
+    }
+    if (link.conv && link.identity && link.sessionID) rows.push([{ text: "Đóng phiên", callback_data: `st:close:${link.id}` },
+      { text: "Mở lại phiên", callback_data: `st:restore:${link.id}` }]);
+    if (!["open", "closed"].includes(link.phase)) rows.push([{ text: "Kiểm tra trạng thái", callback_data: `st:sync:${link.id}` }]);
+    if (link.conv && link.sessionID && link.identity) rows.push([{ text: "Đồng bộ tên", callback_data: `st:title-sync:${link.id}` }]);
+    const titleStatus = link.titleSync?.pending ? `\nTên chủ đề: đang chờ đồng bộ${link.titleSync.error ? ` — ${esc(link.titleSync.error)}` : ""}` : "";
+    await this.tg.sendMessage(conv, `<b>${esc(link.title)}</b> · ${esc(link.phase)}\nSession: <code>${esc(link.sessionID ?? "unconfirmed")}</code>\nLink: <code>${esc(link.id)}</code>${link.step ? `\nStep: ${esc(link.step)}` : ""}${link.error ? `\n${esc(link.error)}` : ""}${titleStatus}`,
+      { reply_markup: { inline_keyboard: rows } });
+    this.topicAnnouncements.set(link.id, this.topicSignature(link));
+    if (link.phase === "open") this.resumePromptReminders();
+  }
+
+  private topicSignature(link: SessionTopic): string { return `${link.phase}:${link.step ?? ""}:${link.error ?? ""}`; }
+
+  private async showTitlePreview(conv: ConvKey, user: number, token?: string, requestedPage = 0): Promise<void> {
+    let preview = this.titlePreviews.get(conv);
+    if (!token) {
+      preview = { token: randomBytes(8).toString("hex"), user, expires: Date.now() + 10 * 60_000,
+        rows: await this.topics.previewTitles(conv) };
+      this.titlePreviews.set(conv, preview);
+    }
+    if (!preview || preview.token !== (token ?? preview.token) || preview.user !== user || preview.expires < Date.now()) {
+      throw new Error("Bản xem trước đã hết hạn hoặc không thuộc bạn. Mở lại bằng nút Đồng bộ tên chủ đề trong /sessions.");
+    }
+    const pages = Math.max(1, Math.ceil(preview.rows.length / 10));
+    const page = Math.min(Math.max(0, requestedPage), pages - 1);
+    const text = ["<b>Xem trước đồng bộ tên chủ đề</b>",
+      "Tên bot đã lưu → tiêu đề OpenCode. Telegram không cung cấp cách đọc lại tên mọi chủ đề; tên đã sửa tay có thể khác bản lưu.",
+      ...preview.rows.slice(page * 10, page * 10 + 10).map(row => `${esc(trunc(row.before, 100))} → ${esc(trunc(row.after ?? "giữ tên hiện tại", 100))}${row.error ? ` · ${esc(trunc(row.error, 100))}` : row.deferred ? " · hoãn đến khi phiên/chủ đề mở" : ""}`),
+      `Trang ${page + 1}/${pages} · ${preview.rows.length} chủ đề.`,
+      "Xác nhận áp dụng cho cả nhóm, gồm các chủ đề tạo sau này. OpenCode là nguồn tên chuẩn; không giữ tên sửa riêng ở Telegram.",
+      "Chỉ đổi tên, không dừng công việc hay mở lại chủ đề đã đóng. Khi thực hiện bot đọc lại tiêu đề mới nhất.",
+    ].join("\n");
+    const rows: Btn[][] = [];
+    const nav: Btn[] = [];
+    if (page > 0) nav.push({ text: "⬅️ Trang trước", callback_data: `st:title-page:${preview.token}:${page - 1}` });
+    if (page + 1 < pages) nav.push({ text: "Trang sau ➡️", callback_data: `st:title-page:${preview.token}:${page + 1}` });
+    if (nav.length) rows.push(nav);
+    rows.push([{ text: this.topics.titleSyncEnabled(conv) ? "Đồng bộ lại tên trong nhóm" : "Bật đồng bộ tên cho nhóm", callback_data: `st:title-enable:${preview.token}` }]);
+    rows.push([{ text: "Hủy", callback_data: `st:title-cancel:${preview.token}` }]);
+    await this.tg.sendMessage(conv, text, { reply_markup: { inline_keyboard: rows } });
+  }
+
+  private reconcileTopics(): Promise<void> {
+    if (this.topicSync) { this.topicSyncAgain = true; return this.topicSync; }
+    this.topicSync = (async () => {
+      do {
+        this.topicSyncAgain = false;
+        for (const link of this.topics.list()) if (!this.topicAnnouncements.has(link.id)) this.topicAnnouncements.set(link.id, this.topicSignature(link));
+        await this.topics.reconcile();
+        this.topics.requestTitleSync();
+        this.resumePromptReminders();
+        for (const link of this.topics.list()) {
+          if (this.topicAnnouncements.get(link.id) !== this.topicSignature(link)) await this.showTopicLink(link.chat, link);
+        }
+      } while (this.topicSyncAgain);
+    })().finally(() => { this.topicSync = undefined; });
+    return this.topicSync;
+  }
+
+  private settingsSession(conv: ConvKey): string | undefined {
+    return this.topics.enabled(conv) && conv === chatOf(conv) ? undefined : this.st.peek(conv)?.sessionID;
+  }
+
+  private async stopManagedTopic(conv: ConvKey): Promise<boolean> {
+    const link = this.topics.forTopic(conv);
+    if (!link || !await this.topics.stop(link.chat, link.id)) return false;
+    this.inflight.get(conv)?.abort();
+    this.stopTyping(conv);
+    this.stopWorking(conv);
+    this.clearActivity(conv);
+    this.cancelAllReminders(conv);
+    this.orch.clearManagerBusy(conv);
+    await this.dropPreview(conv);
+    const worker = this.st.peek(conv)?.worker;
+    if (worker) this.st.set(conv, { worker: { ...worker, status: "stopped", updatedAt: Date.now() } });
+    return true;
   }
 
   // ── PR watcher (watched GitHub repo → one line per new event) ─────────────
@@ -928,7 +1239,11 @@ export class Bot {
    * any await, so concurrent/duplicated updates can't double-trigger.
    */
   private async onMessageReaction(ev: MessageReactionUpdated): Promise<void> {
-    if (!this.cfg.react) return;
+    if (!this.cfg.react || !this.allowed(ev.user?.id)) return;
+    if (this.topics.enabled(String(ev.chat.id))) {
+      await this.tg.sendMessage(String(ev.chat.id), "Use General commands/buttons to manage sessions. Reactions never close, delete or create managed sessions.");
+      return;
+    }
     const emoji = ev.new_reaction?.[0];
     if (!emoji || emoji.type !== "emoji" || !emoji.emoji) return; // only emoji reactions act
     const chatId = ev.chat.id;
@@ -1161,6 +1476,7 @@ export class Bot {
     if (!this.cfg.activity) return;
     const conv = d?.sessionID ? this.st.findChatBySession(d.sessionID) : undefined;
     if (!conv) return;
+    if (this.topics.enabled(conv) && !this.topics.canInteract(conv, d.sessionID)) return;
     const id = typeof d?.id === "string" ? d.id : undefined;
     const names = this.toolNames.get(conv);
     if (t === "session.tool.input.started") {
@@ -1191,6 +1507,7 @@ export class Bot {
   private onDraftTextDelta(d: any): void {
     const conv = d?.sessionID ? this.st.findChatBySession(d.sessionID) : undefined;
     if (!conv) return;
+    if (this.topics.enabled(conv) && !this.topics.canInteract(conv, d.sessionID)) return;
     const w = this.streamFor(conv);
     const segKey = `${d?.assistantMessageID ?? ""}:${d?.ordinal ?? 0}`;
     const r = onTextDelta(w.state, segKey, String(d?.delta ?? ""), Date.now(), w.throttleMs, w.budget);
@@ -1206,6 +1523,7 @@ export class Bot {
   private onDraftToolStart(d: any): void {
     const conv = d?.sessionID ? this.st.findChatBySession(d.sessionID) : undefined;
     if (!conv) return;
+    if (this.topics.enabled(conv) && !this.topics.canInteract(conv, d.sessionID)) return;
     const w = this.streamFor(conv);
     const r = onToolStart(w.state, Date.now(), w.throttleMs);
     if (r.state) w.state = r.state;
@@ -1308,6 +1626,7 @@ export class Bot {
    */
   private startPromptReminder(conv: ConvKey, promptId: string, kind: "form" | "permission", text: string, keyboard?: unknown, messageId?: number): void {
     if (!this.cfg.remind) return;
+    if (this.topics.enabled(conv) && !this.topics.canInteract(conv, this.st.peek(conv)?.sessionID ?? "")) return;
     const prev = this.st.get(conv).pendingPrompts?.[promptId];
     const sched = scheduleForRegistration(prev, kind, this.cfg.remindBaseMs, Date.now());
     const pp = { kind, text, keyboard, messageId: messageId ?? prev?.messageId, ...sched };
@@ -1320,6 +1639,7 @@ export class Bot {
     const key = this.reminderKey(conv, promptId);
     const existing = this.reminders.get(key);
     if (existing) clearTimeout(existing);
+    if (this.topics.enabled(conv) && !this.topics.canInteract(conv, this.st.peek(conv)?.sessionID ?? "")) { this.reminders.delete(key); return; }
     const pp = this.st.get(conv).pendingPrompts?.[promptId];
     if (!pp) return;
     if (reminderBudgetExhausted(pp.remindersSent, this.cfg.remindMax)) return; // spent: stays persisted, no more nudges
@@ -1374,6 +1694,7 @@ export class Bot {
    */
   private async fireReminder(conv: ConvKey, promptId: string): Promise<void> {
     this.reminders.delete(this.reminderKey(conv, promptId));
+    if (this.topics.enabled(conv) && !this.topics.canInteract(conv, this.st.peek(conv)?.sessionID ?? "")) return;
     const pp = this.st.get(conv).pendingPrompts?.[promptId];
     if (!pp) return; // cancelled/answered in the meantime
     // The live prompt must be tracked in memory. After a restart an overdue timer
@@ -1426,6 +1747,10 @@ export class Bot {
     // In groups, commands may arrive as /cmd@BotName.
     const cmd = rawCmd.replace(/@\w+$/, "");
     const arg = rest.join(" ").trim();
+    if (this.scheduler?.owns(conv) && ["/new", "/use", "/clear", "/dir", "/browse", "/b"].includes(cmd.toLowerCase())) {
+      await this.tg.sendMessage(conv, "⏳ Lượt chạy lịch chưa xác nhận kết thúc. Dùng /stop và chờ xác nhận trước khi đổi session hoặc thư mục.");
+      return;
+    }
     if (await this.orch.handleCommand(conv, cmd.toLowerCase(), arg)) return;
     switch (cmd.toLowerCase()) {
       case "/start":
@@ -1486,7 +1811,7 @@ export class Bot {
   private async runPrompt(conv: ConvKey, text: string, state: ChatState, userMsgId?: number): Promise<void> {
     // A closed worker topic reopens itself when the user speaks in it
     // (openForumTopic is a no-op on an already-open topic, so safe every time).
-    if (state.worker) void this.tg.openForumTopic(conv).catch(() => {});
+    if (state.worker && !this.topics.enabled(conv)) void this.tg.openForumTopic(conv).catch(() => {});
     if (this.inflight.has(conv)) {
       if (userMsgId != null) {
         // Offer a one-tap "save as note" for this dropped message: the button's
@@ -1501,6 +1826,9 @@ export class Bot {
       return;
     }
     // Keep the "typing…" indicator alive for the whole turn (until the reply is sent).
+    let releaseWorker: (() => void) | undefined;
+    try { releaseWorker = this.orch.beginWorkerTurn(conv); }
+    catch (e) { await this.tg.sendMessage(conv, esc((e as Error).message)); return; }
     this.startTyping(conv);
     this.startWorking(conv); // "⏳ Đang xử lý…" — General top-level only (native typing doesn't render there)
     try {
@@ -1551,9 +1879,10 @@ export class Bot {
       this.inflight.set(conv, ac);
       log(`[chat ${conv}] prompt on ${sid} (${text.length} chars)`);
       // Fire-and-forget: don't block the polling loop; /stop aborts `ac`.
-      void this.runPromptTask(conv, sid, promptText, ac, userMsgId).catch((e) => error("prompt task:", e?.message));
+      void this.runPromptTask(conv, sid, promptText, ac, userMsgId).catch((e) => error("prompt task:", e?.message)).finally(() => releaseWorker?.());
     } catch (e) {
       this.stopTyping(conv); // don't leave "typing…" running if the prompt never started
+      releaseWorker?.();
       throw e;
     }
   }
@@ -1585,6 +1914,7 @@ export class Bot {
           throw e;
         }
       }
+      if (this.topics.enabled(conv) && ac.signal.aborted) return;
       this.stopTyping(conv);
       // Drop the live preview before the final message lands (group transport
       // keeps a real, self-editing message that must not outlive the reply).
@@ -1615,6 +1945,7 @@ export class Bot {
       await this.tg.sendMessage(conv, meta).catch(() => {});
       if (!res.interrupted && res.reply) await this.maybeOfferPlanToBuild(conv);
     } catch (e) {
+      if (this.topics.enabled(conv) && ac.signal.aborted) return;
       this.stopTyping(conv);
       await this.dropPreview(conv);
       error("prompt error:", (e as Error)?.message);
@@ -1703,7 +2034,12 @@ export class Bot {
    * user already knows (they tapped stop).
    */
   private async onStoppedMessageGeneration(ev: MessageGenerationStopped): Promise<void> {
-    const conv = convKey(ev.chat.id, ev.message_thread_id);
+    const conv = this.convOf({ ...ev, is_topic_message: Boolean(ev.message_thread_id) });
+    if (this.topics.enabled(conv)) {
+      if (this.topics.forTopic(conv)) await this.stopManagedTopic(conv);
+      return;
+    }
+    if (await this.scheduler?.requestStop(conv)) return;
     this.drafts.delete(conv);
     await this.stopCurrent(conv);
     this.cancelAllReminders(conv);
@@ -1736,7 +2072,8 @@ export class Bot {
   // rendered from the shared catalog (src/commands.ts) so they cannot drift
   // apart (drift cost us two follow-up fixes: /agents, /reboot).
   private async cmdHelp(conv: ConvKey): Promise<void> {
-    await this.sendHtml(conv, helpText(), { reply_markup: commandGrid() });
+    const scope = this.topics.enabled(conv) ? conv === chatOf(conv) ? "general" : "topic" : undefined;
+    await this.sendHtml(conv, helpText(scope), { reply_markup: commandGrid(scope) });
   }
 
   /** Register the Telegram /command menu (autocomplete) — cosmetic, best-effort. */
@@ -2095,6 +2432,102 @@ export class Bot {
       await this.tg.answerCallbackQuery(cb.id);
       return;
     }
+    if (this.topics.enabled(conv)) {
+      if (data === "mgr:open") {
+        if (conv !== chatOf(conv)) {
+          await this.tg.answerCallbackQuery(cb.id, "Mở phiên quản lý trong General.");
+          return;
+        }
+        await this.tg.answerCallbackQuery(cb.id);
+        await this.orch.handleCommand(conv, "/manager", "on");
+        return;
+      }
+      if (conv === chatOf(conv) && (/^(?:pb:|cont:|fq:|perm:)/.test(data) || data.startsWith(NOTE_CB_PREFIX))) {
+        await this.tg.answerCallbackQuery(cb.id, "Work and questions belong in the session topic, not General.");
+        return;
+      }
+      if (data.startsWith("cmd:") && await this.handleTopicCommand(conv, `/${data.slice(4)}`, `button:${conv}:${messageId}:${data}`)) {
+        await this.tg.answerCallbackQuery(cb.id);
+        return;
+      }
+      if (data.startsWith("st:")) {
+        if (conv !== chatOf(conv)) {
+          await this.tg.answerCallbackQuery(cb.id, "Manage sessions in General.");
+          return;
+        }
+         const [, action, id, page] = data.split(":");
+         try {
+          if (action.startsWith("title-")) {
+            await this.tg.answerCallbackQuery(cb.id);
+            if (action === "title-preview") await this.showTitlePreview(conv, cb.from!.id);
+            else if (action === "title-page") {
+              if (!/^(?:0|[1-9]\d{0,5})$/.test(page ?? "")) throw new Error("Trang không hợp lệ.");
+              await this.showTitlePreview(conv, cb.from!.id, id, Number(page));
+            } else if (action === "title-sync") {
+              if (this.topics.get(id)?.chat !== conv) throw new Error("Chủ đề không thuộc nhóm này.");
+              if (!this.topics.titleSyncEnabled(conv)) await this.showTitlePreview(conv, cb.from!.id);
+              else {
+                const result = await this.topics.syncTitle(conv, id, true);
+                await this.tg.sendMessage(conv, result.status === "synced" || result.status === "unchanged" ? "Đã đồng bộ tên chủ đề." : "Tên chưa được đồng bộ; đang chờ mở phiên, kiểm tra hoặc thử lại. Công việc hiện tại không bị dừng.");
+                await this.showTopicLink(conv, this.topics.get(id)!);
+              }
+            } else if (action === "title-enable" || action === "title-cancel") {
+              const preview = this.titlePreviews.get(conv);
+              if (!preview || preview.token !== id || preview.user !== cb.from!.id || preview.expires < Date.now()) {
+                throw new Error("Bản xem trước đã hết hạn hoặc không thuộc bạn. Mở lại bằng /sessions.");
+              }
+              this.titlePreviews.delete(conv);
+              if (action === "title-enable") {
+                this.topics.enableTitleSync(conv);
+                this.topics.requestTitleSync(undefined, true, conv);
+                await this.tg.sendMessage(conv, "Đã bật đồng bộ tên theo OpenCode cho nhóm này. Các tên đang được xử lý; chủ đề đã đóng sẽ chờ đến khi mở lại. Không cần mở phiên quản lý.");
+              } else await this.tg.sendMessage(conv, "Đã hủy; không thay đổi chính sách đồng bộ tên.");
+            }
+            return;
+          }
+          if (action === "list") {
+            if (!/^(?:0|[1-9]\d{0,5})$/.test(id ?? "")) throw new Error("Trang không hợp lệ. Dùng /sessions để mở lại danh sách.");
+            await this.showSessionTopics(conv, Number(id));
+            await this.tg.answerCallbackQuery(cb.id);
+            return;
+          }
+          if (action === "sync") {
+            if (this.topics.get(id)?.chat !== conv) throw new Error("This operation belongs to another General.");
+            await this.reconcileTopics();
+            await this.showTopicLink(conv, this.topics.get(id)!);
+            await this.tg.answerCallbackQuery(cb.id);
+            return;
+          }
+          const link = action === "close" ? await this.topics.close(conv, id) :
+            action === "restore" ? await this.topics.restore(conv, id) : undefined;
+          if (link) await this.showTopicLink(conv, link);
+          await this.tg.answerCallbackQuery(cb.id);
+         } catch (error) {
+           if (action.startsWith("title-")) await this.tg.sendMessage(conv, esc((error as Error).message),
+             { reply_markup: { inline_keyboard: [[{ text: "Xem trước đồng bộ tên", callback_data: "st:title-preview:0" }]] } });
+           else await this.tg.answerCallbackQuery(cb.id, (error as Error).message.slice(0, 180));
+         }
+        return;
+      }
+      if (data.startsWith("use:") && data !== "use:close") {
+        await this.handleTopicCommand(conv, data === "use:ls" ? "/sessions" : `/use ${data.slice(4)}`);
+        await this.tg.answerCallbackQuery(cb.id);
+        return;
+      }
+      if (conv !== chatOf(conv) && /^(?:bs:|ap:|prune:|kill:|sch:|reboot:|wt:.*:rm$)/.test(data)) {
+        await this.tg.answerCallbackQuery(cb.id, "Manage sessions and topics in General.");
+        return;
+      }
+      const link = this.topics.forTopic(conv);
+      if (conv !== chatOf(conv) && !this.topics.canPrompt(conv) && !/^(?:cmd:(?:help|status)|mode:(?:close|info))$/.test(data)) {
+        await this.tg.answerCallbackQuery(cb.id, "This session is not open. Use General to reconcile or restore it.");
+        return;
+      }
+    }
+    if (this.scheduler?.owns(conv) && /^(use:|pb:|cont:|bs:|cmd:(?:new|clear|browse)$)/.test(data)) {
+      await this.tg.answerCallbackQuery(cb.id, "Lượt chạy lịch chưa kết thúc; dùng /stop rồi chờ xác nhận.");
+      return;
+    }
     if (data.startsWith("fq:")) {
       await this.handleFormCallback(cb, conv, messageId);
       return;
@@ -2213,6 +2646,14 @@ export class Bot {
           break;
         }
         case "setsess": {
+          if (this.topics.enabled(conv)) {
+            this.st.set(conv, { directory: b.path });
+            await this.handleTopicCommand(conv, "/new", `browser:${conv}:${messageId}`);
+            b.view = "done";
+            b.opened = true;
+            b.result = "Session creation is managed in General; use the session card to open its topic.";
+            break;
+          }
           const state = this.st.get(conv);
           await this.stopCurrent(conv, true);
           const sessionID = await this.oc.createSession(b.path);
@@ -2323,12 +2764,12 @@ export class Bot {
     const models = await this.oc.listModels();
     const cur = this.st.get(conv).model?.id;
     const max = this.cfg.replyMaxLen;
-    const footer = "\n\nSet with /model <id>";
+    const footer = esc("\n\nSet with /model <id>");
     // Show EVERY model, packed into ≤max-char pages on line boundaries so each
     // message is valid HTML with balanced tags (no mid-tag cuts → no 400s).
     const units = [
       `<b>Models (${models.length})</b>`,
-      ...models.map((m) => `${cur === m.id ? "▶️ " : ""}<code>${m.id}</code>${m.name ? ` — ${esc(m.name)}` : ""}`),
+      ...models.map((m) => `${cur === m.id ? "▶️ " : ""}<code>${esc(m.id)}</code>${m.name ? ` — ${esc(m.name)}` : ""}`),
     ];
     const pages: string[] = [];
     let page = "";
@@ -2369,7 +2810,7 @@ export class Bot {
   /** Apply the model choice (shared by the typed command and the picker buttons). */
   private async applyModelPick(conv: ConvKey, m: ModelInfo): Promise<void> {
     this.st.set(conv, { model: { id: m.id, providerID: m.providerID } });
-    const sid = this.st.get(conv).sessionID;
+    const sid = this.settingsSession(conv);
     if (sid) await this.applyModelAndVariant(sid, this.st.get(conv));
   }
 
@@ -2481,7 +2922,7 @@ export class Bot {
   /** Apply the agent switch (shared by the typed command and the picker buttons). */
   private async applyAgent(conv: ConvKey, agent: string): Promise<"applied" | "applies on /new"> {
     this.st.set(conv, { agent });
-    const sid = this.st.get(conv).sessionID;
+    const sid = this.settingsSession(conv);
     if (sid) {
       await this.oc.setAgent(sid, agent).catch((e) => error("setAgent:", e?.message));
       return "applied";
@@ -2531,8 +2972,9 @@ export class Bot {
   /** Switch the chat's mode (agent): persist it and apply to the open session. */
   private async applyMode(conv: ConvKey, state: ChatState, agent: string): Promise<void> {
     this.st.set(conv, { agent });
-    if (state.sessionID) {
-      await this.oc.setAgent(state.sessionID, agent).catch((e) => error("setAgent:", e?.message));
+    const sid = this.settingsSession(conv);
+    if (sid) {
+      await this.oc.setAgent(sid, agent).catch((e) => error("setAgent:", e?.message));
     }
   }
 
@@ -2579,7 +3021,7 @@ export class Bot {
       return;
     }
     await this.applyMode(conv, state, m.agent);
-    const applied = state.sessionID ? "applied" : "applies on /new";
+    const applied = this.settingsSession(conv) ? "applied" : "applies on /new";
     const v = this.renderModePicker(state);
     await this.tg.sendMessage(conv, `✅ Mode → <b>${esc(want)}</b> (${applied})`, { reply_markup: v.keyboard });
   }
@@ -2634,6 +3076,7 @@ export class Bot {
     await this.tg.sendMessage(conv, "Đã chuyển sang <b>build</b> — bắt đầu thực thi kế hoạch.").catch(() => {});
     const prompt =
       "Đã chuyển sang chế độ build. Hãy thực thi kế hoạch vừa được lập trong cuộc hội thoại này: bắt đầu từ bước 1, làm tuần tự, và dừng lại để hỏi nếu thiếu thông tin quan trọng. Nếu không có kế hoạch nào chưa thực thi, chỉ cần xác nhận đã sẵn sàng.";
+    if (this.topics.enabled(conv)) { await this.runPrompt(conv, prompt, state); return; }
     const ac = new AbortController();
     this.inflight.set(conv, ac);
     void this.runPromptTask(conv, state.sessionID, prompt, ac).catch((e) => error("prompt task:", e?.message));
@@ -2661,6 +3104,7 @@ export class Bot {
       return;
     }
     await this.tg.answerCallbackQuery(cb.id, "⏯ Đang chạy tiếp…");
+    if (this.topics.enabled(conv)) { await this.runPrompt(conv, CONTINUE_PROMPT, state); return; }
     this.startTyping(conv);
     const ac = new AbortController();
     this.inflight.set(conv, ac);
@@ -2728,7 +3172,7 @@ export class Bot {
   /** Apply the variant choice (shared by /variants, /variant and the picker buttons). */
   private async applyVariant(conv: ConvKey, want: string): Promise<"applied to current session" | "applies on /new"> {
     this.st.set(conv, { variant: want });
-    const sid = this.st.get(conv).sessionID;
+    const sid = this.settingsSession(conv);
     if (sid) {
       await this.applyModelAndVariant(sid, this.st.get(conv));
       return "applied to current session";
@@ -2770,6 +3214,12 @@ export class Bot {
   }
 
   private async cmdStop(conv: ConvKey, state: ChatState): Promise<void> {
+    if (this.topics.forTopic(conv)) {
+      await this.tg.sendMessage(conv, await this.stopManagedTopic(conv) ?
+        "Work stopped. The session and topic remain open." : "Stop is not confirmed; waiting for evidence, capacity remains reserved.");
+      return;
+    }
+    if (await this.scheduler?.requestStop(conv)) return;
     await this.stopCurrent(conv);
     this.cancelAllReminders(conv);
     if (state.sessionID) await this.oc.interrupt(state.sessionID).catch(() => {});
@@ -3141,8 +3591,10 @@ export class Bot {
       return;
     }
     try {
-      await this.orch.runScheduled(conv, sch);
-      await this.tg.sendMessage(conv, `▶▶ Đã chạy lịch #${id} — kết quả sẽ hiện trong topic sch-${id}.`);
+      const result = await this.scheduler?.run(id, "manual", conv);
+      await this.tg.sendMessage(conv, result?.accepted
+        ? `▶▶ ${esc(result.reason ?? `Đã nhận chạy lịch #${id}; kết quả sẽ hiện trong topic sch-${id}.`)}`
+        : `⛔ ${esc(result?.reason ?? "Chạy lịch đang bị chặn vì dữ liệu lượt chạy chưa đọc được.")}`);
     } catch (e) {
       await this.tg.sendMessage(conv, `❌ Lịch #${id} không chạy được: ${(e as Error).message}`);
     }
@@ -3192,11 +3644,7 @@ export class Bot {
       }
       case "run": {
         await this.tg.answerCallbackQuery(cb.id, `▶▶ Đang chạy #${id}…`);
-        try {
-          await this.orch.runScheduled(conv, sch);
-        } catch (e) {
-          await this.tg.sendMessage(conv, `❌ Lịch #${id} không chạy được: ${(e as Error).message}`).catch(() => {});
-        }
+        await this.scheduleRun(conv, id);
         return;
       }
       case "d": {
@@ -3246,6 +3694,17 @@ export class Bot {
   /** Entry point for every OpenCode event; only question forms interest us. */
   private onOpenCodeEvent(ev: any): void {
     const t = ev?.type;
+    if (t === "session.renamed" && typeof ev?.data?.sessionID === "string") {
+      this.topics.requestTitleSync(ev.data.sessionID);
+      return;
+    }
+    if (["session.archived", "session.unarchived", "session.deleted"].includes(t)) {
+      if (this.topics.list().some((link) => link.sessionID === ev?.data?.sessionID)) void this.reconcileTopics().catch(() => warn("Session/topic lifecycle event could not be reconciled."));
+      return;
+    }
+    if (typeof t === "string" && t.startsWith("session.execution.")) {
+      void this.scheduler?.recover(false, ev?.data?.sessionID).catch((e) => warn("khôi phục lượt chạy:", e?.name));
+    }
     if (t === "form.created") {
       const form = ev?.data?.form;
       if (form?.id && form?.sessionID) void this.onFormCreated(form);
@@ -3328,6 +3787,7 @@ export class Bot {
       warn(`form.created for session ${sessionID} with no mapped chat — ignoring`);
       return;
     }
+    if (this.topics.enabled(conv) && !this.topics.canInteract(conv, sessionID)) return;
     const fields: QField[] = (form.fields ?? [])
       .filter((f: any) => !f.hidden)
       .map((f: any) => ({
@@ -3517,6 +3977,7 @@ export class Bot {
       warn(`permission.asked for session ${sessionID} with no mapped chat — ignoring`);
       return;
     }
+    if (this.topics.enabled(conv) && !this.topics.canInteract(conv, sessionID)) return;
     this.orch.onWaiting(conv);
     const lines: string[] = ["🔐 <b>OpenCode xin quyền</b>"];
     lines.push(`action: <code>${esc(d.action ?? "?")}</code>`);

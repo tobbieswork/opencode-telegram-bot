@@ -36,8 +36,8 @@ The whole Telegram transport is ~130 lines you can read in one sitting.
   executes the plan that is already in context.
 - **Many sessions at once**: each Telegram **forum topic** is its own
   conversation with its own session, so several agents can work in parallel —
-  and an optional **Manager agent** in the main chat splits your requests into
-  tasks and hands them to worker sessions (see below).
+  General manages their lifecycle after `/setup`. An optional **Manager agent**
+  has its own topic and hands work to other sessions (see below).
 - **Live activity line**: while a turn runs, one self-editing message shows
   what the agent is doing right now (`📖 Đang đọc src/bot.ts…`,
   `▶ Đang chạy npm test…`, then `✅` with elapsed time). Hidden with
@@ -119,9 +119,13 @@ bot:   The last commit adds retry logic but…
 | Command | Description |
 | --- | --- |
 | `/help` | Show help + a tappable command menu |
-| `/new` | Start a fresh session in the current directory |
-| `/ls` | List recent sessions |
-| `/use <id>` | Switch this chat to an existing session |
+| `/setup` | Enable fixed session/topic management from General of a forum supergroup |
+| `/new [title]` | In managed General: create a new session **and topic**; legacy chats keep their old behavior |
+| `/ls`, `/sessions` | In managed General: show session/topic lifecycle cards |
+| `/use <id>`, `/attach <id>` | In managed General: attach an idle existing session or find its existing topic |
+| `/close <id>` | General: confirm stop, archive the session, then close its topic; keep history |
+| `/restore <id>` | General: unarchive the original session and reopen the original topic |
+| `/sync` | General: retry pending lifecycle reconciliation |
 | `/dir [path]` | Show or set the working directory |
 | `/browse [path]` | Browse folders with buttons and open a session there |
 | `/models` | List available models |
@@ -134,11 +138,11 @@ bot:   The last commit adds retry logic but…
 | `/history` | Show the last few messages of the current session |
 | `/context` | Photo of the current session — usage, files touched, last prompt |
 | `/status` | Show what the bot is connected to |
-| `/clear` | Reset this chat's session/dir/model/agent |
+| `/clear` | Legacy only; never resets a managed topic binding |
 | `/spawn <name> [dir]` | Create a worker: a new topic with its own session |
 | `/board` | Status of every worker in this chat |
-| `/kill [name]` | Stop a worker (in its topic: no name needed) · `/stopall` stops all |
-| `/manager on\|off` | Turn the Manager agent on/off in the main chat |
+| `/kill <name>` | General: stop selected work without closing its topic; `/stopall` requests all workers stop |
+| `/manager on\|off` | General: open/restore or archive the Manager's own session/topic |
 | `/auto on\|off` | Manager dispatches on its own, or waits for your ✅ |
 | `/wt` | In a worker topic: diff / merge / remove its git worktree |
 
@@ -162,36 +166,44 @@ tool (disable with `OPENCODE_TG_GUIDE=0`).
 
 ## Many sessions in parallel (topics + Manager)
 
-Telegram **forum topics** turn one chat into many conversations. The bot treats
-every topic as its own conversation — its own session, directory, model, agent,
-`/stop`, and history — so you can keep several agents busy at the same time.
-
-Topics work in a **private chat with the bot** when the bot has topic mode
-(Bot API 9.3+; the bot logs `topics in private chats: on/off` at startup), or in a
-**supergroup with Topics enabled**, where the bot must be an admin with the
-*Manage topics* right.
+Use a **supergroup with Topics enabled** and give the bot administrator access
+with **Manage Topics**. An allowlisted user runs `/setup` in **General**; the bot
+checks its actual permissions before enabling the new mode. Enabling it is
+persisted per group, not a change to all existing chats.
 
 ```
-📁 Chat with the bot
-├─ General          ← you ⇄ Manager agent (or a normal session)
-├─ 🟢 api-auth       ← worker: own session + directory (or git worktree)
-├─ 🟡 fix-login      ← waiting for you (permission / question)
-└─ ✅ write-tests    ← done
+📁 Forum supergroup
+├─ General          ← management commands, session cards and approvals; no LLM
+├─ Manager          ← optional Manager agent, its own fixed session
+├─ 🟢 api-auth       ← one fixed session + directory/worktree
+├─ 🟡 fix-login      ← questions and permissions for that session
+└─ ✅ write-tests    ← finished turn; topic stays open until its session is closed
 ```
 
-**By hand**: `/spawn api-auth ~/Code/app` creates a topic + session; just talk
-in that topic. `/board` shows all of them; topic titles show live status
-(🟢 running · 🟡 waiting for you · ✅ done · ❌ failed · ⏹ stopped).
+**By hand**: use `/new` or `/spawn api-auth ~/Code/app` in General, then work in
+the returned topic. `/new`, `/use`, `/clear`, folder buttons and stale menus
+cannot replace a managed topic's session. `/stop` stops work but leaves the
+session/topic open. Closing from General waits for termination evidence before
+archiving and closing; unconfirmed work retains its capacity slot.
 
-**With the Manager**: `/manager on` in the main chat starts a Manager agent (an
-OpenCode session with its own agent prompt). Tell it what you want; it picks
+**With the Manager**: `/manager on` in General opens its own topic. Talk to the
+Manager there; it picks
 directories, splits the work, and dispatches it to workers through a small tool
 bridge (a local MCP server inside the bot, bound to `127.0.0.1`, token-guarded,
 registered only for the Manager's own folder). When workers finish, their
 results are fed back to the Manager, which summarises them for you.
 
+**Tên chủ đề theo OpenCode**: trong General, mở `/sessions` → **Đồng bộ tên chủ đề**
+→ xem trước → **Bật đồng bộ tên cho nhóm**. Bot tự cập nhật một chiều theo tiêu
+đề phiên, không cần phiên quản lý hoặc gọi mô hình AI. Chính sách chỉ bật sau xác
+nhận, không tự đổi tên hàng loạt khi cập nhật bot. Xem
+[hướng dẫn vận hành](docs/session-topics-operations.md#đồng-bộ-tên-chủ-đề-theo-tiêu-đề-opencode).
+
+Kế hoạch các cải tiến tiếp theo, thứ tự và tiêu chí nghiệm thu:
+[quản lý phiên, tên chủ đề, quay lại công việc, thông báo và tìm kiếm](docs/plan-session-workflow-improvements.md).
+
 - **Approval**: by default (`/auto off`) every dispatch the Manager wants —
-  a new worker or a follow-up — appears as a card: `✅ Giao` / `❌ Huỷ` /
+  a new worker or a follow-up — appears in General as a card: `✅ Giao` / `❌ Huỷ` /
   `⚡ Giao + bật auto`. With `/auto on` it dispatches on its own.
 - **Permissions and questions** of a worker always go to *you*, in that
   worker's topic. The Manager never answers them.
@@ -201,8 +213,21 @@ results are fed back to the Manager, which summarises them for you.
 - **Parallel edits in one repo**: a writing worker that would share a git
   checkout with another busy writer gets its **own worktree + branch**
   (`<repo>.worktrees/<name>`, branch `tg/<name>`). When it's done, the topic
-  offers **Diff / Merge / Remove**. Merge only runs on a clean main checkout on
-  the base branch and aborts cleanly on conflict; remove keeps unmerged branches.
+  offers worktree actions. Merge only runs on a clean main checkout on the base
+  branch and aborts cleanly on conflict. Destructive legacy pruning/worktree
+  removal is blocked for managed sessions; closing does not delete either.
+
+OpenCode archive/unarchive/delete events are reconciled at startup, reconnect
+and every minute, so a missed event does not silently create a replacement.
+Each scheduled run gets a fresh topic and session; completed runs stay open
+until explicitly closed. Durable execution replay is still required before
+new scheduled runs can be admitted.
+
+Existing chats and sessions are **not migrated automatically**. Same-group idle
+legacy sessions can be explicitly attached; cross-chat ownership and ambiguous
+duplicate bindings are refused. Private topic chats retain their legacy mode:
+the archive/close workflow above requires a forum supergroup, not private-chat
+topic support. See [operation and migration details](docs/session-topics-operations.md).
 
 ## Configuration
 
@@ -231,12 +256,15 @@ All settings are environment variables (see `.env.example`).
 | `OPENCODE_TG_WORKTREE` | | `auto` | Worktree isolation for writing workers: `auto` / `always` / `off` |
 | `OPENCODE_TG_MANAGER_DIR` | | `./data/manager` | Where each chat's Manager session and agent file live |
 | `OPENCODE_TG_BRIDGE_PORT` | | random | Port of the Manager's local MCP bridge |
+| `OPENCODE_TG_AUTO_CLOSE` | | on | Legacy-only close-on-turn-end; ignored for groups enabled with `/setup` |
 
 \* required unless `OPENCODE_TG_ALLOW_ANY=1`.
 
 ## Running it in the background
 
-It's a single long-running Node process. Pick whatever you like:
+It's a single long-running Node process. Never start another polling instance
+for the same token. Source runs through `tsx`, without hot reload; edits require
+restarting the existing process. Keep `data/state.json` across restarts.
 
 ```sh
 # tmux / screen
@@ -245,26 +273,32 @@ tmux new -s ocbot 'npm start'
 # nohup
 nohup npm start > bot.log 2>&1 &
 
-# systemd (user unit) — create ~/.config/systemd/user/opencode-tg.service
-#   [Service] WorkingDirectory=/path/to/opencode-telegram-bot
-#   [Service] ExecStart=/usr/bin/npm start
+# Linux: install/configure deploy/opencode-bot.service as a user unit
+systemctl --user enable --now opencode-bot
+systemctl --user restart opencode-bot
+journalctl --user -u opencode-bot -n 20 --no-pager
 ```
 
-Then `systemctl --user enable --now opencode-tg`.
+On macOS use the existing process supervisor or stop the known old process
+before starting its replacement; systemd commands do not apply.
 
 ## Development
 
 ```sh
 npm run typecheck   # strict tsc, no emit
 npm run test:unit   # fast checks, no service needed (incl. topics, bridge, worktrees, orchestrator)
+npm run test:session-topics # lifecycle, command scopes and protocol adapters
+npm run smoke:session-topics # real OpenCode, isolated Telegram, no LLM calls
 npm run smoke       # drive the bot through a mock Telegram + real OpenCode
 npm run smoke:multi # parallel topics + Manager + approval against real OpenCode (a few minutes)
 npm run dev         # same as start
 ```
 
-`npm run smoke` needs no bot token: it connects to your real OpenCode service,
-sends a canned prompt, and prints every message it *would* send to Telegram —
-a quick way to verify the whole loop.
+`npm run smoke` needs no bot token: it uses the real OpenCode service and LLM
+prompts with isolated Telegram delivery. Inspect menu, mode, sweep and question
+relay sections, not just the exit code. `smoke:session-topics` creates only owned
+empty sessions in an isolated directory and proves archive/restore/restart
+recovery; it does not test Telegram's application interface or live group rights.
 
 ## Troubleshooting
 

@@ -65,7 +65,7 @@ export interface Config {
   worktreeMode: "auto" | "always" | "off";
   /** Port of the Manager's local MCP bridge (0 = pick a free one). */
   bridgePort: number;
-  /** Close a worker's topic when the worker finishes (the user reopens it by messaging in it). */
+  /** Legacy-only close-on-turn-end; managed forum groups use explicit archive/restore. */
   autoClose: boolean;
   /** Nudge the user to reboot the machine when uptime passes the threshold (kernel updates). */
   uptimeMonitor: boolean;
@@ -124,9 +124,8 @@ export interface Config {
    */
   react: boolean;
   /**
-   * Master switch for /schedule (automated prompts). Default ON; "0" disables.
-   * The on/off is enforced by the caller (slice 3 starts the Scheduler only when
-   * true) — the Scheduler itself is config-agnostic (deps-injected).
+    * Công tắc nhận lượt chạy lịch mới, cả tự động lẫn thủ công.
+    * Giá trị "0" không dừng việc khôi phục hoặc deadline của lượt đang chạy.
    */
   schedule: boolean;
   /** IANA timezone used as the DEFAULT for new schedules (each schedule stores its own at creation). */
@@ -206,8 +205,7 @@ export function loadConfig(root: string): Config {
     prWatchIntervalMs: parseIntSetting("OPENCODE_TG_PR_WATCH_INTERVAL_MS", 5 * 60_000, 60_000),
     // Default OFF: only an explicit "1"/"true" enables the reaction UX.
     react: process.env.OPENCODE_TG_REACT === "1" || process.env.OPENCODE_TG_REACT === "true",
-    // --- /schedule (slice 2 engine; slice 3 wires the command + dispatch) ---
-    // Default ON; only an explicit "0" disables (the tick loop is started by slice 3 only when true).
+    // Công tắc chỉ chặn admission mới; vẫn khôi phục lượt đã nhận khi bị tắt.
     schedule: process.env.OPENCODE_TG_SCHEDULE !== "0",
     scheduleTz: parseTzSetting(process.env.OPENCODE_TG_TIMEZONE?.trim() ?? ""),
     maxSchedules: parseIntSetting("OPENCODE_TG_MAX_SCHEDULES", 10, 1),

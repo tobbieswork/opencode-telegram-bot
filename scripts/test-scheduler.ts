@@ -8,8 +8,8 @@
  * Run:  npx tsx scripts/test-scheduler.ts
  */
 import { mkdirSync, writeFileSync, existsSync, rm } from "node:fs";
-import { Scheduler, ScheduleStore } from "../src/scheduler.js";
-import type { SchedulerDeps } from "../src/scheduler.js";
+import { ScheduleStore } from "../src/scheduler.js";
+import { ScheduledRuns as Scheduler, type ScheduledRunDeps as SchedulerDeps } from "../src/scheduled-run.js";
 import type { Schedule } from "../src/schedule.js";
 import type { ConvKey } from "../src/conv.js";
 
@@ -82,11 +82,21 @@ function makeDeps(
   const deps: SchedulerDeps = {
     now: opts.clock ?? (() => NOW),
     store,
-    dispatch: opts.dispatch ?? (async (s) => { calls.dispatch.push(s); }),
-    isBusy: opts.isBusy ?? (() => false),
+    enabled: () => true,
+    timeoutMs: 1_800_000,
+    execution: {
+      ready: async () => {}, restore: () => {}, release: () => {},
+      claim: (s) => { if (opts.isBusy?.(s)) throw new Error("Worker bận"); },
+      prepare: async (run) => {
+        if (opts.dispatch) await opts.dispatch(run.schedule);
+        else calls.dispatch.push(run.schedule);
+        return { conv: run.schedule.conv, sessionID: "ses_" + run.id, source: "test", projectID: "test", createdAt: NOW, sequence: 0 };
+      },
+      submit: async () => {}, inspect: async () => ({ state: "running" }),
+      stop: async () => {}, settled: async () => {},
+    },
     isAllowed: opts.isAllowed ?? (() => true),
     notify: async (conv, text) => { calls.notify.push([conv, text]); },
-    tickMs: opts.tickMs ?? 30_000,
     graceMs: opts.graceMs ?? GRACE,
   };
   return { deps, calls };
@@ -287,6 +297,25 @@ function makeDeps(
   await sched.tick();
   check("notdue: future schedule is not dispatched", calls.dispatch.length === 0, String(calls.dispatch.length));
   check("notdue: future schedule untouched (no status)", store.get("f1")?.lastStatus === undefined, String(store.get("f1")?.lastStatus));
+}
+
+// Không hồi sinh lịch đã xoá trong lúc dispatch đang chờ.
+{
+  const store = new ScheduleStore(`${T}/delete-during-dispatch.json`, 10);
+  let release!: () => void;
+  let entered!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  const { deps } = makeDeps(store, { dispatch: async () => { entered(); await pending; } });
+  store.add(mkSch({ id: "gone", nextRunAt: NOW }));
+  const tick = new Scheduler(deps).tick();
+  await started;
+  store.remove("gone");
+  store.add(mkSch({ id: "new", nextRunAt: NOW + 60_000 }));
+  release();
+  await tick;
+  check("không hồi sinh lịch đã xoá khi dispatch đang chờ", store.get("gone") === undefined);
+  check("giữ lịch được thêm khi dispatch đang chờ", store.get("new") !== undefined);
 }
 
 await rm(T, { recursive: true, force: true });

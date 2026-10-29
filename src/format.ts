@@ -379,3 +379,13 @@ export function mdToHtmlChunks(text: string, max: number): string[] {
   flush();
   return out;
 }
+/** Tên chủ đề Telegram: một dòng, tối đa 128 đơn vị UTF-16, không cắt cụm ký tự. */
+export function topicTitle(value: string): string {
+  const text = value.normalize("NFC").replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/gu, " ").trim();
+  let result = "";
+  for (const { segment } of new Intl.Segmenter("vi", { granularity: "grapheme" }).segment(text)) {
+    if (result.length + segment.length > 128) break;
+    result += segment;
+  }
+  return result;
+}

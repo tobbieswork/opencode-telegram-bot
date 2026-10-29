@@ -1,7 +1,8 @@
 import { fileURLToPath } from "node:url";
-import { dirname } from "node:path";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { mkdtempSync, readFileSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
+import assert from "node:assert/strict";
 import { loadConfig } from "../src/config.js";
 import { OpenCodeCtl } from "../src/opencode.js";
 import { StateManager } from "../src/state.js";
@@ -27,6 +28,9 @@ class MockTelegram {
   async editMessageText(_chatId: number, _messageId: number, text: string, opts: Record<string, unknown> = {}): Promise<void> {
     this.out.push("[edit] " + text);
     if (opts?.reply_markup) this.keyboards.push(opts.reply_markup);
+  }
+  async editMessageTextStrict(chatId: number, messageId: number, text: string, opts: Record<string, unknown> = {}): Promise<void> {
+    await this.editMessageText(chatId, messageId, text, opts);
   }
   async answerCallbackQuery(_id: string, _text?: string): Promise<void> {}
   async deleteMessage(_chatId: number, _messageId: number): Promise<void> {}
@@ -64,7 +68,12 @@ async function waitFor(pred: (a: string[]) => boolean, arr: string[], ms = 90000
 async function main(): Promise<void> {
   process.env.TELEGRAM_BOT_TOKEN = "dummy";
   process.env.TELEGRAM_ALLOWED_USER_IDS = "1";
-  process.env.OPENCODE_DIRECTORY = "/tmp/opencode/testws";
+  mkdirSync(join(tmpdir(), "opencode"), { recursive: true });
+  const workspace = realpathSync(mkdtempSync(join(tmpdir(), "opencode/smoke-workspace-")));
+  mkdirSync(join(workspace, "child"));
+  process.env.OPENCODE_DIRECTORY = workspace;
+  process.env.OPENCODE_TG_BROWSE_ROOTS = workspace;
+  process.env.OPENCODE_TG_UPTIME_MONITOR = "0";
   // Keep the live activity line off: its "✅ … · Ns" text would trip the
   // smoke's prompt-completed heuristics. It has its own unit tests.
   process.env.OPENCODE_TG_ACTIVITY = "0";
@@ -79,6 +88,7 @@ async function main(): Promise<void> {
   const tg = mock as unknown as Telegram;
   const st = new StateManager(cfg.stateFile);
   const bot = new Bot(tg, oc, st, cfg);
+  const checks: Array<[string, boolean]> = [];
   bot.start(); // wire the event subscription so question forms are relayed
 
   let cursor = 0;
@@ -98,6 +108,7 @@ async function main(): Promise<void> {
   const helpKb = mock.keyboards[mock.keyboards.length - 1];
   const menuBtn = JSON.stringify(helpKb).match(/cmd:(?:new|ls|dir|browse|mode|models|variants|status|context|history|stop|clear|help)/);
   console.log("menu button:", menuBtn ? menuBtn[0] : "NOT FOUND");
+  checks.push(["menu lệnh", !!menuBtn]);
   if (menuBtn) {
     await bot.handle(tap("cmd:ls"));
     show("menu: tap sessions");
@@ -111,6 +122,7 @@ async function main(): Promise<void> {
   await bot.handle(upd("Reply with exactly the single word: HELLO. Nothing else."));
   const done = await waitFor((a) => a.some((m) => /· \d+(\.\d+)?s/.test(m)), mock.out);
   console.log("\n(prompt task completed:", done, ")");
+  checks.push(["hoàn tất prompt đầu", done]);
   show("prompt reply");
 
   await bot.handle(upd("/status"));
@@ -140,6 +152,7 @@ async function main(): Promise<void> {
   console.log("mode keyboard:", JSON.stringify(modeKb, null, 2));
   const mBtn = JSON.stringify(modeKb).match(/mode:(plan|build|general|explore)/);
   console.log("mode option button:", mBtn ? mBtn[0] : "NOT FOUND");
+  checks.push(["bộ chọn chế độ", !!mBtn]);
   if (mBtn) {
     await bot.handle(tap("mode:plan"));
     show("mode: tap plan");
@@ -169,6 +182,7 @@ async function main(): Promise<void> {
       const swept = await waitFor((a) => a.some((m) => m.includes(probe)), mock.out);
       console.log("sweep relayed the out-of-band reply to Telegram:", swept);
        show("sweep: relayed out-of-band reply");
+       checks.push(["chuyển tiếp phản hồi ngoài luồng", swept]);
     }
   }
 
@@ -282,20 +296,26 @@ async function main(): Promise<void> {
   );
   const qok = await waitFor((a) => a.some((m) => /Câu 1\/1/.test(m)), mock.out, 90000);
   console.log("question surfaced:", qok);
+  checks.push(["hiện câu hỏi", qok]);
   show("q: question message");
   const kb = mock.keyboards[mock.keyboards.length - 1];
   const qBtn = JSON.stringify(kb).match(/fq:[A-Za-z0-9_]+:o0/);
   console.log("form option button:", qBtn ? qBtn[0] : "NOT FOUND");
+  checks.push(["nút trả lời câu hỏi", !!qBtn]);
   if (qBtn) {
     const afterTap = mock.out.length;
     await bot.handle(tap(qBtn[0]));
     const dok = await waitFor((a) => a.slice(afterTap).some((m) => /Đã gửi câu trả lời/.test(m)), mock.out, 30000);
     console.log("answer submitted:", dok);
+    checks.push(["gửi câu trả lời", dok]);
     const rok = await waitFor((a) => a.slice(afterTap).some((m) => /· \d+(\.\d+)?s/.test(m)), mock.out, 90000);
     console.log("prompt completed:", rok);
+    checks.push(["hoàn tất sau câu hỏi", rok]);
     show("q: final");
   }
 
+  const finalSession = st.get(42).sessionID;
+  if (finalSession) await oc.interrupt(finalSession).catch(() => {});
   await bot.handle(upd("/clear"));
   show("/clear");
 
@@ -309,6 +329,8 @@ async function main(): Promise<void> {
   console.log("State file:", cfg.stateFile, "\n", stateDump);
 
   oc.stopEvents();
+  bot.stopScheduler();
+  assert.deepEqual(checks.filter(([, ok]) => !ok), [], "Các phần kiểm tra chưa đạt");
 }
 
 main().catch((e) => {

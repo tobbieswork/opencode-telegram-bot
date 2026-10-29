@@ -16,8 +16,10 @@ import { esc, trunc, timeAgo, stripTags } from "./format.js";
 import { log, warn } from "./logger.js";
 import { BUSY_REPLY_TEXT, NOTE_BUTTON_LABEL, noteCallbackData, BusyNoteStore } from "./notes.js";
 import type { Schedule } from "./schedule.js";
+import type { ScheduledExecution, ScheduledRun } from "./scheduled-run.js";
+import type { SessionTopic, SessionTopics } from "./session-topics.js";
 
-type Btn = { text: string; callback_data: string };
+type Btn = { text: string; callback_data: string; url?: never } | { text: string; url: string; callback_data?: never };
 type Keyboard = { inline_keyboard: Btn[][] };
 
 /** What the orchestrator needs from the Bot (kept narrow on purpose). */
@@ -26,6 +28,8 @@ export interface Host {
   oc: OpenCodeCtl;
   st: StateManager;
   cfg: Config;
+  topics?: SessionTopics;
+  stopTopicWork?: (conv: ConvKey) => Promise<boolean>;
   /** Shared retention for the busy-reply "Thêm vào note" button (owned by the Bot). */
   busyNotes: BusyNoteStore;
   sendHtml(conv: ConvKey, html: string, opts?: { reply_markup?: Keyboard }): Promise<void>;
@@ -53,6 +57,8 @@ export interface Host {
    * removeWorktree). Lets the concurrency test count real purges deterministically.
    */
   removeWorktree?: (repoRoot: string, wt: { root: string; branch: string }) => Promise<string>;
+  scheduledStop?: (conv: ConvKey) => Promise<boolean>;
+  onScheduledFinished?: (conv: ConvKey) => Promise<void>;
 }
 
 export const MANAGER_AGENT = "tg-manager";
@@ -109,6 +115,11 @@ Call these directly as native tools (never through \`execute\`):
 - tg-bridge_get_worker_result — read a worker's latest full reply.
 - tg-bridge_stop_worker — interrupt a worker.
 
+Đồng bộ tên chủ đề theo tiêu đề OpenCode là chức năng của bot, không cần công cụ quản lý hay worker.
+Hướng dẫn người dùng về General, mở /sessions, bấm “Đồng bộ tên chủ đề”, xem trước và xác nhận bật cho nhóm.
+Không hứa rằng mở lại phiên quản lý sẽ tự bật chức năng đó. Nếu công cụ báo phiên quản lý chưa mở,
+hướng dẫn người dùng về General và bấm “Mở phiên quản lý”; không tự gửi lại yêu cầu đã thất bại.
+
 ## How to work
 1. Understand the request. If something important is ambiguous, ask ONE question with the \`question\` tool.
 2. Pick the directory. Use list_directories; never guess paths.
@@ -118,6 +129,10 @@ Call these directly as native tools (never through \`execute\`):
 4. Choose the agent: "build" to change code, "plan" for analysis/design only, "explore" for quick
    read-only lookups. Set writes=false for tasks that must not change files.
 5. Spawn the workers (short kebab-case names like "api-auth", "write-tests"). At most ${maxWorkers} may be busy at once.
+    When the user asks to open a topic for an existing work session (they name a session id like ses_...),
+    pass that session as "session_id" — the worker then gets its own Telegram topic
+    bound to that session instead of a fresh one. Give it a task right away when there is one.
+    Phiên quản lý có chủ đề riêng và không được chuyển thành worker. Mở phiên quản lý bằng nút trong General.
 6. If a tool answers that the request is waiting for the user's approval, tell the user in one line and
    stop. Do not call it again — you will be told the decision.
 
@@ -144,6 +159,15 @@ interface SpawnSpec {
    * would lose its uncommitted work).
    */
   isolate?: boolean;
+  scheduledRunID?: string;
+  /**
+   * Bind the worker to an EXISTING OpenCode session instead of creating a new
+   * one. Used when the user asks to open a worker topic for a session that
+   * already exists (they name a `ses_…` id, or it's the Manager's own session):
+   * the topic gets created and the worker is wired to that session, no fresh
+   * OpenCode session is spawned.
+   */
+  sessionID?: string;
 }
 
 /** A Manager action waiting for the user's ✅ (confirm mode). */
@@ -205,6 +229,8 @@ export class Orchestrator {
    * the server failed for good if that first call is refused.
    */
   private bridgeChats = new Set<ConvKey>();
+  /** Xếp hàng thao tác mở/tắt của cùng nhóm để không tạo trùng phiên quản lý. */
+  private managerOperations = new Map<ConvKey, Promise<void>>();
   /**
    * Names being spawned right now, per chat. Spawning awaits several calls
    * (git, Telegram, OpenCode) before the worker is saved; reserving the name
@@ -212,15 +238,44 @@ export class Orchestrator {
    * name check nor the busy limit can be raced past.
    */
   private reserved = new Map<ConvKey, Set<string>>();
+  private starting = new Map<ConvKey, Set<string>>();
+  private scheduledSlots = new Map<string, { chat: ConvKey; name: string; conv?: ConvKey }>();
   private healTimer?: ReturnType<typeof setInterval>;
+  private legacyScheduledNotices = new Set<string>();
 
   constructor(private h: Host) {}
+
+  shutdown(): void {
+    if (this.healTimer) clearInterval(this.healTimer);
+    this.healTimer = undefined;
+    for (const timer of this.reportTimers.values()) clearTimeout(timer);
+    this.reportTimers.clear();
+    this.bridge?.close();
+    this.bridge = undefined;
+  }
+
+  private managerEntry(chat: ConvKey): [ConvKey, ChatState] | undefined {
+    if (!this.h.topics?.enabled(chat)) {
+      const state = this.h.st.peek(chat);
+      return state?.manager ? [chat, state] : undefined;
+    }
+    return this.h.st.convsOfChat(chat).find(([conv, state]) => state.manager && this.h.topics?.canPrompt(conv));
+  }
 
   // ── lifecycle ─────────────────────────────────────────────────────────────
   /** On every (re)connect to OpenCode: re-register the bridge for chats with a Manager (it is runtime-only). */
   async onConnect(): Promise<void> {
     for (const [conv, s] of Object.entries(this.h.st.all())) {
-      if (s.manager) await this.ensureManagerTooling(chatOf(conv)).catch((e) => warn("manager tooling:", e?.message));
+      if (s.manager && s.sessionID) {
+        const directory = this.h.topics?.forTopic(conv)?.directory ?? s.directory;
+        await this.ensureManagerTooling(chatOf(conv), directory).catch((e) => warn("manager tooling:", e?.message));
+      }
+    }
+    for (const [conv, s] of Object.entries(this.h.st.all())) {
+      if (s.worker?.spawnedBy !== "schedule" || !BUSY.includes(s.worker.status) || !s.sessionID ||
+        this.ownsScheduledConv(conv) || this.legacyScheduledNotices.has(s.sessionID)) continue;
+      await this.h.sendHtml(conv, "⚠️ Lượt chạy lịch từ phiên bản cũ chưa có deadline khôi phục được. Tiếp tục theo dõi và tính slot; không tự dừng hoặc cấp thời hạn mới. Dùng /stop nếu cần dừng.").catch(() => {});
+      this.legacyScheduledNotices.add(s.sessionID);
     }
     await this.healWorkers();
     // After healWorkers has settled any stuck "running" workers to their real
@@ -245,6 +300,7 @@ export class Orchestrator {
     for (const [conv, s] of Object.entries(this.h.st.all())) {
       const w = s.worker;
       if (!w || !s.sessionID || !BUSY.includes(w.status)) continue;
+      if (this.ownsScheduledConv(conv)) continue;
       const state = await this.h.oc.sessionState(s.sessionID).catch(() => undefined);
       if (!state || state.busy) continue;
       const status: WorkerStatus = state.outcome === "succeeded" ? "done" : state.outcome === "failed" ? "failed" : "stopped";
@@ -294,7 +350,7 @@ export class Orchestrator {
     try {
       const items: WorkerConv[] = [];
       for (const [conv, s] of Object.entries(this.h.st.all())) {
-        if (s.worker) items.push({ conv, status: s.worker.status });
+        if (s.worker && !this.h.topics?.enabled(conv)) items.push({ conv, status: s.worker.status });
       }
       const targets = selectFinishedWorkers(items);
       for (const conv of targets) await this.h.tg.closeForumTopic(conv).catch(() => {});
@@ -308,7 +364,13 @@ export class Orchestrator {
 
   private async ensureBridge(): Promise<McpBridge> {
     if (this.bridge) return this.bridge;
-    const b = new McpBridge((route) => (this.bridgeChats.has(route) ? this.toolsFor(route) : undefined), BRIDGE_NAME);
+    const b = new McpBridge((route) => (this.bridgeChats.has(route) ? this.toolsFor(route).map((tool) => ({ ...tool,
+      run: async (input) => {
+        if (this.h.topics?.enabled(route) && !this.managerEntry(route)) {
+          throw new Error("Phiên quản lý chưa mở hoặc chưa xác minh được. Về General và bấm “Mở phiên quản lý”. Không tự gửi lại yêu cầu. Để đồng bộ tên chủ đề, dùng nút trong /sessions; không cần phiên quản lý.");
+        }
+        return tool.run(input);
+      } })) : undefined), BRIDGE_NAME);
     await b.listen(this.h.cfg.bridgePort);
     this.bridge = b;
     return b;
@@ -319,8 +381,7 @@ export class Orchestrator {
   }
 
   /** Write the Manager agent into its own directory and register the bridge for that directory only. */
-  private async ensureManagerTooling(chat: ConvKey): Promise<string> {
-    const dir = this.managerDir(chat);
+  private async ensureManagerTooling(chat: ConvKey, dir = this.managerDir(chat)): Promise<string> {
     mkdirSync(join(dir, ".opencode", "agents"), { recursive: true });
     writeFileSync(join(dir, ".opencode", "agents", `${MANAGER_AGENT}.md`), MANAGER_PROMPT(this.h.cfg.maxWorkers));
     const b = await this.ensureBridge();
@@ -396,7 +457,7 @@ export class Orchestrator {
   private async cmdBoard(conv: ConvKey): Promise<void> {
     const top = this.h.st.get(chatOf(conv));
     const workers = this.workersOf(conv);
-    const head = `📋 <b>Workers (${workers.length})</b> · manager: ${top.manager ? "on" : "off"} · auto: ${top.auto ? "on" : "off"}`;
+    const head = `📋 <b>Workers (${workers.length})</b> · manager: ${this.managerEntry(chatOf(conv)) ? "on" : "off"} · auto: ${top.auto ? "on" : "off"}`;
     if (!workers.length) {
       await this.h.sendHtml(conv, `${head}\n\nChưa có worker. Tạo bằng <code>/spawn &lt;tên&gt; [thư mục]</code> hoặc bật /manager.`);
       return;
@@ -467,7 +528,7 @@ export class Orchestrator {
   private async cmdStopAll(conv: ConvKey): Promise<void> {
     const busy = this.workersOf(conv).filter(([, s]) => BUSY.includes(s.worker!.status));
     for (const [k] of busy) await this.stopWorker(k, false);
-    await this.h.sendHtml(conv, busy.length ? `⏹ Đã dừng ${busy.length} worker.` : "Không có worker nào đang chạy.");
+    await this.h.sendHtml(conv, busy.length ? `⏹ Đã gửi yêu cầu dừng ${busy.length} worker; lượt chạy lịch giữ slot đến khi xác nhận kết thúc.` : "Không có worker nào đang chạy.");
   }
 
   private async cmdManager(conv: ConvKey, arg: string): Promise<void> {
@@ -478,6 +539,15 @@ export class Orchestrator {
     }
     const want = arg.trim().toLowerCase();
     const top = this.h.st.get(chat);
+    if (this.h.topics?.enabled(chat)) {
+      if (want === "") { await this.showManagerEntry(chat); return; }
+      if (!["on", "off"].includes(want)) { await this.h.sendHtml(conv, "Dùng <code>/manager on|off</code> trong General."); return; }
+      const task = (this.managerOperations.get(chat) ?? Promise.resolve()).catch(() => {}).then(() => this.manageTopicManager(chat, want));
+      this.managerOperations.set(chat, task);
+      try { await task; }
+      finally { if (this.managerOperations.get(chat) === task) this.managerOperations.delete(chat); }
+      return;
+    }
     if (want === "off") {
       if (!top.manager) return void (await this.h.sendHtml(conv, "Manager đang tắt."));
       if (top.sessionID) await this.h.oc.interrupt(top.sessionID).catch(() => {});
@@ -517,6 +587,78 @@ export class Orchestrator {
     }
   }
 
+  async showManagerEntry(chat: ConvKey): Promise<void> {
+    await this.h.sendHtml(chat, [
+      "General chỉ dùng để quản lý. Gửi yêu cầu làm việc trong chủ đề của phiên tương ứng.",
+      "Bấm nút bên dưới để mở phiên quản lý: bot dùng lại phiên hiện có, khôi phục phiên đã đóng hoặc tạo khi chưa có.",
+      "Bot không tự gửi lại yêu cầu bạn vừa nhắn. Để đồng bộ tên chủ đề theo tiêu đề OpenCode, dùng nút trong /sessions; không cần mở phiên quản lý.",
+    ].join("\n"), { reply_markup: { inline_keyboard: [[{ text: "Mở phiên quản lý", callback_data: "mgr:open" }]] } });
+  }
+
+  private async manageTopicManager(chat: ConvKey, want: string): Promise<void> {
+    const topics = this.h.topics!;
+    try {
+      const managers = this.h.st.convsOfChat(chat).filter(([, state]) => state.manager && state.sessionID);
+      const links = topics.list(chat).filter((link) => link.operationID === `manager:${chat}` || managers.some(([, state]) =>
+        link.sessionID === state.sessionID || link.operationID === `attach:${state.sessionID}`));
+      if (links.length > 1 || managers.length > 1) throw new Error("Có nhiều liên kết phiên quản lý. Kiểm tra bằng /sessions; không tự chọn hay tạo phiên thay thế.");
+      const link = links[0];
+      if (link && managers.some(([, state]) => state.sessionID !== link.sessionID)) {
+        throw new Error("Liên kết phiên quản lý xung đột. Kiểm tra bằng /sessions; không tạo phiên thay thế.");
+      }
+      if (want === "off") {
+        if (!link) {
+          await this.h.sendHtml(chat, "Chưa có chủ đề quản lý để đóng. Phiên cũ, nếu có, được giữ nguyên.");
+          return;
+        }
+        const closed = await topics.close(chat, link.id);
+        if (closed.phase === "closed") this.bridgeChats.delete(chat);
+        await this.h.sendHtml(chat, `Phiên quản lý: ${esc(closed.phase)}. Phiên và lịch sử được giữ nguyên.`,
+          { reply_markup: { inline_keyboard: [[{ text: "Mở phiên quản lý", callback_data: "mgr:open" }]] } });
+        return;
+      }
+      let opened: SessionTopic;
+      if (link) {
+        if (!["open", "closed"].includes(link.phase)) {
+          throw new Error(`Phiên quản lý đang ở trạng thái ${link.phase}. Kiểm tra bằng /sessions hoặc /sync; không tạo phiên thay thế.`);
+        }
+        await this.ensureManagerTooling(chat, link.directory);
+        opened = await topics.open(chat, link.id);
+      } else if (managers.length) {
+        const [from, state] = managers[0];
+        const owners = Object.entries(this.h.st.all()).filter(([, value]) => value.sessionID === state.sessionID);
+        if (owners.length !== 1) throw new Error("Phiên quản lý có nhiều nơi sở hữu. Kiểm tra liên kết trước khi chuyển; không tạo phiên thay thế.");
+        const session = await this.h.oc.topicSession(state.sessionID!);
+        if (session.id !== state.sessionID) throw new Error("Danh tính phiên quản lý không khớp. Giữ nguyên dữ liệu để kiểm tra.");
+        if (this.managerBusy.has(from) || session.busy || !session.terminal) {
+          throw new Error("Phiên quản lý cũ đang chạy hoặc chưa xác nhận kết thúc. Hãy chờ rồi bấm lại; bot không dừng hay chuyển phiên đang chạy.");
+        }
+        if (session.archived) throw new Error("Phiên quản lý cũ đã lưu trữ. Mở lại trong OpenCode trước khi chuyển sang chủ đề; không tạo phiên thay thế.");
+        await this.ensureManagerTooling(chat, session.directory);
+        opened = await topics.attach(chat, session.id);
+        opened = await topics.open(chat, opened.id);
+      } else {
+        if (this.h.st.convsOfChat(chat).some(([, state]) => state.manager)) {
+          throw new Error("Dữ liệu phiên quản lý cũ thiếu mã phiên. Kiểm tra trạng thái đã lưu; không tạo phiên thay thế.");
+        }
+        const dir = await this.ensureManagerTooling(chat);
+        const top = this.h.st.get(chat);
+        opened = await topics.create({ chat, directory: dir, title: "Quản lý", operationID: `manager:${chat}`,
+          agent: MANAGER_AGENT, metadata: { tgRole: "manager" },
+          state: { manager: true, guided: true, model: top.model, variant: top.variant } });
+      }
+      if (opened.phase !== "open" || !opened.conv || this.managerEntry(chat)?.[0] !== opened.conv) {
+        throw new Error(`Chưa xác nhận mở phiên quản lý (${opened.phase}). Kiểm tra bằng /sessions hoặc /sync. Phiên và lịch sử được giữ nguyên.`);
+      }
+      const { chatId, threadId } = parseConv(opened.conv);
+      await this.h.sendHtml(chat, "Phiên quản lý đã mở. Vào chủ đề bên dưới để gửi yêu cầu; các phê duyệt vẫn ở General. Bot không tự gửi lại yêu cầu cũ.",
+        { reply_markup: { inline_keyboard: [[{ text: "Vào chủ đề quản lý", url: `https://t.me/c/${String(chatId).replace(/^-100/, "")}/${threadId}` }]] } });
+    } catch (error) {
+      await this.h.sendHtml(chat, `Chưa mở được phiên quản lý: ${esc((error as Error).message)}`,
+        { reply_markup: { inline_keyboard: [[{ text: "Mở phiên quản lý", callback_data: "mgr:open" }]] } });
+    }
+  }
+
   private async cmdAuto(conv: ConvKey, arg: string): Promise<void> {
     const chat = chatOf(conv);
     const want = arg.trim().toLowerCase();
@@ -553,7 +695,8 @@ export class Orchestrator {
     const n = parseInt(arg, 10);
     const days = Number.isInteger(n) && n > 0 ? n : 7;
     const now = Date.now();
-    const items = this.workersOf(chat).map(([k, s]) => ({ conv: k, status: s.worker!.status, updatedAt: s.worker!.updatedAt }));
+    const items = this.workersOf(chat).filter(([key]) => !this.h.topics?.forTopic(key))
+      .map(([k, s]) => ({ conv: k, status: s.worker!.status, updatedAt: s.worker!.updatedAt }));
     const convs = selectPruneable(items, now, days * 86_400_000);
     if (!convs.length) {
       await this.h.sendHtml(conv, "Không có topic worker cũ nào để dọn.");
@@ -612,26 +755,41 @@ export class Orchestrator {
 
   /** Create a worker: vet inputs, isolate if needed, open its topic and session, and start its task. */
   async spawn(chat: ConvKey, spec: SpawnSpec): Promise<{ conv: ConvKey; worker: WorkerInfo }> {
+    chat = chatOf(chat);
     const name = spec.name.trim().toLowerCase();
     if (!NAME_RE.test(name)) throw new Error(`Tên worker không hợp lệ "${spec.name}" — dùng a-z, 0-9, dấu gạch ngang, tối đa 24 ký tự.`);
     const pending = this.reserved.get(chat) ?? new Set<string>();
     if (this.h.st.findWorker(chat, name) || pending.has(name)) throw new Error(`Đã có worker tên "${name}". Hãy chọn tên khác.`);
     // Only spawns that will start working (have a task) take a busy slot.
     if (spec.task) this.assertCapacity(chat);
+    if (spec.spawnedBy !== "schedule" && [...this.scheduledSlots.values()].some((slot) => slot.chat === chat && slot.name === name)) {
+      throw new Error("Tên worker đang được giữ cho một lượt chạy lịch.");
+    }
     pending.add(name);
     this.reserved.set(chat, pending);
+    if (spec.task) {
+      const starts = this.starting.get(chat) ?? new Set<string>();
+      starts.add(name);
+      this.starting.set(chat, starts);
+    }
     try {
       return await this.spawnReserved(chat, name, spec);
     } finally {
       pending.delete(name);
       if (!pending.size) this.reserved.delete(chat);
+      this.starting.get(chat)?.delete(name);
+      if (!this.starting.get(chat)?.size) this.starting.delete(chat);
     }
   }
 
   /** Busy workers of a chat, counting spawns in flight. */
   private busyCount(chat: ConvKey, except?: ConvKey): number {
-    const busy = this.workersOf(chat).filter(([k, s]) => k !== except && BUSY.includes(s.worker!.status)).length;
-    return busy + (this.reserved.get(chatOf(chat))?.size ?? 0);
+    chat = chatOf(chat);
+    const slots = [...this.scheduledSlots.values()].filter((slot) => slot.chat === chat);
+    const starts = this.starting.get(chat);
+    const busy = this.workersOf(chat).filter(([k, s]) => k !== except && BUSY.includes(s.worker!.status) &&
+      !starts?.has(s.worker!.name) && !slots.some((slot) => slot.name === s.worker!.name)).length;
+    return busy + (starts?.size ?? 0) + slots.length;
   }
 
   private assertCapacity(chat: ConvKey, except?: ConvKey): void {
@@ -649,9 +807,11 @@ export class Orchestrator {
     // Isolation: a writer that would share a repo checkout with another busy
     // writer gets its own worktree + branch instead. A respawn (isolate === false)
     // skips this entirely — it must reuse the dead worker's directory/worktree as-is.
+    // A spawn bound to an existing session (sessionID) also skips isolation: the
+    // session already lives somewhere and must not be moved into a worktree.
     let worktree: WorkerInfo["worktree"];
     let repoRoot: string | undefined;
-    if (spec.isolate !== false && writes && this.h.cfg.worktreeMode !== "off") {
+    if (spec.isolate !== false && !spec.sessionID && writes && this.h.cfg.worktreeMode !== "off") {
       repoRoot = await gitRoot(directory);
       if (repoRoot) {
         const shared = this.workersOf(chat).some(
@@ -678,6 +838,26 @@ export class Orchestrator {
       createdAt: now,
       updatedAt: now,
     };
+    if (this.h.topics?.enabled(chat)) {
+      const top = this.h.st.get(chat);
+      const link = spec.sessionID ? await this.h.topics.attach(chat, spec.sessionID) :
+        await this.h.topics.create({ chat, directory, title: name, agent,
+          operationID: spec.scheduledRunID ? `scheduled:${spec.scheduledRunID}` : undefined,
+          metadata: { tgWorker: name, ...(spec.scheduledRunID ? { tgScheduledRun: spec.scheduledRunID } : {}) },
+          state: { model: top.model, variant: top.variant, guided: true, worker } });
+      if (!link.conv || !link.sessionID || link.phase !== "open") throw new Error("Worker topic is not ready; inspect it in General.");
+      const bound = this.h.st.get(link.conv);
+      if (bound.manager) throw new Error("The Manager session already has its own topic; it cannot become a worker.");
+      if (spec.sessionID && bound.worker && BUSY.includes(bound.worker.status)) throw new Error("The existing session is busy.");
+      if (!bound.worker) this.h.st.setRequired(link.conv, { worker });
+      await this.h.sendHtml(link.conv, `Worker <b>${esc(bound.worker?.name ?? name)}</b> · ${esc(agent)}\n<code>${esc(directory)}</code>`).catch(() => {});
+      if (spec.task) {
+        this.setStatus(link.conv, "running");
+        await this.h.oc.prompt(link.sessionID, `${workerPreamble(name)}\n\n${spec.task}`);
+        this.h.startTyping(link.conv);
+      }
+      return { conv: link.conv, worker: this.h.st.get(link.conv).worker! };
+    }
     let threadId: number;
     try {
       threadId = await this.h.tg.createForumTopic(chatId, this.topicName(worker), TOPIC_COLORS[name.length % TOPIC_COLORS.length]);
@@ -690,18 +870,28 @@ export class Orchestrator {
     }
     const conv = convKey(chatId, threadId);
     const top = this.h.st.get(chat);
+    // Bind to an existing session when the spawn asks for one (a worker topic
+    // opened for a session that already exists); otherwise create a fresh one.
     let sessionID: string;
+    let createdSession = false;
     try {
-      sessionID = await this.h.oc.createSession(directory, {
-        title: `tg:${name}`,
-        agent,
-        metadata: { tgWorker: name, tgChat: chat },
-      });
+      if (spec.sessionID) {
+        sessionID = spec.sessionID;
+        createdSession = false;
+      } else {
+        createdSession = true;
+        sessionID = await this.h.oc.createSession(directory, {
+          title: `tg:${name}`,
+          agent,
+          metadata: { tgWorker: name, tgChat: chat, ...(spec.scheduledRunID ? { tgScheduledRun: spec.scheduledRunID } : {}) },
+        });
+      }
     } catch (e) {
-      // Nothing was saved yet: undo the topic and worktree so a retry with the
-      // same name works and nothing is left orphaned.
+      // Nothing was saved yet (or the session was reused, so there is nothing to
+      // orphan): undo the topic so a retry with the same name works and nothing
+      // is left orphaned.
       await this.h.tg.deleteForumTopic(conv).catch(() => this.h.tg.editForumTopic(conv, `❌ ${name}`).catch(() => {}));
-      if (worktree && repoRoot) await removeWorktree(repoRoot, worktree).catch(() => {});
+      if (createdSession && worktree && repoRoot) await removeWorktree(repoRoot, worktree).catch(() => {});
       throw e;
     }
     // Workers inherit the chat's model/variant choice (the Manager's own agent aside).
@@ -742,14 +932,52 @@ export class Orchestrator {
     // Checked here, not only in the tool, so an approval tapped later can't
     // start a second turn on a busy worker or exceed the busy limit.
     if (BUSY.includes(s.worker.status)) throw new Error(`Worker "${s.worker.name}" đang ${s.worker.status}; chờ nó xong đã.`);
-    this.assertCapacity(chatOf(conv), conv);
-    await this.h.sendHtml(conv, `📨 <b>Manager:</b> ${esc(trunc(message, 1500))}`).catch(() => {});
-    await this.h.oc.prompt(s.sessionID, message);
+    const release = this.beginWorkerTurn(conv);
+    try {
+      await this.h.sendHtml(conv, `📨 <b>Manager:</b> ${esc(trunc(message, 1500))}`).catch(() => {});
+      await this.h.oc.prompt(s.sessionID, message);
+      this.h.startTyping(conv);
+    } finally { release?.(); }
+  }
+
+  beginWorkerTurn(conv: ConvKey): (() => void) | undefined {
+    if (this.h.topics?.enabled(conv) && !this.h.topics.canPrompt(conv)) throw new Error("Session/topic is not open; reconcile it from General.");
+    if (this.ownsScheduledConv(conv)) throw new Error("Worker đang thuộc một lượt chạy lịch chưa kết thúc; chờ xác nhận hoặc dùng /stop.");
+    const w = this.topicWorker(conv);
+    if (!w) return undefined;
+    const chat = chatOf(conv);
+    if (BUSY.includes(w.status) || this.starting.get(chat)?.has(w.name)) throw new Error("Worker đang bận; chờ lượt hiện tại kết thúc.");
+    this.assertCapacity(chat, conv);
+    const starts = this.starting.get(chat) ?? new Set<string>();
+    starts.add(w.name);
+    this.starting.set(chat, starts);
     this.setStatus(conv, "running");
-    this.h.startTyping(conv);
+    return () => {
+      starts.delete(w.name);
+      if (!starts.size) this.starting.delete(chat);
+    };
+  }
+
+  private topicWorker(conv: ConvKey): WorkerInfo | undefined {
+    const state = this.h.st.peek(conv);
+    if (state?.worker) return state.worker;
+    const link = this.h.topics?.forTopic(conv);
+    if (!link || !state || state.manager) return undefined;
+    const now = Date.now();
+    const worker: WorkerInfo = { name: `session-${link.id.slice(0, 12)}`, status: "idle", spawnedBy: "user", createdAt: now, updatedAt: now };
+    this.h.st.setRequired(conv, { worker });
+    return worker;
   }
 
   private async stopWorker(conv: ConvKey, close: boolean): Promise<string> {
+    if (this.h.topics?.forTopic(conv)) {
+      const confirmed = await this.h.stopTopicWork?.(conv);
+      if (confirmed) this.setStatus(conv, "stopped");
+      return confirmed ? "Work stopped. Its session and topic remain open." : "Stop is not confirmed; the worker keeps its capacity slot.";
+    }
+    if (this.h.scheduledStop && await this.h.scheduledStop(conv)) {
+      return "⏹ Đã ghi nhận yêu cầu dừng lượt chạy lịch; đang xác minh execution, chưa nhả slot khi chưa xác nhận kết thúc.";
+    }
     const s = this.h.st.get(conv);
     const w = s.worker!;
     // Mark first: the interrupt fires session.execution.interrupted while the
@@ -767,59 +995,92 @@ export class Orchestrator {
     return !!found && BUSY.includes(found[1].worker!.status);
   }
 
-  /**
-   * Run a schedule once — the real dispatch behind the scheduler's `dispatch`
-   * dependency. Finds (or creates) the schedule's worker topic, applies the
-   * ≤1-live-session policy, prompts it, and arms an anti-hang timeout.
-   */
-  async runScheduled(chat: ConvKey, sch: Schedule): Promise<void> {
-    const name = "sch-" + sch.id;
-    let conv: ConvKey;
-    let justSpawned: boolean;
-    const existing = this.h.st.findWorker(chat, name);
-    if (existing) {
-      conv = existing[0];
-      justSpawned = false;
-    } else {
-      // First run: create the worker with NO task → it starts idle and takes
-      // no busy slot. If spawn throws (e.g. topic unsupported) let it throw —
-      // the scheduler's tick catches it and records the schedule error.
-      conv = (await this.spawn(chat, { name, directory: sch.dir, agent: sch.agent, spawnedBy: "schedule" })).conv;
-      justSpawned = true;
-    }
-    const state = this.h.st.get(conv);
-    let sessionID: string;
-    if (justSpawned) {
-      // First run: reuse the session spawn() already created (a second create
-      // would orphan a session).
-      sessionID = state.sessionID!;
-    } else {
-      // Repeat run: fresh session, created BEFORE retiring the old one so a
-      // failed create never drops the previous session (≤1 live session).
-      sessionID = await this.h.oc.createSession(sch.dir, {
-        title: "tg:" + name,
-        agent: sch.agent,
-        metadata: { tgWorker: name, tgChat: chat },
-      });
-      if (state.sessionID) await this.h.oc.removeSession(state.sessionID).catch(() => {});
-    }
-    // Bind the session to this conv so relay + permission/form route here.
-    this.h.st.set(conv, { sessionID, guided: true, lastRelayedTime: 1 });
-    await this.h.applyModelAndVariant(sessionID, this.h.st.get(conv));
-    this.setStatus(conv, "running");
-    await this.h.oc.prompt(sessionID, workerPreamble(name) + "\n\n" + sch.prompt);
-    this.h.startTyping(conv);
-    // Anti-hang timeout: if still BUSY when it fires, stop it and report once.
-    const timer = setTimeout(() => {
-      void (async () => {
-        const cur = this.h.st.peek(conv);
-        if (cur?.worker && BUSY.includes(cur.worker.status)) {
-          await this.stopWorker(conv, false).catch(() => {});
-          await this.h.tg.sendMessage(conv, "⏱ Quá hạn — đã dừng lịch " + name).catch(() => {});
+  ownsScheduledConv(conv: ConvKey): boolean {
+    const worker = this.h.st.peek(conv)?.worker;
+    return [...this.scheduledSlots.values()].some((slot) => slot.conv === conv || (worker && slot.chat === chatOf(conv) && slot.name === worker.name));
+  }
+
+  scheduledExecution(): ScheduledExecution {
+    return {
+      matches: (run, conv) => {
+        const w = this.h.st.peek(conv)?.worker;
+        return this.scheduledSlots.get(run.id)?.conv === conv ||
+          (chatOf(conv) === chatOf(run.schedule.conv) && w?.name === this.scheduledWorkerName(run.schedule, run.id));
+      },
+      ready: (sch) => this.h.oc.scheduledReady(this.h.st.findWorker(sch.conv, "sch-" + sch.id)?.[1].sessionID, this.vetDirectory(sch.dir)),
+      claim: (sch, id) => {
+        const name = this.scheduledWorkerName(sch, id);
+        if (this.workerBusyByName(sch.conv, name)) throw new Error("Worker đang bận.");
+        if ([...this.scheduledSlots.values()].some((slot) => slot.chat === chatOf(sch.conv) && slot.name === name)) {
+          throw new Error("Lượt trước vẫn đang hoàn tất cleanup.");
         }
-      })();
-    }, this.h.cfg.scheduleTimeoutMs);
-    timer.unref?.();
+        this.assertCapacity(chatOf(sch.conv));
+        this.scheduledSlots.set(id, { chat: chatOf(sch.conv), name });
+      },
+      restore: (run) => { this.scheduledSlots.set(run.id, { chat: chatOf(run.schedule.conv),
+        name: (run.binding && this.h.st.peek(run.binding.conv)?.worker?.name) || this.scheduledWorkerName(run.schedule, run.id), conv: run.binding?.conv }); },
+      release: (run) => { this.scheduledSlots.delete(run.id); },
+      prepare: (run) => this.prepareScheduled(run),
+      submit: async (run) => {
+        if (this.h.st.peek(run.binding!.conv)?.sessionID !== run.binding!.sessionID) throw new Error("Session không còn thuộc lượt chạy.");
+        this.setStatus(run.binding!.conv, "running");
+        await this.h.oc.submitScheduled(run, workerPreamble("sch-" + run.schedule.id) + "\n\n" + run.schedule.prompt);
+        this.h.startTyping(run.binding!.conv);
+      },
+      inspect: (run) => this.h.oc.observeScheduled(run),
+      stop: (run, observation) => this.h.oc.scheduledObserver().stop(run, observation),
+      settled: async (run) => {
+        const b = run.binding;
+        if (!b || this.h.st.peek(b.conv)?.sessionID !== b.sessionID) return;
+        const status = run.phase === "succeeded" ? "done" : run.phase === "failed" ? "failed" : "stopped";
+        await this.onWorkerFinished(b.conv, status, undefined, b.sessionID);
+        if (this.h.st.peek(b.conv)?.sessionID === b.sessionID) await this.h.onScheduledFinished?.(b.conv);
+      },
+    };
+  }
+
+  private scheduledWorkerName(schedule: Schedule, runID: string): string {
+    return this.h.topics?.enabled(schedule.conv) ? `sch-${schedule.id.slice(0, 8)}-${runID.slice(0, 8)}` : `sch-${schedule.id}`;
+  }
+
+  private async prepareScheduled(run: ScheduledRun) {
+    const sch = run.schedule;
+    const name = this.scheduledWorkerName(sch, run.id);
+    this.vetDirectory(sch.dir);
+    if (this.h.topics?.enabled(sch.conv)) {
+      const spawned = await this.spawn(chatOf(sch.conv), { name, directory: sch.dir, agent: sch.agent,
+        spawnedBy: "schedule", scheduledRunID: run.id });
+      const sid = this.h.st.get(spawned.conv).sessionID!;
+      this.scheduledSlots.get(run.id)!.conv = spawned.conv;
+      return this.h.oc.scheduledBinding(run, spawned.conv, sid);
+    }
+    let existing = this.h.st.findWorker(sch.conv, name);
+    let sid: string;
+    if (!existing) {
+      const spawned = await this.spawn(sch.conv, { name, directory: sch.dir, agent: sch.agent, spawnedBy: "schedule", scheduledRunID: run.id });
+      existing = [spawned.conv, this.h.st.get(spawned.conv)];
+      sid = existing[1].sessionID!;
+    } else {
+      sid = await this.h.oc.createSession(sch.dir, { title: "tg:" + name, agent: sch.agent,
+        metadata: { tgWorker: name, tgChat: chatOf(sch.conv), tgScheduledRun: run.id } });
+      try {
+        if (existing[1].sessionID) await this.h.oc.retireScheduledSession(existing[1].sessionID);
+      } catch (e) {
+        await this.h.oc.removeSession(sid).catch(() => {});
+        throw e;
+      }
+    }
+    const [conv, state] = existing;
+    this.scheduledSlots.get(run.id)!.conv = conv;
+    try {
+      this.h.st.setRequired(conv, { sessionID: sid, directory: sch.dir, agent: sch.agent, guided: true, lastRelayedTime: 1,
+        worker: { ...state.worker!, task: sch.prompt, status: "running", updatedAt: Date.now() } });
+      await this.h.applyModelAndVariant(sid, this.h.st.get(conv));
+      return await this.h.oc.scheduledBinding(run, conv, sid);
+    } catch (e) {
+      if (this.h.st.peek(conv)?.sessionID === sid) this.setStatus(conv, "failed");
+      throw e;
+    }
   }
 
   /**
@@ -830,6 +1091,7 @@ export class Orchestrator {
    * the caller checks via decideApprove first (and this double-checks).
    */
   async approveWorkerReport(conv: ConvKey): Promise<{ ok: boolean; busy: boolean; name?: string }> {
+    if (this.h.topics?.forTopic(conv)) return { ok: false, busy: false, name: this.h.st.peek(conv)?.worker?.name };
     const s = this.h.st.peek(conv);
     const w = s?.worker;
     if (!w) return { ok: true, busy: false }; // already retired — nothing to clean
@@ -873,7 +1135,7 @@ export class Orchestrator {
     const changed = s.worker.status !== status;
     const worker: WorkerInfo = { ...s.worker, status, updatedAt: Date.now(), ...(lastResult !== undefined ? { lastResult } : {}) };
     this.h.st.set(conv, { worker });
-    if (changed) void this.h.tg.editForumTopic(conv, this.topicName(worker)).catch((e) => warn("editForumTopic:", e?.message));
+    if (changed && !this.h.topics?.enabled(conv)) void this.h.tg.editForumTopic(conv, this.topicName(worker)).catch((e) => warn("editForumTopic:", e?.message));
   }
 
   // ── OpenCode lifecycle hooks (called by Bot.onOpenCodeEvent) ───────────────
@@ -902,9 +1164,11 @@ export class Orchestrator {
       else this.dropManagerTurn(conv); // succeeded / failed / interrupted
       return;
     }
-    if (!s.worker) return;
+    const worker = this.topicWorker(conv);
+    if (!worker) return;
+    if (this.ownsScheduledConv(conv)) return;
     if (type === "session.execution.started") {
-      if (s.worker.status !== "waiting") this.setStatus(conv, "running");
+      if (worker.status !== "waiting") this.setStatus(conv, "running");
       return;
     }
     const status: WorkerStatus =
@@ -914,7 +1178,7 @@ export class Orchestrator {
 
   /** A worker is blocked on the user (permission ask / question). */
   onWaiting(conv: ConvKey): void {
-    if (this.h.st.peek(conv)?.worker) this.setStatus(conv, "waiting");
+    if (this.topicWorker(conv)) this.setStatus(conv, "waiting");
   }
 
   /** The user answered — the worker resumes. */
@@ -922,13 +1186,14 @@ export class Orchestrator {
     if (this.h.st.peek(conv)?.worker?.status === "waiting") this.setStatus(conv, "running");
   }
 
-  private async onWorkerFinished(conv: ConvKey, status: WorkerStatus, error?: string): Promise<void> {
+  private async onWorkerFinished(conv: ConvKey, status: WorkerStatus, error?: string, expectedSession?: string): Promise<void> {
     if (this.finishing.has(conv)) return;
     this.finishing.add(conv);
     try {
       const s = this.h.st.peek(conv);
       const w = s?.worker;
       if (!w) return; // state already retired (e.g. by a concurrent purge)
+      if (expectedSession && s?.sessionID !== expectedSession) return;
       // Topic deleted in the UI while the worker was running: the detection only
       // fires on sends, and a finished worker sends nothing more — this is the
       // moment to retire the conv (see onTopicDeleted).
@@ -958,7 +1223,10 @@ export class Orchestrator {
         if (!reply) await new Promise((r) => setTimeout(r, 400));
       }
       const tail = reply ? stripTags(reply.text).trim().slice(-1500) : error ? `error: ${error}` : "(no text reply)";
+      if (expectedSession && this.h.st.peek(conv)?.sessionID !== expectedSession) return;
       this.setStatus(conv, status, tail);
+      const managed = this.h.topics?.forTopic(conv);
+      if (managed && managed.phase !== "open") return;
       // Context-overflow recovery: a worker that died because it outgrew the
       // model's context is respawned in a FRESH session in the SAME directory
       // (same worktree), handed its original task + git evidence. Bounded to one
@@ -966,6 +1234,7 @@ export class Orchestrator {
       let respawnedAs: string | undefined;
       if (
         status === "failed" &&
+        w.spawnedBy !== "schedule" &&
         shouldRespawnWorker({
           status,
           error,
@@ -979,7 +1248,7 @@ export class Orchestrator {
       if (w.worktree && status === "done") {
         await this.h.sendHtml(conv, this.worktreeText(w), { reply_markup: this.worktreeKeyboard(w) }).catch(() => {});
       }
-      if (this.h.st.peek(chatOf(conv))?.manager) {
+      if (this.managerEntry(chatOf(conv))) {
         this.queueReport(
           chatOf(conv),
           respawnedAs
@@ -991,7 +1260,7 @@ export class Orchestrator {
       // doesn't fill with dead topics. The user reopens it just by messaging in
       // it. A worker respawned for overflow stays OPEN (❌) so the user can read
       // why it died and follow the new one; /prune cleans it up later.
-      if (this.h.cfg.autoClose && (status === "done" || status === "failed") && !respawnedAs) {
+      if (this.h.cfg.autoClose && !this.h.topics?.enabled(conv) && (status === "done" || status === "failed") && !respawnedAs) {
         void this.h.tg.closeForumTopic(conv).catch(() => {});
       }
     } finally {
@@ -1062,6 +1331,7 @@ export class Orchestrator {
   // ── Manager ───────────────────────────────────────────────────────────────
   /** A user message for the Manager: admit it without blocking; the reply is relayed when the turn ends. */
   async promptManager(conv: ConvKey, text: string, messageId?: number): Promise<void> {
+    if (this.h.topics?.enabled(conv) && !this.h.topics.canPrompt(conv)) throw new Error("Manager topic is not open; manage it from General.");
     const s = this.h.st.get(conv);
     if (!s.sessionID) {
       await this.cmdManager(conv, "on");
@@ -1083,7 +1353,7 @@ export class Orchestrator {
       return;
     }
     this.managerBusy.add(conv); // mark before the await so a 2nd message can't slip through
-    this.budget.set(conv, DISPATCH_BUDGET); // the user spoke: refill the dispatch budget
+    this.budget.set(chatOf(conv), DISPATCH_BUDGET); // the user spoke: refill the dispatch budget
     await this.h.prepareNotes?.(conv, this.h.st.get(conv).sessionID!); // /note: surface pending notes this turn
     try {
       await this.h.oc.prompt(this.h.st.get(conv).sessionID!, text);
@@ -1128,10 +1398,11 @@ export class Orchestrator {
   }
 
   private async notifyManager(chat: ConvKey, body: string): Promise<void> {
-    const sid = this.h.st.peek(chat)?.manager ? this.h.st.peek(chat)?.sessionID : undefined;
+    const entry = this.managerEntry(chat);
+    const sid = entry?.[1].sessionID;
     if (!sid || !body) return;
     await this.h.oc.prompt(sid, `[Bot event — not from the user]\n${body}`);
-    this.h.startTyping(chat);
+    this.h.startTyping(entry![0]);
   }
 
   /** Spend one unit of the chat's dispatch budget, or refuse. */
@@ -1230,6 +1501,7 @@ export class Orchestrator {
    * send-failure or /prune can still retry a purge that failed.
    */
   private async purgeConv(conv: ConvKey): Promise<boolean> {
+    if (this.h.topics?.forTopic(conv)) return false;
     if (this.purging.has(conv)) return false; // an in-flight purge owns this conv
     this.purging.add(conv);
     try {
@@ -1292,6 +1564,7 @@ export class Orchestrator {
    * to react to until we actually try to send.
    */
   async onTopicDeleted(conv: ConvKey): Promise<void> {
+    if (this.h.topics?.forTopic(conv)) { this.h.topics.topicGone(conv); return; }
     if (!String(conv).includes(":")) {
       // Defensive: topic deletion is observed from a topic send, so this can't
       // be a top-level chat — but if it ever is, never retire the main chat.
@@ -1344,6 +1617,7 @@ export class Orchestrator {
     let ok = 0;
     let skipped = 0;
     for (const k of p.convs) {
+      if (this.h.topics?.forTopic(k)) { skipped++; continue; }
       const s = this.h.st.peek(k);
       const w = s?.worker;
       // It may have started a new turn since the list was shown — never delete a busy worker.
@@ -1421,6 +1695,10 @@ export class Orchestrator {
   private async handleWorktreeCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
     const [, name, op] = (cb.data ?? "").split(":");
     const found = this.h.st.findWorker(conv, name);
+    if (found && this.h.topics?.forTopic(found[0]) && ["rm", "rmok"].includes(op)) {
+      await this.h.tg.answerCallbackQuery(cb.id, "A managed topic keeps its session and worktree. Close it in General; cleanup is separate.");
+      return;
+    }
     const w = found?.[1].worker;
     if (!found || !w?.worktree || !w.repoRoot) {
       await this.h.tg.answerCallbackQuery(cb.id, "Worktree không còn.");
@@ -1537,11 +1815,12 @@ export class Orchestrator {
           properties: {
             name: { type: "string", description: "Short kebab-case name, unique in this chat (a-z, 0-9, -; max 24)" },
             directory: { type: "string", description: "Absolute folder to work in (see list_directories)" },
-            task: { type: "string", description: "Complete instructions: goal, context, constraints, definition of done" },
+            task: { type: "string", description: "Complete instructions: goal, context, constraints, definition of done. Required unless `session_id` names an existing session to open a topic for." },
             agent: { type: "string", enum: ["build", "plan", "explore"], description: "build = edit code (default); plan = analysis only; explore = quick read-only lookup" },
             writes: { type: "boolean", description: "Whether the task may change files (default true for build)" },
+            session_id: { type: "string", description: "Optional existing OpenCode session (ses_…) to bind this worker to instead of creating a new one. The worker then gets its own Telegram topic for that session — no fresh session is spawned." },
           },
-          required: ["name", "directory", "task"],
+          required: ["name", "directory"],
         },
         run: async (a) => {
           const spec: SpawnSpec = {
@@ -1551,8 +1830,9 @@ export class Orchestrator {
             agent: a.agent,
             writes: a.writes,
             spawnedBy: "manager",
+            sessionID: a.session_id ? String(a.session_id) : undefined,
           };
-          if (!spec.task) throw new Error("task is required");
+          if (!spec.task && !spec.sessionID) throw new Error("task is required (or pass session_id to open a topic for an existing session).");
           if (this.h.st.findWorker(chat, spec.name.trim().toLowerCase())) throw new Error(`A worker named "${spec.name}" already exists — use send_to_worker or pick another name.`);
           this.takeBudget(chat);
           if (!auto()) {
@@ -1560,7 +1840,10 @@ export class Orchestrator {
             return `PENDING: waiting for the user's approval (request #${id}). Do not call this again; you will get a [Bot event] with the decision.`;
           }
           const r = await this.spawn(chat, spec);
-          return `Worker "${r.worker.name}" started in ${this.h.st.get(r.conv).directory}${r.worker.worktree ? ` (own worktree, branch ${r.worker.worktree.branch})` : ""}. You will get a [Bot event] when it finishes.`;
+          const done = spec.task
+            ? `You will get a [Bot event] when it finishes.`
+            : `No task was given — send the task to this worker with send_to_worker when ready.`;
+          return `Worker "${r.worker.name}" started in ${this.h.st.get(r.conv).directory}${r.worker.worktree ? ` (own worktree, branch ${r.worker.worktree.branch})` : ""}. ${done}`;
         },
       },
       {

@@ -1,34 +1,15 @@
-/**
- * The scheduler engine for `/schedule`: a file-backed store of schedules plus a
- * tick loop that fires the due ones. Deliberately dependency-injected (clock,
- * dispatch, notify, allow/busy checks) so it is fully testable WITHOUT
- * Telegram or OpenCode — slice 3 supplies the real `dispatch` (spawn a worker
- * topic + prompt). This module must not import Telegram or OpenCode.
- *
- * Crash safety (the important part): when a schedule is due we PERSIST the
- * next-fire advance (nextRunAt / lastRunAt, and enabled=false for `once`)
- * BEFORE dispatching. A crash or restart between the persist and the dispatch
- * therefore never re-runs a turn — the schedule already points at the next
- * fire time, so the post-restart tick sees it as not-due.
- *
- * No stacking: if the schedule's worker is still running/waiting we skip the
- * turn (advance + lastStatus="skipped-busy") rather than pile up runs. One
- * schedule failing must never kill the loop — the per-schedule body is wrapped
- * so a throwing dispatch (including the capacity/contention case where the
- * real dispatch's spawn throws because max workers is full) is caught, logged,
- * reported, and the tick continues.
- */
+/** Lưu cấu hình và lượt chạy trong cùng một lần ghi; vòng đời nằm ở scheduled-run.ts. */
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
-import type { ConvKey } from "./conv.js";
-import { nextRunAfter, decideRun, formatSchedule } from "./schedule.js";
 import type { Schedule } from "./schedule.js";
 import { warn } from "./logger.js";
+import type { ScheduledRun } from "./scheduled-run.js";
 
 /** On-disk shape of `data/schedules.json` (versioned so we can migrate later). */
 export interface ScheduleStoreFile {
   v: 1;
   schedules: Schedule[];
+  runs?: ScheduledRun[];
 }
 
 /**
@@ -39,6 +20,8 @@ export interface ScheduleStoreFile {
  * on purpose: /clear and the per-chat sweeps must never touch schedules.
  */
 export class ScheduleStore {
+  private runsRequired = false;
+  private fileSeen = false;
   constructor(
     private readonly file: string,
     private readonly maxSchedules: number,
@@ -46,6 +29,7 @@ export class ScheduleStore {
 
   /** Read + parse. Missing file → []. Corrupt/unreadable → rename to .bak, warn, []. */
   load(): Schedule[] {
+    if (this.runsRequired) return this.readRunsFile().schedules;
     if (!existsSync(this.file)) return [];
     let parsed: unknown;
     try {
@@ -68,11 +52,73 @@ export class ScheduleStore {
    * error (caught by the tick) rather than silently risk a double-run on restart.
    */
   save(schedules: Schedule[]): void {
+    this.write({ ...this.readRunsFile(), schedules });
+  }
+
+  private write(body: ScheduleStoreFile): void {
     mkdirSync(dirname(this.file), { recursive: true });
-    const body: ScheduleStoreFile = { v: 1, schedules };
     const tmp = `${this.file}.${process.pid}.tmp`;
     writeFileSync(tmp, JSON.stringify(body, null, 2), { mode: 0o600 });
     renameSync(tmp, this.file);
+    this.fileSeen = true;
+  }
+
+  private readRunsFile(): ScheduleStoreFile {
+    if (!existsSync(this.file)) {
+      if (this.runsRequired && this.fileSeen) throw new Error("File dữ liệu lượt chạy đã mất; cần khôi phục trước khi tiếp tục.");
+      return { v: 1, schedules: [], runs: [] };
+    }
+    this.fileSeen = true;
+    const body = JSON.parse(readFileSync(this.file, "utf8")) as ScheduleStoreFile;
+    if (body.v !== 1 || !Array.isArray(body.schedules) || (body.runs !== undefined && !Array.isArray(body.runs))) {
+      throw new Error("Không đọc được lịch và thông tin lượt chạy; cần kiểm tra file dữ liệu.");
+    }
+    const phases = ["preparing", "dispatching", "active", "recovering", "stopping", "blocked", "succeeded", "failed", "interrupted", "not-started"];
+    const ids = new Set<string>();
+    const active = new Set<string>();
+    for (const run of body.runs ?? []) {
+      if (!run || typeof run.id !== "string" || typeof run.schedule?.id !== "string" || typeof run.schedule?.conv !== "string" ||
+        typeof run.messageID !== "string" || !Number.isFinite(run.admittedAt) || !Number.isFinite(run.deadline) || !phases.includes(run.phase)) {
+        throw new Error("Thông tin lượt chạy không hợp lệ; giữ nguyên file và chặn admission để kiểm tra.");
+      }
+      if (ids.has(run.id) || (run.finishedAt === undefined && active.has(run.schedule.id)) ||
+        (run.finishedAt !== undefined && !Number.isFinite(run.finishedAt))) throw new Error("Identity lượt chạy trùng hoặc dữ liệu terminal không hợp lệ.");
+      ids.add(run.id);
+      if (run.finishedAt === undefined) active.add(run.schedule.id);
+    }
+    return body;
+  }
+
+  runs(): ScheduledRun[] {
+    this.runsRequired = true;
+    return this.readRunsFile().runs ?? [];
+  }
+
+  admit(run: ScheduledRun, patch: Partial<Schedule>): void {
+    const body = this.readRunsFile();
+    const index = body.schedules.findIndex((s) => s.id === run.schedule.id && s.conv === run.schedule.conv);
+    if (index < 0) throw new Error("Lịch không còn tồn tại.");
+    if ((body.runs ?? []).some((r) => r.schedule.id === run.schedule.id && r.finishedAt === undefined)) {
+      throw new Error("Lịch đã có lượt đang chạy.");
+    }
+    body.schedules[index] = { ...body.schedules[index], ...patch, id: run.schedule.id };
+    body.runs = [...(body.runs ?? []), run];
+    this.write(body);
+  }
+
+  putRun(run: ScheduledRun): void {
+    const body = this.readRunsFile();
+    body.runs = (body.runs ?? []).map((r) => r.id === run.id && !(r.finishedAt !== undefined && run.finishedAt === undefined) ? run : r);
+    this.write(body);
+  }
+
+  patchRun(id: string, patch: Partial<ScheduledRun>): ScheduledRun {
+    const body = this.readRunsFile();
+    const found = body.runs?.find((r) => r.id === id);
+    if (!found) throw new Error("Không còn dữ liệu lượt chạy để xác minh.");
+    Object.assign(found, patch, { id: found.id });
+    this.write(body);
+    return found;
   }
 
   get(id: string): Schedule | undefined {
@@ -117,129 +163,6 @@ export class ScheduleStore {
       if (existsSync(this.file)) renameSync(this.file, `${this.file}.bak`);
     } catch {
       /* best effort — we still start fresh in memory either way */
-    }
-  }
-}
-
-/**
- * The tick engine. Every collaborator is injected so tests run without
- * Telegram/OpenCode:
- *  - `now()`         injectable clock (ms epoch)
- *  - `store`         the file-backed schedule store (already size-capped on add)
- *  - `dispatch(sch)`  slice 3's real "run this schedule once" (spawn worker + prompt)
- *  - `isBusy(sch)`    is this schedule's worker still running/waiting (skip, no stacking)
- *  - `isAllowed(uid)` re-check the creator against cfg.allowedUserIds each run
- *  - `notify(conv,t)` one short 1-line report to the schedule's conv
- *  - `tickMs`        tick interval (default 30s)
- *  - `graceMs`       a due run late by at most this still fires once (default 60 min)
- */
-export interface SchedulerDeps {
-  now: () => number;
-  store: ScheduleStore;
-  dispatch: (sch: Schedule) => Promise<void>;
-  isBusy: (sch: Schedule) => boolean;
-  isAllowed: (userId: number) => boolean;
-  notify: (conv: ConvKey, text: string) => Promise<void>;
-  tickMs?: number;
-  graceMs?: number;
-}
-
-const DEFAULT_TICK_MS = 30_000;
-const DEFAULT_GRACE_MS = 60 * 60_000;
-
-export class Scheduler {
-  private readonly tickMs: number;
-  private readonly graceMs: number;
-  private timer?: ReturnType<typeof setInterval>;
-  /** Re-entrancy guard: a slow dispatch must never let two ticks overlap. */
-  private ticking = false;
-
-  constructor(private readonly deps: SchedulerDeps) {
-    this.tickMs = deps.tickMs ?? DEFAULT_TICK_MS;
-    this.graceMs = deps.graceMs ?? DEFAULT_GRACE_MS;
-  }
-
-  /** Begin the recurring tick (unref'd so it never holds the process open). */
-  start(): void {
-    if (this.timer) return;
-    this.timer = setInterval(
-      () => void this.tick().catch((e) => warn("scheduler tick:", errText(e))),
-      this.tickMs,
-    );
-    this.timer.unref?.();
-  }
-
-  stop(): void {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = undefined;
-  }
-
-  /**
-   * One pass over all schedules. The ordering is the contract:
-   *   1. skip schedules that are disabled or not due yet;
-   *   2. classify a due one via decideRun (run / catchup / skip);
-   *   3. for run/catchup, PERSIST the next-fire advance BEFORE dispatching
-   *      (the double-run guard), then:
-   *        busy → skip the turn (no stacking); not-allowed → log + skip;
-   *        otherwise dispatch, catching any error so one bad schedule can't
-   *        kill the loop (also covers the capacity/contention spawn throw).
-   *   4. a `skip` (too late) advances past it and, for a `once`, disables it
-   *      (its single instant has passed — it can never fire, so don't churn).
-   */
-  async tick(): Promise<void> {
-    if (this.ticking) return; // a previous tick is still dispatching
-    this.ticking = true;
-    try {
-      const now = this.deps.now();
-      const list = this.deps.store.load();
-      for (const sch of list) {
-        if (!sch.enabled) continue;
-        if (sch.nextRunAt > now) continue; // not due yet
-        const dec = decideRun(sch.nextRunAt, now, this.graceMs);
-        if (dec === "skip") {
-          // Too late to run: advance past it (don't pile up) and move on.
-          sch.nextRunAt = nextRunAfter(sch.spec, now, sch.tz);
-          sch.lastStatus = "skipped-late";
-          if (sch.spec.kind === "once") sch.enabled = false;
-          continue;
-        }
-        // run / catchup: advance first, then dispatch.
-        try {
-          sch.nextRunAt = nextRunAfter(sch.spec, now, sch.tz);
-          sch.lastRunAt = now;
-          if (sch.spec.kind === "once") sch.enabled = false;
-          // Persist the advance BEFORE dispatch — the double-run guard.
-          this.deps.store.save(list);
-
-          if (this.deps.isBusy(sch)) {
-            sch.lastStatus = "skipped-busy";
-            await this.safeNotify(sch.conv, `⏭ ${formatSchedule(sch)} — bỏ lượt (worker đang bận).`);
-          } else if (!this.deps.isAllowed(sch.createdBy)) {
-            // Creator was removed from the allowlist since creation.
-            warn(`scheduler: #${sch.id} creator ${sch.createdBy} no longer allowed — skipped`);
-          } else {
-            await this.deps.dispatch(sch);
-            sch.lastStatus = "ok";
-          }
-        } catch (e) {
-          sch.lastStatus = "error";
-          warn(`scheduler: #${sch.id} error: ${errText(e)}`);
-          await this.safeNotify(sch.conv, `⚠️ ${formatSchedule(sch)} — lỗi khi chạy.`);
-        }
-      }
-      // Persist every status/advance change made this pass.
-      this.deps.store.save(list);
-    } finally {
-      this.ticking = false;
-    }
-  }
-
-  /** A notify must never break the tick, so swallow (and log) its own errors. */
-  private async safeNotify(conv: ConvKey, text: string): Promise<void> {
-    try {
-      await this.deps.notify(conv, text);
-    } catch (e) {
-      warn("scheduler notify:", errText(e));
     }
   }
 }

@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "
 import { dirname } from "node:path";
 import { ConvKey, chatOf } from "./conv.js";
 import type { PrSnapshot } from "./pr-watch.js";
+import type { SessionTopicsData } from "./session-topics.js";
 
 export interface ModelRef {
   id: string;
@@ -87,6 +88,8 @@ export interface PendingPrompt {
 }
 
 export interface ChatState {
+  /** Machine-wide lifecycle data; only SessionTopics writes this field. */
+  sessionTopics?: SessionTopicsData;
   sessionID?: string;
   directory?: string;
   model?: ModelRef;
@@ -192,12 +195,14 @@ export class StateManager {
   private data: StateMap = {};
   /** sessionID -> conversation, kept in sync on every write. */
   private bySession = new Map<string, ConvKey>();
+  private loadFailed = false;
 
   constructor(private file: string) {
     if (existsSync(file)) {
       try {
         this.data = JSON.parse(readFileSync(file, "utf8")) as StateMap;
       } catch {
+        this.loadFailed = true;
         this.data = {};
       }
     }
@@ -219,6 +224,20 @@ export class StateManager {
     Object.assign(this.get(key), patch);
     this.reindex();
     this.save();
+  }
+
+  setRequired(key: ConvKey | number, patch: ChatState): void {
+    const k = String(key);
+    const previous = this.data[k];
+    this.data[k] = { ...previous, ...patch };
+    this.reindex();
+    try { this.save(true); }
+    catch (e) {
+      if (previous) this.data[k] = previous;
+      else delete this.data[k];
+      this.reindex();
+      throw e;
+    }
   }
 
   clear(key: ConvKey | number): void {
@@ -248,6 +267,30 @@ export class StateManager {
     return this.convsOfChat(key).find(([, s]) => s.worker?.name === name);
   }
 
+  sessionTopics(): SessionTopicsData | undefined {
+    if (this.loadFailed) throw new Error("State could not be read; session/topic changes are disabled.");
+    return structuredClone(this.data[MACHINE_STATE_KEY]?.sessionTopics);
+  }
+
+  /** Commit lifecycle data and its conversation binding in one file replacement. */
+  commitSessionTopics(topics: SessionTopicsData, binding?: { conv: ConvKey; state: ChatState; from?: ConvKey }): void {
+    if (this.loadFailed) throw new Error("State could not be read; session/topic changes are disabled.");
+    const previous = this.data;
+    this.data = { ...previous, [MACHINE_STATE_KEY]: { ...previous[MACHINE_STATE_KEY], sessionTopics: structuredClone(topics) } };
+    if (binding) {
+      this.data[binding.conv] = { ...this.data[binding.conv], ...binding.state };
+      if (binding.from && binding.from !== binding.conv) {
+        const old = this.data[binding.from];
+        this.data[binding.from] = { ...old, sessionID: undefined,
+          ...(old?.manager ? { manager: false, guided: false, agent: undefined,
+            directory: old.directory === binding.state.directory ? undefined : old.directory } : {}) };
+      }
+    }
+    this.reindex();
+    try { this.save(true); }
+    catch (error) { this.data = previous; this.reindex(); throw error; }
+  }
+
   private reindex(): void {
     this.bySession.clear();
     for (const [k, s] of Object.entries(this.data)) {
@@ -256,13 +299,14 @@ export class StateManager {
     }
   }
 
-  private save(): void {
+  private save(required = false): void {
     try {
       mkdirSync(dirname(this.file), { recursive: true });
       const tmp = `${this.file}.${process.pid}.tmp`;
       writeFileSync(tmp, JSON.stringify(this.data, null, 2), { mode: 0o600 });
       renameSync(tmp, this.file);
-    } catch {
+    } catch (e) {
+      if (required) throw e;
       /* best-effort persistence */
     }
   }
