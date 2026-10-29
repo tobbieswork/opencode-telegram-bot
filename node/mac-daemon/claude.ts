@@ -50,26 +50,49 @@ export const CLAUDE_ALLOWED_TOOLS = [
   "Bash(wc:*)",
 ];
 
+/**
+ * Read-only profile for the advisor (pure consultation): the model answers from
+ * the context the caller provides — it may peek at files but never edits or runs
+ * commands. Same tools Claude needs for the future "read the repo" advisor role.
+ */
+export const CLAUDE_ADVISOR_TOOLS = ["Read", "Grep", "Glob"];
+
 export function runClaude(opts: {
   bin: string;
   workdir: string;
   prompt: string;
   maxTurns: number;
   timeoutMs: number;
+  /** When set, `claude --resume <id>` continues that session instead of a new one. */
+  resumeSessionId?: string;
+  permissionMode?: "acceptEdits" | "plan";
+  /** Defaults to CLAUDE_ALLOWED_TOOLS; pass CLAUDE_ADVISOR_TOOLS for the read-only advisor. */
+  allowedTools?: string[];
   log?: (line: string) => void;
 }): Promise<ClaudeResult> {
-  const { bin, workdir, prompt, maxTurns, timeoutMs, log = () => {} } = opts;
+  const {
+    bin,
+    workdir,
+    prompt,
+    maxTurns,
+    timeoutMs,
+    resumeSessionId,
+    permissionMode = "acceptEdits",
+    allowedTools = CLAUDE_ALLOWED_TOOLS,
+    log = () => {},
+  } = opts;
   return new Promise((resolve) => {
     const startedAt = Date.now();
     const child: ChildProcess = spawn(
       bin,
       [
         "-p",
+        ...(resumeSessionId ? ["--resume", resumeSessionId] : []),
         "--output-format", "stream-json",
         "--verbose",
         "--max-turns", String(maxTurns),
-        "--permission-mode", "acceptEdits",
-        "--allowedTools", CLAUDE_ALLOWED_TOOLS.join(","),
+        "--permission-mode", permissionMode,
+        ...(allowedTools.length ? ["--allowedTools", allowedTools.join(",")] : []),
       ],
       { cwd: workdir, detached: true, stdio: ["pipe", "pipe", "pipe"] },
     );
