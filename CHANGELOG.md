@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.3](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.3.2...opencode-telegram-bot-v1.3.3) (2026-10-29)
+
+
+### Bug Fixes
+
+* **node:** daemon clone SSH→HTTPS + MAC_NODE_GIT_TOKEN (launchd has no ssh-agent) ([#73](https://github.com/tobbieswork/opencode-telegram-bot/issues/73)) ([b904505](https://github.com/tobbieswork/opencode-telegram-bot/commit/b9045056253391b1b9c14eb274d891b5ee4b650d))
+
 ## [1.3.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.3.1...opencode-telegram-bot-v1.3.2) (2026-10-29)
 
 
