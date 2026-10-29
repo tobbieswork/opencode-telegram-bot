@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.3.1...opencode-telegram-bot-v1.3.2) (2026-10-29)
+
+
+### Bug Fixes
+
+* **node:** install.sh warns when node comes from an fnm multishell path ([#71](https://github.com/tobbieswork/opencode-telegram-bot/issues/71)) ([3524a42](https://github.com/tobbieswork/opencode-telegram-bot/commit/3524a42d5ceadb25e4e05d90c41b94773157435d))
+
 ## [1.3.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.3.0...opencode-telegram-bot-v1.3.1) (2026-10-29)
 
 
