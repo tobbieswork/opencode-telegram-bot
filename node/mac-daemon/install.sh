@@ -32,10 +32,15 @@ ENV_XML=""
 for kv in "MAC_NODE_CLAUDE_BIN=$CLAUDE_BIN" \
           "MAC_NODE_POLL_MS=${MAC_NODE_POLL_MS:-}" \
           "MAC_NODE_MAX_TURNS=${MAC_NODE_MAX_TURNS:-}" \
-          "MAC_NODE_TIMEOUT_MS=${MAC_NODE_TIMEOUT_MS:-}"; do
+          "MAC_NODE_TIMEOUT_MS=${MAC_NODE_TIMEOUT_MS:-}" \
+          "MAC_NODE_GIT_TOKEN=${MAC_NODE_GIT_TOKEN:-}"; do
   [ -n "${kv#*=}" ] || continue
   ENV_XML+="    <key>${kv%%=*}</key><string>$(xml_escape "${kv#*=}")</string>"$'\n'
 done
+
+if [ -n "${MAC_NODE_GIT_TOKEN:-}" ]; then
+  echo "ℹ MAC_NODE_GIT_TOKEN được ghi vào plist (chỉ bạn đọc được) — daemon clone/push qua HTTPS + token này."
+fi
 
 mkdir -p "$WORKROOT/logs"
 

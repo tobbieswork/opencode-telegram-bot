@@ -37,6 +37,7 @@ dời `claude` thì chạy lại `./install.sh`.
 | `MAC_NODE_CLAUDE_BIN` | `claude` | Đường dẫn binary claude |
 | `MAC_NODE_MAX_TURNS` | `200` | Số turn tối đa mỗi task |
 | `MAC_NODE_TIMEOUT_MS` | `1800000` | Timeout cứng mỗi task (30 phút) |
+| `MAC_NODE_GIT_TOKEN` | *(trống)* | Token GitHub để clone/push khi origin là **SSH** (launchd không có ssh-agent). Đặt: `MAC_NODE_GIT_TOKEN=$(gh auth token) ./install.sh` |
 
 ## Vận hành
 

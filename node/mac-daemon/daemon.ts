@@ -19,7 +19,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runClaude } from "./claude.js";
-import { git, pushBranch } from "./git.js";
+import { git, pushBranch, resolveCloneUrl } from "./git.js";
 import {
   buildDoneFile,
   claimPath,
@@ -82,10 +82,20 @@ function acquireLock(): boolean {
  * node commits are made there directly (the code worktrees are separate).
  */
 async function ensureRepo(): Promise<boolean> {
-  if (!existsSync(join(REPO_CLONE, ".git"))) {
-    log("cloning repo (first run)…");
+  // An interrupted clone has a .git dir but no remote-tracking refs —
+  // "healthy" means we can see the node branch locally.
+  const healthy = await git(REPO_CLONE, ["rev-parse", "--verify", "--quiet", "refs/remotes/origin/" + NODE_BRANCH], 10_000)
+    .then(() => true)
+    .catch(() => false);
+  if (!healthy) {
+    if (existsSync(REPO_CLONE)) {
+      log("broken clone on disk — removing and re-cloning…");
+      await rm(REPO_CLONE, { recursive: true, force: true });
+    }
+    log("cloning repo…");
     await mkdir(WORKROOT, { recursive: true });
-    const url = await git(REPO_ROOT, ["remote", "get-url", "origin"]);
+    const rawUrl = await git(REPO_ROOT, ["remote", "get-url", "origin"]);
+    const url = resolveCloneUrl(rawUrl, process.env.MAC_NODE_GIT_TOKEN?.trim() || "");
     await git(REPO_ROOT, ["clone", "-q", url, REPO_CLONE], 300_000);
   }
   await git(REPO_CLONE, ["fetch", "-q", "--prune", "origin"], 120_000);

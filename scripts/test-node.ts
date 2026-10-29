@@ -20,6 +20,7 @@ import {
   type NodeDone,
   type NodeTask,
 } from "../src/node/node-github.js";
+import { resolveCloneUrl } from "../node/mac-daemon/git.js";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: string): void {
@@ -135,6 +136,16 @@ function buildFrontlessTask(): string {
   check("claim beats task", classifyTask("a", [taskPath("a"), claimPath("a")]) === "running");
   check("task only = pending", classifyTask("a", [taskPath("a")]) === "pending");
   check("no trace = unknown", classifyTask("a", []) === "unknown");
+}
+
+// ── clone URL resolution (SSH → HTTPS, token embed) ─────────────────────────
+{
+  check("https untouched, no token", resolveCloneUrl("https://github.com/a/b.git", "") === "https://github.com/a/b.git");
+  check("scp-style ssh → https", resolveCloneUrl("git@github.com:a/b.git", "") === "https://github.com/a/b.git");
+  check("ssh:// → https", resolveCloneUrl("ssh://git@github.com/a/b.git", "") === "https://github.com/a/b.git");
+  check("https + token embedded", resolveCloneUrl("https://github.com/a/b.git", "tok_123") === "https://x-access-token:tok_123@github.com/a/b.git");
+  check("ssh + token → https with token", resolveCloneUrl("git@github.com:a/b.git", "tok_123") === "https://x-access-token:tok_123@github.com/a/b.git");
+  check("unknown scheme + token untouched", resolveCloneUrl("ssh://git@gitlab.com/a/b.git", "t") === "ssh://git@gitlab.com/a/b.git");
 }
 
 if (failures) {
