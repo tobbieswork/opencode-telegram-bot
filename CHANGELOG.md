@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.5](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.2.4...opencode-telegram-bot-v1.2.5) (2026-10-29)
+
+
+### Bug Fixes
+
+* **release:** validate release id is numeric before using it ([#65](https://github.com/tobbieswork/opencode-telegram-bot/issues/65)) ([1db266f](https://github.com/tobbieswork/opencode-telegram-bot/commit/1db266fe4876cef237c7d3f667f5299fbe8d2665))
+
 ## [1.2.4](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.2.3...opencode-telegram-bot-v1.2.4) (2026-10-29)
 
 
