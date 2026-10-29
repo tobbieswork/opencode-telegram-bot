@@ -1070,6 +1070,11 @@ export class Orchestrator {
     this.dropManagerTurn(conv);
   }
 
+  /** True while at least one manager turn is in flight (used by the Bot's shutdown drain). */
+  get managerInflight(): boolean {
+    return this.managerBusy.size > 0;
+  }
+
   /**
    * Clear a conv's manager busy flag AND its note-button retention together — one
    * logical turn end. Keeping them in one place guarantees the retention window

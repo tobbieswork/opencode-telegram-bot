@@ -161,6 +161,39 @@ interface GhPr {
   head: { sha: string; ref: string };
 }
 
+/** Shown on a live stream preview while the bot drains at shutdown. */
+const DRAIN_PREVIEW_TEXT = "⏳ Đang khởi động lại… kết quả sẽ gửi sau.";
+
+/**
+ * Core of the graceful-shutdown drain, split out so it can be unit-tested with
+ * fake promises (no bot, no Telegram, no systemd).
+ *
+ * Polls `isBusy` until it reports idle, or until `timeoutMs` elapses —
+ * whichever comes first. Work that appears WHILE the drain is running (e.g. a
+ * final-reply sweep spawned by the very turn that just ended) is picked up on
+ * the next poll, so the drain never returns while registered work is pending.
+ *
+ * @returns true when everything settled before the cap, false when the cap
+ *          elapsed first. The caller must exit either way — the cap is the
+ *          guarantee that the drain never blocks forever.
+ */
+export async function drainInflightCore(opts: {
+  /** True while in-flight work that must finish before exit remains. */
+  isBusy: () => boolean;
+  /** Hard cap for the whole wait. */
+  timeoutMs: number;
+  /** Poll interval (default 100ms). */
+  pollMs?: number;
+}): Promise<boolean> {
+  const pollMs = opts.pollMs ?? 100;
+  const deadline = Date.now() + opts.timeoutMs;
+  for (;;) {
+    if (!opts.isBusy()) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, Math.min(pollMs, deadline - Date.now())));
+  }
+}
+
 /**
  * Glue between Telegram and OpenCode. Owns per-chat state and the in-flight
  * prompt task, so a running prompt never blocks the polling loop and /stop
@@ -181,6 +214,14 @@ export class Bot {
   private typing = new Map<ConvKey, ReturnType<typeof setInterval>>();
   /** Chats whose unrelayed-reply sweep is currently running (prevents a double relay). */
   private sweeping = new Set<ConvKey>();
+  /**
+   * Fire-and-forget reply work a graceful shutdown must wait for (see
+   * drainInflight): the unrelayed-reply sweeps that carry a finished turn's
+   * final send. Each promise deletes itself once settled.
+   */
+  private pendingSends = new Set<Promise<void>>();
+  /** True while the shutdown drain is running: preview pushes pause so the "restarting" notice stays. */
+  private draining = false;
   /**
    * Pending-prompt reminder timers, keyed by `${conv}::${promptId}` (one per
    * pending form/permission, so a conv's form and permission don't share a slot).
@@ -369,6 +410,45 @@ export class Bot {
   /** Stop the Mac node poller (called from index.ts during shutdown). */
   stopNode(): void {
     this.node?.stop();
+  }
+
+  /** Register fire-and-forget reply work so a shutdown drain waits for it. */
+  private trackPending(p: Promise<void>): void {
+    this.pendingSends.add(p);
+    void p.finally(() => this.pendingSends.delete(p));
+  }
+
+  /**
+   * Graceful-shutdown drain (called from index.ts between tg.stop() and
+   * stopNode): wait until no turn is in flight (an inflight runPrompt or a
+   * manager turn) and no fire-and-forget reply (pendingSends — the unrelayed-
+   * reply sweeps that carry a finished turn's final send) remains, or until
+   * the cap elapses. The OpenCode service + event stream stay alive for the
+   * duration: a manager turn's terminal event arrives over the stream, and the
+   * final send itself only needs Telegram (it re-reads the stored reply).
+   *
+   * While waiting, every active stream preview is edited ONCE to a
+   * "restarting" notice (best-effort and time-bounded — a hung Telegram call
+   * can never block the exit) so no partial preview is left frozen.
+   *
+   * @returns true when everything settled before the cap.
+   */
+  async drainInflight(opts: { timeoutMs: number }): Promise<boolean> {
+    this.draining = true; // pause preview pushes so the notice isn't overwritten
+    const edits: Promise<unknown>[] = [];
+    for (const [conv, w] of this.drafts) {
+      if (w.previewMsgId && w.previewMsgId !== 0) {
+        edits.push(this.tg.editMessageText(conv, w.previewMsgId, DRAIN_PREVIEW_TEXT, { parse_mode: undefined }).catch(() => {}));
+      }
+    }
+    if (edits.length) {
+      // Bound the notice phase itself: a hung Telegram call must not eat the cap.
+      await Promise.race([Promise.allSettled(edits), new Promise((r) => setTimeout(r, 5_000))]);
+    }
+    return drainInflightCore({
+      timeoutMs: opts.timeoutMs,
+      isBusy: () => this.inflight.size > 0 || this.orch.managerInflight || this.pendingSends.size > 0,
+    });
   }
 
   /** Render a node report and send it via the standard reply path (rich/HTML). */
@@ -1289,7 +1369,7 @@ export class Bot {
     action: { draftID: number; text: string },
   ): Promise<void> {
     const w = this.drafts.get(conv);
-    if (!w || w.gen !== this.turnGen.get(conv) || w.previewMsgId === 0 || Date.now() < w.nextEditAt) return;
+    if (!w || this.draining || w.gen !== this.turnGen.get(conv) || w.previewMsgId === 0 || Date.now() < w.nextEditAt) return;
     const text = action.text || "✍️ Đang xử lý…";
     try {
       if (isDmConv(conv)) {
@@ -2794,7 +2874,8 @@ export class Bot {
         this.stopTyping(conv);
         this.stopWorking(conv); // manager turn ended (fire-and-forget, not inflight) — remove the "⏳"
         this.clearActivity(conv);
-        void this.sweepUnrelayedReplies(conv, "turn ended out-of-band", t === "session.execution.succeeded");
+        // Track the sweep so a shutdown drain waits for the final send it carries.
+        this.trackPending(this.sweepUnrelayedReplies(conv, "turn ended out-of-band", t === "session.execution.succeeded"));
       }
     }
   }
