@@ -13,8 +13,8 @@ khi bắt đầu đầu việc tiếp theo. Không bật chính sách mới trê
 | CV04 | Hoàn thành | `ba59ed1`; kiểu, đơn vị và ghép đầu vào OpenCode thật đạt; đã khởi động lại, giữ 5 liên kết |
 | CV05 | Hoàn thành | `026f3ec`; kiểu, đơn vị và đầu-cuối đạt; đã khởi động lại, giữ 5 liên kết |
 | CV06 | Hoàn thành | `e688e11`; kiểu, đơn vị và đầu-cuối đạt; đã khởi động lại, giữ 5 liên kết |
-| CV07 | Đã triển khai, chờ chốt commit và khởi động lại | Nhập tên bằng trả lời đúng tin ở General, xác nhận một lần; ý định bền vững gắn danh tính, phản hồi cũ không đè ý định mới; thử trên thiết bị thật chờ CV15 |
-| CV08 | Chưa bắt đầu | Tóm tắt chỉ đọc |
+| CV07 | Đã triển khai và áp dụng | `aa57067`; kiểu, đơn vị và đầu-cuối đạt; đã khởi động lại, giữ 5 liên kết; thử thiết bị/nhóm thật giữ riêng cho CV15 |
+| CV08 | Đã triển khai, chờ chốt commit và khởi động lại | Tóm tắt chỉ đọc, nguồn/mốc riêng, không suy đoán bước tiếp theo; làm mới đúng phiên tối đa 40 tin, có hạn và chống đọc lặp |
 | CV09 | Chưa bắt đầu | Tiếp tục có xác nhận |
 | CV10 | Chưa bắt đầu | Phân loại thông báo |
 | CV11 | Chưa bắt đầu | Hàng đợi và gộp |

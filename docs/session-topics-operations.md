@@ -33,6 +33,12 @@ and all command/button handlers enforce General versus work-topic scope.
   của tác vụ làm yêu cầu mới nhất. Đây là đoạn phản hồi đã quan sát, không phải
   xác nhận độc lập rằng mô hình đã sửa tệp hoặc kiểm thử thành công. Phiên cũ
   không bị tự quét toàn bộ lịch sử; cập nhật từ công việc mới/sự kiện đã biết.
+- **Xem tóm tắt** trên thẻ phiên là thao tác chỉ đọc, kể cả phiên đã đóng.
+  Hiện nguồn và mốc yêu cầu/kết quả, trạng thái và việc đang chờ; không suy ra
+  đã sửa tệp/kiểm thử từ lời mô hình. Chưa có bước tiếp theo thì ghi rõ chưa có.
+  **Làm mới thông tin** chỉ đọc tối đa 40 tin của phiên đó và trạng thái nhẹ,
+  có thời hạn và chống bấm dồn; không gọi mô hình, mở lại hay chạy tiếp. Đọc
+  lỗi giữ chưa xác minh. **Mở lại phiên** là nút vòng đời riêng, không thực thi.
 - **Gắn phiên có sẵn**, `/attach` hoặc `/use` không có mã mở danh sách chọn
   có tên. Danh sách chỉ đọc, không gửi lại thẻ của mọi phiên đã quản lý.
   Saved legacy sessions of this group are included, even outside the

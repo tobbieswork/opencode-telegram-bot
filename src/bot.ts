@@ -13,6 +13,7 @@ import { ScheduledRuns } from "./scheduled-run.js";
 import { SessionTopics, TITLE_POLICY_LABELS, type SessionTopic, type TopicTitlePreview } from "./session-topics.js";
 import { SessionDashboard, dashboardPage, DASHBOARD_FILTERS, DASHBOARD_WORK_LABELS, DASHBOARD_PHASE_LABELS, type DashboardFilter } from "./session-dashboard.js";
 import { SessionActivityLog, ACTIVITY_SOURCE_LABELS } from "./session-activity.js";
+import { buildSessionSummary } from "./session-summary.js";
 import { Schedule, SchedSpec, formatSchedule, nextRunAfter, parseScheduleSpec } from "./schedule.js";
 import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure, topicTitle } from "./format.js";
@@ -257,6 +258,10 @@ export class Bot {
   private activityAgain = new Set<ConvKey>();
   private activityAborts = new Map<ConvKey, AbortController>();
   private activityStopped = false;
+  private summaryCards = new Map<string, { chat: ConvKey; user: number; id: string; binding: string; marker: string; expires: number }>();
+  private summaryRefreshes = new Map<string, { at: number; refreshedAt?: number; error?: string }>();
+  private summaryLoads = new Map<string, Promise<{ at: number; refreshedAt?: number; error?: string }>>();
+  private summaryAborts = new Set<AbortController>();
   private dashboardCards = new Map<string, { chat: ConvKey; user: number; expires: number; filter: DashboardFilter; page: number }>();
   private pendingCards = new Map<string, { chat: ConvKey; user: number; expires: number; linkID: string; sessionID: string; identity: string;
     items: Array<{ id: string; kind: "form" | "permission" }> }>();
@@ -432,6 +437,8 @@ export class Bot {
     this.activityStopped = true;
     for (const controller of this.activityAborts.values()) controller.abort();
     this.activityAgain.clear();
+    for (const controller of this.summaryAborts) controller.abort();
+    this.summaryCards.clear();
     this.scheduler?.stop();
     this.orch.shutdown();
     this.topics.stopTitleSync();
@@ -1034,6 +1041,7 @@ export class Bot {
     if (link.conv && link.sessionID && link.identity) rows.push([{ text: "Đồng bộ tên", callback_data: `st:title-sync:${link.id}` }]);
     if (link.conv && link.sessionID && link.identity) rows.push([{ text: "Thiết lập tên", callback_data: `tc:open:${link.id}` }]);
     if (link.conv && link.sessionID) rows.push([{ text: "Xem yêu cầu đang chờ", callback_data: `pa:list:${link.id}:0` }]);
+    rows.push([{ text: "Xem tóm tắt", callback_data: `sum:show:${link.id}` }]);
     const nameStatus = link.conv && link.sessionID && link.identity ? this.topics.titleStatus(conv, link.id) : undefined;
     const retryDate = nameStatus?.retryAt ? new Date(nameStatus.retryAt) : undefined;
     const titleLines = nameStatus ? [
@@ -1056,6 +1064,78 @@ export class Bot {
   }
 
   private topicSignature(link: SessionTopic): string { return `${link.phase}:${link.step ?? ""}:${link.error ?? ""}`; }
+
+  private summaryBinding(link: SessionTopic): string {
+    return JSON.stringify([link.id, link.sessionID, link.conv, link.directory,
+      link.identity?.source, link.identity?.projectID, link.identity?.createdAt]);
+  }
+
+  private refreshSummary(conv: ConvKey, link: SessionTopic, bypassCache = false): Promise<{ at: number; refreshedAt?: number; error?: string }> {
+    const key = this.summaryBinding(link);
+    const existing = this.summaryLoads.get(key);
+    if (existing) return existing;
+    const cached = this.summaryRefreshes.get(key);
+    if (!bypassCache && cached && Date.now() - cached.at < 5000) return Promise.resolve(cached);
+    const task = (async () => {
+      const errors: string[] = [];
+      let refreshedAt: number | undefined;
+      const history = (async () => {
+        if (!link.conv || !link.sessionID || !link.identity || this.st.peek(link.conv)?.sessionID !== link.sessionID ||
+          this.st.findChatBySession(link.sessionID) !== link.conv || Object.values(this.st.all()).filter(state => state.sessionID === link.sessionID).length !== 1) throw new Error("Liên kết chưa đủ hoặc xung đột; không đọc lịch sử nguồn.");
+        const revision = this.sessionActivity.read(link.conv)?.revision;
+        const controller = new AbortController();
+        this.summaryAborts.add(controller);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const snapshot = await Promise.race([this.oc.activitySnapshot(link.sessionID, controller.signal), new Promise<never>((_, reject) => {
+            timer = setTimeout(() => { controller.abort(); reject(new Error("Hết thời gian đọc tối đa 40 tin của phiên.")); }, 3000);
+          })]);
+          const latest = this.topics.get(link.id);
+          if (this.activityStopped || controller.signal.aborted || !latest || this.summaryBinding(latest) !== key || latest.chat !== conv ||
+            snapshot.info.id !== link.sessionID || snapshot.info.source !== link.identity.source || snapshot.info.projectID !== link.identity.projectID ||
+            snapshot.info.createdAt !== link.identity.createdAt || snapshot.info.directory !== link.directory || this.st.peek(link.conv)?.sessionID !== link.sessionID) throw new Error("Danh tính, thư mục hoặc liên kết đổi trong lúc đọc; giữ bản đã biết.");
+          if (this.sessionActivity.read(link.conv)?.revision !== revision) throw new Error("Có hoạt động mới trong lúc đọc; mở hoặc làm mới lại bản tóm tắt.");
+          if (snapshot.messages.length && !snapshot.messages.some(message => message.type === "user")) throw new Error("Chưa tìm thấy ranh giới đầu vào trong 40 tin; không ghép kết quả bằng suy đoán.");
+          this.sessionActivity.observe(link.conv, link.sessionID, revision, snapshot.messages);
+          refreshedAt = Date.now();
+        } finally { if (timer) clearTimeout(timer); controller.abort(); this.summaryAborts.delete(controller); }
+      })().catch(error => { errors.push((error as Error).message); });
+      await Promise.all([history, this.dashboard.read(conv, { refresh: true, force: true, ids: [link.id] }).catch(error => { errors.push((error as Error).message); })]);
+      const row = (await this.dashboard.read(conv)).find(row => row.id === link.id);
+      if (row?.lifecycle === "open" && row.stale && row.reason) errors.push(row.reason);
+      const result = { at: Date.now(), refreshedAt, error: errors.length ? errors.join("; ") : undefined };
+      this.summaryRefreshes.delete(key);
+      this.summaryRefreshes.set(key, result);
+      while (this.summaryRefreshes.size > 1000) this.summaryRefreshes.delete(this.summaryRefreshes.keys().next().value!);
+      return result;
+    })().finally(() => this.summaryLoads.delete(key));
+    this.summaryLoads.set(key, task);
+    return task;
+  }
+
+  private async showSessionSummary(conv: ConvKey, user: number, id: string, refresh = false): Promise<void> {
+    const link = this.topics.get(id);
+    if (!link || link.chat !== conv) throw new Error("Phiên không thuộc nhóm này.");
+    const binding = this.summaryBinding(link);
+    if (refresh) await this.refreshSummary(conv, link);
+    const row = (await this.dashboard.read(conv)).find(row => row.id === id);
+    const latest = this.topics.get(id);
+    if (!row || !latest || latest.chat !== conv || this.summaryBinding(latest) !== binding || row.sessionID !== latest.sessionID) throw new Error("Liên kết đã đổi; mở lại tóm tắt từ bảng điều khiển.");
+    const refreshed = this.summaryRefreshes.get(binding);
+    const summary = buildSessionSummary(conv, row, { now: Date.now(), refreshedAt: refreshed?.refreshedAt, refreshError: refreshed?.error });
+    for (const [key, value] of this.summaryCards) if (value.expires < Date.now()) this.summaryCards.delete(key);
+    while (this.summaryCards.size >= 500) this.summaryCards.delete(this.summaryCards.keys().next().value!);
+    const token = randomBytes(6).toString("hex");
+    this.summaryCards.set(token, { chat: conv, user, id, binding, marker: summary.marker, expires: Date.now() + 10 * 60_000 });
+    const keyboard: Btn[][] = [];
+    if (row.pending.length) keyboard.push([{ text: row.pending.some(item => item.verified) ? "Đến yêu cầu đang chờ" : "Kiểm tra yêu cầu đã lưu", callback_data: `pa:list:${id}:0` }]);
+    if (latest.conv) keyboard.push([{ text: "Đến chủ đề", url: topicMessageUrl(latest.conv)! }]);
+    keyboard.push([{ text: "Làm mới thông tin", callback_data: `sum:refresh:${token}` }]);
+    if (latest.phase === "closed") keyboard.push([{ text: "Mở lại phiên", callback_data: `st:restore:${id}` }]);
+    else if (latest.phase !== "open") keyboard.push([{ text: "Kiểm tra trạng thái", callback_data: `st:sync:${id}` }]);
+    keyboard.push([{ text: "Bảng điều khiển phiên", callback_data: "cmd:ls" }]);
+    await this.tg.sendMessage(conv, summary.text, { reply_markup: { inline_keyboard: keyboard } });
+  }
 
   private newTitleSettings(conv: ConvKey, user: number, id?: string, preview?: TopicTitlePreview, customName?: string): string {
     for (const [key, value] of this.titleSettings) if (value.expires < Date.now()) this.titleSettings.delete(key);
@@ -2753,6 +2833,21 @@ export class Bot {
         try { await this.handleTitleSettings(conv, cb); }
         catch (error) { await this.tg.sendMessage(conv, esc((error as Error).message),
           { reply_markup: { inline_keyboard: [[{ text: "Thiết lập tên", callback_data: "tc:open:group" }]] } }); }
+        return;
+      }
+      if (data.startsWith("sum:")) {
+        if (conv !== chatOf(conv)) { await this.tg.answerCallbackQuery(cb.id, "Xem tóm tắt trong General."); return; }
+        await this.tg.answerCallbackQuery(cb.id);
+        try {
+          const [, action, value] = data.split(":");
+          if (action === "show") await this.showSessionSummary(conv, cb.from!.id, value);
+          else if (action === "refresh") {
+            const card = this.summaryCards.get(value);
+            const link = card && this.topics.get(card.id);
+            if (!card || card.chat !== conv || card.user !== cb.from!.id || card.expires < Date.now() || !link || this.summaryBinding(link) !== card.binding) throw new Error("Thẻ tóm tắt hết hạn hoặc không thuộc bạn/nhóm/phiên này.");
+            await this.showSessionSummary(conv, cb.from!.id, card.id, true);
+          } else throw new Error("Nút tóm tắt không hợp lệ.");
+        } catch (error) { await this.tg.sendMessage(conv, esc((error as Error).message)); }
         return;
       }
       if (data.startsWith("pa:")) {

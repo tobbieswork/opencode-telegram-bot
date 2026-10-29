@@ -1,7 +1,8 @@
 # Đầu việc 3 — Quay lại phiên và tiếp tục công việc có xác nhận
 
-**Trạng thái:** chưa triển khai. **Thứ tự:** CV08 → CV09.
-**Điều kiện bắt đầu:** CV07 đã nghiệm thu; dùng dữ liệu hoạt động của CV04 trong
+**Trạng thái:** CV08 đã triển khai; CV09 chưa triển khai. **Thứ tự:** CV08 → CV09.
+**Điều kiện bắt đầu:** CV07 đạt kiểm thử tự động; nghiệm thu thiết bị/nhóm thật
+được giữ rõ ở CV15, chưa đánh dấu hoàn tất. Dùng dữ liệu hoạt động của CV04 trong
 [kế hoạch tổng](../plan-session-workflow-improvements.md).
 
 ## Mục tiêu và giới hạn
@@ -19,29 +20,47 @@ theo, hiển thị **Chưa có bước tiếp theo được ghi nhận**.
 
 ### Công việc
 
-- [ ] Thêm nút **Xem tóm tắt** trên thẻ phiên, bao gồm phiên đã đóng nếu còn
+- [x] Thêm nút **Xem tóm tắt** trên thẻ phiên, bao gồm phiên đã đóng nếu còn
   dữ liệu được phép xem; không tự khôi phục phiên để đọc.
-- [ ] Thiết kế module trình bày bản tóm tắt, vị trí dự kiến
+- [x] Thiết kế module trình bày bản tóm tắt, vị trí dự kiến
   `src/session-summary.ts`, nhận dữ liệu đã kiểm tra từ CV01/CV04 thay vì tự
   đọc toàn bộ trạng thái hoặc tự gọi các công cụ thực thi.
-- [ ] Hiển thị mục tiêu/yêu cầu gần nhất, kết quả đã quan sát, vướng mắc hoặc
+- [x] Hiển thị mục tiêu/yêu cầu gần nhất, kết quả đã quan sát, vướng mắc hoặc
   yêu cầu đang chờ, bước tiếp theo đã có trong dữ liệu, thời gian và nguồn.
-- [ ] Phân biệt kết quả đã xác minh với lời mô hình tự báo hoàn thành; không
+- [x] Phân biệt kết quả đã xác minh với lời mô hình tự báo hoàn thành; không
   suy ra đã sửa tệp/đã kiểm thử chỉ từ một câu trả lời nếu không có bằng chứng.
-- [ ] Với dữ liệu thiếu/cũ, cung cấp **Làm mới thông tin** có giới hạn số tin
+- [x] Với dữ liệu thiếu/cũ, cung cấp **Làm mới thông tin** có giới hạn số tin
   cần đọc và thời hạn. Không quét lịch sử mọi phiên hoặc gọi mô hình ngầm.
-- [ ] Gắn bản tóm tắt với mã phiên và mốc công việc. Ghi rõ nó có thể đã cũ
+- [x] Gắn bản tóm tắt với mã phiên và mốc công việc. Ghi rõ nó có thể đã cũ
   khi có đầu vào mới; không lấy thời gian mở thẻ làm mốc thực thi.
-- [ ] Chỉ hiển thị **Đến chủ đề**, **Làm mới** và hành động phù hợp vòng đời;
+- [x] Chỉ hiển thị **Đến chủ đề**, **Làm mới** và hành động phù hợp vòng đời;
   phiên đang chờ người dùng ưu tiên đường đến yêu cầu chờ.
 
 ### Kiểm thử và nghiệm thu
 
-- [ ] Phiên chưa có tin, dữ liệu cũ, đang chạy, đang chờ, đã đóng và cần can
+- [x] Phiên chưa có tin, dữ liệu cũ, đang chạy, đang chờ, đã đóng và cần can
   thiệp đều có mô tả trung thực, không bịa kết quả hoặc bước tiếp theo.
-- [ ] Xem và làm mới không gửi yêu cầu, chiếm chỗ, sửa hướng dẫn hoặc đổi mốc
+- [x] Xem và làm mới không gửi yêu cầu, chiếm chỗ, sửa hướng dẫn hoặc đổi mốc
   chuyển tiếp phản hồi `lastRelayedTime`.
-- [ ] Nội dung dài/HTML/ký tự đặc biệt an toàn; không dùng dữ liệu khác nhóm.
+- [x] Nội dung dài/HTML/ký tự đặc biệt an toàn; không dùng dữ liệu khác nhóm.
+
+`src/session-summary.ts` là module thuần nhận hàng đã kiểm tra của bảng điều
+khiển, không có cổng thực thi. Bản tóm tắt lấy đoạn yêu cầu/kết quả CV04, không
+lấy `WorkerInfo.task` hoặc câu tự báo hoàn thành làm bằng chứng đã kiểm thử.
+Chưa có dữ liệu bước tiếp theo thì nói rõ chưa có, không gọi mô hình suy luận.
+
+**Làm mới thông tin** chỉ đọc phiên được chọn: metadata, tối đa 40 tin giảm
+dần và trạng thái/câu hỏi/quyền từ mô hình đọc CV01. Lịch sử có hạn 3 giây;
+trạng thái có hạn hiện có 8 giây. Gộp yêu cầu cùng liên kết, giữ khoảng cách
+5 giây cho các lần bấm liên tục; bộ nhớ tối đa 1000 liên kết. Không quét lịch
+sử mọi phiên. Đọc được phiên đã đóng nếu sở hữu/danh tính hợp lệ, không đổi
+trạng thái lưu trữ hay mở chủ đề. Kết quả trả muộn không ghi đè mốc mới hơn.
+
+Thẻ đọc có người sở hữu, nhóm, liên kết/danh tính và thời hạn 10 phút. Mốc công
+việc lấy từ hoạt động và nội dung đã quan sát, không từ thời điểm mở thẻ. Chỉ
+cập nhật bản ghi hoạt động phụ; không đổi dung lượng, hướng dẫn, câu trả lời,
+lượt nhắc hoặc `lastRelayedTime`. Nguồn lỗi hoặc thiếu ranh giới đầu vào vẫn
+hiển thị chưa rõ; không chuyển thành đã hoàn tất.
 
 **Tệp liên quan:** `src/bot.ts`, `src/state.ts`, `src/opencode.ts`, module đọc
 bảng điều khiển. Kiểm thử dự kiến: `scripts/test-session-summary.ts`.
