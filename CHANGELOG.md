@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.4.0...opencode-telegram-bot-v1.4.1) (2026-10-29)
+
+
+### Bug Fixes
+
+* graceful shutdown drains in-flight turns before exit on restart ([#82](https://github.com/tobbieswork/opencode-telegram-bot/issues/82)) ([74ba3d7](https://github.com/tobbieswork/opencode-telegram-bot/commit/74ba3d75e3aedf1c2d52a0fb31dadcca4e5f9862))
+
 ## [1.4.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.3.5...opencode-telegram-bot-v1.4.0) (2026-10-29)
 
 
