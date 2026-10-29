@@ -44,9 +44,11 @@ import type { Btn, Keyboard } from "./shared.js";
 import { cmdAgents, cmdAgent, handleAgentCallback } from "./commands/agents.js";
 import { cmdSchedule, handleScheduleCallback } from "./commands/schedule.js";
 import { cmdNode, MacNode } from "./node/mac-node.js";
+import { Advisor } from "./node/advisor.js";
 import type { NodeDone } from "./node/node-github.js";
 import { cmdHelp, cmdStatus, cmdContext, cmdUsage, cmdHistory, cmdNote, handleNoteCallback } from "./commands/meta.js";
 import { cmdBtw } from "./btw.js";
+import { cmdAsk } from "./ask.js";
 
 /** The message carries media (sticker/photo/video/voice/…) — used to acknowledge non-text input. */
 function hasNonTextContent(m: Message): boolean {
@@ -243,6 +245,8 @@ export class Bot {
   private scheduler?: Scheduler;
   /** Mac node poller — public because cmdNode (node/mac-node.ts) reads it. */
   public node?: MacNode;
+  /** Claude advisor (topic + Claude session on the Mac) — present only when enabled. */
+  public advisor?: Advisor;
 
   constructor(
     public tg: Telegram,
@@ -256,12 +260,19 @@ export class Bot {
       join(dirname(this.cfg.stateFile), "schedules.json"),
       this.cfg.maxSchedules,
     );
+    if (this.cfg.advisor) {
+      this.advisor = new Advisor(
+        { tg, st, cfg, sendHtml: (c, h) => this.sendHtml(c, h), startTyping: (c) => this.startTyping(c) },
+        { url: this.cfg.advisorUrl, token: this.cfg.advisorToken },
+      );
+    }
     this.orch = new Orchestrator({
       tg,
       oc,
       st,
       cfg,
       busyNotes: this.busyNotes,
+      advisor: this.advisor,
       sendHtml: (conv, html, opts) => this.sendHtml(conv, html, opts),
       applyModelAndVariant: (sid, state) => this.applyModelAndVariant(sid, state),
       prepareNotes: (conv, sid) => this.prepareNotesTurn(conv, sid),
@@ -673,7 +684,7 @@ export class Bot {
     // "got it" 🤔 when a real prompt (not a command) starts a turn.
     if (msg.message_id) this.indexUserMessage(conv, msg.message_id, text);
     const state = this.st.get(conv);
-    if (!state.directory) {
+    if (!state.directory && !state.advisor) {
       // A topic the user opened by hand starts where the chat's main session works
       // (unless that is the Manager, whose folder is not a project).
       const top = this.st.peek(chatOf(conv));
@@ -681,6 +692,11 @@ export class Bot {
     }
 
     if (text.startsWith("/")) await this.handleCommand(conv, text, state, uid);
+    else if (state.advisor && this.advisor) {
+      // A Claude advisor thread: the user's message is a follow-up question
+      // (resumes the session on the Mac). No OpenCode session is involved here.
+      await this.advisor.followUp(conv, text);
+    }
     else {
       // (The "🤔 thinking" body-react on the user's message was removed 2026-10-27:
       // the working indicator now covers "the bot is working" on new prompts.)
@@ -1500,6 +1516,8 @@ export class Bot {
         return cmdNote(this, conv, arg);
       case "/btw":
         return cmdBtw(this, conv, state, arg);
+      case "/ask":
+        return cmdAsk(this, conv, arg);
       case "/schedule":
         return cmdSchedule(this, conv, arg, state, uid);
       case "/node":

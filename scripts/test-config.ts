@@ -70,6 +70,25 @@ check("uptimeThresholdDays valid respected (45)", custom.uptimeThresholdDays ===
 check("uptimeRemindIntervalDays valid respected (7)", custom.uptimeRemindIntervalDays === 7, String(custom.uptimeRemindIntervalDays));
 check("rebootDelayMs valid respected (30000)", custom.rebootDelayMs === 30000, String(custom.rebootDelayMs));
 
+// advisor URL: scheme normalization (bare host:port gains http://; full URLs kept).
+delete process.env.MAC_ADVISOR_URL;
+delete process.env.MAC_ADVISOR_TOKEN;
+const advOff = loadConfig(process.cwd());
+check("advisor OFF when no MAC_ADVISOR_URL", advOff.advisor === false, String(advOff.advisor));
+process.env.MAC_ADVISOR_URL = "100.75.153.113:8391";
+process.env.MAC_ADVISOR_TOKEN = "tok";
+const advBare = loadConfig(process.cwd());
+check("bare MAC_ADVISOR_URL gains http://", advBare.advisorUrl === "http://100.75.153.113:8391", advBare.advisorUrl);
+check("advisor ON with url+token", advBare.advisor === true, String(advBare.advisor));
+process.env.MAC_ADVISOR_URL = "https://mac.tail:8391";
+const advFull = loadConfig(process.cwd());
+check("full MAC_ADVISOR_URL kept", advFull.advisorUrl === "https://mac.tail:8391", advFull.advisorUrl);
+process.env.MAC_ADVISOR_URL = "";
+const advEmpty = loadConfig(process.cwd());
+check("advisor OFF when url empty", advEmpty.advisor === false, String(advEmpty.advisor));
+delete process.env.MAC_ADVISOR_URL;
+delete process.env.MAC_ADVISOR_TOKEN;
+
 process.env.OPENCODE_TG_UPTIME_THRESHOLD_DAYS = "abc";
 process.env.OPENCODE_TG_REBOOT_DELAY_MS = "100"; // below min 1000
 const uptimeBad = loadConfig(process.cwd());

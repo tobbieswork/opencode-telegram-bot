@@ -59,6 +59,23 @@ export interface WorkerInfo {
 }
 
 /**
+ * A Claude advisor thread: one forum topic bound to one Claude session on the
+ * Mac (reached over Tailscale). Unlike a worker, it has NO OpenCode sessionID —
+ * the "session" is the Claude CLI session on the Mac (resumed via --resume). Pure
+ * advice: it answers the Manager/user's questions, it does not run code.
+ */
+export interface AdvisorInfo {
+  /** The thread's display title (a short form of the question). */
+  title: string;
+  /** The Claude session id on the Mac ("" until the first answer returns). */
+  sessionId: string;
+  /** Number of /ask exchanges in this session (drives the per-session turn cap). */
+  turns: number;
+  lastActive: number;
+  createdAt: number;
+}
+
+/**
  * A pending question-form or permission the user hasn't answered yet, with the
  * bookkeeping for the exponential-backoff reminder nudges (see cfg.remind*). The
  * actual prompt lives in OpenCode; this is only the bot's reminder schedule. It
@@ -126,6 +143,8 @@ export interface ChatState {
   notesStage?: "pending" | "shown";
   /** Present when this conversation is a worker topic. */
   worker?: WorkerInfo;
+  /** Present when this conversation is a Claude advisor thread topic. */
+  advisor?: AdvisorInfo;
   /**
    * True when this conversation's Telegram topic was deleted in the UI and its
    * purge is still pending — the worker was running/waiting so the purge was
