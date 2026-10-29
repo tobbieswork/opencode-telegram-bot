@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.3.0...opencode-telegram-bot-v1.3.1) (2026-10-29)
+
+
+### Bug Fixes
+
+* **node:** sửa install.sh của Mac node daemon (REPO_ROOT sai) + hardening ([#69](https://github.com/tobbieswork/opencode-telegram-bot/issues/69)) ([478e478](https://github.com/tobbieswork/opencode-telegram-bot/commit/478e47808d903d73e8fca16fdb634c6fab5c10ca))
+
 ## [1.3.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.2.5...opencode-telegram-bot-v1.3.0) (2026-10-29)
 
 
