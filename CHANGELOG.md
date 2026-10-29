@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.2.1...opencode-telegram-bot-v1.2.2) (2026-10-29)
+
+
+### Bug Fixes
+
+* **release:** trigger no-op via PATCH /git/refs/heads/{branch} ([#59](https://github.com/tobbieswork/opencode-telegram-bot/issues/59)) ([055df8b](https://github.com/tobbieswork/opencode-telegram-bot/commit/055df8b998ab7704a27d1bcfe6cd5b7a924d2b70))
+
 ## [1.2.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.2.0...opencode-telegram-bot-v1.2.1) (2026-10-28)
 
 
