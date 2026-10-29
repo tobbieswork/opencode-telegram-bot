@@ -11,6 +11,12 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 command -v node >/dev/null || { echo "✗ node không có trong PATH (cần Node >= 20)"; exit 1; }
 NODE_BIN="$(command -v node)"
+case "$NODE_BIN" in
+  *fnm_multishells*)
+    echo "⚠ node đang ở đường dẫn tạm của fnm ($NODE_BIN) — sẽ hỏng khi phiên shell/thư mục này mất."
+    echo "  Sửa: PATH=\"\$HOME/.local/share/fnm/node-versions/<phiên bản>/installation/bin:\$PATH\" ./install.sh"
+    ;;
+esac
 [ "$("$NODE_BIN" -p 'process.versions.node.split(".")[0]')" -ge 20 ] || { echo "✗ Node $("$NODE_BIN" -v) quá cũ (cần >= 20)"; exit 1; }
 [ -d "$REPO_ROOT/node_modules" ] || { echo "npm ci…"; (cd "$REPO_ROOT" && npm ci --no-fund --no-audit); }
 TSX_BIN="$REPO_ROOT/node_modules/.bin/tsx"
