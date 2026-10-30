@@ -162,6 +162,22 @@ export interface Config {
   advisorMaxTurnsPerSession: number;
   /** An advisor thread idle this long is treated as closed (mirrors the Mac TTL). */
   advisorIdleTtlMs: number;
+  /**
+   * Manager rotation (M3): auto-rotate the Manager's session to a fresh one when
+   * its context FLOOR (min sent-context over 24h) drifts above this — in
+   * thousands of tokens, no confirm. Default 110K. See src/rotation.ts.
+   */
+  rotationAutoFloorK: number;
+  /**
+   * Manager rotation (M3): when the floor is above this (and below the auto
+   * threshold) and the Manager is idle, offer a one-time confirm button instead
+   * of auto-rotating. Thousands of tokens. Default 90K.
+   */
+  rotationConfirmFloorK: number;
+  /** Manager rotation (M3): minimum gap between two rotations (idempotency), ms. */
+  rotationMinIntervalMs: number;
+  /** Manager rotation (M3): don't re-offer the confirm more often than this, ms. */
+  rotationConfirmRepromptMs: number;
 }
 
 export function loadConfig(root: string): Config {
@@ -250,6 +266,12 @@ export function loadConfig(root: string): Config {
     advisor: Boolean(process.env.MAC_ADVISOR_URL?.trim() && process.env.MAC_ADVISOR_TOKEN?.trim()),
     advisorMaxTurnsPerSession: parseIntSetting("MAC_ADVISOR_MAX_TURNS_PER_SESSION", 10, 1),
     advisorIdleTtlMs: parseIntSetting("MAC_ADVISOR_IDLE_TTL_MS", 24 * 3600 * 1000, 1),
+    // --- Manager rotation (floor-driven; see src/rotation.ts) ---
+    // Floor thresholds in thousands of tokens; intervals env in hours → ms.
+    rotationAutoFloorK: parseIntSetting("OPENCODE_TG_ROTATION_AUTO_FLOOR_K", 110, 1),
+    rotationConfirmFloorK: parseIntSetting("OPENCODE_TG_ROTATION_CONFIRM_FLOOR_K", 90, 1),
+    rotationMinIntervalMs: parseIntSetting("OPENCODE_TG_ROTATION_MIN_INTERVAL_H", 24, 1) * 3600_000,
+    rotationConfirmRepromptMs: parseIntSetting("OPENCODE_TG_ROTATION_CONFIRM_REPROMPT_H", 12, 1) * 3600_000,
   };
   const agent = process.env.OPENCODE_DEFAULT_AGENT?.trim();
   if (agent) cfg.defaultAgent = agent;

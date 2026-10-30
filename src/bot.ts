@@ -49,6 +49,7 @@ import type { NodeDone } from "./node/node-github.js";
 import { cmdHelp, cmdStatus, cmdContext, cmdUsage, cmdHistory, cmdNote, handleNoteCallback } from "./commands/meta.js";
 import { cmdBtw } from "./btw.js";
 import { cmdAsk } from "./ask.js";
+import { managerFloorFromMessages, runRotationHandoff, rotationGate } from "./rotation.js";
 
 /** The message carries media (sticker/photo/video/voice/…) — used to acknowledge non-text input. */
 function hasNonTextContent(m: Message): boolean {
@@ -230,6 +231,7 @@ export class Bot {
   private reminders = new Map<string, ReturnType<typeof setTimeout>>();
   private uptimeTimer?: ReturnType<typeof setInterval>;
   private prWatchTimer?: ReturnType<typeof setInterval>;
+  private rotationTimer?: ReturnType<typeof setInterval>;
   /** True while a PR-watch tick is running, so a slow tick can't overlap the next. */
   private prWatchBusy = false;
   /** A reboot is already armed (token minted, timer pending) — ignores a double-tap on "Xác nhận". */
@@ -400,6 +402,10 @@ export class Bot {
     // Post one line per new PR event (merged / comment / CI / review) on the
     // watched GitHub repo. Default OFF; see cfg.prWatch*.
     this.startPrWatchMonitor();
+    // Rotate the Manager's session to a fresh one when its context floor drifts
+    // high (see src/rotation.ts). Runs every 10 min; no-op until a manager conv
+    // crosses a threshold.
+    this.startRotationMonitor();
   }
 
   /** Stop the /schedule tick engine (called from index.ts during shutdown). */
@@ -1890,6 +1896,167 @@ export class Bot {
     );
   }
 
+  /**
+   * M1 — the manager session's FLOOR: the MIN sent-context (input + cache.read)
+   * across its assistant messages from the last 24h. 0 when there are none (a
+   * fresh session). Drives the auto-rotation trigger and the /status floor line.
+   * Never throws — a read failure just reports no floor (0).
+   */
+  async managerFloor(sessionID: string, now = Date.now()): Promise<number> {
+    const msgs = (await this.oc.listMessages(sessionID, 700).catch(() => [] as any[])) as any[];
+    return managerFloorFromMessages(msgs, now);
+  }
+
+  /**
+   * M2 — the handoff pass on the OLD manager session: prompt it to save its
+   * persistent state (memory + notes) and return a ≤300-word handoff brief.
+   * Never throws — a failed/interrupted pass just returns "" (the rotation can
+   * still proceed on memory + notes alone).
+   */
+  async rotateHandoff(sessionID: string, dir: string): Promise<string> {
+    return runRotationHandoff(sessionID, dir, {
+      prompt: async (sid, text) => ({ reply: (await this.oc.promptAndWait(sid, text)).reply ?? "" }),
+    });
+  }
+
+  /**
+   * M3 — start the rotation sweep: every 10 min, measure each manager conv's
+   * floor and apply the two-tier trigger. No-op until a manager conv crosses a
+   * threshold. Unref'd (the process is long-lived; shutdown is guarded by
+   * `this.draining` inside the tick). See src/rotation.ts.
+   */
+  private startRotationMonitor(): void {
+    this.rotationTimer = setInterval(() => {
+      for (const [conv, state] of Object.entries(this.st.all())) {
+        if (state.manager && state.sessionID) {
+          void this.checkManagerRotation(conv).catch((e) => warn("manager rotation:", e?.message));
+        }
+      }
+    }, 10 * 60_000);
+    this.rotationTimer.unref?.();
+  }
+
+  /**
+   * M3 — one rotation tick for a manager conv: measure the floor, run the
+   * two-tier gate, act on it. Auto → rotate now + notify; confirm → offer a
+   * one-time confirm button (throttled); defer/idle → nothing this tick.
+   */
+  private async checkManagerRotation(conv: ConvKey): Promise<void> {
+    if (this.draining) return;
+    const state = this.st.peek(conv);
+    if (!state?.manager || !state.sessionID) return;
+    const floor = await this.managerFloor(state.sessionID).catch(() => 0);
+    const floorK = floor / 1000;
+    const action = rotationGate({
+      floorK,
+      // Busy = an in-band turn (inflight) OR an OUT-OF-BAND manager turn (a
+      // schedule task / background wake on the manager session) tracked only in
+      // orch.managerInflight. Matches the shutdown drain's authoritative check
+      // (isBusy below); omitting it could rotate mid-turn and interrupt it.
+      busy: this.inflight.has(conv) || this.orch.managerInflight,
+      nowMs: Date.now(),
+      lastRotationMs: state.lastRotationMs,
+      lastRotationPromptMs: state.lastRotationPromptMs,
+      autoFloorK: this.cfg.rotationAutoFloorK,
+      confirmFloorK: this.cfg.rotationConfirmFloorK,
+      minIntervalMs: this.cfg.rotationMinIntervalMs,
+      confirmRepromptMs: this.cfg.rotationConfirmRepromptMs,
+    });
+    if (action === "auto") {
+      await this.doManagerRotation(conv, "auto", floorK);
+    } else if (action === "confirm") {
+      // Throttle the re-prompt (the gate already checked, but stamp here so a
+      // confirm is never re-offered more often than the interval, even if the
+      // floor is still high on the very next tick).
+      this.st.set(conv, { lastRotationPromptMs: Date.now() });
+      await this.sendRotationConfirm(conv, floorK);
+    }
+  }
+
+  /**
+   * M3 — actually rotate the manager: hand off (M2 — save memory + notes, get a
+   * brief), create a fresh session, inject the brief as carry-over, update
+   * state, notify. Never throws (a failure is reported, the old session kept).
+   */
+  private async doManagerRotation(conv: ConvKey, mode: "auto" | "confirm", floorK: number): Promise<void> {
+    const state = this.st.get(conv);
+    const oldSID = state.sessionID;
+    if (!oldSID) return;
+    const dir = state.directory || this.cfg.opencodeDirectory;
+    const how = mode === "auto" ? "tự động (nền đã cao)" : "theo yêu cầu của bạn";
+    await this.tg.sendMessage(conv, `🔄 Đang xoay phiên Manager (nền ~${Math.round(floorK)}K, ${how}) — tóm tắt + tạo phiên mới…`);
+    try {
+      const brief = await this.rotateHandoff(oldSID, dir);
+      await this.stopCurrent(conv, true);
+      this.cancelAllReminders(conv);
+      const sessionID = await this.oc.createSession(dir);
+      await this.applyModelAndVariant(sessionID, state);
+      if (state.agent) await this.oc.setAgent(sessionID, state.agent).catch((e) => warn("rotation setAgent:", e?.message));
+      if (brief) {
+        await this.oc
+          .setInstruction(
+            sessionID,
+            CARRYOVER_KEY,
+            `Bạn đang tiếp tục từ một phiên Manager đã bị xoay (nền cũ ~${Math.round(floorK)}K). Brief bàn giao từ phiên cũ:\n${brief}\nTiếp tục từ đây — memory + notes đã giữ các thực tế quan trọng.`,
+          )
+          .catch((e) => warn("rotation brief:", (e as Error).message));
+      }
+      const now = Date.now();
+      this.st.set(conv, {
+        sessionID,
+        directory: dir,
+        lastRotationMs: now,
+        lastRotationSID: oldSID,
+        lastRotationFloor: Math.round(floorK),
+        lastRotationPromptMs: undefined,
+      });
+      await this.tg.sendMessage(
+        conv,
+        `✅ Đã xoay Manager → session mới <code>${esc(sessionID)}</code>\nDir: <code>${esc(dir)}</code>\n${brief ? `📝 Brief: ${brief.split(/\s+/).length} từ` : "📝 (phiên cũ trống)"}`,
+      );
+      log(`manager rotation (${mode}) conv=${conv} ${oldSID} → ${sessionID} floor=${Math.round(floorK)}K brief=${brief ? brief.length : 0}ch`);
+    } catch (e) {
+      warn("manager rotation failed (old session kept):", (e as Error)?.message ?? e);
+      await this.tg.sendMessage(conv, `⚠️ Xoay phiên Manager thất bại — phiên cũ vẫn giữ nguyên.`).catch(() => {});
+    }
+  }
+
+  /** M3 — the one-time confirm (two-tier, L1): offer rotate / keep-old buttons. */
+  private async sendRotationConfirm(conv: ConvKey, floorK: number): Promise<void> {
+    await this.tg.sendMessage(
+      conv,
+      `🧹 Session Manager đang gần hết chỗ trống — nền (sau summarization) đã lên ~${Math.round(floorK)}K.\n\nĐề xuất: xoay sang phiên mới, giữ lại <b>memory + notes</b> cộng thêm một brief ngắn. Muốn xoay ngay?`,
+      {
+        reply_markup: {
+          inline_keyboard: [[{ text: "🔄 Xoay ngay", callback_data: "rot:cf" }, { text: "↩️ Giữ phiên cũ", callback_data: "rot:cx" }]],
+        },
+      },
+    );
+  }
+
+  /** M3 — rot:cf / rot:cx — confirm or cancel a manager rotation offer. */
+  private async handleRotationCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+    const op = (cb.data ?? "").split(":")[1];
+    if (op === "cx") {
+      await this.tg.answerCallbackQuery(cb.id, "↩️ Đã huỷ");
+      if (messageId) {
+        await this.tg
+          .editMessageText(conv, messageId, "↩️ Đã huỷ — phiên Manager giữ nguyên.", { reply_markup: { inline_keyboard: [] } })
+          .catch(() => {});
+      }
+      return;
+    }
+    if (op !== "cf") return;
+    const sid = this.st.peek(conv)?.sessionID;
+    if (!sid) {
+      await this.tg.answerCallbackQuery(cb.id, "Không có session để xoay");
+      return;
+    }
+    await this.tg.answerCallbackQuery(cb.id, "🔄 Đang xoay…");
+    const floor = await this.managerFloor(sid).catch(() => 0);
+    await this.doManagerRotation(conv, "confirm", floor / 1000);
+  }
+
   /** Actually create the fresh session (cmdNew --keep, or the nw:cf confirm button). */
   private async doNewSession(conv: ConvKey, state: ChatState, keep: boolean): Promise<void> {
     // --keep: capture a short handoff summary of the CURRENT session before
@@ -2222,6 +2389,10 @@ export class Bot {
     }
     if (data.startsWith("reboot:")) {
       await this.handleRebootCallback(cb, conv, messageId);
+      return;
+    }
+    if (data.startsWith("rot:")) {
+      await this.handleRotationCallback(cb, conv, messageId);
       return;
     }
     if (data.startsWith("nw:")) {
