@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "
 import { dirname } from "node:path";
 import { ConvKey, chatOf } from "./conv.js";
 import type { PrSnapshot } from "./pr-watch.js";
+import type { RotationHistoryEntry, FloorTrendEntry } from "./rotation-health.js";
 
 export interface ModelRef {
   id: string;
@@ -168,6 +169,19 @@ export interface ChatState {
   lastRotationFloor?: number;
   /** epoch ms of the last manager-rotation CONFIRM shown/dismissed (avoids re-prompting every tick). */
   lastRotationPromptMs?: number;
+  /**
+   * Part 1 (rotation tracking): the manager's recent rotation attempts, newest
+   * last. Capped at ROTATION_HISTORY_CAP (oldest dropped). PERSISTED (survives a
+   * restart) so the /rotation report and the durability snapshot keep their
+   * history. See src/rotation-health.ts.
+   */
+  rotationHistory?: RotationHistoryEntry[];
+  /**
+   * Part 1 (rotation tracking): the manager's context floor (K) per local day
+   * (YYYY-MM-DD), min/max of the ticks that day. Capped at FLOOR_TREND_DAYS
+   * (oldest pruned). PERSISTED. Gives a 7-day floor trend. See rotation-health.ts.
+   */
+  floorTrend?: FloorTrendEntry[];
   /**
    * MACHINE-WIDE (only ever written on the reserved MACHINE_STATE_KEY entry):
    * when we last sent the reboot reminder, in epoch ms. Drives the snooze
