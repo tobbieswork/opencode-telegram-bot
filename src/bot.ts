@@ -49,7 +49,7 @@ import type { NodeDone } from "./node/node-github.js";
 import { cmdHelp, cmdStatus, cmdContext, cmdUsage, cmdHistory, cmdNote, handleNoteCallback } from "./commands/meta.js";
 import { cmdBtw } from "./btw.js";
 import { cmdAsk } from "./ask.js";
-import { managerFloorFromMessages } from "./rotation.js";
+import { managerFloorFromMessages, runRotationHandoff } from "./rotation.js";
 
 /** The message carries media (sticker/photo/video/voice/…) — used to acknowledge non-text input. */
 function hasNonTextContent(m: Message): boolean {
@@ -1900,6 +1900,18 @@ export class Bot {
   async managerFloor(sessionID: string, now = Date.now()): Promise<number> {
     const msgs = (await this.oc.listMessages(sessionID, 700).catch(() => [] as any[])) as any[];
     return managerFloorFromMessages(msgs, now);
+  }
+
+  /**
+   * M2 — the handoff pass on the OLD manager session: prompt it to save its
+   * persistent state (memory + notes) and return a ≤300-word handoff brief.
+   * Never throws — a failed/interrupted pass just returns "" (the rotation can
+   * still proceed on memory + notes alone).
+   */
+  async rotateHandoff(sessionID: string, dir: string): Promise<string> {
+    return runRotationHandoff(sessionID, dir, {
+      prompt: async (sid, text) => ({ reply: (await this.oc.promptAndWait(sid, text)).reply ?? "" }),
+    });
   }
 
   /** Actually create the fresh session (cmdNew --keep, or the nw:cf confirm button). */

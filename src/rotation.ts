@@ -72,3 +72,75 @@ export function managerFloorFromMessages(
   }
   return Number.isFinite(min) ? min : 0;
 }
+
+// ── M2: handoff pass ─────────────────────────────────────────────────────────
+
+/** Max words for the handoff brief the old manager returns. */
+export const HANDOFF_BRIEF_WORDS = 300;
+/** Per-session instruction key carrying the handoff brief into the NEW session. */
+export const ROTATION_KEY = "tgbot.rotation";
+
+/** The handoff brief carried into a fresh manager session (instruction entry). */
+export interface RotationBrief {
+  /** The session id the fresh one replaces. */
+  rotatedFrom: string;
+  /** epoch ms the rotation happened. */
+  rotatedAt: number;
+  /** The old manager's handoff brief (≤ HANDOFF_BRIEF_WORDS words). */
+  brief: string;
+}
+
+/** Trim `s` and normalize whitespace to single spaces, keeping at most `max` words. */
+export function capWords(s: string, max: number): string {
+  return s.trim().split(/\s+/).slice(0, max).join(" ");
+}
+
+/**
+ * The handoff instruction, sent as a prompt to the OLD manager session. Two
+ * directives: (1) save what must not be lost into the manager's OWN persistent
+ * store (Magic Context memories + notes — inherited by the new session),
+ * (2) reply with a short handoff brief. The brief is what the fresh manager
+ * reads first; memories/notes persist regardless, so the handoff degrades
+ * gracefully if the old session dies mid-pass.
+ */
+export function rotationInstruction(dir: string, briefWords = HANDOFF_BRIEF_WORDS): string {
+  return (
+    "[Rotation handoff] This manager session is about to be replaced by a fresh one. " +
+    "Before you reply: (1) save anything that must not be lost into your own persistent " +
+    "memory (ctx_memory) and notes (ctx_note) — architectural facts, config values, " +
+    "constraints, pending intentions; the new session inherits these automatically. " +
+    `Then reply with a handoff brief of at most ${briefWords} words covering: ` +
+    `(a) the working directory ${dir} and the current git branch, ` +
+    "(b) current task state — what is done vs still pending, " +
+    "(c) recent decisions and their reasoning, " +
+    "(d) open questions or risks. " +
+    "Be concise and factual — it is the first thing the replacement session reads."
+  );
+}
+
+/** I/O seam for runRotationHandoff: the only network call it makes. */
+export interface RotationHandoffDeps {
+  /** Prompt the OLD session, block until idle, return its reply text. */
+  prompt: (sessionID: string, text: string) => Promise<{ reply: string }>;
+}
+
+/**
+ * Run the handoff pass on the OLD manager session and return the (capped)
+ * brief. Returns "" when the old session yields no brief (interrupted / call
+ * failed) — the rotation still proceeds, because memory + notes already carry
+ * the durable state.
+ */
+export async function runRotationHandoff(
+  oldSID: string,
+  dir: string,
+  deps: RotationHandoffDeps,
+  briefWords = HANDOFF_BRIEF_WORDS,
+): Promise<string> {
+  let reply = "";
+  try {
+    reply = (await deps.prompt(oldSID, rotationInstruction(dir, briefWords))).reply;
+  } catch {
+    /* old session error/interrupt — degrade: rely on memory + notes */
+  }
+  return capWords(reply, briefWords);
+}
