@@ -79,6 +79,7 @@ export const COMMANDS: BotCommand[] = [
   { cmd: "ask", arg: "[claude|gemini] <câu hỏi>", desc: "Hỏi cố vấn Claude/Gemini — topic riêng, hỏi tiếp được", group: "control" },
   { cmd: "context", aliases: ["ctx"], desc: "Ảnh chụp phiên hiện tại (usage + files)", button: "📸 Context", group: "control" },
   { cmd: "usage", desc: "Mức dùng context theo phiên + cảnh báo gần tràn", button: "📊 Usage", group: "control" },
+  { cmd: "rotation", desc: "Sức khoẻ xoay phiên Manager (nền + lịch sử)", button: "♻️ Rotation", group: "control" },
   { cmd: "history", desc: "Xem tin nhắn gần đây", button: "📜 Lịch sử", group: "control" },
   { cmd: "status", desc: "Trạng thái kết nối", button: "🔌 Trạng thái", group: "control" },
   { cmd: "reboot", desc: "Reboot máy (2 bước xác nhận)", button: "🔄 Reboot", group: "control" },

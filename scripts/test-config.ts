@@ -168,5 +168,39 @@ check("scheduleTimeoutMs NaN → default 30min", schedBad.scheduleTimeoutMs === 
 check("scheduleTz invalid → fallback (not the garbage)", schedBad.scheduleTz.length > 0 && schedBad.scheduleTz !== "Not/AZone", String(schedBad.scheduleTz));
 delete process.env.OPENCODE_TG_TIMEZONE;
 
+// --- manager rotation knobs: floor thresholds (K) + intervals (h→ms) --------
+// Defaults: auto 110K, confirm 90K, min interval 24h, confirm re-prompt 12h.
+// NaN/garbage falls back to the defaults; valid values are respected.
+{
+  const base = loadConfig(process.cwd());
+  check("rotationAutoFloorK default 110", base.rotationAutoFloorK === 110, String(base.rotationAutoFloorK));
+  check("rotationConfirmFloorK default 90", base.rotationConfirmFloorK === 90, String(base.rotationConfirmFloorK));
+  check("rotationMinIntervalMs default 24h", base.rotationMinIntervalMs === 24 * 3600_000, String(base.rotationMinIntervalMs));
+  check("rotationConfirmRepromptMs default 12h", base.rotationConfirmRepromptMs === 12 * 3600_000, String(base.rotationConfirmRepromptMs));
+
+  // valid values respected
+  process.env.OPENCODE_TG_ROTATION_AUTO_FLOOR_K = "120";
+  process.env.OPENCODE_TG_ROTATION_CONFIRM_FLOOR_K = "100";
+  process.env.OPENCODE_TG_ROTATION_MIN_INTERVAL_H = "48";
+  process.env.OPENCODE_TG_ROTATION_CONFIRM_REPROMPT_H = "6";
+  const good = loadConfig(process.cwd());
+  check("rotationAutoFloorK valid respected (120)", good.rotationAutoFloorK === 120, String(good.rotationAutoFloorK));
+  check("rotationConfirmFloorK valid respected (100)", good.rotationConfirmFloorK === 100, String(good.rotationConfirmFloorK));
+  check("rotationMinIntervalMs valid (48h)", good.rotationMinIntervalMs === 48 * 3600_000, String(good.rotationMinIntervalMs));
+  check("rotationConfirmRepromptMs valid (6h)", good.rotationConfirmRepromptMs === 6 * 3600_000, String(good.rotationConfirmRepromptMs));
+
+  // garbage → fallback to defaults (never NaN)
+  process.env.OPENCODE_TG_ROTATION_AUTO_FLOOR_K = "abc";
+  process.env.OPENCODE_TG_ROTATION_CONFIRM_FLOOR_K = "xyz";
+  process.env.OPENCODE_TG_ROTATION_MIN_INTERVAL_H = "nope";
+  process.env.OPENCODE_TG_ROTATION_CONFIRM_REPROMPT_H = "??";
+  const bad = loadConfig(process.cwd());
+  check("rotationAutoFloorK NaN → 110", bad.rotationAutoFloorK === 110, String(bad.rotationAutoFloorK));
+  check("rotationConfirmFloorK NaN → 90", bad.rotationConfirmFloorK === 90, String(bad.rotationConfirmFloorK));
+  check("rotationMinIntervalMs NaN → 24h", bad.rotationMinIntervalMs === 24 * 3600_000, String(bad.rotationMinIntervalMs));
+  check("rotationConfirmRepromptMs NaN → 12h", bad.rotationConfirmRepromptMs === 12 * 3600_000, String(bad.rotationConfirmRepromptMs));
+  for (const k of ["OPENCODE_TG_ROTATION_AUTO_FLOOR_K", "OPENCODE_TG_ROTATION_CONFIRM_FLOOR_K", "OPENCODE_TG_ROTATION_MIN_INTERVAL_H", "OPENCODE_TG_ROTATION_CONFIRM_REPROMPT_H"]) delete process.env[k];
+}
+
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
