@@ -46,10 +46,20 @@ import { cmdSchedule, handleScheduleCallback } from "./commands/schedule.js";
 import { cmdNode, MacNode } from "./node/mac-node.js";
 import { Advisor } from "./node/advisor.js";
 import type { NodeDone } from "./node/node-github.js";
-import { cmdHelp, cmdStatus, cmdContext, cmdUsage, cmdHistory, cmdNote, handleNoteCallback } from "./commands/meta.js";
+import { cmdHelp, cmdStatus, cmdContext, cmdUsage, cmdHistory, cmdNote, cmdRotation, handleNoteCallback } from "./commands/meta.js";
 import { cmdBtw } from "./btw.js";
 import { cmdAsk } from "./ask.js";
 import { managerFloorFromMessages, runRotationHandoff, rotationGate } from "./rotation.js";
+import {
+  rotationHealthPath,
+  writeRotationHealth,
+  readRotationHealth,
+  buildRotationSnapshot,
+  appendRotationHistory,
+  dayKey,
+  upsertFloorTrend,
+} from "./rotation-health.js";
+import type { RotationHealthSnapshot } from "./rotation-health.js";
 
 /** The message carries media (sticker/photo/video/voice/…) — used to acknowledge non-text input. */
 function hasNonTextContent(m: Message): boolean {
@@ -1596,6 +1606,8 @@ export class Bot {
         return cmdUsage(this, conv, arg);
       case "/history":
         return cmdHistory(this, conv, state);
+      case "/rotation":
+        return cmdRotation(this, conv);
       case "/clear":
         return this.cmdClear(conv, state);
       case "/note":
@@ -1947,6 +1959,15 @@ export class Bot {
     if (!state?.manager || !state.sessionID) return;
     const floor = await this.managerFloor(state.sessionID).catch(() => 0);
     const floorK = floor / 1000;
+    // Part 1 (rotation tracking): record this tick's floor into the 7-day trend
+    // (daily min/max) and refresh the machine-wide durability snapshot. Best-
+    // effort — a tracking failure must never break the rotation gate below.
+    try {
+      this.st.set(conv, { floorTrend: upsertFloorTrend(this.st.peek(conv)?.floorTrend, dayKey(Date.now()), floorK) });
+      this.writeRotationSnapshot(conv, floorK);
+    } catch (e) {
+      warn("rotation tracking:", (e as Error)?.message);
+    }
     const action = rotationGate({
       floorK,
       // Busy = an in-band turn (inflight) OR an OUT-OF-BAND manager turn (a
@@ -2002,6 +2023,12 @@ export class Bot {
           .catch((e) => warn("rotation brief:", (e as Error).message));
       }
       const now = Date.now();
+      // Part 1 (rotation tracking): record this SUCCESSFUL attempt + the fresh
+      // session's (best-effort) post-rotation floor. A brand-new session has no
+      // assistant messages yet, so its floor reads 0 — the honest value.
+      const newFloorK = Math.round((await this.managerFloor(sessionID).catch(() => 0)) / 1000);
+      const cur = this.st.get(conv);
+      const nextHistory = appendRotationHistory(cur.rotationHistory, { at: now, floorK: Math.round(floorK), tier: mode, outcome: "success", newFloorK });
       this.st.set(conv, {
         sessionID,
         directory: dir,
@@ -2009,16 +2036,80 @@ export class Bot {
         lastRotationSID: oldSID,
         lastRotationFloor: Math.round(floorK),
         lastRotationPromptMs: undefined,
+        rotationHistory: nextHistory,
       });
       await this.tg.sendMessage(
         conv,
         `✅ Đã xoay Manager → session mới <code>${esc(sessionID)}</code>\nDir: <code>${esc(dir)}</code>\n${brief ? `📝 Brief: ${brief.split(/\s+/).length} từ` : "📝 (phiên cũ trống)"}`,
       );
       log(`manager rotation (${mode}) conv=${conv} ${oldSID} → ${sessionID} floor=${Math.round(floorK)}K brief=${brief ? brief.length : 0}ch`);
+      // Refresh the snapshot so it reflects the rotation just performed (the
+      // pre-action snapshot written by checkManagerRotation is now stale).
+      this.writeRotationSnapshot(conv, newFloorK);
     } catch (e) {
       warn("manager rotation failed (old session kept):", (e as Error)?.message ?? e);
+      // Part 1 (rotation tracking): record the FAILED attempt so /rotation and
+      // the durability check see it (lastOutcome=fail → "unbounded" verdict).
+      // The old session is kept, so its floor is still ~floorK.
+      try {
+        const cur = this.st.get(conv);
+        this.st.set(conv, { rotationHistory: appendRotationHistory(cur.rotationHistory, { at: Date.now(), floorK: Math.round(floorK), tier: mode, outcome: "fail" }) });
+        this.writeRotationSnapshot(conv, Math.round(floorK));
+      } catch (e2) {
+        warn("rotation tracking (fail):", (e2 as Error)?.message);
+      }
       await this.tg.sendMessage(conv, `⚠️ Xoay phiên Manager thất bại — phiên cũ vẫn giữ nguyên.`).catch(() => {});
     }
+  }
+
+  /**
+   * Part 1 (rotation tracking) — refresh the machine-wide rotation health
+   * snapshot for a manager conv (data/rotation-health.json). Best-effort: the
+   * caller wraps in try/catch. `floorK` is the manager's CURRENT floor (K)
+   * (null when not measured). Reads the conv's trend + history from state.
+   */
+  private writeRotationSnapshot(conv: ConvKey, floorK: number | null): void {
+    const state = this.st.peek(conv);
+    if (!state) return;
+    const hist = state.rotationHistory ?? [];
+    const last = hist[hist.length - 1];
+    const snap = buildRotationSnapshot({
+      now: Date.now(),
+      currentFloorK: floorK === null ? null : Math.round(floorK),
+      floorTrend: state.floorTrend ?? [],
+      rotationHistory: hist,
+      lastRotationAt: last ? last.at : state.lastRotationMs ?? null,
+      lastRotationOutcome: last ? last.outcome : null,
+      autoK: this.cfg.rotationAutoFloorK,
+      confirmK: this.cfg.rotationConfirmFloorK,
+    });
+    writeRotationHealth(rotationHealthPath(this.cfg.stateFile), snap);
+  }
+
+  /**
+   * Part 1 (rotation tracking) — the machine-wide rotation health snapshot for
+   * the /rotation command. Reads the on-disk file if present; otherwise builds
+   * one live from the first manager conv's state (so /rotation works even in
+   * the first 10 minutes, before the first tick has written the file — the
+   * current floor reads null in that fallback). Read-only, no REST calls.
+   */
+  public rotationHealthSnapshot(): RotationHealthSnapshot | null {
+    const onDisk = readRotationHealth(rotationHealthPath(this.cfg.stateFile));
+    if (onDisk) return onDisk;
+    const state = Object.values(this.st.all()).find((s) => s.manager && s.sessionID);
+    if (!state) return null;
+    const hist = state.rotationHistory ?? [];
+    const last = hist[hist.length - 1];
+    return buildRotationSnapshot({
+      now: Date.now(),
+      currentFloorK: null,
+      floorTrend: state.floorTrend ?? [],
+      rotationHistory: hist,
+      lastRotationAt: last ? last.at : state.lastRotationMs ?? null,
+      lastRotationOutcome: last ? last.outcome : null,
+      autoK: this.cfg.rotationAutoFloorK,
+      confirmK: this.cfg.rotationConfirmFloorK,
+    });
   }
 
   /** M3 — the one-time confirm (two-tier, L1): offer rotate / keep-old buttons. */
@@ -2573,6 +2664,9 @@ export class Bot {
           break;
         case "usage":
           await cmdUsage(this, conv);
+          break;
+        case "rotation":
+          await cmdRotation(this, conv);
           break;
         case "history":
           await cmdHistory(this, conv, state);
