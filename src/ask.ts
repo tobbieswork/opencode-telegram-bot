@@ -20,37 +20,37 @@ import { agentLabel, resolveAgent, type AgentId } from "./advisor/agents.js";
  */
 export async function cmdAsk(bot: Bot, conv: ConvKey, arg: string): Promise<void> {
   if (!bot.advisor) {
-    await bot.sendHtml(conv, "🧠 Cố vấn chưa bật (thiếu <code>ADVISOR_URL</code> / <code>ADVISOR_TOKEN</code>).");
+    await bot.sendHtml(conv, "🧠 Cố vấn chưa bật (thiếu <code>ADVISOR_URL</code> / <code>ADVISOR_TOKEN</code>).").catch(() => {});
     return;
   }
-  const { agent, question: q } = parseAskArg(arg);
-  if (!q) {
-    const ts = bot.advisor.listThreads(chatOf(conv));
-    if (!ts.length) {
+  try {
+    const { agent, question: q } = parseAskArg(arg);
+    if (!q) {
+      const ts = bot.advisor.listThreads(chatOf(conv));
+      if (!ts.length) {
+        await bot.sendHtml(
+          conv,
+          "Cú pháp: <code>/ask [claude|gemini] &lt;câu hỏi&gt;</code>\n" +
+            `Hỏi một model khác (cố vấn thứ hai, mặc định ${esc(agentLabel(bot.advisor.defaultAgent()))}) — mở một topic riêng, bạn có thể hỏi tiếp trong đó.`,
+        );
+        return;
+      }
+      const cap = bot.cfg.advisorMaxTurnsPerSession;
+      const lines = ts.map(
+        (t) => `• id ${parseConv(t.conv).threadId} · ${esc(agentLabel(t.agent))} · ${esc(t.title)} · ${t.turns}/${cap} lượt · ${timeAgo(t.lastActive)}`,
+      );
       await bot.sendHtml(
         conv,
-        "Cú pháp: <code>/ask [claude|gemini] &lt;câu hỏi&gt;</code>\n" +
-          `Hỏi một model khác (cố vấn thứ hai, mặc định ${esc(agentLabel(bot.advisor.defaultAgent()))}) — mở một topic riêng, bạn có thể hỏi tiếp trong đó.`,
+        `🧠 <b>Các thread cố vấn</b>\n${lines.join("\n")}\n\nGõ <code>/ask [claude|gemini] &lt;câu&gt;</code> để mở thread mới, hoặc nhắn trực tiếp trong topic để hỏi tiếp.`,
       );
       return;
     }
-    const cap = bot.cfg.advisorMaxTurnsPerSession;
-    const lines = ts.map(
-      (t) => `• id ${parseConv(t.conv).threadId} · ${esc(agentLabel(t.agent))} · ${esc(t.title)} · ${t.turns}/${cap} lượt · ${timeAgo(t.lastActive)}`,
-    );
-    await bot.sendHtml(
-      conv,
-      `🧠 <b>Các thread cố vấn</b>\n${lines.join("\n")}\n\nGõ <code>/ask [claude|gemini] &lt;câu&gt;</code> để mở thread mới, hoặc nhắn trực tiếp trong topic để hỏi tiếp.`,
-    );
-    return;
-  }
-  const chat = chatOf(conv);
-  try {
+    const chat = chatOf(conv);
     const title = q.replace(/\s+/g, " ").slice(0, 60);
     await bot.advisor.startThread({ chat, title, message: q, agent });
     await bot.sendHtml(conv, "🧠 Đã mở thread cố vấn — câu trả lời đã gửi trong topic mới. Nhắn tiếp trong topic đó để hỏi thêm.");
   } catch (e) {
-    await bot.sendHtml(conv, `❌ Không mở được thread cố vấn: ${esc(trunc(String((e as Error)?.message ?? e), 300))}`).catch(() => {});
+    await bot.sendHtml(conv, `❌ Lỗi: ${esc(trunc(String((e as Error)?.message ?? e), 300))}`).catch(() => {});
   }
 }
 
