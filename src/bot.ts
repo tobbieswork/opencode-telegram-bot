@@ -15,7 +15,9 @@ import { SessionDashboard, dashboardPage, DASHBOARD_FILTERS, DASHBOARD_WORK_LABE
 import { SessionActivityLog, ACTIVITY_SOURCE_LABELS } from "./session-activity.js";
 import { buildSessionSummary } from "./session-summary.js";
 import { ResumeConfirmations, type ResumeConfirmation } from "./session-resume.js";
-import { Notifications, type Notice, type NoticeKind } from "./notifications.js";
+import { Notifications, NOTICE_LABELS, type Notice, type NoticeKind } from "./notifications.js";
+import { validateQuiet, type QuietHours } from "./notification-time.js";
+import { snoozeSchedule } from "./reminders.js";
 import { Schedule, SchedSpec, formatSchedule, nextRunAfter, parseScheduleSpec } from "./schedule.js";
 import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure, topicTitle } from "./format.js";
@@ -258,7 +260,8 @@ export class Bot {
   private sessionActivity: SessionActivityLog;
   private resumeConfirmations: ResumeConfirmations;
   private notifications: Notifications;
-  private noticePreviews = new Map<string, { chat: ConvKey; user: number; revision: number; expires: number }>();
+  private noticePreviews = new Map<string, { chat: ConvKey; user: number; revision: number; expires: number; purpose: "enable" | "quiet"; quiet?: QuietHours }>();
+  private quietInputs = new Map<string, { token: string; messageID: number; revision: number; expires: number }>();
   private resumeInputs = new Map<string, { id: string; token: string; messageID: number; binding: string; marker: string; expires: number }>();
   private activityReads = new Map<ConvKey, Promise<void>>();
   private activityAgain = new Set<ConvKey>();
@@ -296,7 +299,12 @@ export class Bot {
     this.notifications = new Notifications(st, { now: () => Date.now(), deliver: (chat, text, links) => tg.sendMessageId(chat, text,
       { reply_markup: { inline_keyboard: links.map(link => [link]) } }), edit: async (chat, id, text, links) => {
         await tg.editMessageText(chat, id, text, { reply_markup: { inline_keyboard: links.map(link => [link]) } });
-      }, resolve: event => this.resolveNotice(event) });
+      }, resolve: event => this.resolveNotice(event), holdUntil: event => {
+        if (!event.reference || !["form", "permission"].includes(event.reference.kind)) return 0;
+        const until = this.st.peek(event.conv)?.pendingPrompts?.[event.reference.id]?.snoozedUntil ?? 0;
+        if (!Number.isFinite(until)) throw new Error("Mốc hoãn yêu cầu không hợp lệ.");
+        return until;
+      } });
     this.topics = new SessionTopics(st, {
       createSession: (input) => oc.createTopicSession(input),
       session: (id) => oc.topicSession(id),
@@ -455,6 +463,7 @@ export class Bot {
     this.scheduler?.stop();
     this.notifications.stop();
     this.noticePreviews.clear();
+    this.quietInputs.clear();
     this.orch.shutdown();
     this.topics.stopTitleSync();
     this.titlePreviews.clear();
@@ -794,14 +803,16 @@ export class Bot {
     // Remember the user's top-level chat so proactive notices (e.g. DNS heal)
     // have a destination even mid-polling-failure.
     if (uid !== undefined && this.topics.enabled(conv) && conv === chatOf(conv)) {
-      if (/^\/cancel(?:@\w+)?$/i.test(text) && (this.titleInputs.has(`${conv}:${uid}`) || this.resumeInputs.has(`${conv}:${uid}`))) {
+      if (/^\/cancel(?:@\w+)?$/i.test(text) && (this.titleInputs.has(`${conv}:${uid}`) || this.resumeInputs.has(`${conv}:${uid}`) || this.quietInputs.has(`${conv}:${uid}`))) {
         this.titleInputs.delete(`${conv}:${uid}`);
         this.resumeInputs.delete(`${conv}:${uid}`);
+        this.quietInputs.delete(`${conv}:${uid}`);
         await this.tg.sendMessage(conv, "Đã hủy các bản nhập của bạn; không gửi công việc hoặc đổi tên.");
         return;
       }
       if (await this.handleTitleInput(conv, uid, msg, text)) return;
       if (await this.handleResumeInput(conv, uid, msg, text)) return;
+      if (await this.handleQuietInput(conv, uid, msg, text)) return;
     }
     this.lastActiveConv = chatOf(conv);
     // Reaction UX: index every user message so a reaction on it can be
@@ -982,6 +993,7 @@ export class Bot {
     keyboard.push([{ text: "➕ Tạo phiên mới", callback_data: "cmd:new" }, { text: "Mở phiên quản lý", callback_data: "mgr:open" }]);
     keyboard.push([{ text: "Đồng bộ tên chủ đề", callback_data: "st:title-preview:0" }]);
     keyboard.push([{ text: "Thiết lập tên", callback_data: "tc:open:group" }]);
+    keyboard.push([{ text: "Thông báo và giờ yên lặng", callback_data: "nt:rules" }]);
     const text = ["<b>Phiên đang quản lý</b>", `${DASHBOARD_FILTERS[filter]} · ${page.total} phiên · Trang ${page.page + 1}/${page.pages}`,
       ...page.rows.flatMap((row, index) => [
         `${page.page * 10 + index + 1}. <b>${esc(trunc(row.title, 48))}</b> · ${DASHBOARD_PHASE_LABELS[row.lifecycle]} · ${DASHBOARD_WORK_LABELS[row.work]}`,
@@ -1020,6 +1032,13 @@ export class Bot {
       if (item.messageId && item.messageId > 0) keyboard.push([{ text: item.kind === "form" ? "Đến câu hỏi" : "Đến yêu cầu cấp quyền", url: topicMessageUrl(link.conv!, item.messageId)! }]);
       else lines.push("Không có mã tin gốc; hãy mở chủ đề hoặc hiển thị lại thẻ.");
       if (item.verified) keyboard.push([{ text: `Hiển thị lại ${item.kind === "form" ? "câu hỏi" : "yêu cầu quyền"} ${index + 1}`, callback_data: `pa:relay:${token}:${index}` }]);
+      const pending = this.st.peek(link.conv!)?.pendingPrompts?.[item.id];
+      if (item.verified && pending) {
+        if ((pending.snoozedUntil ?? 0) > Date.now()) {
+          lines.push(`Tạm hoãn tới ${esc(new Date(pending.snoozedUntil!).toISOString())}; không thay hạn công việc.`);
+          keyboard.push([{ text: `Bỏ hoãn mục ${index + 1}`, callback_data: `pa:wake:${token}:${index}` }]);
+        } else keyboard.push([{ text: `Hoãn 15 phút · mục ${index + 1}`, callback_data: `pa:s15:${token}:${index}` }, { text: "Hoãn 1 giờ", callback_data: `pa:s60:${token}:${index}` }]);
+      }
     });
     const navigation: Btn[] = [];
     if (page > 0) navigation.push({ text: "⬅️ Trang trước", callback_data: `pa:list:${id}:${page - 1}` });
@@ -1030,7 +1049,7 @@ export class Bot {
     await this.tg.sendMessage(conv, lines.join("\n"), { reply_markup: { inline_keyboard: keyboard } });
   }
 
-  private async relayPendingAction(conv: ConvKey, user: number, token: string, index: number): Promise<void> {
+  private async verifyPendingAction(conv: ConvKey, user: number, token: string, index: number) {
     const card = this.pendingCards.get(token);
     const item = card?.items[index];
     if (!card || !item || card.chat !== conv || card.user !== user || card.expires < Date.now()) throw new Error("Thẻ đã hết hạn hoặc không thuộc bạn; mở lại yêu cầu đang chờ.");
@@ -1045,7 +1064,24 @@ export class Bot {
       await this.oc.listPermissions(card.sessionID, AbortSignal.timeout(3000));
     const request = live.find(request => request.id === item.id);
     if (!request) throw new Error("Yêu cầu đã hết chờ. Làm mới danh sách để xem trạng thái mới.");
-    valid();
+    const link = valid();
+    if (!this.allowed(user)) throw new Error("Quyền người dùng đã đổi trong lúc đọc yêu cầu.");
+    return { card, item, request, link };
+  }
+
+  private async snoozePendingAction(conv: ConvKey, user: number, token: string, index: number, minutes?: number): Promise<void> {
+    const { card, item, link } = await this.verifyPendingAction(conv, user, token, index);
+    const current = this.st.peek(link.conv!)?.pendingPrompts?.[item.id];
+    if (!current || current.kind !== item.kind) throw new Error("Chưa có bản ghi lời nhắc hợp lệ; hiển thị lại thẻ trước.");
+    const schedule = snoozeSchedule(current, minutes === undefined ? undefined : Date.now() + minutes * 60_000);
+    this.st.setRequired(link.conv!, { pendingPrompts: { ...this.st.peek(link.conv!)!.pendingPrompts, [item.id]: { ...current, ...schedule } } });
+    this.armReminderTimer(link.conv!, item.id);
+    await this.tg.sendMessage(conv, schedule.snoozedUntil ? `Đã hoãn đúng yêu cầu tới ${new Date(schedule.snoozedUntil).toISOString()}. Không trả lời/hủy/cấp quyền, không đổi số lượt nhắc hoặc hạn công việc.` : "Đã bỏ tạm hoãn; dùng lịch nhắc đã có, không cấp lại ngân sách.");
+    await this.showPendingActions(conv, user, card.linkID);
+  }
+
+  private async relayPendingAction(conv: ConvKey, user: number, token: string, index: number): Promise<void> {
+    const { card, item, request } = await this.verifyPendingAction(conv, user, token, index);
     if (item.kind === "form") await this.onFormCreated({ ...request, sessionID: card.sessionID }, true);
     else await this.onPermissionAsked({ ...request, sessionID: card.sessionID }, true);
     const messageID = item.kind === "form" ? this.questionForms.get(item.id)?.messageId : this.permissionPrompts.get(item.id)?.messageId;
@@ -1134,11 +1170,41 @@ export class Bot {
   }
 
   private async showNoticeSettings(conv: ConvKey, user: number, action: string, token?: string): Promise<void> {
+    if (action === "quiet") {
+      while (this.quietInputs.size >= 100) this.quietInputs.delete(this.quietInputs.keys().next().value!);
+      const id = randomBytes(6).toString("hex");
+      const messageID = await this.tg.sendMessageId(conv, "<b>Nhập giờ yên lặng</b>\nTrả lời đúng tin này trong 10 phút: giờ bắt đầu, giờ kết thúc và múi giờ IANA. Ví dụ chỉ để tham khảo: <code>23:00 07:00 Asia/Ho_Chi_Minh</code>. Chưa áp dụng cho tới khi xem trước và xác nhận; không đổi múi giờ lịch chạy.",
+        { reply_markup: { inline_keyboard: [[{ text: "Hủy nhập", callback_data: `nt:qcancel:${id}` }]] } });
+      if (messageID < 1) throw new Error("Chưa xác nhận được tin nhập giờ; thử lại từ thiết lập.");
+      this.quietInputs.set(`${conv}:${user}`, { token: id, messageID, revision: this.notifications.settings(conv).revision, expires: Date.now() + 600_000 });
+      return;
+    }
+    if (action === "qcancel") {
+      const input = this.quietInputs.get(`${conv}:${user}`);
+      if (!input || input.token !== token) throw new Error("Bản nhập không thuộc bạn.");
+      this.quietInputs.delete(`${conv}:${user}`);
+    } else if (action === "qtypes" || action === "qsave") {
+      const preview = token && this.noticePreviews.get(token);
+      if (!preview || preview.purpose !== "quiet" || !preview.quiet || preview.chat !== conv || preview.user !== user || preview.expires < Date.now()) throw new Error("Bản xem trước giờ không thuộc bạn/nhóm này hoặc hết hạn.");
+      if (action === "qtypes") {
+        preview.quiet.urgent = preview.quiet.urgent.length === 3 ? ["blocked"] : preview.quiet.urgent.length === 1 ? [] : ["question", "permission", "blocked"];
+        await this.showQuietPreview(conv, token!, preview.quiet);
+        return;
+      }
+      this.notifications.configureQuiet(conv, preview.revision, preview.quiet);
+      this.noticePreviews.delete(token!);
+      this.resumePromptReminders();
+    } else if (action === "qoff") {
+      if (token !== conv) throw new Error("Nút tắt giờ không thuộc nhóm.");
+      const settings = this.notifications.settings(conv);
+      if (settings.quiet) this.notifications.configureQuiet(conv, settings.revision, { ...settings.quiet, enabled: false });
+      this.resumePromptReminders();
+    }
     if (action === "preview") {
       for (const [key, value] of this.noticePreviews) if (value.expires < Date.now()) this.noticePreviews.delete(key);
       while (this.noticePreviews.size >= 500) this.noticePreviews.delete(this.noticePreviews.keys().next().value!);
       const id = randomBytes(6).toString("hex");
-      this.noticePreviews.set(id, { chat: conv, user, revision: this.notifications.settings(conv).revision, expires: Date.now() + 10 * 60_000 });
+      this.noticePreviews.set(id, { chat: conv, user, purpose: "enable", revision: this.notifications.settings(conv).revision, expires: Date.now() + 10 * 60_000 });
       await this.tg.sendMessage(conv, this.notifications.rules(conv) + "\n\nBật sẽ thêm thông báo sự kiện mới tại General. Kết quả gộp 5 giây, tối đa 8 mục/tin; không sao chép phản hồi và không chạy mô hình. Giao tin chưa xác nhận không được gửi mới mù quáng.",
         { reply_markup: { inline_keyboard: [[{ text: "Xác nhận bật thông báo General", callback_data: `nt:enable:${id}` }, { text: "Hủy", callback_data: `nt:cancel:${id}` }]] } });
       return;
@@ -1146,7 +1212,10 @@ export class Bot {
     if (action === "enable" || action === "cancel") {
       const preview = token && this.noticePreviews.get(token);
       if (!preview || preview.chat !== conv || preview.user !== user || preview.expires < Date.now()) throw new Error("Bản xem trước không thuộc bạn/nhóm này hoặc hết hạn.");
-      if (action === "enable") this.notifications.configure(conv, preview.revision, true);
+      if (action === "enable") {
+        if (preview.purpose !== "enable") throw new Error("Bản xem trước không phải thao tác bật thông báo.");
+        this.notifications.configure(conv, preview.revision, true);
+      }
       this.noticePreviews.delete(token!);
     } else if (action === "off") {
       if (token !== conv) throw new Error("Nút tắt không thuộc nhóm này.");
@@ -1155,13 +1224,37 @@ export class Bot {
       if (token !== conv) throw new Error("Thao tác giao tin không thuộc nhóm này.");
       const count = this.notifications.repairKnown(conv);
       await this.tg.sendMessage(conv, `Đã xếp ${count} mục để kiểm tra/chỉnh sửa tin đã biết. Mục không có mã tin không được gửi mới; dùng bảng điều khiển để kiểm tra công việc.`);
-    } else if (action !== "rules") throw new Error("Nút thông báo không hợp lệ.");
+    } else if (!["rules", "qcancel", "qsave", "qoff"].includes(action)) throw new Error("Nút thông báo không hợp lệ.");
     const settings = this.notifications.settings(conv);
     const status = this.notifications.status(conv);
     await this.tg.sendMessage(conv, this.notifications.rules(conv) + `\nHàng đợi: ${status.pending} chờ · ${status.unknown + status.sending} chưa xác nhận · ${status.failed} bị từ chối.`,
       { reply_markup: { inline_keyboard: [[{ text: settings.enabled ? "Tắt thông báo General" : "Xem trước bật", callback_data: settings.enabled ? `nt:off:${conv}` : "nt:preview" }],
         ...(status.unknown ? [[{ text: "Kiểm tra/sửa tin đã biết", callback_data: `nt:repair:${conv}` }]] : []),
+        [{ text: "Đặt giờ yên lặng", callback_data: "nt:quiet" }, ...(settings.quiet?.enabled ? [{ text: "Tắt giờ yên lặng", callback_data: `nt:qoff:${conv}` }] : [])],
         [{ text: "Bảng điều khiển phiên", callback_data: "cmd:ls" }]] } });
+  }
+
+  private async showQuietPreview(conv: ConvKey, token: string, quiet: QuietHours): Promise<void> {
+    await this.tg.sendMessage(conv, `<b>Xem trước giờ yên lặng</b>\n${esc(quiet.start)}–${esc(quiet.end)} · ${esc(quiet.timeZone)}\nBáo ngay tại General: ${quiet.urgent.map(kind => NOTICE_LABELS[kind]).join(", ") || "không loại nào"}.\nNhắc tự động sẽ hoãn, kể cả khi chưa bật bản tin General. Thẻ câu hỏi gốc/phản hồi vẫn đến ngay; không đổi lịch chạy hoặc hạn công việc. Khi hết giờ, chỉ gộp mục còn liên quan, giãn bản tin tối thiểu 5 giây.`,
+      { reply_markup: { inline_keyboard: [[{ text: "Đổi loại báo ngay", callback_data: `nt:qtypes:${token}` }], [{ text: "Xác nhận giờ yên lặng", callback_data: `nt:qsave:${token}` }, { text: "Hủy", callback_data: `nt:cancel:${token}` }]] } });
+  }
+
+  private async handleQuietInput(conv: ConvKey, user: number, msg: Message, text: string): Promise<boolean> {
+    const key = `${conv}:${user}`;
+    const input = this.quietInputs.get(key);
+    if (!input || msg.reply_to_message?.message_id !== input.messageID || text.startsWith("/")) return false;
+    this.quietInputs.delete(key);
+    try {
+      if (input.expires < Date.now() || this.notifications.settings(conv).revision !== input.revision) throw new Error("Bản nhập hết hạn/chính sách đổi; nhập lại từ thiết lập.");
+      const values = text.trim().split(/\s+/);
+      if (values.length !== 3 || text.length > 160) throw new Error("Nhập đúng ba phần: HH:MM HH:MM múi_giờ_IANA.");
+      const quiet = validateQuiet({ enabled: true, start: values[0], end: values[1], timeZone: values[2], urgent: ["question", "permission", "blocked"] });
+      while (this.noticePreviews.size >= 500) this.noticePreviews.delete(this.noticePreviews.keys().next().value!);
+      const token = randomBytes(6).toString("hex");
+      this.noticePreviews.set(token, { chat: conv, user, purpose: "quiet", quiet, revision: input.revision, expires: Date.now() + 600_000 });
+      await this.showQuietPreview(conv, token, quiet);
+    } catch (error) { await this.tg.sendMessage(conv, esc((error as Error).message)); }
+    return true;
   }
 
   private refreshSummary(conv: ConvKey, link: SessionTopic, bypassCache = false): Promise<{ at: number; refreshedAt?: number; error?: string }> {
@@ -2212,12 +2305,18 @@ export class Bot {
     if (this.topics.enabled(conv) && !this.topics.canInteract(conv, this.st.peek(conv)?.sessionID ?? "")) return;
     const prev = this.st.get(conv).pendingPrompts?.[promptId];
     const sched = scheduleForRegistration(prev, kind, this.cfg.remindBaseMs, Date.now());
-    const pp = { kind, text, keyboard, messageId: messageId ?? prev?.messageId, ...sched };
+    const pp = { kind, text, keyboard, messageId: messageId ?? prev?.messageId, ...sched, snoozedUntil: prev?.snoozedUntil, snoozeBaseAt: prev?.snoozeBaseAt };
     this.st.set(conv, { pendingPrompts: { ...this.st.get(conv).pendingPrompts, [promptId]: pp } });
     if (this.cfg.remind) this.armReminderTimer(conv, promptId);
   }
 
   /** (Re)arm the one-shot reminder timer for one prompt from its persisted schedule. */
+  private reminderHold(conv: ConvKey, prompt: { snoozedUntil?: number }): number {
+    const until = prompt.snoozedUntil ?? 0;
+    if (typeof until !== "number" || !Number.isFinite(until)) throw new Error("Mốc hoãn lời nhắc không hợp lệ.");
+    return Math.max(until, this.notifications.pauseUntil(chatOf(conv), "reminder"));
+  }
+
   private armReminderTimer(conv: ConvKey, promptId: string): void {
     const key = this.reminderKey(conv, promptId);
     const existing = this.reminders.get(key);
@@ -2227,8 +2326,13 @@ export class Bot {
     const pp = this.st.get(conv).pendingPrompts?.[promptId];
     if (!pp) return;
     if (reminderBudgetExhausted(pp.remindersSent, this.cfg.remindMax)) return; // spent: stays persisted, no more nudges
-    const delay = clampTimerDelay(Math.max(0, pp.nextReminderAt - Date.now())); // overdue → fire soon
-    this.reminders.set(key, setTimeout(() => void this.fireReminder(conv, promptId), delay));
+    let hold: number;
+    try { hold = this.reminderHold(conv, pp); } catch (error) { warn("Chưa nhắc:", (error as Error).message); return; }
+    if (typeof pp.nextReminderAt !== "number") { warn("Mốc lời nhắc không hợp lệ; chưa gửi."); return; }
+    const due = Math.max(pp.nextReminderAt, hold);
+    if (!Number.isFinite(due)) { warn("Mốc lời nhắc không hợp lệ; chưa gửi."); return; }
+    const delay = clampTimerDelay(Math.max(0, due - Date.now()));
+    this.reminders.set(key, setTimeout(() => void this.fireReminder(conv, promptId).catch(error => warn("Chưa giao lời nhắc:", error?.message)), delay));
   }
 
   /** Stop nudging one prompt and forget its schedule (the prompt stays pending). */
@@ -2281,6 +2385,8 @@ export class Bot {
     if (this.topics.enabled(conv) && !this.topics.canInteract(conv, this.st.peek(conv)?.sessionID ?? "")) return;
     const pp = this.st.get(conv).pendingPrompts?.[promptId];
     if (!pp) return; // cancelled/answered in the meantime
+    if (!this.cfg.remind || reminderBudgetExhausted(pp.remindersSent, this.cfg.remindMax)) return;
+    if (this.reminderHold(conv, pp) > Date.now()) { this.armReminderTimer(conv, promptId); return; }
     // The live prompt must be tracked in memory. After a restart an overdue timer
     // can fire before reconcile() has re-read OpenCode; re-sending then could show
     // a card with dead buttons. Do NOT forget the schedule here: reconcile() either
@@ -2288,8 +2394,19 @@ export class Bot {
     // schedule and re-arms it) or drops a settled one as stale.
     const live = pp.kind === "form" ? this.questionForms.has(promptId) : this.permissionPrompts.has(promptId);
     if (!live) return;
+    const sessionID = this.st.peek(conv)?.sessionID;
+    if (!sessionID) return;
+    try {
+      const requests = pp.kind === "form" ? await this.oc.listForms(sessionID, AbortSignal.timeout(3000)) : await this.oc.listPermissions(sessionID, AbortSignal.timeout(3000));
+      if (!requests.some(request => request.id === promptId)) { this.cancelReminder(conv, promptId); return; }
+    } catch { return; }
+    const current = this.st.peek(conv)?.pendingPrompts?.[promptId];
+    if (this.st.peek(conv)?.sessionID !== sessionID || !current || current.firstShownAt !== pp.firstShownAt ||
+      (this.topics.enabled(conv) && !this.topics.canInteract(conv, sessionID))) return;
+    if (this.reminderHold(conv, current) > Date.now()) { this.armReminderTimer(conv, promptId); return; }
     const max = this.cfg.remindMax;
     const sent = pp.remindersSent + 1;
+    this.publishNotice(conv, "reminder", { kind: pp.kind, id: promptId }, pp.nextReminderAt, sent);
     // Nudge by EDITING the original card in place (⏰ count line on top) — one
     // prompt = one message, never a duplicate per nudge. Falls back to a fresh
     // message only when the original is gone (deleted by the user, too old).
@@ -2321,7 +2438,7 @@ export class Bot {
     const cur = this.st.get(conv).pendingPrompts?.[promptId];
     const advance = nextScheduleAfterReminder(pp, cur, this.cfg.remindBaseMs, this.cfg.remindFactor, Date.now());
     if (advance && cur) {
-      this.st.set(conv, { pendingPrompts: { ...this.st.get(conv).pendingPrompts, [promptId]: { ...cur, ...advance } } });
+      this.st.set(conv, { pendingPrompts: { ...this.st.get(conv).pendingPrompts, [promptId]: { ...cur, ...advance, snoozedUntil: undefined, snoozeBaseAt: undefined } } });
       this.armReminderTimer(conv, promptId);
     }
   }
@@ -3089,6 +3206,7 @@ export class Bot {
           if (!/^(?:0|[1-9]\d{0,5})$/.test(value ?? "")) throw new Error("Trang hoặc yêu cầu không hợp lệ.");
           if (action === "list") await this.showPendingActions(conv, cb.from!.id, target, Number(value));
           else if (action === "relay") await this.relayPendingAction(conv, cb.from!.id, target, Number(value));
+          else if (["s15", "s60", "wake"].includes(action)) await this.snoozePendingAction(conv, cb.from!.id, target, Number(value), action === "wake" ? undefined : action === "s15" ? 15 : 60);
           else throw new Error("Thao tác không hợp lệ.");
         } catch (error) { await this.tg.sendMessage(conv, esc((error as Error).message)); }
         return;

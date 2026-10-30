@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { chatOf, type ConvKey } from "./conv.js";
 import { esc } from "./format.js";
 import type { StateManager } from "./state.js";
+import { quietUntil, validateQuiet, type QuietHours } from "./notification-time.js";
 
 export const NOTICE_KINDS = ["question", "permission", "blocked", "completed", "reminder", "operational", "progress", "naming"] as const;
 export type NoticeKind = typeof NOTICE_KINDS[number];
@@ -21,16 +22,17 @@ export interface Notice {
   occurrence?: number;
   direct?: boolean;
 }
-export interface NotificationSettings { version: 1; enabled: boolean; revision: number }
+export interface NotificationSettings { version: 1 | 2; enabled: boolean; revision: number; quiet?: QuietHours }
 export interface NotificationPorts {
   now(): number;
   deliver(chat: ConvKey, text: string, links: Array<{ text: string; url: string }>): Promise<number>;
   edit?(chat: ConvKey, messageID: number, text: string, links: Array<{ text: string; url: string }>): Promise<void>;
   resolve?(event: Notice): Promise<Notice | undefined>;
+  holdUntil?(event: Notice): number | undefined;
 }
 export interface NoticeItem { key: string; event: Notice; state: "pending" | "sending" | "sent" | "unknown" | "dropped" | "failed";
-  createdAt: number; dueAt: number; expiresAt: number; attempts: number; messageID?: number; error?: string }
-export interface NotificationQueue { version: 1; items: Record<string, NoticeItem>; blockedUntil?: number }
+  createdAt: number; dueAt: number; expiresAt: number; attempts: number; messageID?: number; error?: string; heldUntil?: number }
+export interface NotificationQueue { version: 1; items: Record<string, NoticeItem>; blockedUntil?: number; batchAfter?: number }
 export type NoticeDecision = "direct" | "off" | "immediate" | "batch" | "drop" | "defer";
 
 export function noticeDecision(settings: NotificationSettings, event: Notice): NoticeDecision {
@@ -58,12 +60,14 @@ export class Notifications {
   private stopped = false;
   private cursor = 0;
   private receipts = new Map<string, number>();
+  private quietCache = new Map<ConvKey, { revision: number; from: number; to: number; until?: number }>();
   constructor(protected store: StateManager, protected ports: NotificationPorts) {}
   settings(chat: ConvKey): NotificationSettings {
     if (chat !== chatOf(chat)) throw new Error("Thiết lập thông báo chỉ thuộc General.");
     const value = this.store.peek(chat)?.notificationSettings;
     if (value === undefined) return { version: 1, enabled: false, revision: 0 };
-    if (!value || typeof value !== "object" || value.version !== 1 || typeof value.enabled !== "boolean" || !Number.isSafeInteger(value.revision) || value.revision < 0) throw new Error("Thiết lập thông báo chưa hỗ trợ; giữ dữ liệu và không tự bật.");
+    if (!value || typeof value !== "object" || ![1, 2].includes(value.version) || typeof value.enabled !== "boolean" || !Number.isSafeInteger(value.revision) || value.revision < 0) throw new Error("Thiết lập thông báo chưa hỗ trợ; giữ dữ liệu và không tự bật.");
+    if (value.quiet) validateQuiet(value.quiet);
     return structuredClone(value);
   }
   configure(chat: ConvKey, revision: number, enabled: boolean): NotificationSettings {
@@ -79,14 +83,39 @@ export class Notifications {
   decision(event: Notice): NoticeDecision {
     if (event.direct) return "direct";
     if (event.chat !== chatOf(event.conv)) throw new Error("Thông báo không thuộc nhóm của phiên.");
-    return noticeDecision(this.settings(event.chat), event);
+    const decision = noticeDecision(this.settings(event.chat), event);
+    return !["off", "direct", "drop"].includes(decision) && this.pauseUntil(event.chat, event.kind) > this.ports.now() ? "defer" : decision;
+  }
+  configureQuiet(chat: ConvKey, revision: number, quiet: QuietHours): NotificationSettings {
+    const previous = this.settings(chat);
+    if (previous.revision !== revision) throw new Error("Chính sách đã đổi; xem trước giờ yên lặng lại.");
+    const next: NotificationSettings = { ...previous, version: 2, revision: previous.revision + 1, quiet: validateQuiet(quiet) };
+    if (!Number.isSafeInteger(next.revision)) throw new Error("Mốc chính sách không hợp lệ.");
+    this.store.setRequired(chat, { notificationSettings: next });
+    this.quietCache.delete(chat);
+    return next;
+  }
+  pauseUntil(chat: ConvKey, kind: NoticeKind): number {
+    const settings = this.settings(chat);
+    if ((!settings.enabled && kind !== "reminder") || !settings.quiet?.enabled || settings.quiet.urgent.includes(kind as "question" | "permission" | "blocked")) return 0;
+    const now = this.ports.now();
+    let cache = this.quietCache.get(chat);
+    if (!cache || cache.revision !== settings.revision || now < cache.from || now >= cache.to) {
+      const until = quietUntil(settings.quiet, now);
+      cache = { revision: settings.revision, from: now, to: until ?? Math.floor(now / 60_000) * 60_000 + 60_000, until };
+      this.quietCache.set(chat, cache);
+      while (this.quietCache.size > 1000) this.quietCache.delete(this.quietCache.keys().next().value!);
+    }
+    return cache.until ?? 0;
   }
   rules(chat: ConvKey): string {
     const settings = this.settings(chat);
     return `<b>Quy tắc thông báo General</b>\nHiện tại: ${settings.enabled ? "đã bật" : "chưa bật; giữ cách nhận hiện tại"}.\n` +
       "• Câu hỏi/quyền/lỗi chặn việc: ưu tiên báo ngay.\n• Hoàn tất/vận hành/lỗi tên: có thể gộp. Lỗi tên không phải lỗi thực thi.\n" +
       "• Tiến độ thông thường: không thêm thông báo General.\n• Chỉ tên phiên, trạng thái và đường dẫn; không sao chép phản hồi/công cụ.\n" +
-      "• Trả lời trực tiếp và thẻ câu hỏi gốc không bị hoãn.\n• Giờ yên lặng chưa được tự bật. Thay đổi cần xem trước và xác nhận.";
+      "• Trả lời trực tiếp và thẻ câu hỏi gốc không bị hoãn.\n" +
+      (settings.quiet?.enabled ? `• Giờ yên lặng: ${esc(settings.quiet.start)}–${esc(settings.quiet.end)} · ${esc(settings.quiet.timeZone)}; báo ngay: ${settings.quiet.urgent.map(kind => NOTICE_LABELS[kind]).join(", ") || "không loại nào"}.` : "• Giờ yên lặng chưa bật.") +
+      "\nChỉ áp dụng cho thông báo/nhắc của luồng này; cảnh báo máy/PR, phản hồi và lịch chạy không đổi. Thay đổi cần xem trước/xác nhận.";
   }
   private valid(event: Notice): boolean {
     return Boolean(event && typeof event.chat === "string" && typeof event.conv === "string" && event.chat === chatOf(event.conv) && /^[a-f0-9]{16}$/.test(event.linkID) &&
@@ -102,7 +131,8 @@ export class Notifications {
     if (!data || data.version !== 1 || !data.items || typeof data.items !== "object" || Array.isArray(data.items) || Object.keys(data.items).length > 500 ||
       (data.blockedUntil !== undefined && !Number.isFinite(data.blockedUntil)) || Object.entries(data.items).some(([key, item]) => !item || key !== item.key ||
         !/^[a-f0-9]{64}$/.test(key) || !this.valid(item.event) || item.event.chat !== chat || !["pending", "sending", "sent", "unknown", "dropped", "failed"].includes(item.state) ||
-        ![item.createdAt, item.dueAt, item.expiresAt, item.attempts].every(Number.isFinite) || (item.messageID !== undefined && (!Number.isSafeInteger(item.messageID) || item.messageID <= 0)))) throw new Error("Hàng đợi thông báo hỏng/chưa hỗ trợ; giữ dữ liệu, không phát lại.");
+        ![item.createdAt, item.dueAt, item.expiresAt, item.attempts].every(Number.isFinite) || (item.heldUntil !== undefined && !Number.isFinite(item.heldUntil)) ||
+        (item.messageID !== undefined && (!Number.isSafeInteger(item.messageID) || item.messageID <= 0))) || (data.batchAfter !== undefined && !Number.isFinite(data.batchAfter))) throw new Error("Hàng đợi thông báo hỏng/chưa hỗ trợ; giữ dữ liệu, không phát lại.");
     return structuredClone(data);
   }
   private save(chat: ConvKey, data: NotificationQueue): void { this.store.setRequired(chat, { notificationQueue: data }); }
@@ -196,7 +226,17 @@ export class Notifications {
       for (const item of Object.values(data.items)) if (item.state === "sent") this.receipts.delete(item.key);
     }
     if (!this.settings(chat).enabled || (data.blockedUntil ?? 0) > this.ports.now()) return;
+    changed = false;
+    for (const item of Object.values(data.items)) if (item.state === "pending") {
+      const hold = Math.max(this.pauseUntil(chat, item.event.kind), this.ports.holdUntil?.(item.event) ?? 0);
+      if (!Number.isFinite(hold)) throw new Error("Mốc tạm hoãn không hợp lệ; chưa gửi.");
+      if (hold > this.ports.now()) {
+        if (item.heldUntil !== hold) { item.heldUntil = hold; item.dueAt = Math.max(item.dueAt, hold); changed = true; }
+      } else if (item.heldUntil !== undefined) { item.heldUntil = undefined; item.dueAt = this.ports.now(); changed = true; }
+    }
+    if (changed) this.save(chat, data);
     const candidates = Object.values(data.items).filter(item => item.state === "pending" && item.dueAt <= this.ports.now())
+      .filter(item => this.decision(item.event) === "immediate" || (data.batchAfter ?? 0) <= this.ports.now())
       .sort((a, b) => Number(this.decision(b.event) === "immediate") - Number(this.decision(a.event) === "immediate") || a.createdAt - b.createdAt);
     const first = candidates[0];
     if (!first) return;
@@ -204,6 +244,7 @@ export class Notifications {
       (item.dueAt <= this.ports.now() || item.attempts === 0 && item.dueAt === item.createdAt + 5000 && this.decision(item.event) === "batch"))
       .sort((a, b) => Number(this.decision(b.event) === "immediate") - Number(this.decision(a.event) === "immediate") || a.createdAt - b.createdAt).slice(0, 8);
     const ready: Notice[] = [];
+    const readyKeys = new Set<string>();
     try {
       for (const item of selected) {
         const event = await this.bounded(this.ports.resolve ? this.ports.resolve(item.event) : Promise.resolve(item.event));
@@ -212,7 +253,12 @@ export class Notifications {
         if (!current || current.state !== "pending") continue;
         if (!event || !this.valid(event) || event.chat !== chat || event.binding !== item.event.binding || event.sessionID !== item.event.sessionID || event.conv !== item.event.conv ||
           event.kind !== item.event.kind || JSON.stringify(event.reference) !== JSON.stringify(item.event.reference) || event.occurrence !== item.event.occurrence) current.state = "dropped";
-        else { current.event = event; ready.push(event); }
+        else {
+          current.event = event;
+          const hold = Math.max(this.pauseUntil(chat, event.kind), this.ports.holdUntil?.(event) ?? 0);
+          if (hold > this.ports.now()) { current.dueAt = hold; current.heldUntil = hold; }
+          else { ready.push(event); readyKeys.add(item.key); }
+        }
         this.save(chat, data);
       }
     } catch (error) {
@@ -224,8 +270,13 @@ export class Notifications {
       this.save(chat, data); return;
     }
     data = this.queue(chat);
-    const active = selected.map(item => data.items[item.key]).filter(item => item?.state === "pending");
+    const active = selected.map(item => data.items[item.key]).filter(item => item?.state === "pending" && readyKeys.has(item.key));
     if (!active.length || !ready.length || this.stopped || !this.settings(chat).enabled) return;
+    for (const item of active) {
+      const hold = Math.max(this.pauseUntil(chat, item.event.kind), this.ports.holdUntil?.(item.event) ?? 0);
+      if (hold > this.ports.now()) { item.dueAt = hold; item.heldUntil = hold; readyKeys.delete(item.key); }
+    }
+    if (active.some(item => !readyKeys.has(item.key))) { this.save(chat, data); return; }
     for (const item of active) { item.state = "sending"; item.attempts++; }
     this.save(chat, data);
     const links = ready.filter(event => event.url).map(event => ({ text: [...event.title].slice(0, 32).join(""), url: event.url! }));
@@ -244,6 +295,7 @@ export class Notifications {
       for (const item of active) this.receipts.set(item.key, messageID!);
       data = this.queue(chat);
       for (const item of active) Object.assign(data.items[item.key], { state: "sent", messageID, error: undefined });
+      data.batchAfter = this.ports.now() + 5000;
       this.save(chat, data);
       for (const item of active) this.receipts.delete(item.key);
     } catch (error) {

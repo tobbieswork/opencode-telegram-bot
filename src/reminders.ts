@@ -68,6 +68,12 @@ export function reminderBudgetExhausted(remindersSent: number, max: number): boo
   return remindersSent >= max;
 }
 
+export function snoozeSchedule(current: { nextReminderAt: number; snoozeBaseAt?: number }, until?: number) {
+  const base = current.snoozeBaseAt ?? current.nextReminderAt;
+  if (!Number.isFinite(base) || (until !== undefined && !Number.isFinite(until))) throw new Error("Mốc tạm hoãn không hợp lệ.");
+  return { nextReminderAt: until === undefined ? base : Math.max(base, until), snoozeBaseAt: until === undefined ? undefined : base, snoozedUntil: until };
+}
+
 /**
  * Pure: after a reminder has been sent, decide whether the schedule should be
  * advanced. `captured` is the schedule as it was when this reminder fired;

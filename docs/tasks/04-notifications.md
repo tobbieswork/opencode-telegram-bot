@@ -1,6 +1,6 @@
 # Đầu việc 4 — Thông báo ít nhưng đúng lúc
 
-**Trạng thái:** CV10–CV11 đã triển khai; CV12 chưa triển khai. **Thứ tự:** CV10 → CV11 → CV12.
+**Trạng thái:** CV10–CV12 đã triển khai và kiểm thử tự động; thử nhóm/thiết bị ở CV15. **Thứ tự:** CV10 → CV11 → CV12.
 **Điều kiện bắt đầu:** CV09 đạt kiểm thử tự động; thử thiết bị thật giữ ở CV15 theo
 [kế hoạch tổng](../plan-session-workflow-improvements.md).
 
@@ -137,29 +137,57 @@ Kiểm thử: `scripts/test-notification-queue.ts`.
 
 ### Công việc
 
-- [ ] Thêm trang cấu hình trong General: bật/tắt, khoảng giờ, múi giờ IANA,
+- [x] Thêm trang cấu hình trong General: bật/tắt, khoảng giờ, múi giờ IANA,
   loại được báo ngay và cách gộp sau giờ yên lặng. Không tự chọn giờ cho người
   dùng; giá trị gợi ý chỉ có hiệu lực sau xác nhận.
-- [ ] Lưu múi giờ riêng cho thông báo; có thể gợi ý từ cấu hình hiện có nhưng
+- [x] Lưu múi giờ riêng cho thông báo; có thể gợi ý từ cấu hình hiện có nhưng
   không thay múi giờ của lịch chạy hoặc suy ra từ độ lệch UTC cố định.
-- [ ] Xử lý khoảng qua nửa đêm, giờ đổi mùa và giờ bắt đầu/kết thúc. Với khoảng
+- [x] Xử lý khoảng qua nửa đêm, giờ đổi mùa và giờ bắt đầu/kết thúc. Với khoảng
   không hợp lệ, báo lỗi trước khi lưu thay vì im lặng áp dụng giá trị khác.
-- [ ] Thêm nút tạm hoãn nhắc cho đúng yêu cầu; hiển thị thời điểm nhắc lại và
+- [x] Thêm nút tạm hoãn nhắc cho đúng yêu cầu; hiển thị thời điểm nhắc lại và
   nút bỏ tạm hoãn. Không coi tạm hoãn là trả lời/hủy/cấp quyền.
-- [ ] Lưu mốc tạm hoãn qua khởi động lại. Tạm hoãn không đặt lại số lần nhắc,
+- [x] Lưu mốc tạm hoãn qua khởi động lại. Tạm hoãn không đặt lại số lần nhắc,
   không kéo dài hạn chót lượt lịch hoặc nhả chỗ thực thi đang bị giữ.
-- [ ] Hết giờ yên lặng chỉ gửi bản gộp còn liên quan; không bắn dồn mọi mốc nhắc
+- [x] Hết giờ yên lặng chỉ gửi bản gộp còn liên quan; không bắn dồn mọi mốc nhắc
   bị bỏ qua. Khi yêu cầu được giải quyết từ nơi khác, gỡ nó khỏi phần đang hoãn.
-- [ ] Nếu thay đổi chính sách trong khi có thông báo chờ, tính lại theo dữ liệu
+- [x] Nếu thay đổi chính sách trong khi có thông báo chờ, tính lại theo dữ liệu
   mới nhất và kiểm tra quyền trước khi gửi; không hồi sinh thông báo đã xong.
 
 ### Kiểm thử và nghiệm thu
 
-- [ ] Dùng đồng hồ giả cho ranh giới thời gian, đổi ngày/múi giờ/giờ mùa, tạm
+- [x] Dùng đồng hồ giả cho ranh giới thời gian, đổi ngày/múi giờ/giờ mùa, tạm
   hoãn quá hạn, khởi động lại và chính sách đổi trong lúc chờ.
-- [ ] Thông báo khẩn đi đúng quy tắc đã xác nhận; câu trả lời trực tiếp vẫn
+- [x] Thông báo khẩn đi đúng quy tắc đã xác nhận; câu trả lời trực tiếp vẫn
   đến ngay; lịch thực thi không đổi hạn chót.
-- [ ] Không có loạt thông báo dồn khi hết giờ yên lặng hoặc khi mạng trở lại.
+- [x] Không có loạt thông báo dồn khi hết giờ yên lặng hoặc khi mạng trở lại.
+
+Lối vào: **Thông báo và giờ yên lặng** ở `/sessions`, hoặc quy tắc trên thẻ
+phiên. Nhập bằng trả lời đúng tin General, dạng `HH:MM HH:MM IANA`, rồi xem
+trước/xác nhận trong 10 phút. Không tự chọn giờ. Có ba cấu hình báo ngay để
+chọn trước xác nhận: câu hỏi/quyền/lỗi chặn; chỉ lỗi chặn; không loại nào.
+Tắt giờ riêng không bật/tắt bản tin General. Giờ áp dụng cho nhắc tự động
+kể cả khi chưa bật bản tin General; thẻ gốc/đáp án, cảnh báo máy/PR và hạn lịch
+không bị đổi. Không tự bật nhắc nếu `OPENCODE_TG_REMIND` đang tắt.
+
+`src/notification-time.ts` theo giờ địa phương bằng IANA/Intl, không dùng UTC
+offset cố định. Đầu giờ tính vào, cuối giờ tính ra. Giờ lặp áp dụng ở cả hai
+lần nếu đồng hồ đang trong khoảng; giờ bị bỏ qua kết thúc ở mốc đầu ngoài
+khoảng. Tính ranh giới có giới hạn và bộ nhớ tạm theo nhóm/chính sách, không
+quét lịch sử. Sau giờ chỉ xử lý mục còn liên quan, tối đa 8 mục và giãn bản
+tin không khẩn 5 giây, không tạo lại các nhịp nhắc đã bỏ qua.
+
+**Đang chờ bạn** có Hoãn 15 phút/1 giờ và Bỏ hoãn từng mục. Kiểm tra lại chủ
+sở hữu và request sống trước lưu; lưu `snoozedUntil` và mốc nhắc cũ, giữ nguyên
+`remindersSent`/`firstShownAt`. Hiển thị lại thẻ/khởi động lại không mất hoãn.
+Bỏ hoãn dùng mốc đã có, không cấp ngân sách mới. Trước nhắc đọc nguồn lại;
+đã giải quyết thì gỡ lời nhắc, không trả lời hay cấp quyền thay người dùng.
+HTTP đang bay không thể rút lại khi chính sách vừa đổi; các mục chưa gửi được
+xét lại. Kiểm thử: `scripts/test-notification-time.ts` và bộ nhắc hiện có.
+
+Chính sách giờ dùng phiên bản 2: mã CV11 cũ không hiểu nên dừng bản tin thay
+vì bỏ qua giờ yên lặng. Khi quay lại mã cũ, phải tắt nhắc trong cấu hình trước
+và giữ trạng thái; không hứa mã cũ hiểu mọi trường hoãn/giờ mới. Khôi phục mã
+mới để chỉnh chính sách qua giao diện, không xóa dữ liệu để chữa lỗi.
 
 **Tệp liên quan:** module thông báo dự kiến, `src/reminders.ts`, `src/bot.ts`,
 `src/state.ts`, `src/config.ts` nếu cần giá trị mặc định; kiểm thử thời gian,
@@ -167,7 +195,7 @@ chuyển tiếp câu hỏi và lượt lịch.
 
 ## Điều kiện bàn giao nhóm tính năng
 
-- [ ] CV10–CV12 đạt; người dùng thấy rõ quy tắc nào được bật và tắt được bằng nút.
-- [ ] Tài liệu ghi trung thực giới hạn chống gửi trùng và cách xử lý chưa xác nhận.
+- [x] CV10–CV12 đạt kiểm thử tự động; quy tắc đang bật/tắt hiện rõ và có nút tắt.
+- [x] Tài liệu ghi trung thực giới hạn chống gửi trùng và cách xử lý chưa xác nhận.
 
 **Tiếp theo:** [CV13–CV14 — Tìm kiếm và ghim](05-session-search.md).

@@ -88,6 +88,9 @@ export interface PendingPrompt {
   remindersSent: number;
   /** When the next reminder is due (ms epoch). */
   nextReminderAt: number;
+  /** Hoãn nhắc, không đổi ngân sách; giữ mốc cũ để bỏ hoãn không đặt lại lịch. */
+  snoozedUntil?: number;
+  snoozeBaseAt?: number;
 }
 
 export interface ChatState {

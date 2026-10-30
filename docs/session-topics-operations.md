@@ -52,6 +52,13 @@ and all command/button handlers enforce General versus work-topic scope.
   nhận giao không tự gửi mới: trang quy tắc hiện số chưa rõ; chỉ sửa tin đã biết
   mã. Không biết mã thì kiểm tra bảng điều khiển/Đang chờ bạn. Không hứa chống
   trùng khi mất kho. Tắt không dừng việc, hủy yêu cầu hoặc đặt lại lượt nhắc.
+- **Đặt giờ yên lặng**: trả lời đúng tin nhập bằng `HH:MM HH:MM IANA`, chọn
+  loại báo ngay rồi xác nhận; ví dụ không phải cấu hình ngầm. Giờ riêng không
+  đổi múi giờ lịch/hạn công việc; thẻ gốc/phản hồi vẫn đến ngay. Nhắc tự động
+  được hoãn cả khi bản tin General tắt, nhưng không tự bật nhắc đã tắt cấu hình.
+  Trong **Đang chờ bạn**, Hoãn 15 phút/1 giờ áp dụng đúng mục; Bỏ hoãn không
+  đặt lại ngân sách. Mốc lưu qua khởi động/hiển thị lại. Không đổi câu trả lời,
+  quyền hoặc dung lượng thực thi. Khi hết giờ không bắn lại các nhịp đã bỏ qua.
 - **Gắn phiên có sẵn**, `/attach` hoặc `/use` không có mã mở danh sách chọn
   có tên. Danh sách chỉ đọc, không gửi lại thẻ của mọi phiên đã quản lý.
   Saved legacy sessions of this group are included, even outside the
