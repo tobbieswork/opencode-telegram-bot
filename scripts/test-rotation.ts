@@ -13,6 +13,7 @@ import {
   runRotationHandoff,
   capWords,
   HANDOFF_BRIEF_WORDS,
+  rotationGate,
 } from "../src/rotation.js";
 
 let failures = 0;
@@ -112,6 +113,33 @@ const inWindow = (t: number, tokens: object) => ({ type: "assistant", time: { cr
     const r = await runRotationHandoff("s", "/d", { prompt: async () => ({ reply: "   " }) });
     check("handoff empty reply → empty brief", r === "");
   }
+}
+
+// ── M3: rotationGate (two-tier trigger) ──────────────────────────────────────
+{
+  const NOW = 1_800_000_000_000;
+  const cfg = { autoFloorK: 110, confirmFloorK: 90, minIntervalMs: 24 * 3600_000, confirmRepromptMs: 12 * 3600_000 };
+  const base = { nowMs: NOW, ...cfg };
+
+  check("gate: floor 0 → idle", rotationGate({ floorK: 0, busy: false, ...base }) === "idle");
+  check("gate: below confirm → idle", rotationGate({ floorK: 80, busy: false, ...base }) === "idle");
+  check("gate: == confirmFloorK (boundary) → idle", rotationGate({ floorK: 90, busy: false, ...base }) === "idle");
+  check("gate: above confirm, idle → confirm", rotationGate({ floorK: 100, busy: false, ...base }) === "confirm");
+  check("gate: above confirm, busy → defer", rotationGate({ floorK: 100, busy: true, ...base }) === "defer");
+  check("gate: above confirm, just prompted → idle (re-prompt throttle)", rotationGate({ floorK: 100, busy: false, lastRotationPromptMs: NOW - 1 * 3600_000, ...base }) === "idle");
+  check("gate: above confirm, prompted 13h ago → confirm again", rotationGate({ floorK: 100, busy: false, lastRotationPromptMs: NOW - 13 * 3600_000, ...base }) === "confirm");
+
+  check("gate: == autoFloorK (boundary) → confirm (not auto)", rotationGate({ floorK: 110, busy: false, ...base }) === "confirm");
+  check("gate: above auto, idle → auto", rotationGate({ floorK: 120, busy: false, ...base }) === "auto");
+  check("gate: above auto, busy → defer", rotationGate({ floorK: 120, busy: true, ...base }) === "defer");
+
+  // idempotency: within the min interval of a last rotation → defer (both tiers)
+  check("gate: above auto, within interval → defer", rotationGate({ floorK: 120, busy: false, lastRotationMs: NOW - 2 * 3600_000, ...base }) === "defer");
+  check("gate: above confirm, within interval → defer", rotationGate({ floorK: 100, busy: false, lastRotationMs: NOW - 2 * 3600_000, ...base }) === "defer");
+  check("gate: above auto, past interval → auto", rotationGate({ floorK: 120, busy: false, lastRotationMs: NOW - 25 * 3600_000, ...base }) === "auto");
+
+  // auto takes priority over confirm (a floor above auto never offers confirm)
+  check("gate: above auto, recently prompted → still auto (not throttled to idle)", rotationGate({ floorK: 120, busy: false, lastRotationPromptMs: NOW - 1 * 3600_000, ...base }) === "auto");
 }
 
 if (failures > 0) {

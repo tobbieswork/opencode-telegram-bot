@@ -144,3 +144,58 @@ export async function runRotationHandoff(
   }
   return capWords(reply, briefWords);
 }
+
+// ── M3: two-tier rotation trigger ────────────────────────────────────────────
+
+/** What a rotation tick decides to do for one manager conversation. */
+export type RotationAction = "auto" | "confirm" | "defer" | "idle";
+
+/** Everything the rotation decision needs (deps-injected for unit testing). */
+export interface RotationGateInput {
+  /** The manager's context floor in thousands of tokens (0 = none / fresh). */
+  floorK: number;
+  /** True while the manager conv is mid-turn (don't interrupt a live turn). */
+  busy: boolean;
+  nowMs: number;
+  /** epoch ms of the last COMPLETED rotation (idempotency guard). */
+  lastRotationMs?: number;
+  /** epoch ms of the last confirm shown (re-prompt throttle). */
+  lastRotationPromptMs?: number;
+  /** Auto-rotate when floor exceeds this (thousands). */
+  autoFloorK: number;
+  /** Offer a confirm when floor exceeds this (thousands). */
+  confirmFloorK: number;
+  /** Minimum gap between two rotations, ms. */
+  minIntervalMs: number;
+  /** Don't re-offer the confirm more often than this, ms. */
+  confirmRepromptMs: number;
+}
+
+/**
+ * The two-tier trigger, pure.
+ *   floor > autoFloorK     → "auto"    (rotate now, no confirm) — unless busy or
+ *                              within the min interval, then "defer".
+ *   confirmFloorK < floor ≤ autoFloorK → "confirm" (offer a one-time confirm) —
+ *                              unless busy / within interval, or the confirm was
+ *                              just shown (re-prompt throttle), then "defer"/"idle".
+ *   floor ≤ confirmFloorK  → "idle" (nothing to do).
+ * "defer" means: retry on a later tick (the condition may clear — e.g. the turn
+ * finishes). "idle" means: nothing to do until the next measurement.
+ */
+export function rotationGate(i: RotationGateInput): RotationAction {
+  const floorK = i.floorK;
+  if (!(floorK > 0)) return "idle";
+  const withinInterval = i.lastRotationMs !== undefined && i.nowMs - i.lastRotationMs < i.minIntervalMs;
+  if (floorK > i.autoFloorK) {
+    if (i.busy) return "defer";
+    if (withinInterval) return "defer";
+    return "auto";
+  }
+  if (floorK > i.confirmFloorK) {
+    if (i.busy) return "defer";
+    if (withinInterval) return "defer";
+    if (i.lastRotationPromptMs !== undefined && i.nowMs - i.lastRotationPromptMs < i.confirmRepromptMs) return "idle";
+    return "confirm";
+  }
+  return "idle";
+}
