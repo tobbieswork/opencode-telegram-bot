@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { closeSync, mkdirSync, openSync, readFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -49,10 +49,14 @@ assert.ok(expectedID, "Nhật ký cũ không đủ bằng chứng tài khoản b
 assert.equal(cfg.stateFile, priorLog.match(/State file: (.+)/)?.[1].trim());
 assert.equal((await new Telegram(cfg.telegramToken).getMe()).id, expectedID);
 const before = JSON.parse(readFileSync(cfg.stateFile, "utf8"));
-const priorLinks = before.__machine__?.sessionTopics?.links ?? {};
+let priorLinks = before.__machine__?.sessionTopics?.links ?? {};
 if (process.argv.includes("--check")) {
   console.log("Đạt: đúng một bot, đúng thư mục, tài khoản và tệp trạng thái; chưa khởi động lại.");
 } else {
+  const backupDir = join(dirname(cfg.stateFile), "backups");
+  mkdirSync(backupDir, { recursive: true, mode: 0o700 });
+  const stamp = Date.now();
+  writeFileSync(join(backupDir, `state-before-${stamp}.json`), JSON.stringify(before), { flag: "wx", mode: 0o600 });
   const old = new Set(current.map(row => row.pid));
   for (const row of current) {
     const parent = processes().find(item => item.pid === row.parent);
@@ -60,6 +64,10 @@ if (process.argv.includes("--check")) {
   }
   process.kill(leaf[0].pid, "SIGTERM");
   await until(() => !processes().some(row => old.has(row.pid)) && bots().length === 0, 20_000);
+  const stopped = readFileSync(cfg.stateFile, "utf8");
+  const backup = join(backupDir, `state-stopped-${stamp}.json`);
+  writeFileSync(backup, stopped, { flag: "wx", mode: 0o600 });
+  priorLinks = JSON.parse(stopped).__machine__?.sessionTopics?.links ?? {};
   const logDir = join(tmpdir(), "opencode");
   mkdirSync(logDir, { recursive: true });
   const log = join(logDir, `opencode-telegram-bot-${Date.now()}.log`);
@@ -81,5 +89,12 @@ if (process.argv.includes("--check")) {
     assert.equal(after.__machine__?.sessionTopics?.links?.[id]?.sessionID, link.sessionID);
     assert.equal(after.__machine__?.sessionTopics?.links?.[id]?.conv, link.conv);
   }
-  console.log(JSON.stringify({ daKhoiDongLai: true, chiMotBot: true, soLienKetDuocGiu: Object.keys(priorLinks).length, nhatKy: log }));
+  const receipts = join(dirname(cfg.stateFile), "deployments");
+  mkdirSync(receipts, { recursive: true, mode: 0o700 });
+  const receipt = join(receipts, `deployment-${stamp}.json`);
+  writeFileSync(receipt, JSON.stringify({ luc: new Date().toISOString(), commit: run("git", ["rev-parse", "HEAD"]).trim(),
+    thayDoiChuaCommit: run("git", ["status", "--porcelain"]).trim().split("\n").filter(Boolean),
+    taiKhoanBot: expectedID, stateFile: cfg.stateFile, motBot: true, khongLoi409: true,
+    soLienKetDuocGiu: Object.keys(priorLinks).length, saoLuu: backup, nhatKy: log }, null, 2), { flag: "wx", mode: 0o600 });
+  console.log(JSON.stringify({ daKhoiDongLai: true, chiMotBot: true, soLienKetDuocGiu: Object.keys(priorLinks).length, saoLuu: backup, nhatKy: log, bienNhan: receipt }));
 }

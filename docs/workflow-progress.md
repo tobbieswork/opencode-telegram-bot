@@ -20,8 +20,8 @@ khi bắt đầu đầu việc tiếp theo. Không bật chính sách mới trê
 | CV11 | Đã triển khai và áp dụng | `a1d17f3`; kiểu, đơn vị, đầu-cuối đạt; đã khởi động lại, giữ 5 liên kết |
 | CV12 | Đã triển khai và áp dụng | `e4944c5`; kiểu, đơn vị, đầu-cuối đạt; đã khởi động lại, giữ 5 liên kết |
 | CV13 | Đã triển khai và áp dụng | `e228701`; kiểu, đơn vị, đầu-cuối đạt; đã khởi động lại, giữ 5 liên kết |
-| CV14 | Đã triển khai, chờ chốt commit và khởi động lại | Ghim cá nhân đúng nhóm/người, 20 mục, bấm đôi không đảo; giữ qua đổi tên/đóng/khởi động, mất sở hữu không lộ nguồn |
-| CV15 | Chưa bắt đầu | Nghiệm thu tổng hợp |
+| CV14 | Đã triển khai và áp dụng | `fd0b4bf`; kiểu, đơn vị, đầu-cuối đạt; đã khởi động lại, giữ 5 liên kết trước khi thử CV15 |
+| CV15 | Đã nghiệm thu mã và luồng thử thật; kết quả triển khai ghi bằng biên nhận | [Hồ sơ](workflow-acceptance.md); 1.000 phiên, một chủ đề thật được cho phép, sửa URL queue và tin nhập kế tiếp; giữ riêng mã song song, xem `data/deployments/` sau lần chốt |
 
 Mã commit của một đầu việc được ghi ở bản cập nhật tiến độ kế tiếp để không sửa
 lại commit sau khi đã khởi động lại. Tác vụ chưa được kiểm tra thực tế trên nhóm

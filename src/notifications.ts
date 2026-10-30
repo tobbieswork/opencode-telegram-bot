@@ -121,7 +121,7 @@ export class Notifications {
     return Boolean(event && typeof event.chat === "string" && typeof event.conv === "string" && event.chat === chatOf(event.conv) && /^[a-f0-9]{16}$/.test(event.linkID) &&
       typeof event.sessionID === "string" && event.sessionID.length <= 128 && event.sessionID && typeof event.binding === "string" && event.binding.length > 0 && event.binding.length <= 8192 &&
       NOTICE_KINDS.includes(event.kind) && typeof event.title === "string" && event.title.length <= 256 && Number.isFinite(event.occurredAt) &&
-      (!event.url || /^https:\/\/t\.me\/c\/\d+\/\d+(?:\/\d+)?$/.test(event.url)) && (!event.reference ||
+      (!event.url || /^https:\/\/t\.me\/c\/\d+\/\d+(?:\/\d+|\?thread=\d+)?$/.test(event.url)) && (!event.reference ||
         ["form", "permission", "input", "operation"].includes(event.reference.kind) && typeof event.reference.id === "string" && event.reference.id.length > 0 && event.reference.id.length <= 128) &&
       (event.occurrence === undefined || Number.isSafeInteger(event.occurrence) && event.occurrence >= 0));
   }

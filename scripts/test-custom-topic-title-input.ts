@@ -17,12 +17,12 @@ try {
   await f.bot.handle(f.tap("tc:open:0000000000000001"));
   await f.bot.handle(f.tap(button(":custom")));
   const promptID = f.sent.length;
-  assert.ok(f.sent.at(-1)?.text.includes("Trả lời trực tiếp tin nhắn này"));
+  assert.ok(f.sent.at(-1)?.text.includes("tin kế tiếp của bạn ở General"));
   await f.bot.handle(reply("Không phải người mở", promptID, 2));
   await f.bot.handle(reply("Không phải General", promptID, 1, 203));
   assert.equal(writes.length, 0);
   const raw = " Tên <riêng>\n👨‍👩‍👧‍👦 ";
-  await f.bot.handle(reply(raw, promptID));
+  await f.bot.handle(f.message(raw));
   assert.ok(f.sent.at(-1)?.text.includes("Tên &lt;riêng&gt;"));
   const confirm = button(":confirm");
   assert.equal(writes.length, 0, "Nhập tên chỉ tạo xem trước");
@@ -59,5 +59,5 @@ try {
   assert.ok(f.sent.at(-1)?.text.includes("chính sách đã đổi"));
   assert.equal(writes.length, 1);
   assert.equal(f.effects.length, 0);
-  console.log("Đạt: nhập tên gắn đúng người/General/tin đích, xem trước an toàn HTML, xác nhận một lần và hủy không đổi tên.");
+  console.log("Đạt: nhập tên kế tiếp đúng người/General hoặc trả lời tin đích, xem trước an toàn HTML, xác nhận một lần và hủy không đổi tên.");
 } finally { f.dispose(); }

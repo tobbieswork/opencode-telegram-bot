@@ -10,7 +10,7 @@
     "dev": "tsx src/index.ts",
     "start": "tsx src/index.ts",
     "restart:local": "tsx scripts/restart-local-bot.ts",
-    "test:workflow": "tsx scripts/test-workflow-foundations.ts && tsx scripts/test-session-dashboard.ts && tsx scripts/test-session-dashboard-commands.ts && tsx scripts/test-pending-actions.ts && tsx scripts/test-session-activity.ts && tsx scripts/test-session-summary.ts && tsx scripts/test-session-resume.ts && tsx scripts/test-notifications.ts && tsx scripts/test-notification-queue.ts && tsx scripts/test-notification-time.ts && tsx scripts/test-session-search.ts && tsx scripts/test-session-pins.ts",
+    "test:workflow": "tsx scripts/test-workflow-foundations.ts && tsx scripts/test-session-dashboard.ts && tsx scripts/test-session-dashboard-commands.ts && tsx scripts/test-pending-actions.ts && tsx scripts/test-session-activity.ts && tsx scripts/test-session-summary.ts && tsx scripts/test-session-resume.ts && tsx scripts/test-notifications.ts && tsx scripts/test-notification-queue.ts && tsx scripts/test-notification-time.ts && tsx scripts/test-session-search.ts && tsx scripts/test-session-pins.ts && tsx scripts/test-workflow-acceptance.ts && tsx scripts/test-workflow-scale.ts && tsx scripts/test-general-input-next-message.ts && tsx scripts/test-opencode-existing-only.ts",
     "smoke": "tsx scripts/smoke.ts",
     "test:format": "tsx scripts/test-format.ts",
     "test:fsbrowser": "tsx scripts/test-fsbrowser.ts",

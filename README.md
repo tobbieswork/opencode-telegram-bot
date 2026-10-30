@@ -199,8 +199,29 @@ results are fed back to the Manager, which summarises them for you.
 nhận, không tự đổi tên hàng loạt khi cập nhật bot. Xem
 [hướng dẫn vận hành](docs/session-topics-operations.md#đồng-bộ-tên-chủ-đề-theo-tiêu-đề-opencode).
 
-Kế hoạch các cải tiến tiếp theo, thứ tự và tiêu chí nghiệm thu:
-[quản lý phiên, tên chủ đề, quay lại công việc, thông báo và tìm kiếm](docs/plan-session-workflow-improvements.md).
+**Luồng quản lý phiên đã triển khai (CV00–CV15):**
+
+- `/sessions` có bộ lọc **Đang chờ bạn**, lỗi, vòng đời và **Đã ghim**, tối đa
+  10 hàng/trang. Thẻ phiên dẫn đến đúng câu hỏi/quyền trong chủ đề.
+- **Xem tóm tắt** chỉ đọc dữ liệu đã quan sát. **Chuẩn bị tiếp tục** yêu cầu
+  nhập mục tiêu mới, xem nguyên văn và xác nhận; không tự chạy từ tóm tắt.
+- **Thiết lập tên** hỗ trợ Theo OpenCode, Giữ tên hiện tại và tên riêng có
+  xem trước; tắt nhóm không bỏ ngoại lệ. Không đồng bộ ngược sang OpenCode.
+- **Thông báo và giờ yên lặng** bật riêng sau xác nhận; mặc định không thêm
+  bản tin General hoặc giờ yên lặng. Hoãn từng câu hỏi không đặt lại ngân sách
+  nhắc hay kéo dài hạn công việc. Mất xác nhận giao tin không tự gửi mới.
+- **Tìm phiên** theo tên/thư mục/đoạn yêu cầu-kết quả đã lưu, hỗ trợ không dấu.
+  Sau khi bấm nhập, gửi tin kế tiếp của bạn trong General hoặc Trả lời tin nhập;
+  không cần tự tìm mã. Hủy bằng nút hoặc `/cancel`. Chỉ một luồng nhập/người/
+  nhóm hoạt động; mở luồng nhập mới hủy luồng nhập cũ, không hủy công việc.
+- **Ghim/Bỏ ghim** là danh sách riêng của người bấm trong nhóm, tối đa 20 mục,
+  không phải ghim tin Telegram. Thẻ chung mở thẻ ghim cá nhân trước; tin trong
+  General vẫn chung cho nhóm, không phải tin riêng tư.
+
+Xem [vận hành](docs/session-topics-operations.md),
+[dữ liệu/nâng cấp/quay mã](docs/workflow-compatibility.md),
+[bằng chứng nghiệm thu](docs/workflow-acceptance.md) và
+[kế hoạch/tiến độ](docs/plan-session-workflow-improvements.md).
 
 - **Approval**: by default (`/auto off`) every dispatch the Manager wants —
   a new worker or a follow-up — appears in General as a card: `✅ Giao` / `❌ Huỷ` /
@@ -265,6 +286,14 @@ All settings are environment variables (see `.env.example`).
 It's a single long-running Node process. Never start another polling instance
 for the same token. Source runs through `tsx`, without hot reload; edits require
 restarting the existing process. Keep `data/state.json` across restarts.
+
+Trên máy macOS của dự án, dùng `npm run restart:local` từ đúng thư mục.
+Công cụ đối chiếu tài khoản/tệp trạng thái, sao lưu trước và sau khi tiến trình
+cũ dừng vào `data/backups/`, chỉ mở một tiến trình mới rồi kiểm tra nhật ký và
+liên kết. `npm run restart:local -- --check` chỉ kiểm tra, chưa khởi động lại.
+Không chạy thêm `npm start` bên cạnh tiến trình hiện có. Bản ghi triển khai
+nằm ở thư mục `deployments/` cạnh tệp trạng thái; có commit và các đường dẫn
+mã còn chưa commit để không nhầm mã nguồn đang chạy với chỉ riêng commit.
 
 ```sh
 # tmux / screen

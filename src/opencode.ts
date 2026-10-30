@@ -206,9 +206,10 @@ export class OpenCodeCtl {
     serviceUrl?: string,
     user?: string,
     password?: string,
+    options: { allowStart?: boolean } = {},
   ): Promise<{ url: string; version?: string }> {
     this.discoverArgs = { serviceUrl, user, password };
-    await this.establishClient();
+    await this.establishClient(options.allowStart ?? true);
     return { url: this.url as string, version: this.version };
   }
 

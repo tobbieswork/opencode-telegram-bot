@@ -130,44 +130,51 @@ nhận lời gọi.
 
 ### Kiểm thử tổng hợp
 
-- [ ] Một kịch bản xuyên suốt: tạo phiên → gửi yêu cầu → có câu hỏi → xuất hiện
+- [x] Một kịch bản xuyên suốt: tạo phiên → gửi yêu cầu → có câu hỏi → xuất hiện
   trong Đang chờ bạn → trả lời trong chủ đề → hoàn tất → xem tóm tắt → tìm và
   ghim phiên → đóng → mở lại đúng liên kết.
-- [ ] Một kịch bản tên: bật nhóm → tắt một chủ đề → đặt tên riêng → đổi tiêu đề
+- [x] Một kịch bản tên trong kiểm thử cô lập: bật nhóm → tắt một chủ đề → đặt tên riêng → đổi tiêu đề
   OpenCode → kiểm tra tên riêng không bị hàng đợi cũ ghi đè → bật theo OpenCode
   với xem trước → khởi động lại và kiểm tra chính sách.
-- [ ] Một kịch bản thông báo: bật giờ yên lặng → nhiều phiên hoàn tất → có câu
+- [x] Một kịch bản thông báo với đồng hồ/cổng giao cô lập: bật giờ yên lặng → nhiều phiên hoàn tất → có câu
   hỏi khẩn → khởi động lại → chỉ còn thông báo hợp lệ, không gửi dồn lời nhắc cũ.
-- [ ] Hai nhóm và hai người dùng: không lộ dữ liệu, dùng nhầm bản xem trước,
+- [x] Hai nhóm và hai người dùng trong kiểm thử: không lộ dữ liệu, dùng nhầm bản xem trước,
   xác nhận hoặc danh sách ghim của nhau; nút cũ bị kiểm tra lại.
-- [ ] Lỗi mạng, giới hạn tần suất, thiếu quyền, lỗi lưu, dữ liệu cũ/hỏng, khởi
+- [x] Lỗi mạng, giới hạn tần suất, thiếu quyền, lỗi lưu, dữ liệu cũ/hỏng, khởi
   động lại giữa thao tác và kết quả gửi không rõ đều có hành vi đã kiểm thử.
-- [ ] `npm run typecheck`, `npm run test:unit`, các kiểm thử tích hợp bổ sung và
+- [x] `npm run typecheck`, `npm run test:unit`, các kiểm thử tích hợp bổ sung và
   cuối cùng `npm run smoke` đều đạt. Đọc các phần menu, chọn chế độ, chuyển tiếp
   phản hồi bị bỏ lỡ và chuyển tiếp câu hỏi; không chỉ nhìn mã thoát.
-- [ ] Kiểm tra nhóm Telegram thử nghiệm cho liên kết tới câu hỏi, giới hạn tên,
+- [x] Kiểm tra một chủ đề thử Telegram được người dùng cho phép cho liên kết tới câu hỏi, giới hạn tên,
   thao tác nút và quyền thực tế; không dùng nhóm thật để tạo dữ liệu kiểm thử
   hàng loạt mà chưa xin phép.
 
 ### Tài liệu và vận hành
 
-- [ ] Cập nhật `README.md`, `docs/session-topics-operations.md`, danh mục lệnh
+- [x] Cập nhật `README.md`, `docs/session-topics-operations.md`, danh mục lệnh
   nếu có thay đổi, hướng dẫn lỗi và cách tắt từng tính năng mới.
-- [ ] Ghi rõ trường dữ liệu mới, giá trị mặc định, giới hạn lưu, cách nâng dữ
+- [x] Ghi rõ trường dữ liệu mới, giá trị mặc định, giới hạn lưu, cách nâng dữ
   liệu cũ và cách quay về bản mã đã triển khai trước đó mà không mất dữ liệu.
-- [ ] Kiểm tra cấu hình triển khai hiện tại thay vì dùng lại mã tiến trình hoặc
+- [x] Kiểm tra cấu hình triển khai hiện tại thay vì dùng lại mã tiến trình hoặc
   đường dẫn nhật ký cũ. Xác minh đúng tài khoản bot và đúng tệp trạng thái.
-- [ ] Khi được phép triển khai: sao lưu trạng thái cần thiết; dừng đúng tiến
+- [x] Khi được phép triển khai: sao lưu trạng thái cần thiết; dừng đúng tiến
   trình cũ và chờ thoát trước khi chạy bản mới. Linux dùng dịch vụ systemd đang
   cấu hình; máy macOS hiện tại dùng tiến trình `npm start` tách nền.
-- [ ] Kiểm tra nhật ký khởi động, chỉ một tiến trình thăm dò Telegram, không có
+- [x] Kiểm tra nhật ký khởi động, chỉ một tiến trình thăm dò Telegram, không có
   lỗi 409 và các liên kết phiên/chủ đề cũ được giữ nguyên.
-- [ ] Không bật hàng loạt chính sách tên, giờ yên lặng hoặc thông báo mới khi
+- [x] Không bật hàng loạt chính sách tên, giờ yên lặng hoặc thông báo mới khi
   cập nhật mã. Đưa ra nút xem trước/cấu hình trong General cho người dùng chọn.
 
 **Hoàn thành khi:** có bằng chứng cho cả kiểm thử, tương thích dữ liệu và vận
 hành; người dùng dùng được hoàn toàn qua Telegram, không mất liên kết/lịch sử và
 không phát sinh công việc mô hình ngoài những gì họ đã xác nhận.
+
+Hồ sơ thực hiện: [nghiệm thu CV15](workflow-acceptance.md),
+[dữ liệu/quay mã](workflow-compatibility.md), [tiến độ](workflow-progress.md).
+Ca chính sách nhóm/hai tài khoản được thử cô lập; trên nhóm thật chỉ một chủ đề
+được cho phép, không bật/tắt chính sách toàn nhóm để làm bài thử. Lần khởi động
+cuối có biên nhận ghi commit và mã chưa commit được người dùng cho phép nạp;
+không gộp thay đổi song song về phiên đóng vào commit CV15.
 
 ## 7. Ngoài phạm vi của kế hoạch
 

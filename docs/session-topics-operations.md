@@ -39,7 +39,7 @@ and all command/button handlers enforce General versus work-topic scope.
   **Làm mới thông tin** chỉ đọc tối đa 40 tin của phiên đó và trạng thái nhẹ,
   có thời hạn và chống bấm dồn; không gọi mô hình, mở lại hay chạy tiếp. Đọc
   lỗi giữ chưa xác minh. **Mở lại phiên** là nút vòng đời riêng, không thực thi.
-- **Chuẩn bị tiếp tục** là bước riêng: trả lời đúng tin nhập mục tiêu trong
+- **Chuẩn bị tiếp tục** là bước riêng: gửi mục tiêu ở tin kế tiếp của bạn hoặc Trả lời tin nhập trong
   General, xem nguyên văn yêu cầu và phiên/thư mục đích rồi mới xác nhận. Có
   Hủy hoặc `/cancel`, hạn 10 phút. Phiên đóng phải mở lại riêng và chuẩn bị lại.
   Có đầu vào mới, thay đổi vòng đời, việc chưa kết thúc/chờ quyền/câu hỏi hoặc
@@ -52,14 +52,14 @@ and all command/button handlers enforce General versus work-topic scope.
   nhận giao không tự gửi mới: trang quy tắc hiện số chưa rõ; chỉ sửa tin đã biết
   mã. Không biết mã thì kiểm tra bảng điều khiển/Đang chờ bạn. Không hứa chống
   trùng khi mất kho. Tắt không dừng việc, hủy yêu cầu hoặc đặt lại lượt nhắc.
-- **Đặt giờ yên lặng**: trả lời đúng tin nhập bằng `HH:MM HH:MM IANA`, chọn
+- **Đặt giờ yên lặng**: gửi tin kế tiếp hoặc Trả lời tin nhập bằng `HH:MM HH:MM IANA`, chọn
   loại báo ngay rồi xác nhận; ví dụ không phải cấu hình ngầm. Giờ riêng không
   đổi múi giờ lịch/hạn công việc; thẻ gốc/phản hồi vẫn đến ngay. Nhắc tự động
   được hoãn cả khi bản tin General tắt, nhưng không tự bật nhắc đã tắt cấu hình.
   Trong **Đang chờ bạn**, Hoãn 15 phút/1 giờ áp dụng đúng mục; Bỏ hoãn không
   đặt lại ngân sách. Mốc lưu qua khởi động/hiển thị lại. Không đổi câu trả lời,
   quyền hoặc dung lượng thực thi. Khi hết giờ không bắn lại các nhịp đã bỏ qua.
-- **Tìm phiên** ở `/sessions`: trả lời đúng tin nhập bằng 1–120 ký tự trong
+- **Tìm phiên** ở `/sessions`: gửi tin kế tiếp hoặc Trả lời tin nhập bằng 1–120 ký tự trong
   10 phút. Hỗ trợ không dấu, tên/thư mục/đoạn yêu cầu-kết quả đã lưu; không tìm
   toàn bộ hội thoại. Tách Đang quản lý và Có thể gắn; bấm chi tiết không mở lại
   hay chạy tiếp, bấm gắn vẫn kiểm tra nguồn và trạng thái thật. Đổi thư mục
@@ -166,8 +166,9 @@ thường; đổi tên không tự mở chủ đề. Kiểm thử riêng: `npm r
   trước khởi động lại không dùng lại được. Mở trang mới để thao tác tiếp.
 
 **Tên riêng từ CV07:** thẻ phiên → **Thiết lập tên** → **Đặt tên riêng**.
-Trả lời trực tiếp tin hỏi tên trong General bằng tên mới; chỉ đúng người mở và
-đúng tin mới được nhận. Sau chuẩn hóa có xem trước; xác nhận mới xếp hàng.
+Gửi tên mới ở tin kế tiếp của bạn trong General hoặc Trả lời tin hỏi tên; chỉ
+người vừa mở luồng được nhận. Trả lời một tin khác không bị lấy làm tên.
+Mở luồng nhập khác sẽ hủy bản nhập cũ. Sau chuẩn hóa có xem trước; xác nhận mới xếp hàng.
 Nút Hủy hoặc `/cancel` bỏ bản nhập mà không đổi tên.
 
 Đặt tên riêng là thao tác thủ công một lần, không bật công tắc nhóm và không
@@ -229,6 +230,11 @@ topic replacement and destructive cleanup are intentionally not implemented.
 Legacy `/prune` and worktree-removal actions cannot erase managed history.
 
 ## Verification
+
+Hồ sơ CV15: [nghiệm thu](workflow-acceptance.md) và
+[dữ liệu/nâng cấp/quay mã](workflow-compatibility.md). Kiểm thử chung đi qua
+`Bot.handle`, tạo → câu hỏi → chờ → trả lời → tóm tắt → tìm/ghim → đóng/mở.
+Kiểm thử 1.000 liên kết kiểm tra trang 10 hàng và giới hạn hai lời đọc nguồn.
 
 ```sh
 npm run typecheck

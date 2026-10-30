@@ -898,11 +898,11 @@ export class Bot {
           title: arg.slice(0, 128) || `Session ${suffix}`, operationID, agent: state.agent || this.cfg.defaultAgent,
           state: { model: state.model, variant: state.variant,
             worker: { name: `session-${suffix}`, status: "idle", spawnedBy: "user", createdAt: now, updatedAt: now } } });
-        await this.showTopicLink(conv, link);
+        await this.showTopicLink(conv, link, userID);
         return true;
       }
       if (["/use", "/attach"].includes(cmd) && arg) {
-        await this.showTopicLink(conv, await this.topics.attach(conv, arg));
+        await this.showTopicLink(conv, await this.topics.attach(conv, arg), userID);
         return true;
       }
       if (["/sessions", "/ls"].includes(cmd)) {
@@ -917,7 +917,7 @@ export class Bot {
       if (["/close", "/restore"].includes(cmd)) {
         const link = this.topics.list(conv).find((item) => item.id === arg || item.sessionID === arg);
         if (!link) throw new Error("Choose a session with /sessions, or supply its link/session ID.");
-        await this.showTopicLink(conv, cmd === "/close" ? await this.topics.close(conv, link.id) : await this.topics.restore(conv, link.id));
+        await this.showTopicLink(conv, cmd === "/close" ? await this.topics.close(conv, link.id) : await this.topics.restore(conv, link.id), userID);
         return true;
       }
       if (cmd === "/sync") {
@@ -1032,6 +1032,15 @@ export class Bot {
     await this.tg.sendMessage(conv, text, { reply_markup: { inline_keyboard: keyboard } });
   }
 
+  private activateGeneralInput(conv: ConvKey, user: number): void {
+    const key = `${conv}:${user}`;
+    this.titleInputs.delete(key); this.resumeInputs.delete(key); this.quietInputs.delete(key); this.searchInputs.delete(key);
+  }
+
+  private acceptsGeneralInput(conv: ConvKey, msg: Message, promptID: number, text: string): boolean {
+    return conv === chatOf(conv) && !text.startsWith("/") && (!msg.reply_to_message || msg.reply_to_message.message_id === promptID);
+  }
+
   private readPinSet(conv: ConvKey, user: number): { ids: ReadonlySet<string>; error?: string } {
     try { return { ids: this.pins.ids(conv, user) }; }
     catch (error) { return { ids: new Set(), error: (error as Error).message }; }
@@ -1094,16 +1103,17 @@ export class Bot {
     for (const [key, value] of this.searchInputs) if (value.expires < Date.now()) this.searchInputs.delete(key);
     while (this.searchInputs.size >= 100) this.searchInputs.delete(this.searchInputs.keys().next().value!);
     const token = randomBytes(6).toString("hex");
-    const messageID = await this.tg.sendMessageId(conv, "<b>Tìm phiên</b>\nTrả lời đúng tin này trong 10 phút bằng từ khóa 1–120 ký tự. Tìm tên, thư mục và đoạn yêu cầu/kết quả đã lưu; hỗ trợ không dấu. Không đọc toàn bộ hội thoại hoặc gửi ra công cụ tìm kiếm ngoài.",
+    const messageID = await this.tg.sendMessageId(conv, "<b>Tìm phiên</b>\nGửi từ khóa 1–120 ký tự trong tin nhắn kế tiếp ở General, hoặc Trả lời tin này, trong 10 phút. Chỉ nhận tin của người vừa bấm Tìm. Tìm tên, thư mục và đoạn yêu cầu/kết quả đã lưu; hỗ trợ không dấu. Không đọc toàn bộ hội thoại hoặc gửi ra công cụ tìm kiếm ngoài.",
       { reply_markup: { inline_keyboard: [[{ text: "Hủy tìm", callback_data: `ss:cancel:${token}` }]] } });
     if (messageID < 1) throw new Error("Chưa xác nhận được tin nhập từ khóa.");
+    this.activateGeneralInput(conv, user);
     this.searchInputs.set(`${conv}:${user}`, { token, messageID, expires: Date.now() + 600_000 });
   }
 
   private async handleSearchInput(conv: ConvKey, user: number, msg: Message, text: string): Promise<boolean> {
     const key = `${conv}:${user}`;
     const input = this.searchInputs.get(key);
-    if (!input || msg.reply_to_message?.message_id !== input.messageID || text.startsWith("/")) return false;
+    if (!input || !this.acceptsGeneralInput(conv, msg, input.messageID, text)) return false;
     this.searchInputs.delete(key);
     try {
       if (input.expires < Date.now()) throw new Error("Luồng tìm kiếm hết hạn; bấm Tìm phiên lại.");
@@ -1196,7 +1206,7 @@ export class Bot {
         const directory = session?.directory || this.st.peek(this.st.findChatBySession(item.id) ?? "")?.directory || listing.directory;
         if (listing.directory !== card.directory || !session || JSON.stringify([session.id, session.title || "Phiên chưa đặt tên", directory]) !== item.binding) throw new Error("Phạm vi, chủ sở hữu hoặc metadata đã đổi; làm mới kết quả trước khi gắn.");
         const link = await this.topics.attach(conv, item.id);
-        await this.showTopicLink(conv, link);
+        await this.showTopicLink(conv, link, user);
       }
       return;
     }
@@ -1385,9 +1395,10 @@ export class Bot {
     if (action === "quiet") {
       while (this.quietInputs.size >= 100) this.quietInputs.delete(this.quietInputs.keys().next().value!);
       const id = randomBytes(6).toString("hex");
-      const messageID = await this.tg.sendMessageId(conv, "<b>Nhập giờ yên lặng</b>\nTrả lời đúng tin này trong 10 phút: giờ bắt đầu, giờ kết thúc và múi giờ IANA. Ví dụ chỉ để tham khảo: <code>23:00 07:00 Asia/Ho_Chi_Minh</code>. Chưa áp dụng cho tới khi xem trước và xác nhận; không đổi múi giờ lịch chạy.",
+      const messageID = await this.tg.sendMessageId(conv, "<b>Nhập giờ yên lặng</b>\nGửi tin kế tiếp của bạn ở General hoặc Trả lời tin này trong 10 phút: giờ bắt đầu, giờ kết thúc và múi giờ IANA. Ví dụ chỉ để tham khảo: <code>23:00 07:00 Asia/Ho_Chi_Minh</code>. Chưa áp dụng cho tới khi xem trước và xác nhận; không đổi múi giờ lịch chạy.",
         { reply_markup: { inline_keyboard: [[{ text: "Hủy nhập", callback_data: `nt:qcancel:${id}` }]] } });
       if (messageID < 1) throw new Error("Chưa xác nhận được tin nhập giờ; thử lại từ thiết lập.");
+      this.activateGeneralInput(conv, user);
       this.quietInputs.set(`${conv}:${user}`, { token: id, messageID, revision: this.notifications.settings(conv).revision, expires: Date.now() + 600_000 });
       return;
     }
@@ -1454,7 +1465,7 @@ export class Bot {
   private async handleQuietInput(conv: ConvKey, user: number, msg: Message, text: string): Promise<boolean> {
     const key = `${conv}:${user}`;
     const input = this.quietInputs.get(key);
-    if (!input || msg.reply_to_message?.message_id !== input.messageID || text.startsWith("/")) return false;
+    if (!input || !this.acceptsGeneralInput(conv, msg, input.messageID, text)) return false;
     this.quietInputs.delete(key);
     try {
       if (input.expires < Date.now() || this.notifications.settings(conv).revision !== input.revision) throw new Error("Bản nhập hết hạn/chính sách đổi; nhập lại từ thiết lập.");
@@ -1566,16 +1577,17 @@ export class Bot {
     for (const [key, value] of this.resumeInputs) if (value.expires < Date.now()) this.resumeInputs.delete(key);
     while (this.resumeInputs.size >= 100) this.resumeInputs.delete(this.resumeInputs.keys().next().value!);
     const token = randomBytes(6).toString("hex");
-    const messageID = await this.tg.sendMessageId(conv, `<b>Nhập mục tiêu tiếp tục</b>\nPhiên: <code>${esc(ready.link.sessionID!)}</code>\nTrả lời trực tiếp tin này trong 10 phút bằng yêu cầu mới bạn muốn gửi. Không tự lấy lại yêu cầu cũ hay suy đoán bước tiếp theo. Sau đó còn bước xem trước/xác nhận.`,
+    const messageID = await this.tg.sendMessageId(conv, `<b>Nhập mục tiêu tiếp tục</b>\nPhiên: <code>${esc(ready.link.sessionID!)}</code>\nGửi yêu cầu mới trong tin kế tiếp của bạn ở General hoặc Trả lời tin này, trong 10 phút. Không tự lấy lại yêu cầu cũ hay suy đoán bước tiếp theo. Sau đó còn bước xem trước/xác nhận.`,
       { reply_markup: { inline_keyboard: [[{ text: "Hủy nhập mục tiêu", callback_data: `resume:cancel-input:${token}` }]] } });
     if (!Number.isSafeInteger(messageID) || messageID <= 0) throw new Error("Chưa xác nhận được tin nhập mục tiêu; mở lại từ tóm tắt.");
+    this.activateGeneralInput(conv, user);
     this.resumeInputs.set(`${conv}:${user}`, { id: card.id, token, messageID, marker: ready.marker, binding: ready.binding, expires: Date.now() + 10 * 60_000 });
   }
 
   private async handleResumeInput(conv: ConvKey, user: number, msg: Message, text: string): Promise<boolean> {
     const key = `${conv}:${user}`;
     const input = this.resumeInputs.get(key);
-    if (!input || msg.reply_to_message?.message_id !== input.messageID || text.startsWith("/")) return false;
+    if (!input || !this.acceptsGeneralInput(conv, msg, input.messageID, text)) return false;
     this.resumeInputs.delete(key);
     try {
       if (input.expires < Date.now() || text.length > 1200) throw new Error("Bản nhập hết hạn hoặc mục tiêu dài quá 1200 ký tự; chuẩn bị lại.");
@@ -1714,7 +1726,7 @@ export class Bot {
       await this.tg.sendMessage(conv, "Đã hủy nhập tên riêng; không đổi tên.");
       return true;
     }
-    if (msg.reply_to_message?.message_id !== input.messageID || text.startsWith("/")) return false;
+    if (!this.acceptsGeneralInput(conv, msg, input.messageID, text)) return false;
     this.titleInputs.delete(key);
     try {
       if (input.expires < Date.now() || this.topics.titleScopeStamp(conv, input.id) !== input.stamp) throw new Error("Yêu cầu nhập tên đã hết hạn hoặc phiên/chính sách đã đổi. Mở lại Thiết lập tên.");
@@ -1759,9 +1771,10 @@ export class Bot {
       for (const [key, value] of this.titleInputs) if (value.expires < Date.now()) this.titleInputs.delete(key);
       while (this.titleInputs.size >= 100) this.titleInputs.delete(this.titleInputs.keys().next().value!);
       const inputToken = randomBytes(6).toString("hex");
-      const messageID = await this.tg.sendMessageId(conv, `<b>Nhập tên riêng</b>\nPhiên: <code>${esc(this.topics.get(card.id)!.sessionID!)}</code>\nTrả lời trực tiếp tin nhắn này bằng tên mới trong 10 phút. Bot sẽ chuẩn hóa một dòng, tối đa 128 ký tự rồi cho xem trước; chưa đổi tên ngay.`,
+      const messageID = await this.tg.sendMessageId(conv, `<b>Nhập tên riêng</b>\nPhiên: <code>${esc(this.topics.get(card.id)!.sessionID!)}</code>\nGửi tên mới trong tin kế tiếp của bạn ở General hoặc Trả lời tin này, trong 10 phút. Bot sẽ chuẩn hóa một dòng, tối đa 128 ký tự rồi cho xem trước; chưa đổi tên ngay.`,
         { reply_markup: { inline_keyboard: [[{ text: "Hủy nhập tên", callback_data: `tc:${inputToken}:cancel-input` }]] } });
       if (!Number.isSafeInteger(messageID) || messageID <= 0 || this.topics.titleScopeStamp(conv, card.id) !== card.stamp) throw new Error("Không xác nhận được tin nhập hoặc phạm vi đã đổi; mở lại Thiết lập tên.");
+      this.activateGeneralInput(conv, user);
       this.titleInputs.set(`${conv}:${user}`, { chat: conv, id: card.id, token: inputToken, expires: Date.now() + 10 * 60_000, messageID, stamp: card.stamp });
       return;
     } else if (action === "custom-preview" && card.id) {
@@ -3485,7 +3498,7 @@ export class Bot {
               else {
                 const result = await this.topics.syncTitle(conv, id, true);
                 await this.tg.sendMessage(conv, result.status === "synced" || result.status === "unchanged" ? "Đã đồng bộ tên chủ đề." : "Tên chưa được đồng bộ; đang chờ mở phiên, kiểm tra hoặc thử lại. Công việc hiện tại không bị dừng.");
-                await this.showTopicLink(conv, this.topics.get(id)!);
+                await this.showTopicLink(conv, this.topics.get(id)!, cb.from!.id);
               }
             } else if (action === "title-enable" || action === "title-cancel") {
               const preview = this.titlePreviews.get(conv);
@@ -3510,13 +3523,13 @@ export class Bot {
           if (action === "sync") {
             if (this.topics.get(id)?.chat !== conv) throw new Error("This operation belongs to another General.");
             await this.reconcileTopics();
-            await this.showTopicLink(conv, this.topics.get(id)!);
+            await this.showTopicLink(conv, this.topics.get(id)!, cb.from!.id);
             await this.tg.answerCallbackQuery(cb.id);
             return;
           }
           const link = action === "close" ? await this.topics.close(conv, id) :
             action === "restore" ? await this.topics.restore(conv, id) : undefined;
-          if (link) await this.showTopicLink(conv, link);
+          if (link) await this.showTopicLink(conv, link, cb.from!.id);
           await this.tg.answerCallbackQuery(cb.id);
          } catch (error) {
            if (action.startsWith("title-")) await this.tg.sendMessage(conv, esc((error as Error).message),

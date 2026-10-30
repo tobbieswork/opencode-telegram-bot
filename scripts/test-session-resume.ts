@@ -23,13 +23,13 @@ function setup() {
     throw new Error("Transport: fetch failed"); };
   f.oc.reconnect = async () => { throw new Error("Không được tự kết nối rồi gửi lại lượt tiếp tục"); };
   const button = (prefix: string) => f.buttons().find(button => button.callback_data?.startsWith(prefix))!.callback_data!;
-  const start = async () => {
+  const start = async (replyToPrompt = true) => {
     await f.bot.handle(f.tap("sum:show:0000000000000001"));
     await f.bot.handle(f.tap(button("sum:refresh:")));
     await f.bot.handle(f.tap(button("sum:prepare:")));
     const replyID = f.sent.length;
     const update: Update = f.message("Tiếp tục: kiểm tra <đăng nhập> rồi báo kết quả");
-    update.message!.reply_to_message = { message_id: replyID };
+    if (replyToPrompt) update.message!.reply_to_message = { message_id: replyID };
     await f.bot.handle(update);
     assert.ok(f.sent.at(-1)?.text.includes("Nội dung sẽ gửi"));
     return button("resume:yes:");
@@ -40,7 +40,7 @@ function setup() {
 const f = setup();
 let restored: Bot | undefined;
 try {
-  const yes = await f.start();
+  const yes = await f.start(false);
   assert.equal(f.prompts.length, 0);
   await f.bot.handle(f.tap(yes, 2));
   assert.equal(f.prompts.length, 0);
