@@ -19,8 +19,8 @@ khi bắt đầu đầu việc tiếp theo. Không bật chính sách mới trê
 | CV10 | Đã triển khai và áp dụng | `61435b2`; kiểu, đơn vị, đầu-cuối đạt; đã khởi động lại, giữ 5 liên kết |
 | CV11 | Đã triển khai và áp dụng | `a1d17f3`; kiểu, đơn vị, đầu-cuối đạt; đã khởi động lại, giữ 5 liên kết |
 | CV12 | Đã triển khai và áp dụng | `e4944c5`; kiểu, đơn vị, đầu-cuối đạt; đã khởi động lại, giữ 5 liên kết |
-| CV13 | Đã triển khai, chờ chốt commit và khởi động lại | Tìm không dấu/Unicode trong nhóm, lọc và trang 10 hàng, tách quản lý/khám phá gắn; thẻ bất biến đúng người và phạm vi |
-| CV14 | Chưa bắt đầu | Ghim |
+| CV13 | Đã triển khai và áp dụng | `e228701`; kiểu, đơn vị, đầu-cuối đạt; đã khởi động lại, giữ 5 liên kết |
+| CV14 | Đã triển khai, chờ chốt commit và khởi động lại | Ghim cá nhân đúng nhóm/người, 20 mục, bấm đôi không đảo; giữ qua đổi tên/đóng/khởi động, mất sở hữu không lộ nguồn |
 | CV15 | Chưa bắt đầu | Nghiệm thu tổng hợp |
 
 Mã commit của một đầu việc được ghi ở bản cập nhật tiến độ kế tiếp để không sửa

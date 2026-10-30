@@ -41,7 +41,7 @@ export interface DashboardRow {
   activityError?: string;
 }
 
-export const DASHBOARD_FILTERS = { all: "Tất cả", waiting: "Đang chờ bạn", running: "Đang chạy", error: "Gặp lỗi", closed: "Đã đóng" } as const;
+export const DASHBOARD_FILTERS = { all: "Tất cả", waiting: "Đang chờ bạn", running: "Đang chạy", error: "Gặp lỗi", closed: "Đã đóng", pinned: "Đã ghim" } as const;
 export type DashboardFilter = keyof typeof DASHBOARD_FILTERS;
 export const DASHBOARD_WORK_LABELS: Record<DashboardWork, string> = {
   unknown: "Chưa xác minh", idle: "Đang nghỉ", running: "Đang chạy", done: "Đã hoàn tất", failed: "Công việc lỗi", stopped: "Đã dừng",
@@ -50,17 +50,17 @@ export const DASHBOARD_PHASE_LABELS: Record<SessionTopic["phase"], string> = {
   creating: "Đang tạo", open: "Đang mở", closing: "Đang đóng", closed: "Đã đóng", restoring: "Đang mở lại",
   missing: "Không còn phiên", attention: "Cần kiểm tra",
 };
-export function dashboardMatches(row: DashboardRow, kind: DashboardFilter): boolean {
+export function dashboardMatches(row: DashboardRow, kind: DashboardFilter, pinned: ReadonlySet<string> = new Set()): boolean {
   return kind === "all" ||
     (kind === "waiting" && row.pending.some(item => item.verified)) ||
     (kind === "running" && row.work === "running") || (kind === "closed" && row.lifecycle === "closed") ||
-    (kind === "error" && (row.work === "failed" || ["attention", "missing"].includes(row.lifecycle) || Boolean(row.titleError)));
+    (kind === "error" && (row.work === "failed" || ["attention", "missing"].includes(row.lifecycle) || Boolean(row.titleError))) || (kind === "pinned" && pinned.has(row.id));
 }
-export function dashboardPage(rows: readonly DashboardRow[], filter: DashboardFilter, requestedPage = 0) {
+export function dashboardPage(rows: readonly DashboardRow[], filter: DashboardFilter, requestedPage = 0, pinned: ReadonlySet<string> = new Set()) {
   const counts = Object.fromEntries(Object.keys(DASHBOARD_FILTERS).map(kind => [kind,
-    rows.filter(row => dashboardMatches(row, kind as DashboardFilter)).length])) as Record<DashboardFilter, number>;
-  const selected = rows.filter(row => dashboardMatches(row, filter)).sort((a, b) =>
-    Number(b.pending.length > 0) - Number(a.pending.length > 0) || b.lastActivityAt - a.lastActivityAt || a.id.localeCompare(b.id));
+    rows.filter(row => dashboardMatches(row, kind as DashboardFilter, pinned)).length])) as Record<DashboardFilter, number>;
+  const selected = rows.filter(row => dashboardMatches(row, filter, pinned)).sort((a, b) =>
+    Number(b.pending.length > 0) - Number(a.pending.length > 0) || Number(pinned.has(b.id)) - Number(pinned.has(a.id)) || b.lastActivityAt - a.lastActivityAt || a.id.localeCompare(b.id));
   const pages = Math.max(1, Math.ceil(selected.length / 10));
   const page = Math.min(Math.max(0, requestedPage), pages - 1);
   return { rows: selected.slice(page * 10, page * 10 + 10), page, pages, total: selected.length, counts,

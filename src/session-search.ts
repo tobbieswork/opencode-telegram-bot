@@ -24,7 +24,7 @@ export function rankedSearch<T extends SearchEntry>(entries: readonly T[], query
 export function searchManaged(chat: ConvKey, rows: readonly DashboardRow[], query: string, filter: DashboardFilter, page = 0,
   includeClosed = false, pinned: ReadonlySet<string> = new Set(), onlyPinned = false) {
   const source = rows.filter(row => row.chat === chat && (includeClosed || filter === "closed" || row.lifecycle !== "closed") &&
-    dashboardMatches(row, filter) && (!onlyPinned || pinned.has(row.id))).map(row => {
+    dashboardMatches(row, filter, pinned) && (!onlyPinned || pinned.has(row.id))).map(row => {
     const activity = row.activity?.sessionID === row.sessionID ? row.activity : undefined;
     return { ...row, at: row.lastActivityAt, summary: activity ? `${activity.input.snippet} ${activity.result?.snippet ?? ""}` : "" };
   });

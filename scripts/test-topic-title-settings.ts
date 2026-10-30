@@ -53,8 +53,14 @@ try {
   renameError = new Error("Thiếu <quyền> đổi tên");
   await f.bot.handle(f.tap("tc:open:0000000000000001"));
   await f.bot.handle(f.tap(button(":retry")));
-  const errorDeadline = Date.now() + 4000;
-  while (!f.st.sessionTopics()?.links["0000000000000001"].titleSync?.error && Date.now() < errorDeadline) await new Promise(resolve => setTimeout(resolve, 20));
+  // Các chủ đề cùng nhóm dùng chung nhịp 1 giây; chờ đúng ý định, không chỉ lỗi của lượt trước.
+  const errorDeadline = Date.now() + 8000;
+  while (Date.now() < errorDeadline) {
+    const sync = f.st.sessionTopics()?.links["0000000000000001"].titleSync;
+    if (sync?.error && sync.desiredName === "Tên chờ <khác>") break;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.equal(f.st.sessionTopics()?.links["0000000000000001"].titleSync?.desiredName, "Tên chờ <khác>");
   await f.bot.handle(f.tap("tc:open:0000000000000001"));
   assert.ok(f.sent.at(-1)?.text.includes("Ý định tên đã lưu: Tên chờ &lt;khác&gt;"));
   assert.ok(f.sent.at(-1)?.text.includes("Thiếu &lt;quyền&gt;"));

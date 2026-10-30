@@ -19,6 +19,7 @@ import { Notifications, NOTICE_LABELS, type Notice, type NoticeKind } from "./no
 import { validateQuiet, type QuietHours } from "./notification-time.js";
 import { snoozeSchedule } from "./reminders.js";
 import { rankedSearch, searchManaged, searchQuery } from "./session-search.js";
+import { SessionPins, pinBinding } from "./session-pins.js";
 
 import { Schedule, SchedSpec, formatSchedule, nextRunAfter, parseScheduleSpec } from "./schedule.js";
 import { Config } from "./config.js";
@@ -117,6 +118,7 @@ function isTransportError(e: any): boolean {
 interface SearchCard {
   chat: ConvKey; user: number; query: string; mode: "managed" | "attach"; filter: DashboardFilter; includeClosed: boolean;
   directory: string; page: number; expires: number; visible: Array<{ id: string; sessionID?: string; binding: string }>;
+  onlyPinned?: boolean;
 }
 type Btn = { text: string; callback_data: string; url?: never } | { text: string; url: string; callback_data?: never };
 type Keyboard = { inline_keyboard: Btn[][] };
@@ -270,6 +272,8 @@ export class Bot {
   private quietInputs = new Map<string, { token: string; messageID: number; revision: number; expires: number }>();
   private searchInputs = new Map<string, { token: string; messageID: number; expires: number }>();
   private searchCards = new Map<string, SearchCard>();
+  private pins: SessionPins;
+  private pinCards = new Map<string, { chat: ConvKey; user: number; id: string; binding?: string; revision: number; expires: number }>();
   private resumeInputs = new Map<string, { id: string; token: string; messageID: number; binding: string; marker: string; expires: number }>();
   private activityReads = new Map<ConvKey, Promise<void>>();
   private activityAgain = new Set<ConvKey>();
@@ -357,6 +361,7 @@ export class Bot {
         return true;
       },
     });
+    this.pins = new SessionPins(st, this.topics);
     this.dashboard = new SessionDashboard({ store: st, topics: this.topics,
       observe: (id, signal) => oc.dashboardObservation(id, signal), timeoutMs: 3000 });
     this.orch = new Orchestrator({
@@ -474,6 +479,7 @@ export class Bot {
     this.quietInputs.clear();
     this.searchInputs.clear();
     this.searchCards.clear();
+    this.pinCards.clear();
     this.orch.shutdown();
     this.topics.stopTitleSync();
     this.titlePreviews.clear();
@@ -994,9 +1000,10 @@ export class Bot {
     if (!card || card.chat !== conv || card.user !== user || card.expires < Date.now()) {
       throw new Error("Thẻ đã hết hạn hoặc không thuộc bạn/nhóm này. Mở lại bằng /sessions.");
     }
-    const prior = dashboardPage(await this.dashboard.read(conv), filter, requestedPage);
+    const pins = this.readPinSet(conv, user);
+    const prior = dashboardPage(await this.dashboard.read(conv), filter, requestedPage, pins.ids);
     const rows = await this.dashboard.read(conv, { refresh: true, force, ids: prior.rows.map(row => row.id) });
-    const page = dashboardPage(rows, filter, prior.page);
+    const page = dashboardPage(rows, filter, prior.page, pins.ids);
     card.filter = filter;
     card.page = page.page;
     const keyboard: Btn[][] = page.rows.map(row => [{ text: trunc(row.title || "Phiên chưa đặt tên", 48), callback_data: `db:${token}:detail:${row.id}` }]);
@@ -1012,15 +1019,75 @@ export class Bot {
     keyboard.push([{ text: "Thiết lập tên", callback_data: "tc:open:group" }]);
     keyboard.push([{ text: "Thông báo và giờ yên lặng", callback_data: "nt:rules" }]);
     keyboard.push([{ text: "Tìm phiên", callback_data: "ss:start" }]);
+    keyboard.push([{ text: "Quản lý ghim cá nhân", callback_data: "pin:list" }]);
     const text = ["<b>Phiên đang quản lý</b>", `${DASHBOARD_FILTERS[filter]} · ${page.total} phiên · Trang ${page.page + 1}/${page.pages}`,
       ...page.rows.flatMap((row, index) => [
-        `${page.page * 10 + index + 1}. <b>${esc(trunc(row.title, 48))}</b> · ${DASHBOARD_PHASE_LABELS[row.lifecycle]} · ${DASHBOARD_WORK_LABELS[row.work]}`,
+        `${page.page * 10 + index + 1}. ${pins.ids.has(row.id) ? "📌 " : ""}<b>${esc(trunc(row.title, 48))}</b> · ${DASHBOARD_PHASE_LABELS[row.lifecycle]} · ${DASHBOARD_WORK_LABELS[row.work]}`,
         `<code>${esc(trunc(row.directory, 60))}</code> · ${row.checkedAt ? `Đã kiểm tra ${esc(timeAgo(row.checkedAt))}` : "Chưa kiểm tra"}${row.pending.length ? ` · ${row.pending.length} yêu cầu${row.pendingVerified ? "" : " cần đối chiếu"}` : ""}${row.titleError ? " · Lỗi đồng bộ tên" : ""}`,
       ]),
       !page.rows.length ? "Chưa có phiên phù hợp. Có thể làm mới, đổi bộ lọc, tạo mới hoặc gắn phiên có sẵn." : "Bấm tên phiên để xem chi tiết và đi tới chủ đề.",
       page.unverified ? `${page.unverified} phiên chưa xác minh đủ. Số đang chạy/chờ chỉ tính dữ liệu đã xác minh; làm mới từng trang khi cần.` : "Trạng thái là dữ liệu đã quan sát, không tự thay đổi vòng đời.",
+      pins.error ? `Ghim chưa đọc được: ${esc(pins.error)}; giữ dữ liệu, không xóa ghim.` : "Ghim là danh sách của người bấm trong nhóm; tin General vẫn công khai với nhóm.",
     ].join("\n");
     await this.tg.sendMessage(conv, text, { reply_markup: { inline_keyboard: keyboard } });
+  }
+
+  private readPinSet(conv: ConvKey, user: number): { ids: ReadonlySet<string>; error?: string } {
+    try { return { ids: this.pins.ids(conv, user) }; }
+    catch (error) { return { ids: new Set(), error: (error as Error).message }; }
+  }
+
+  private pinContext(conv: ConvKey, user: number, id: string) {
+    const state = this.pins.user(conv, user);
+    const entry = state.entries.find(entry => entry.id === id);
+    const link = /^[a-f0-9]{16}$/.test(id) ? this.topics.get(id) : undefined;
+    if ((!link || link.chat !== conv) && !entry) throw new Error("Phiên không thuộc danh sách được phép ghim của nhóm.");
+    for (const [key, value] of this.pinCards) if (value.expires < Date.now()) this.pinCards.delete(key);
+    while (this.pinCards.size >= 500) this.pinCards.delete(this.pinCards.keys().next().value!);
+    const token = randomBytes(6).toString("hex");
+    this.pinCards.set(token, { chat: conv, user, id, binding: link?.chat === conv ? pinBinding(link) : entry?.binding,
+      revision: state.revision, expires: Date.now() + 600_000 });
+    return { token, pinned: Boolean(entry), link: link?.chat === conv ? link : undefined };
+  }
+
+  private async showPins(conv: ConvKey, user: number): Promise<void> {
+    const entries = this.pins.list(conv, user);
+    const rows = await this.dashboard.read(conv);
+    const lines = [`<b>Ghim cá nhân · ${entries.length}/20</b>`, "Chỉ danh sách của người bấm trong nhóm này; tin gửi ở General vẫn hiển thị cho nhóm."];
+    const keyboard: Btn[][] = [];
+    for (const [index, entry] of entries.entries()) {
+      const row = entry.available ? rows.find(row => row.id === entry.id && row.chat === conv) : undefined;
+      lines.push(`${index + 1}. ${entry.link && row ? `${esc(trunc(entry.link.title, 70))} · ${DASHBOARD_PHASE_LABELS[row.lifecycle]}${row.stale ? " · Nguồn chưa xác minh, giữ ghim" : ""}` : `Không khả dụng · mã ghim ${esc(trunc(entry.id, 20))}; giữ để bạn bỏ ghim, không thay bằng phiên khác`}`);
+      const context = this.pinContext(conv, user, entry.id);
+      keyboard.push([{ text: `Bỏ ghim mục ${index + 1}`, callback_data: `pin:set:${context.token}:0` },
+        ...(entry.available ? [{ text: "Xem thẻ", callback_data: `pin:detail:${context.token}:0` }] : [])]);
+    }
+    if (!entries.length) lines.push("Chưa có ghim. Mở thẻ phiên và chọn Ghim; không cần mã phiên.");
+    keyboard.push([{ text: "Bảng điều khiển", callback_data: "cmd:ls" }]);
+    await this.tg.sendMessage(conv, lines.join("\n"), { reply_markup: { inline_keyboard: keyboard } });
+  }
+
+  private async handlePinCallback(conv: ConvKey, cb: CallbackQuery): Promise<void> {
+    const [, action, token, value] = (cb.data ?? "").split(":");
+    const user = cb.from!.id;
+    if (action === "list") { await this.showPins(conv, user); return; }
+    if (action === "open") {
+      const context = this.pinContext(conv, user, token);
+      await this.tg.sendMessage(conv, `<b>Ghim cá nhân</b>\n${context.link ? esc(trunc(context.link.title, 100)) : "Liên kết không khả dụng"}\nChỉ sửa danh sách của bạn trong nhóm; không ghim tin Telegram hoặc chạy công việc.`,
+        { reply_markup: { inline_keyboard: [[{ text: context.pinned ? "Bỏ ghim" : "Ghim", callback_data: `pin:set:${context.token}:${context.pinned ? 0 : 1}` }, { text: "Danh sách của tôi", callback_data: "pin:list" }]] } });
+      return;
+    }
+    const card = this.pinCards.get(token);
+    if (!card || card.chat !== conv || card.user !== user || card.expires < Date.now()) throw new Error("Thẻ ghim hết hạn hoặc thuộc người/nhóm khác.");
+    const link = /^[a-f0-9]{16}$/.test(card.id) ? this.topics.get(card.id) : undefined;
+    if (action === "detail") {
+      if (!this.pins.ids(conv, user).has(card.id) || !link || link.chat !== conv || pinBinding(link) !== card.binding) throw new Error("Ghim không còn khả dụng; danh sách vẫn được giữ để bỏ ghim.");
+      await this.showTopicLink(conv, link, user); return;
+    }
+    if (action !== "set" || (value !== "0" && value !== "1")) throw new Error("Nút ghim không hợp lệ.");
+    if (value === "1" && (!link || link.chat !== conv || pinBinding(link) !== card.binding)) throw new Error("Liên kết đã đổi; không ghim phiên thay thế từ thẻ cũ.");
+    this.pins.set(conv, user, card.id, value === "1", card.revision);
+    await this.showPins(conv, user);
   }
 
   private async startSearch(conv: ConvKey, user: number): Promise<void> {
@@ -1053,12 +1120,14 @@ export class Bot {
     const lines = [`<b>Tìm phiên · ${card.mode === "managed" ? "Đang quản lý" : "Có thể gắn"}</b>`, `Từ khóa: ${esc(card.query)}`];
     let pages = 1, total = 0;
     if (card.mode === "managed") {
+      const pins = this.readPinSet(card.chat, card.user);
+      if (pins.error) lines.push(`Chưa đọc được ghim: ${esc(pins.error)}`);
       let rows = await this.dashboard.read(card.chat);
-      let result = searchManaged(card.chat, rows, card.query, card.filter, card.page, card.includeClosed);
+      let result = searchManaged(card.chat, rows, card.query, card.filter, card.page, card.includeClosed, pins.ids, card.onlyPinned);
       if (refresh) {
-        const subset = result.rows.length ? result.rows : searchManaged(card.chat, rows, card.query, "all", card.page, card.includeClosed).rows;
+        const subset = result.rows.length ? result.rows : searchManaged(card.chat, rows, card.query, "all", card.page, card.includeClosed, pins.ids, card.onlyPinned || card.filter === "pinned").rows;
         rows = await this.dashboard.read(card.chat, { refresh: true, force: true, ids: subset.map(row => row.id) });
-        result = searchManaged(card.chat, rows, card.query, card.filter, card.page, card.includeClosed);
+        result = searchManaged(card.chat, rows, card.query, card.filter, card.page, card.includeClosed, pins.ids, card.onlyPinned);
       }
       card.page = result.page; pages = result.pages; total = result.total;
       for (const row of result.rows) {
@@ -1094,6 +1163,7 @@ export class Bot {
       const filters = Object.entries(DASHBOARD_FILTERS).map(([key, label]) => ({ text: label, callback_data: `ss:filter:${token}:${key}` }));
       for (let n = 0; n < filters.length; n += 2) keyboard.push(filters.slice(n, n + 2));
       keyboard.push([{ text: card.includeClosed ? "Không kèm đã đóng" : "Kèm phiên đã đóng", callback_data: `ss:closed:${token}:0` }]);
+      keyboard.push([{ text: card.onlyPinned ? "Bỏ giới hạn chỉ ghim" : "Chỉ kết quả đã ghim", callback_data: `ss:pinned:${token}:0` }]);
     }
     keyboard.push([{ text: card.mode === "managed" ? "Tìm phiên có thể gắn" : "Tìm phiên đang quản lý", callback_data: `ss:mode:${token}:${card.mode === "managed" ? "attach" : "managed"}` }]);
     keyboard.push([{ text: "Làm mới", callback_data: `ss:refresh:${token}:0` }, { text: "Bỏ bộ lọc", callback_data: `ss:clear:${token}:0` }]);
@@ -1119,7 +1189,7 @@ export class Bot {
       if (card.mode === "managed") {
         const link = this.topics.get(item.id);
         if (!link || link.chat !== conv || link.sessionID !== item.sessionID || this.summaryBinding(link) !== item.binding) throw new Error("Liên kết kết quả đã đổi; tìm lại.");
-        await this.showTopicLink(conv, link);
+        await this.showTopicLink(conv, link, user);
       } else {
         const listing = await this.attachmentChoices(conv);
         const session = listing.choices.find(session => session.id === item.id);
@@ -1134,7 +1204,8 @@ export class Bot {
     if (action === "page") { if (!/^(?:0|[1-9]\d{0,5})$/.test(value ?? "")) throw new Error("Trang không hợp lệ."); next.page = Number(value); }
     else if (action === "filter") { if (!Object.hasOwn(DASHBOARD_FILTERS, value)) throw new Error("Bộ lọc không hợp lệ."); next.filter = value as DashboardFilter; next.page = 0; if (next.filter === "closed") next.includeClosed = true; }
     else if (action === "closed") { next.includeClosed = !next.includeClosed; next.page = 0; if (!next.includeClosed && next.filter === "closed") next.filter = "all"; }
-    else if (action === "clear") { next.filter = "all"; next.includeClosed = false; next.page = 0; }
+    else if (action === "clear") { next.filter = "all"; next.includeClosed = false; next.onlyPinned = false; next.page = 0; }
+    else if (action === "pinned") { next.onlyPinned = !next.onlyPinned; next.page = 0; }
     else if (action === "mode") { if (value !== "managed" && value !== "attach") throw new Error("Loại kết quả không hợp lệ."); next.mode = value; next.page = 0; next.directory = resolve(this.st.peek(conv)?.directory || this.cfg.opencodeDirectory); }
     else if (action !== "refresh") throw new Error("Nút tìm kiếm không hợp lệ.");
     await this.showSearchPage(next, action === "refresh");
@@ -1224,7 +1295,7 @@ export class Bot {
     await this.tg.sendMessage(conv, "Đã hiển thị lại thẻ trong đúng chủ đề. Không đặt lại số lần nhắc đã có.");
   }
 
-  private async showTopicLink(conv: ConvKey, link: SessionTopic): Promise<void> {
+  private async showTopicLink(conv: ConvKey, link: SessionTopic, user?: number): Promise<void> {
     const rows: Array<Array<{ text: string; callback_data?: string; url?: string }>> = [];
     if (link.conv) {
       const { chatId, threadId } = parseConv(link.conv);
@@ -1238,6 +1309,12 @@ export class Bot {
     if (link.conv && link.sessionID) rows.push([{ text: "Xem yêu cầu đang chờ", callback_data: `pa:list:${link.id}:0` }]);
     rows.push([{ text: "Xem tóm tắt", callback_data: `sum:show:${link.id}` }]);
     rows.push([{ text: "Quy tắc thông báo General", callback_data: "nt:rules" }]);
+    if (user !== undefined) {
+      try {
+        const pin = this.pinContext(conv, user, link.id);
+        rows.push([{ text: pin.pinned ? "Bỏ ghim" : "Ghim", callback_data: `pin:set:${pin.token}:${pin.pinned ? 0 : 1}` }]);
+      } catch { rows.push([{ text: "Quản lý ghim cá nhân", callback_data: "pin:list" }]); }
+    } else rows.push([{ text: "Ghim/Bỏ ghim cá nhân", callback_data: `pin:open:${link.id}` }]);
     const nameStatus = link.conv && link.sessionID && link.identity ? this.topics.titleStatus(conv, link.id) : undefined;
     const retryDate = nameStatus?.retryAt ? new Date(nameStatus.retryAt) : undefined;
     const titleLines = nameStatus ? [
@@ -3353,6 +3430,13 @@ export class Bot {
         catch (error) { await this.tg.sendMessage(conv, esc((error as Error).message)); }
         return;
       }
+      if (data.startsWith("pin:")) {
+        await this.tg.answerCallbackQuery(cb.id);
+        if (conv !== chatOf(conv)) { await this.tg.sendMessage(conv, "Quản lý ghim cá nhân trong General."); return; }
+        try { await this.handlePinCallback(conv, cb); }
+        catch (error) { await this.tg.sendMessage(conv, esc((error as Error).message)); }
+        return;
+      }
       if (data.startsWith("db:")) {
         if (conv !== chatOf(conv)) { await this.tg.answerCallbackQuery(cb.id, "Dùng bảng điều khiển trong General."); return; }
         await this.tg.answerCallbackQuery(cb.id);
@@ -3365,7 +3449,7 @@ export class Bot {
           if (action === "detail") {
             const link = this.topics.get(value);
             if (!link || link.chat !== conv) throw new Error("Phiên không còn thuộc nhóm này. Mở lại /sessions.");
-            await this.showTopicLink(conv, link);
+            await this.showTopicLink(conv, link, cb.from!.id);
           } else if (action === "refresh") await this.showSessionDashboard(conv, cb.from!.id, token, card.filter, card.page, true);
           else {
             if (!Object.hasOwn(DASHBOARD_FILTERS, action) || !/^(?:0|[1-9]\d{0,5})$/.test(value ?? "")) throw new Error("Bộ lọc hoặc trang không hợp lệ.");

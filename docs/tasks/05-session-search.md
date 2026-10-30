@@ -1,6 +1,6 @@
 # Đầu việc 5 — Tìm và ghim phiên
 
-**Trạng thái:** CV13 đã triển khai; CV14 chưa triển khai. **Thứ tự:** CV13 → CV14.
+**Trạng thái:** CV13–CV14 đã triển khai và kiểm thử tự động; thử nhóm/thiết bị ở CV15. **Thứ tự:** CV13 → CV14.
 **Điều kiện bắt đầu:** CV12 đạt kiểm thử tự động; thử nhóm thật ở CV15. Dùng bảng điều khiển CV01–CV04.
 Xem [kế hoạch tổng](../plan-session-workflow-improvements.md).
 
@@ -81,37 +81,53 @@ không phải tin riêng tư của người sở hữu nút.
 
 ### Công việc
 
-- [ ] Thêm **Ghim/Bỏ ghim** trên thẻ phiên và bộ lọc **Đã ghim**. Đây là danh
+- [x] Thêm **Ghim/Bỏ ghim** trên thẻ phiên và bộ lọc **Đã ghim**. Đây là danh
   sách ưa dùng của từng người trong từng nhóm, không phải thao tác ghim tin
   Telegram và không yêu cầu thêm quyền quản trị ngoài quy tắc bot hiện có.
-- [ ] Lưu bằng mã liên kết ổn định, kèm nhóm/người dùng; không lưu theo tên
+- [x] Lưu bằng mã liên kết ổn định, kèm nhóm/người dùng; không lưu theo tên
   hoặc số thứ tự trên trang. Đổi tên không làm mất ghim.
-- [ ] Giới hạn đề xuất tối đa 20 ghim/người/nhóm, báo rõ khi đầy; giá trị cuối
+- [x] Giới hạn đề xuất tối đa 20 ghim/người/nhóm, báo rõ khi đầy; giá trị cuối
   cùng phải được ghi trong tài liệu triển khai và kiểm thử.
-- [ ] Bấm lặp và bấm đồng thời cho kết quả xác định. Người dùng chỉ sửa danh
+- [x] Bấm lặp và bấm đồng thời cho kết quả xác định. Người dùng chỉ sửa danh
   sách của mình; thẻ tạo cho người này không sửa danh sách người khác.
-- [ ] Phiên đã đóng vẫn có thể được ghim nhưng hiển thị đã đóng. Ghim không
+- [x] Phiên đã đóng vẫn có thể được ghim nhưng hiển thị đã đóng. Ghim không
   tự khôi phục, mở chủ đề, nhận công việc hay thay quyền xem.
-- [ ] Khi liên kết/phiên không còn xác minh được, hiển thị không khả dụng và
+- [x] Khi liên kết/phiên không còn xác minh được, hiển thị không khả dụng và
   cho bỏ ghim; không xóa ghim chỉ vì một lần lỗi mạng hoặc tạo phiên thay thế.
-- [ ] Khởi động lại giữ danh sách. Danh sách chỉ đọc lại các liên kết còn thuộc
+- [x] Khởi động lại giữ danh sách. Danh sách chỉ đọc lại các liên kết còn thuộc
   đúng nhóm, không làm lộ dữ liệu nếu sở hữu đã thay đổi hoặc dữ liệu lưu bị lỗi.
 
 ### Kiểm thử và nghiệm thu
 
-- [ ] Hai người và hai nhóm, cùng phiên/cùng tên; đổi tên; đóng/mở lại;
+- [x] Hai người và hai nhóm, cùng phiên/cùng tên; đổi tên; đóng/mở lại;
   lỗi truy vấn; mã ghim không hợp lệ; vượt giới hạn; khởi động lại; ghi lỗi.
-- [ ] Bộ lọc ghim phối hợp đúng từ khóa/trạng thái và không vượt kiểm tra phạm vi.
-- [ ] Không có lời gọi thay đổi phiên hoặc thực thi khi chỉ ghim/bỏ ghim.
+- [x] Bộ lọc ghim phối hợp đúng từ khóa/trạng thái và không vượt kiểm tra phạm vi.
+- [x] Không có lời gọi thay đổi phiên hoặc thực thi khi chỉ ghim/bỏ ghim.
 
 **Tệp liên quan:** `src/state.ts`, `src/bot.ts`, module đọc/tìm kiếm dự kiến;
 kiểm thử tìm kiếm, lưu trạng thái và đường vào Telegram.
 
+`src/session-pins.ts` sở hữu bản ghi phiên bản 1 tại General, tách người dùng
+và kiểm tra nhóm. Tối đa **20 ghim/người/nhóm**, 500 danh sách người dùng/nhóm;
+không gọi API ghim tin Telegram. Ghim theo mã liên kết và dấu danh tính phiên,
+không theo tên/chỉ số trang. Đổi tên/đóng/mở không làm mất ghim; chuyển chủ hoặc
+thay danh tính làm mục không khả dụng, không trỏ sang phiên thay thế. Mất nguồn
+hiển thị chưa xác minh, không xóa. Mã ghim hỏng còn đọc được theo định dạng lưu
+thì hiển thị không khả dụng và cho bỏ; phiên bản lưu chưa hỗ trợ giữ nguyên.
+
+Thẻ có người sở hữu có nút Ghim/Bỏ ghim trực tiếp. Thẻ vận hành chung không
+biết người xem có lối mở thẻ ghim cá nhân trước. Nút ghi gắn người/nhóm/mốc
+10 phút và ý định **đặt trạng thái**, không đảo qua lại khi bấm đôi. Lưu lỗi
+không báo thành công. `/sessions` thêm Đã ghim và Quản lý ghim cá nhân; vẫn ưu
+tiên yêu cầu chờ người dùng, ghim ưu tiên trong cùng nhóm xếp hạng. Tìm kiếm có
+Chỉ kết quả đã ghim phối hợp trạng thái/từ khóa; không đưa ghim không khớp hay
+ngoài quyền vào kết quả. Kiểm thử: `scripts/test-session-pins.ts`.
+
 ## Điều kiện bàn giao nhóm tính năng
 
-- [ ] CV13–CV14 đạt; người dùng tìm/ghim hoàn toàn bằng nút hoặc luồng nhập có
+- [x] CV13–CV14 đạt kiểm thử tự động; tìm/ghim bằng nút hoặc luồng nhập có
   thể hủy, không cần tìm mã phiên.
-- [ ] Tài liệu ghi rõ phạm vi tìm kiếm và tính cá nhân của ghim trong General
+- [x] Tài liệu ghi rõ phạm vi tìm kiếm và tính cá nhân của ghim trong General
   dùng chung; không tuyên bố tin gửi trong nhóm là riêng tư với từng người.
 
 **Tiếp theo:** CV15 trong

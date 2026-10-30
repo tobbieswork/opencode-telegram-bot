@@ -65,6 +65,12 @@ and all command/button handlers enforce General versus work-topic scope.
   hay chạy tiếp, bấm gắn vẫn kiểm tra nguồn và trạng thái thật. Đổi thư mục
   khám phá không đổi các phiên đang làm. Kết quả/nội dung gửi trong General
   vẫn chung cho nhóm; khóa người dùng chỉ ngăn người khác thao tác trên nút.
+- **Ghim/Bỏ ghim** trên thẻ là danh sách ưa dùng của bạn trong nhóm, tối đa
+  20, không phải ghim tin Telegram. Thẻ chung mở thiết lập cá nhân trước;
+  `/sessions` có Đã ghim và Quản lý ghim cá nhân. Ghim không chạy/mở lại phiên,
+  đổi tên/đóng/khởi động không mất ghim. Mất liên kết/quyền thì mục không khả
+  dụng vẫn giữ để bạn bỏ, không lấy tên/phiên khác thay thế. Nút người này không
+  sửa danh sách người khác, nhưng tin danh sách gửi General không phải tin riêng.
 - **Gắn phiên có sẵn**, `/attach` hoặc `/use` không có mã mở danh sách chọn
   có tên. Danh sách chỉ đọc, không gửi lại thẻ của mọi phiên đã quản lý.
   Saved legacy sessions of this group are included, even outside the
