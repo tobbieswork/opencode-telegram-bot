@@ -47,6 +47,7 @@ import { Advisor } from "./advisor/advisor.js";
 import { cmdHelp, cmdStatus, cmdContext, cmdUsage, cmdHistory, cmdNote, cmdRotation, handleNoteCallback } from "./commands/meta.js";
 import { cmdBtw } from "./btw.js";
 import { cmdAsk } from "./ask.js";
+import { reviewPrompt, REVIEW_USAGE } from "./review.js";
 import { managerFloorFromMessages, runRotationHandoff, rotationGate } from "./rotation.js";
 import {
   rotationHealthPath,
@@ -1591,6 +1592,13 @@ export class Bot {
         // (cmdAsk reports its own errors).
         this.trackPending(cmdAsk(this, conv, arg));
         return;
+      case "/review": {
+        // The Manager's folder is not a project: a review needs a worker topic / plain session.
+        if (state.manager) return this.tg.sendMessage(conv, "🔍 Manager không có repo để review — dùng /review trong topic worker, hoặc /manager off.");
+        const prompt = reviewPrompt(arg);
+        if (prompt === null) return this.sendHtml(conv, REVIEW_USAGE);
+        return this.runPrompt(conv, prompt, state);
+      }
       case "/schedule":
         return cmdSchedule(this, conv, arg, state, uid);
       default:

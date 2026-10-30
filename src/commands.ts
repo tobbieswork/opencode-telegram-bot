@@ -77,6 +77,7 @@ export const COMMANDS: BotCommand[] = [
   { cmd: "stop", desc: "Dừng task đang chạy", button: "⏹ Dừng", group: "control" },
   { cmd: "btw", arg: "<câu hỏi>", desc: "Hỏi nhanh trên phiên tạm — không lẫn ngữ cảnh manager", group: "control" },
   { cmd: "ask", arg: "[claude|gemini] <câu hỏi>", desc: "Hỏi cố vấn Claude/Gemini — topic riêng, hỏi tiếp được", group: "control" },
+  { cmd: "review", arg: "[PR|branch|commit]", desc: "Review code (chỉ đọc, chạy skill review-code)", group: "control" },
   { cmd: "context", aliases: ["ctx"], desc: "Ảnh chụp phiên hiện tại (usage + files)", button: "📸 Context", group: "control" },
   { cmd: "usage", desc: "Mức dùng context theo phiên + cảnh báo gần tràn", button: "📊 Usage", group: "control" },
   { cmd: "rotation", desc: "Sức khoẻ xoay phiên Manager (nền + lịch sử)", button: "♻️ Rotation", group: "control" },
