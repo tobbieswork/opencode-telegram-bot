@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.6.0...opencode-telegram-bot-v1.7.0) (2026-10-30)
+
+
+### Features
+
+* **rotation:** add /rotation + rotation-history / durability tracking (Part 1) ([#91](https://github.com/tobbieswork/opencode-telegram-bot/issues/91)) ([7829c94](https://github.com/tobbieswork/opencode-telegram-bot/commit/7829c94fbbb5a90810fc97312b5ade883f61563a))
+
 ## [1.6.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.5.0...opencode-telegram-bot-v1.6.0) (2026-10-30)
 
 
