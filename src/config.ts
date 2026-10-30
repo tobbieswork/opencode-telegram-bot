@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { isUnderRoot } from "./fsbrowser.js";
 import { warn } from "./logger.js";
 import type { ModelRef } from "./state.js";
+import { AGENT_IDS, LEGACY_AGENT, resolveAgent, type AgentId } from "./advisor/agents.js";
 
 /**
  * Minimal .env loader (no dependency). Existing environment variables win,
@@ -138,26 +139,18 @@ export interface Config {
   /** A scheduled run still running/waiting after this long is interrupted (slice 3). */
   scheduleTimeoutMs: number;
   /**
-   * Mac node (Claude CLI): queue tasks to a Mac machine over the `node/mac`
-   * git branch and relay its reports back to chat. Default ON; "0" disables.
-   */
-  nodeMac: boolean;
-  /** Local single-branch clone the hub uses for the node/mac branch. */
-  nodeMacDir: string;
-  /** The repo whose `origin` hosts the node/mac branch (the Mac clones it too). */
-  nodeRepoDir: string;
-  /** Poll interval for node task results, ms (floor 10s). */
-  nodePollMs: number;
-  /**
-   * Claude advisor: consult a Claude session on the Mac over Tailscale for a
-   * second opinion (pure advice — no code, no repo). Default OFF; enable by
-   * setting both MAC_ADVISOR_URL and MAC_ADVISOR_TOKEN.
+   * Advisor: consult another model (Claude, Gemini/agy) on the advisor
+   * daemon's machine over Tailscale for a second opinion (pure advice — no
+   * code). Default OFF; enable by setting both ADVISOR_URL and ADVISOR_TOKEN
+   * (the older MAC_ADVISOR_* names still work).
    */
   advisor: boolean;
-  /** Base URL of the Mac advisor daemon (e.g. http://100.75.153.113:8391). */
+  /** Base URL of the advisor daemon (e.g. http://100.75.153.113:8391). */
   advisorUrl: string;
-  /** Shared bearer token — must equal the Mac's MAC_ADVISOR_TOKEN. */
+  /** Shared bearer token — must equal the daemon's ADVISOR_TOKEN. */
   advisorToken: string;
+  /** Agent /ask and consult use when none is named (ADVISOR_DEFAULT_AGENT; default claude). */
+  advisorDefaultAgent: AgentId;
   /** Max /ask exchanges in one advisor thread before forcing a fresh session. */
   advisorMaxTurnsPerSession: number;
   /** An advisor thread idle this long is treated as closed (mirrors the Mac TTL). */
@@ -255,17 +248,8 @@ export function loadConfig(root: string): Config {
     // Minute-valued env → ms (the scheduler works in ms; decideRun/nextRunAfter too).
     scheduleGraceMs: parseIntSetting("OPENCODE_TG_SCHEDULE_GRACE_MIN", 60, 1) * 60_000,
     scheduleTimeoutMs: parseIntSetting("OPENCODE_TG_SCHEDULE_TIMEOUT_MIN", 30, 1) * 60_000,
-    // --- Mac node (task queue over the node/mac git branch) ---
-    nodeMac: process.env.OPENCODE_TG_NODE_MAC !== "0",
-    nodeMacDir: resolve(process.env.OPENCODE_TG_NODE_MAC_DIR?.trim() || resolve(root, "data/node/mac")),
-    nodeRepoDir: resolve(process.env.OPENCODE_TG_NODE_REPO_DIR?.trim() || process.cwd()),
-    nodePollMs: parseIntSetting("OPENCODE_TG_NODE_POLL_MS", 30_000, 10_000),
-    // --- Claude advisor (consult Claude on the Mac over Tailscale) ---
-    advisorUrl: normalizeAdvisorUrl(process.env.MAC_ADVISOR_URL ?? ""),
-    advisorToken: process.env.MAC_ADVISOR_TOKEN?.trim() ?? "",
-    advisor: Boolean(process.env.MAC_ADVISOR_URL?.trim() && process.env.MAC_ADVISOR_TOKEN?.trim()),
-    advisorMaxTurnsPerSession: parseIntSetting("MAC_ADVISOR_MAX_TURNS_PER_SESSION", 10, 1),
-    advisorIdleTtlMs: parseIntSetting("MAC_ADVISOR_IDLE_TTL_MS", 24 * 3600 * 1000, 1),
+    // --- Advisor (consult Claude / Gemini on another machine over Tailscale) ---
+    ...advisorConfig(),
     // --- Manager rotation (floor-driven; see src/rotation.ts) ---
     // Floor thresholds in thousands of tokens; intervals env in hours → ms.
     rotationAutoFloorK: parseIntSetting("OPENCODE_TG_ROTATION_AUTO_FLOOR_K", 110, 1),
@@ -292,7 +276,42 @@ function parseIntSetting(name: string, fallback: number, min: number): number {
    return fallback;
 }
 
-/** MAC_ADVISOR_URL may be a bare host:port (no scheme); the client fetches
+type AdvisorConfig = Pick<
+  Config,
+  "advisor" | "advisorUrl" | "advisorToken" | "advisorDefaultAgent" | "advisorMaxTurnsPerSession" | "advisorIdleTtlMs"
+>;
+
+/** The advisor settings alone — also used by `npm run advisor:doctor`, which has no bot token. */
+export function advisorConfig(): AdvisorConfig {
+  const url = process.env[advisorEnvName("URL")] ?? "";
+  const token = process.env[advisorEnvName("TOKEN")]?.trim() ?? "";
+  return {
+    advisorUrl: normalizeAdvisorUrl(url),
+    advisorToken: token,
+    advisor: Boolean(url.trim() && token),
+    advisorDefaultAgent: parseAdvisorAgent(),
+    advisorMaxTurnsPerSession: parseIntSetting(advisorEnvName("MAX_TURNS_PER_SESSION"), 10, 1),
+    advisorIdleTtlMs: parseIntSetting(advisorEnvName("IDLE_TTL_MS"), 24 * 3600 * 1000, 1),
+  };
+}
+
+/** ADVISOR_<suffix> when set, else the pre-rename MAC_ADVISOR_<suffix> (both work). */
+function advisorEnvName(suffix: string): string {
+  return process.env[`ADVISOR_${suffix}`] !== undefined ? `ADVISOR_${suffix}` : `MAC_ADVISOR_${suffix}`;
+}
+
+/** ADVISOR_DEFAULT_AGENT: an agent id or alias ("gemini"); unknown → claude, with a warning. */
+function parseAdvisorAgent(): AgentId {
+  const name = advisorEnvName("DEFAULT_AGENT");
+  const raw = process.env[name]?.trim();
+  if (!raw) return LEGACY_AGENT;
+  const id = resolveAgent(raw);
+  if (id) return id;
+  warn(`${name}=${raw} is not a known agent (${AGENT_IDS.join(", ")}) — using ${LEGACY_AGENT}`);
+  return LEGACY_AGENT;
+}
+
+/** ADVISOR_URL may be a bare host:port (no scheme); the client fetches
  *  `${url}${path}`, so a missing scheme would be read as a relative URL. */
 function normalizeAdvisorUrl(raw: string): string {
   const u = raw.trim();

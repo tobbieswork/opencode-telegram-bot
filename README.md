@@ -143,6 +143,7 @@ bot:   The last commit adds retry logic but…
 | `/manager on\|off` | Turn the Manager agent on/off in the main chat |
 | `/auto on\|off` | Manager dispatches on its own, or waits for your ✅ |
 | `/wt` | In a worker topic: diff / merge / remove its git worktree |
+| `/ask [claude\|gemini] <question>` | Second opinion from another model, in its own topic (see below) |
 
 ### When OpenCode asks a question
 
@@ -206,6 +207,33 @@ results are fed back to the Manager, which summarises them for you.
   offers **Diff / Merge / Remove**. Merge only runs on a clean main checkout on
   the base branch and aborts cleanly on conflict; remove keeps unmerged branches.
 
+## Second opinion: `/ask` (Claude / Gemini advisor)
+
+`/ask <question>` sends a question to a **different model** — Claude Code
+(`claude`) or Gemini (the Antigravity CLI, `agy`) — running on another machine
+you own, and posts the answer in a new forum topic. Keep typing in that topic
+to follow up; the agent resumes its own session. `/ask gemini <question>` picks
+the agent; the Manager can do the same with its `consult` tool.
+
+It is **advice only**: the agent runs read-only (plan mode, no commands, no
+file edits) and answers from the context it is given.
+
+```
+bot (hub) ── HTTP over Tailscale ──▶ advisor daemon ──▶ claude -p / agy -p
+          ◀──────────── {answer, sessionId} ──────────────────
+```
+
+Setup, once, on the machine that has `claude` and/or `agy` logged in
+(macOS or Linux, Tailscale running on both machines):
+
+```bash
+cd advisor-daemon && ./install.sh     # prints ADVISOR_URL + ADVISOR_TOKEN
+```
+
+Put those two lines in the bot's `.env`, restart the bot, then check the link
+from the bot machine with `npm run advisor:doctor` (`--live` asks each agent one
+question). Details, options and security notes: [`advisor-daemon/README.md`](advisor-daemon/README.md).
+
 ## Configuration
 
 All settings are environment variables (see `.env.example`).
@@ -233,6 +261,8 @@ All settings are environment variables (see `.env.example`).
 | `OPENCODE_TG_WORKTREE` | | `auto` | Worktree isolation for writing workers: `auto` / `always` / `off` |
 | `OPENCODE_TG_MANAGER_DIR` | | `./data/manager` | Where each chat's Manager session and agent file live |
 | `OPENCODE_TG_BRIDGE_PORT` | | random | Port of the Manager's local MCP bridge |
+| `ADVISOR_URL` + `ADVISOR_TOKEN` | | off | Advisor daemon URL + shared token — both set turns `/ask` on (old names `MAC_ADVISOR_*` still work) |
+| `ADVISOR_DEFAULT_AGENT` | | `claude` | Agent for `/ask` / `consult` when none is named: `claude` or `gemini` |
 
 \* required unless `OPENCODE_TG_ALLOW_ANY=1`.
 
@@ -309,11 +339,16 @@ src/
   conv.ts       conversation keys: a chat, or one forum topic in it
   orchestrator.ts  worker topics, the Manager agent, approvals, worktree actions
   mcp-bridge.ts tiny MCP server the Manager calls to steer workers
+  ask.ts        /ask — the user's side of the advisor
+  advisor/      advisor threads (topic ↔ agent session), HTTP client, agent catalog
   worktree.ts   git worktree isolation for parallel writers
   state.ts      JSON persistence of per-conversation state (+ event→conversation routing)
   format.ts     escaping / tag-stripping / chunking
   logger.ts     tiny timestamped logger
+advisor-daemon/  the advisor daemon (runs on the agent machine) + install/uninstall
+  agents/       one adapter per agent CLI (claude, agy)
 scripts/
+  advisor-doctor.ts  checks the bot → advisor link (npm run advisor:doctor)
   smoke.ts      token-free end-to-end smoke test
   smoke-multi.ts  end-to-end test of topics + Manager
   test-*.ts     unit checks (npm run test:unit)

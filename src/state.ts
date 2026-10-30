@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "
 import { dirname } from "node:path";
 import { ConvKey, chatOf } from "./conv.js";
 import type { PrSnapshot } from "./pr-watch.js";
+import type { AgentId } from "./advisor/agents.js";
 import type { RotationHistoryEntry, FloorTrendEntry } from "./rotation-health.js";
 
 export interface ModelRef {
@@ -60,15 +61,18 @@ export interface WorkerInfo {
 }
 
 /**
- * A Claude advisor thread: one forum topic bound to one Claude session on the
- * Mac (reached over Tailscale). Unlike a worker, it has NO OpenCode sessionID —
- * the "session" is the Claude CLI session on the Mac (resumed via --resume). Pure
- * advice: it answers the Manager/user's questions, it does not run code.
+ * An advisor thread: one forum topic bound to one agent session (Claude or
+ * Gemini/agy) on the advisor daemon's machine (reached over Tailscale). Unlike
+ * a worker, it has NO OpenCode sessionID — the "session" is the agent CLI's
+ * own (resumed on each follow-up). Pure advice: it answers the Manager/user's
+ * questions, it does not run code.
  */
 export interface AdvisorInfo {
+  /** The agent this thread talks to. Missing on threads created before agents existed — those are Claude. */
+  agent?: AgentId;
   /** The thread's display title (a short form of the question). */
   title: string;
-  /** The Claude session id on the Mac ("" until the first answer returns). */
+  /** The agent's session id on the daemon's machine ("" until the first answer returns). */
   sessionId: string;
   /** Number of /ask exchanges in this session (drives the per-session turn cap). */
   turns: number;
@@ -144,7 +148,7 @@ export interface ChatState {
   notesStage?: "pending" | "shown";
   /** Present when this conversation is a worker topic. */
   worker?: WorkerInfo;
-  /** Present when this conversation is a Claude advisor thread topic. */
+  /** Present when this conversation is an advisor thread topic. */
   advisor?: AdvisorInfo;
   /**
    * True when this conversation's Telegram topic was deleted in the UI and its

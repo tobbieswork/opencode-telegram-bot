@@ -89,6 +89,27 @@ check("advisor OFF when url empty", advEmpty.advisor === false, String(advEmpty.
 delete process.env.MAC_ADVISOR_URL;
 delete process.env.MAC_ADVISOR_TOKEN;
 
+// ADVISOR_* names win over the pre-rename MAC_ADVISOR_* ones (both work).
+process.env.ADVISOR_URL = "100.64.0.9:8391";
+process.env.ADVISOR_TOKEN = "new-tok";
+process.env.MAC_ADVISOR_URL = "100.75.153.113:8391";
+process.env.MAC_ADVISOR_TOKEN = "old-tok";
+const advNew = loadConfig(process.cwd());
+check("ADVISOR_URL wins over MAC_ADVISOR_URL", advNew.advisorUrl === "http://100.64.0.9:8391", advNew.advisorUrl);
+check("ADVISOR_TOKEN wins over MAC_ADVISOR_TOKEN", advNew.advisorToken === "new-tok", advNew.advisorToken);
+check("default agent is claude", advNew.advisorDefaultAgent === "claude", advNew.advisorDefaultAgent);
+process.env.ADVISOR_DEFAULT_AGENT = "Gemini";
+check("ADVISOR_DEFAULT_AGENT alias gemini → agy", loadConfig(process.cwd()).advisorDefaultAgent === "agy");
+process.env.ADVISOR_DEFAULT_AGENT = "gpt";
+check("unknown ADVISOR_DEFAULT_AGENT → claude", loadConfig(process.cwd()).advisorDefaultAgent === "claude");
+delete process.env.ADVISOR_DEFAULT_AGENT;
+delete process.env.ADVISOR_URL;
+delete process.env.ADVISOR_TOKEN;
+const advOld = loadConfig(process.cwd());
+check("MAC_ADVISOR_* still enables the advisor", advOld.advisor === true && advOld.advisorToken === "old-tok", `${advOld.advisor} ${advOld.advisorToken}`);
+delete process.env.MAC_ADVISOR_URL;
+delete process.env.MAC_ADVISOR_TOKEN;
+
 process.env.OPENCODE_TG_UPTIME_THRESHOLD_DAYS = "abc";
 process.env.OPENCODE_TG_REBOOT_DELAY_MS = "100"; // below min 1000
 const uptimeBad = loadConfig(process.cwd());

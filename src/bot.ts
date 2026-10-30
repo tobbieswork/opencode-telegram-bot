@@ -43,9 +43,7 @@ import { QUESTIONS_PREAMBLE, NOTES_KEY } from "./shared.js";
 import type { Btn, Keyboard } from "./shared.js";
 import { cmdAgents, cmdAgent, handleAgentCallback } from "./commands/agents.js";
 import { cmdSchedule, handleScheduleCallback } from "./commands/schedule.js";
-import { cmdNode, MacNode } from "./node/mac-node.js";
-import { Advisor } from "./node/advisor.js";
-import type { NodeDone } from "./node/node-github.js";
+import { Advisor } from "./advisor/advisor.js";
 import { cmdHelp, cmdStatus, cmdContext, cmdUsage, cmdHistory, cmdNote, cmdRotation, handleNoteCallback } from "./commands/meta.js";
 import { cmdBtw } from "./btw.js";
 import { cmdAsk } from "./ask.js";
@@ -296,8 +294,6 @@ export class Bot {
   public scheduleStore: ScheduleStore;
   /** /schedule tick engine — only constructed/started when cfg.schedule is on. */
   private scheduler?: Scheduler;
-  /** Mac node poller — public because cmdNode (node/mac-node.ts) reads it. */
-  public node?: MacNode;
   /** Claude advisor (topic + Claude session on the Mac) — present only when enabled. */
   public advisor?: Advisor;
 
@@ -387,20 +383,6 @@ export class Bot {
       });
       this.scheduler.start();
     }
-    // Queue tasks to the Mac node (Claude CLI) over the node/mac git branch.
-    // Default ON; the poller is a no-op until the first /node task seeds the branch.
-    if (this.cfg.nodeMac) {
-      this.node = new MacNode({
-        dir: this.cfg.nodeMacDir,
-        repoDir: this.cfg.nodeRepoDir,
-        pollMs: this.cfg.nodePollMs,
-        now: () => Date.now(),
-        relay: (done, conv) => {
-          void this.relayNodeReport(done, conv).catch((e) => warn("node relay:", e?.message));
-        },
-      });
-      this.node.start();
-    }
     // Close topics left open by workers that finished before auto-close existed
     // (or while the service was down). Fire-and-forget; never fails startup.
     void closeFinishedTopicsAtStartup(this.orch).catch((e) => warn("startup topic close:", e?.message));
@@ -423,11 +405,6 @@ export class Bot {
     this.scheduler?.stop();
   }
 
-  /** Stop the Mac node poller (called from index.ts during shutdown). */
-  stopNode(): void {
-    this.node?.stop();
-  }
-
   /** Register fire-and-forget reply work so a shutdown drain waits for it. */
   private trackPending(p: Promise<void>): void {
     this.pendingSends.add(p);
@@ -436,7 +413,7 @@ export class Bot {
 
   /**
    * Graceful-shutdown drain (called from index.ts between tg.stop() and
-   * stopNode): wait until no turn is in flight (an inflight runPrompt or a
+   * the OpenCode teardown): wait until no turn is in flight (an inflight runPrompt or a
    * manager turn) and no fire-and-forget reply (pendingSends — the unrelayed-
    * reply sweeps that carry a finished turn's final send) remains, or until
    * the cap elapses. The OpenCode service + event stream stay alive for the
@@ -465,14 +442,6 @@ export class Bot {
       timeoutMs: opts.timeoutMs,
       isBusy: () => this.inflight.size > 0 || this.orch.managerInflight || this.pendingSends.size > 0,
     });
-  }
-
-  /** Render a node report and send it via the standard reply path (rich/HTML). */
-  private async relayNodeReport(done: NodeDone, conv: ConvKey): Promise<void> {
-    const icon = done.status === "done" ? "✅" : done.status === "failed" ? "❌" : "⏱️";
-    let text = `📦 ${done.id} — ${icon} ${done.status} · ${(done.durationMs / 1000).toFixed(0)}s · $${done.costUsd.toFixed(2)} · ${done.tokensIn}→${done.tokensOut} tok\n\n${done.report}`;
-    if (done.codeBranch) text += `\n\n🌿 Code branch: ${done.codeBranch} (đã push — merge tay nếu cần)`;
-    await this.sendReply(conv, text);
   }
 
   // ── Uptime monitor + reboot ─────────────────────────────────────────────────
@@ -789,9 +758,12 @@ export class Bot {
 
     if (text.startsWith("/")) await this.handleCommand(conv, text, state, uid);
     else if (state.advisor && this.advisor) {
-      // A Claude advisor thread: the user's message is a follow-up question
-      // (resumes the session on the Mac). No OpenCode session is involved here.
-      await this.advisor.followUp(conv, text);
+      // An advisor thread: the user's message is a follow-up question (resumes
+      // the agent session). No OpenCode session is involved. A turn can take
+      // minutes, and updates are handled one at a time — so it runs off the
+      // update loop, tracked so a shutdown drain still waits for it. Errors were
+      // already shown in the topic.
+      this.trackPending(this.advisor.followUp(conv, text).then(() => {}, (e) => warn("advisor follow-up:", (e as Error)?.message)));
     }
     else {
       // (The "🤔 thinking" body-react on the user's message was removed 2026-10-27:
@@ -1615,11 +1587,12 @@ export class Bot {
       case "/btw":
         return cmdBtw(this, conv, state, arg);
       case "/ask":
-        return cmdAsk(this, conv, arg);
+        // An agent turn can take minutes: never hold the update loop on it
+        // (cmdAsk reports its own errors).
+        this.trackPending(cmdAsk(this, conv, arg));
+        return;
       case "/schedule":
         return cmdSchedule(this, conv, arg, state, uid);
-      case "/node":
-        return cmdNode(this, conv, arg, uid);
       default:
         return this.tg.sendMessage(conv, `Unknown command: ${esc(cmd)}\nSend /help`);
     }

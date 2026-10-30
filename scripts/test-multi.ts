@@ -238,7 +238,7 @@ const repo = join(tmp, "repo");
   check("stale approval tap is refused", (await orch.handleCallback({ id: "c2", data: okBtn![0] } as any, "42", 9)) && sessions === before + 1);
   check("an old card's id (pre-restart counter) matches nothing", (await orch.handleCallback({ id: "c3", data: "ap:1:ok" } as any, "42", 9)) && /hết hạn/.test(sent.join("\n") + ""));
 
-  // Claude advisor tools: present only when the host has an advisor; start vs resume.
+  // Advisor tools: present only when the host has an advisor; start vs resume; agent choice.
   {
     const advCalls: { kind: string; a: any }[] = [];
     const fakeAdvisor: any = {
@@ -268,6 +268,10 @@ const repo = join(tmp, "repo");
     check("reuse returns the resumed answer", /ADVICE-2: hả\?/.test(c2), c2);
     check("consult unknown threadId is a clear error", await throws(() => byName("consult").run({ question: "x", threadId: 404 }), /No advisor thread/));
     check("consult requires a question", await throws(() => byName("consult").run({}), /question is required/));
+    check("consult without agent leaves the default", advCalls.find((c) => c.kind === "start")?.a.agent === undefined, JSON.stringify(advCalls));
+    await byName("consult").run({ question: "mongo?", agent: "gemini" });
+    check("consult agent=gemini starts an agy thread", advCalls.at(-1)?.kind === "start" && advCalls.at(-1)?.a.agent === "agy", JSON.stringify(advCalls.at(-1)));
+    check("consult unknown agent is a clear error", await throws(() => byName("consult").run({ question: "x", agent: "gpt" }), /Unknown agent/));
   }
 
   st.set("42", { auto: true });
