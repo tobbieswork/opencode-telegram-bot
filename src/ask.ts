@@ -12,7 +12,7 @@ import { esc, trunc, timeAgo } from "./format.js";
  *  - `/ask` (no arg)    → list this chat's open advisor threads (id, title, turns).
  *
  * This is the user-facing counterpart of the Manager's `consult` tool; both go
- * through the same Advisor (src/node/advisor.ts). It does nothing when the
+ * through the same Advisor (src/advisor/advisor.ts). It does nothing when the
  * advisor is not enabled (no MAC_ADVISOR_URL / MAC_ADVISOR_TOKEN).
  */
 export async function cmdAsk(bot: Bot, conv: ConvKey, arg: string): Promise<void> {

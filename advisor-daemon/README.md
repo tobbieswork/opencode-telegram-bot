@@ -14,9 +14,9 @@ Mac advisor daemon → claude -p (lần đầu) | claude --resume <sid> (hỏi t
 ## Setup (1 lần)
 
 ```bash
-cd node/mac-daemon
+cd advisor-daemon
 export MAC_ADVISOR_TOKEN='<secret>'   # hub phải dùng CÙNG secret
-./install-advisor.sh
+./install.sh
 ```
 
 Yêu cầu: Node ≥ 20, `claude` đã login, **Tailscale đang chạy** trên Mac.
@@ -40,7 +40,7 @@ bạn đọc được). Hub cần đúng giá trị này ở `MAC_ADVISOR_TOKEN`
 tail -f ~/mac-advisor/logs/advisor.log            # log chạy
 curl -s 127.0.0.1:8391/health                     # {ok, sessions}
 launchctl print gui/$(id -u)/com.tobbies.macadvisor | head -20
-./uninstall-advisor.sh                             # dừng + gỡ (giữ data)
+./uninstall.sh                             # dừng + gỡ (giữ data)
 ```
 
 ## An toàn

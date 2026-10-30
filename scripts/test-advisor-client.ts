@@ -1,5 +1,5 @@
 /**
- * Unit test for the hub advisor client (src/node/advisor-client.ts) against a
+ * Unit test for the hub advisor client (src/advisor/advisor-client.ts) against a
  * fake advisor HTTP server: /ask (new + resume), /forget, /health, and the
  * "offline" path when nothing is listening.
  *
@@ -8,7 +8,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { askClaude, forgetClaude, advisorHealth, AdvisorError } from "../src/node/advisor-client.js";
+import { askClaude, forgetClaude, advisorHealth, AdvisorError } from "../src/advisor/advisor-client.js";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 void REPO;

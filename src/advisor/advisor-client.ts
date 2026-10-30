@@ -1,5 +1,5 @@
 /**
- * Hub-side client for the Claude advisor daemon (node/mac-daemon/advisor.ts),
+ * Hub-side client for the Claude advisor daemon (advisor-daemon/advisor.ts),
  * reached over Tailscale. Pure HTTP — no side effects — so it's unit-testable
  * against a fake server. The daemon is a black box: it runs `claude -p` /
  * `claude --resume` and returns {answer, sessionId, cost, tokens, ms}.

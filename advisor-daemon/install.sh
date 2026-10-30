@@ -4,11 +4,11 @@
 #
 # Required: MAC_ADVISOR_TOKEN (shared secret; the hub needs the SAME value).
 #   export MAC_ADVISOR_TOKEN='...'   # must be the same as the hub's MAC_ADVISOR_TOKEN
-# Usage:  cd node/mac-daemon && ./install-advisor.sh
+# Usage:  cd advisor-daemon && ./install.sh
 set -euo pipefail
 cd "$(dirname "$0")"
 
-REPO_ROOT="$(cd ../.. && pwd -P)"
+REPO_ROOT="$(cd .. && pwd -P)"
 WORKROOT="${MAC_ADVISOR_WORKROOT:-$HOME/mac-advisor}"
 LABEL="com.tobbies.macadvisor"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
@@ -57,7 +57,7 @@ cat > "$PLIST" <<EOF
   <array>
     <string>$(xml_escape "$NODE_BIN")</string>
     <string>$(xml_escape "$TSX_BIN")</string>
-    <string>$(xml_escape "$REPO_ROOT/node/mac-daemon/advisor.ts")</string>
+    <string>$(xml_escape "$REPO_ROOT/advisor-daemon/advisor.ts")</string>
   </array>
   <key>WorkingDirectory</key><string>$(xml_escape "$REPO_ROOT")</string>
   <key>RunAtLoad</key><true/>
@@ -81,4 +81,4 @@ echo "✓ Claude advisor daemon installed"
 echo "  workroot:  $WORKROOT"
 echo "  log:       $WORKROOT/logs/advisor.log   (tail -f để theo dõi)"
 echo "  port:      ${MAC_ADVISOR_PORT:-8391}  (chỉ Tailscale vào được)"
-echo "  gỡ:        ./uninstall-advisor.sh"
+echo "  gỡ:        ./uninstall.sh"

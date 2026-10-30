@@ -18,7 +18,7 @@ import { queueReport } from "./orchestrator/report.js";
 import { purgeConv, cmdPrune, handlePruneCallback } from "./orchestrator/purge.js";
 import { onTopicDeleted, reapPendingTopicDeletes } from "./orchestrator/topics.js";
 import type { Schedule } from "./schedule.js";
-import type { Advisor } from "./node/advisor.js";
+import type { Advisor } from "./advisor/advisor.js";
 
 type Btn = { text: string; callback_data: string };
 type Keyboard = { inline_keyboard: Btn[][] };

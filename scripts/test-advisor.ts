@@ -1,5 +1,5 @@
 /**
- * Integration test for the Claude advisor daemon (node/mac-daemon/advisor.ts):
+ * Integration test for the Claude advisor daemon (advisor-daemon/advisor.ts):
  * spawns the REAL daemon with a fake `claude` binary + bearer token + a temp
  * workroot, then drives it over HTTP — /health, /ask (new session), /ask
  * (resume — proves the --resume flag reached claude), /forget, and the 401
@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const TSX = join(REPO, "node_modules", ".bin", "tsx");
-const ADVISOR = join(REPO, "node", "mac-daemon", "advisor.ts");
+const ADVISOR = join(REPO, "advisor-daemon", "advisor.ts");
 const TOKEN = "test-token";
 const PORT = 18500 + Math.floor(Math.random() * 4000);
 

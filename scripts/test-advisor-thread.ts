@@ -1,5 +1,5 @@
 /**
- * Unit test for the advisor thread module (src/node/advisor.ts) using the REAL
+ * Unit test for the advisor thread module (src/advisor/advisor.ts) using the REAL
  * StateManager (temp file) + a fake Telegram + a fake client: startThread
  * (topic + fresh session), followUp (--resume), the per-session turn cap,
  * forget, listThreads, and startThread failure (topic undone).
@@ -11,7 +11,7 @@ import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StateManager } from "../src/state.js";
-import { Advisor } from "../src/node/advisor.js";
+import { Advisor } from "../src/advisor/advisor.js";
 import { convKey, type ConvKey } from "../src/conv.js";
 import type { Config } from "../src/config.js";
 
@@ -63,7 +63,7 @@ async function main(): Promise<void> {
   let forgetCalls: string[] = [];
   let failNextAsk = false;
   const client = {
-    ask: async (req: { sessionId?: string; message: string; context?: string }): Promise<import("../src/node/advisor-client.js").AdvisorAnswer> => {
+    ask: async (req: { sessionId?: string; message: string; context?: string }): Promise<import("../src/advisor/advisor-client.js").AdvisorAnswer> => {
       askCalls.push(req);
       if (failNextAsk) {
         failNextAsk = false;

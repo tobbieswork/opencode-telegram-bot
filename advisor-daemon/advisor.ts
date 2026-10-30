@@ -18,7 +18,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { runClaude, CLAUDE_ADVISOR_TOOLS, type ClaudeResult } from "./claude.js";
+import { runClaude, CLAUDE_ADVISOR_TOOLS, type ClaudeResult } from "./agents/claude.js";
 
 const PORT = Number(process.env.MAC_ADVISOR_PORT ?? "8391");
 const HOST = process.env.MAC_ADVISOR_HOST?.trim() || "0.0.0.0";
