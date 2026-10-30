@@ -8,21 +8,15 @@
  * the report, cost, tokens and the session id (follow-ups use
  * `claude --resume`). A wall-clock timeout kills the whole process
  * group (detached spawn + kill -pgid).
+ *
+ * Always read-only: `--permission-mode plan` + the Read/Grep/Glob allowlist.
+ * There is deliberately no option to widen it.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-
-export interface ClaudeResult {
-  status: "done" | "failed" | "timeout";
-  /** The final Claude message — becomes the report body. */
-  report: string;
-  costUsd: number;
-  tokensIn: number;
-  tokensOut: number;
-  durationMs: number;
-  sessionId: string;
-  /** True when the run ended before producing a result event. */
-  incomplete: boolean;
-}
+import { existsSync, readdirSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import type { AgentAdapter, AgentResult, AgentRun } from "./types.js";
 
 /**
  * Read-only profile for the advisor (pure consultation): the model answers from
@@ -31,31 +25,40 @@ export interface ClaudeResult {
  */
 export const CLAUDE_ADVISOR_TOOLS = ["Read", "Grep", "Glob"];
 
-export function runClaude(opts: {
-  bin: string;
-  workdir: string;
-  prompt: string;
-  maxTurns: number;
-  timeoutMs: number;
-  /** When set, `claude --resume <id>` continues that session instead of a new one. */
-  resumeSessionId?: string;
-  /** Defaults to "plan" (read-only). */
-  permissionMode?: "plan";
-  /** Defaults to CLAUDE_ADVISOR_TOOLS (read-only). */
-  allowedTools?: string[];
-  log?: (line: string) => void;
-}): Promise<ClaudeResult> {
-  const {
+/** The Claude adapter. `home` is Claude's config dir (sessions live under it). */
+export function claudeAdapter(bin: string, home = process.env.CLAUDE_HOME?.trim() || join(homedir(), ".claude")): AgentAdapter {
+  return {
+    id: "claude",
     bin,
-    workdir,
-    prompt,
-    maxTurns,
-    timeoutMs,
-    resumeSessionId,
-    permissionMode = "plan",
-    allowedTools = CLAUDE_ADVISOR_TOOLS,
-    log = () => {},
-  } = opts;
+    run: (opts) => runClaude({ ...opts, bin }),
+    forget: (sessionId) => {
+      const f = claudeSessionFile(home, sessionId);
+      if (!f) return false;
+      try {
+        rmSync(f);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  };
+}
+
+// Claude stores each session as <home>/projects/<encoded-cwd>/<id>.jsonl.
+// The caller has validated the id (isValidSessionId), so it cannot escape the dir.
+function claudeSessionFile(home: string, id: string): string | null {
+  const projects = join(home, "projects");
+  if (!existsSync(projects)) return null;
+  for (const dir of readdirSync(projects)) {
+    const f = join(projects, dir, `${id}.jsonl`);
+    if (existsSync(f)) return f;
+  }
+  return null;
+}
+
+/** When `resumeSessionId` is set, `claude --resume <id>` continues that session. */
+export function runClaude(opts: AgentRun & { bin: string }): Promise<AgentResult> {
+  const { bin, workdir, prompt, maxTurns, timeoutMs, resumeSessionId, log = () => {} } = opts;
   return new Promise((resolve) => {
     const startedAt = Date.now();
     const child: ChildProcess = spawn(
@@ -66,14 +69,14 @@ export function runClaude(opts: {
         "--output-format", "stream-json",
         "--verbose",
         "--max-turns", String(maxTurns),
-        "--permission-mode", permissionMode,
-        ...(allowedTools.length ? ["--allowedTools", allowedTools.join(",")] : []),
+        "--permission-mode", "plan",
+        "--allowedTools", CLAUDE_ADVISOR_TOOLS.join(","),
       ],
       { cwd: workdir, detached: true, stdio: ["pipe", "pipe", "pipe"] },
     );
 
     let settled = false;
-    const finish = (r: ClaudeResult): void => {
+    const finish = (r: AgentResult): void => {
       if (settled) return;
       settled = true;
       child.stdout?.off("data", onStdout);
@@ -90,7 +93,7 @@ export function runClaude(opts: {
       } catch {}
       finish({
         status: "timeout",
-        report: `⏱️ Task quá thời gian (${Math.round(timeoutMs / 60000)} phút) — đã dừng.\nXem log để biết Claude đã làm được gì trước đó.`,
+        report: `⏱️ Claude chưa trả lời sau ${Math.round(timeoutMs / 60000)} phút — đã dừng.`,
         costUsd: 0,
         tokensIn: 0,
         tokensOut: 0,
@@ -120,7 +123,7 @@ export function runClaude(opts: {
         if (ev.type === "system" && typeof ev.session_id === "string") sessionId = ev.session_id;
         if (ev.type === "result") {
           const usage = (ev.usage as Record<string, unknown>) ?? {};
-          const r: ClaudeResult = {
+          const r: AgentResult = {
             status: ev.is_error ? "failed" : "done",
             report:
               typeof ev.result === "string" && ev.result.trim()
