@@ -132,6 +132,13 @@ const inWindow = (t: number, tokens: object) => ({ type: "assistant", time: { cr
   check("gate: == autoFloorK (boundary) → confirm (not auto)", rotationGate({ floorK: 110, busy: false, ...base }) === "confirm");
   check("gate: above auto, idle → auto", rotationGate({ floorK: 120, busy: false, ...base }) === "auto");
   check("gate: above auto, busy → defer", rotationGate({ floorK: 120, busy: true, ...base }) === "defer");
+  // Out-of-band manager turn: a schedule task / background wake running on the
+  // manager session is NOT in `inflight` — it is tracked only in
+  // orch.managerInflight. checkManagerRotation computes busy =
+  // inflight.has(conv) || orch.managerInflight, so this surfaces as busy=true.
+  // Guards against a regression that rotated mid-turn and interrupted it via
+  // stopCurrent (would be "auto", not "defer").
+  check("gate: out-of-band manager busy (inflight empty, managerInflight true) + floor > auto → defer, not auto", rotationGate({ floorK: 120, busy: true, ...base }) === "defer" && rotationGate({ floorK: 120, busy: false, ...base }) === "auto");
 
   // idempotency: within the min interval of a last rotation → defer (both tiers)
   check("gate: above auto, within interval → defer", rotationGate({ floorK: 120, busy: false, lastRotationMs: NOW - 2 * 3600_000, ...base }) === "defer");

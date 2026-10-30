@@ -1949,7 +1949,11 @@ export class Bot {
     const floorK = floor / 1000;
     const action = rotationGate({
       floorK,
-      busy: this.inflight.has(conv),
+      // Busy = an in-band turn (inflight) OR an OUT-OF-BAND manager turn (a
+      // schedule task / background wake on the manager session) tracked only in
+      // orch.managerInflight. Matches the shutdown drain's authoritative check
+      // (isBusy below); omitting it could rotate mid-turn and interrupt it.
+      busy: this.inflight.has(conv) || this.orch.managerInflight,
       nowMs: Date.now(),
       lastRotationMs: state.lastRotationMs,
       lastRotationPromptMs: state.lastRotationPromptMs,
