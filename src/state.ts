@@ -160,6 +160,14 @@ export interface ChatState {
   manager?: boolean;
   /** Manager dispatch without asking (top-level conversation only). */
   auto?: boolean;
+  /** epoch ms of the last COMPLETED manager rotation (idempotency guard: no re-rotation before the min interval). */
+  lastRotationMs?: number;
+  /** The session id the manager most recently rotated FROM. */
+  lastRotationSID?: string;
+  /** The manager's context floor (thousands of tokens) at the last rotation. */
+  lastRotationFloor?: number;
+  /** epoch ms of the last manager-rotation CONFIRM shown/dismissed (avoids re-prompting every tick). */
+  lastRotationPromptMs?: number;
   /**
    * MACHINE-WIDE (only ever written on the reserved MACHINE_STATE_KEY entry):
    * when we last sent the reboot reminder, in epoch ms. Drives the snooze
