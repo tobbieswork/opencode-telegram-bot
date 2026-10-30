@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.5.0...opencode-telegram-bot-v1.6.0) (2026-10-30)
+
+
+### Features
+
+* **manager:** auto-rotate Manager session on context-floor drift ([#86](https://github.com/tobbieswork/opencode-telegram-bot/issues/86)) ([2b450c5](https://github.com/tobbieswork/opencode-telegram-bot/commit/2b450c599246af3ff858d2f2b9655d86ec3604fe))
+
 ## [1.5.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.4.1...opencode-telegram-bot-v1.5.0) (2026-10-30)
 
 
