@@ -233,12 +233,7 @@ export function loadConfig(root: string): Config {
     scheduleGraceMs: parseIntSetting("OPENCODE_TG_SCHEDULE_GRACE_MIN", 60, 1) * 60_000,
     scheduleTimeoutMs: parseIntSetting("OPENCODE_TG_SCHEDULE_TIMEOUT_MIN", 30, 1) * 60_000,
     // --- Advisor (consult Claude / Gemini on another machine over Tailscale) ---
-    advisorUrl: normalizeAdvisorUrl(process.env[advisorEnvName("URL")] ?? ""),
-    advisorToken: process.env[advisorEnvName("TOKEN")]?.trim() ?? "",
-    advisor: Boolean(process.env[advisorEnvName("URL")]?.trim() && process.env[advisorEnvName("TOKEN")]?.trim()),
-    advisorDefaultAgent: parseAdvisorAgent(),
-    advisorMaxTurnsPerSession: parseIntSetting(advisorEnvName("MAX_TURNS_PER_SESSION"), 10, 1),
-    advisorIdleTtlMs: parseIntSetting(advisorEnvName("IDLE_TTL_MS"), 24 * 3600 * 1000, 1),
+    ...advisorConfig(),
   };
   const agent = process.env.OPENCODE_DEFAULT_AGENT?.trim();
   if (agent) cfg.defaultAgent = agent;
@@ -257,6 +252,25 @@ function parseIntSetting(name: string, fallback: number, min: number): number {
    if (Number.isInteger(n) && n >= min) return n;
    warn(`${name}=${raw} is not a whole number >= ${min} — using ${fallback}`);
    return fallback;
+}
+
+type AdvisorConfig = Pick<
+  Config,
+  "advisor" | "advisorUrl" | "advisorToken" | "advisorDefaultAgent" | "advisorMaxTurnsPerSession" | "advisorIdleTtlMs"
+>;
+
+/** The advisor settings alone — also used by `npm run advisor:doctor`, which has no bot token. */
+export function advisorConfig(): AdvisorConfig {
+  const url = process.env[advisorEnvName("URL")] ?? "";
+  const token = process.env[advisorEnvName("TOKEN")]?.trim() ?? "";
+  return {
+    advisorUrl: normalizeAdvisorUrl(url),
+    advisorToken: token,
+    advisor: Boolean(url.trim() && token),
+    advisorDefaultAgent: parseAdvisorAgent(),
+    advisorMaxTurnsPerSession: parseIntSetting(advisorEnvName("MAX_TURNS_PER_SESSION"), 10, 1),
+    advisorIdleTtlMs: parseIntSetting(advisorEnvName("IDLE_TTL_MS"), 24 * 3600 * 1000, 1),
+  };
 }
 
 /** ADVISOR_<suffix> when set, else the pre-rename MAC_ADVISOR_<suffix> (both work). */

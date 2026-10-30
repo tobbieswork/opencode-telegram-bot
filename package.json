@@ -18,6 +18,7 @@
     "test:activity": "tsx scripts/test-activity.ts",
     "test:reminders": "tsx scripts/test-reminders.ts",
     "test:schedule": "tsx scripts/test-schedule.ts",
+    "advisor:doctor": "tsx scripts/advisor-doctor.ts",
     "test:advisor": "tsx scripts/test-advisor.ts",
     "test:advisor-client": "tsx scripts/test-advisor-client.ts",
     "test:advisor-thread": "tsx scripts/test-advisor-thread.ts",
