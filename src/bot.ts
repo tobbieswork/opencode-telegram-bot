@@ -18,6 +18,8 @@ import { ResumeConfirmations, type ResumeConfirmation } from "./session-resume.j
 import { Notifications, NOTICE_LABELS, type Notice, type NoticeKind } from "./notifications.js";
 import { validateQuiet, type QuietHours } from "./notification-time.js";
 import { snoozeSchedule } from "./reminders.js";
+import { rankedSearch, searchManaged, searchQuery } from "./session-search.js";
+
 import { Schedule, SchedSpec, formatSchedule, nextRunAfter, parseScheduleSpec } from "./schedule.js";
 import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure, topicTitle } from "./format.js";
@@ -112,6 +114,10 @@ function isTransportError(e: any): boolean {
   );
 }
 
+interface SearchCard {
+  chat: ConvKey; user: number; query: string; mode: "managed" | "attach"; filter: DashboardFilter; includeClosed: boolean;
+  directory: string; page: number; expires: number; visible: Array<{ id: string; sessionID?: string; binding: string }>;
+}
 type Btn = { text: string; callback_data: string; url?: never } | { text: string; url: string; callback_data?: never };
 type Keyboard = { inline_keyboard: Btn[][] };
 
@@ -262,6 +268,8 @@ export class Bot {
   private notifications: Notifications;
   private noticePreviews = new Map<string, { chat: ConvKey; user: number; revision: number; expires: number; purpose: "enable" | "quiet"; quiet?: QuietHours }>();
   private quietInputs = new Map<string, { token: string; messageID: number; revision: number; expires: number }>();
+  private searchInputs = new Map<string, { token: string; messageID: number; expires: number }>();
+  private searchCards = new Map<string, SearchCard>();
   private resumeInputs = new Map<string, { id: string; token: string; messageID: number; binding: string; marker: string; expires: number }>();
   private activityReads = new Map<ConvKey, Promise<void>>();
   private activityAgain = new Set<ConvKey>();
@@ -464,6 +472,8 @@ export class Bot {
     this.notifications.stop();
     this.noticePreviews.clear();
     this.quietInputs.clear();
+    this.searchInputs.clear();
+    this.searchCards.clear();
     this.orch.shutdown();
     this.topics.stopTitleSync();
     this.titlePreviews.clear();
@@ -803,16 +813,18 @@ export class Bot {
     // Remember the user's top-level chat so proactive notices (e.g. DNS heal)
     // have a destination even mid-polling-failure.
     if (uid !== undefined && this.topics.enabled(conv) && conv === chatOf(conv)) {
-      if (/^\/cancel(?:@\w+)?$/i.test(text) && (this.titleInputs.has(`${conv}:${uid}`) || this.resumeInputs.has(`${conv}:${uid}`) || this.quietInputs.has(`${conv}:${uid}`))) {
+      if (/^\/cancel(?:@\w+)?$/i.test(text) && (this.titleInputs.has(`${conv}:${uid}`) || this.resumeInputs.has(`${conv}:${uid}`) || this.quietInputs.has(`${conv}:${uid}`) || this.searchInputs.has(`${conv}:${uid}`))) {
         this.titleInputs.delete(`${conv}:${uid}`);
         this.resumeInputs.delete(`${conv}:${uid}`);
         this.quietInputs.delete(`${conv}:${uid}`);
+        this.searchInputs.delete(`${conv}:${uid}`);
         await this.tg.sendMessage(conv, "Đã hủy các bản nhập của bạn; không gửi công việc hoặc đổi tên.");
         return;
       }
       if (await this.handleTitleInput(conv, uid, msg, text)) return;
       if (await this.handleResumeInput(conv, uid, msg, text)) return;
       if (await this.handleQuietInput(conv, uid, msg, text)) return;
+      if (await this.handleSearchInput(conv, uid, msg, text)) return;
     }
     this.lastActiveConv = chatOf(conv);
     // Reaction UX: index every user message so a reaction on it can be
@@ -918,7 +930,7 @@ export class Bot {
     return false;
   }
 
-  private async showSessionTopics(conv: ConvKey, requestedPage = 0): Promise<void> {
+  private async attachmentChoices(conv: ConvKey) {
     const directory = resolve(this.st.peek(conv)?.directory || this.cfg.opencodeDirectory);
     let sessions: SessionBrief[] = [];
     let failed = false;
@@ -943,6 +955,11 @@ export class Bot {
       candidates.set(session.id, session);
     }
     const choices = [...candidates.values()].filter((session) => Buffer.byteLength(`use:${session.id}`) <= 64);
+    return { directory, choices, failed };
+  }
+
+  private async showSessionTopics(conv: ConvKey, requestedPage = 0): Promise<void> {
+    const { directory, choices, failed } = await this.attachmentChoices(conv);
     const pages = Math.max(1, Math.ceil(choices.length / 10));
     const page = Math.max(0, Math.min(requestedPage, pages - 1));
     const visible = choices.slice(page * 10, (page + 1) * 10);
@@ -994,6 +1011,7 @@ export class Bot {
     keyboard.push([{ text: "Đồng bộ tên chủ đề", callback_data: "st:title-preview:0" }]);
     keyboard.push([{ text: "Thiết lập tên", callback_data: "tc:open:group" }]);
     keyboard.push([{ text: "Thông báo và giờ yên lặng", callback_data: "nt:rules" }]);
+    keyboard.push([{ text: "Tìm phiên", callback_data: "ss:start" }]);
     const text = ["<b>Phiên đang quản lý</b>", `${DASHBOARD_FILTERS[filter]} · ${page.total} phiên · Trang ${page.page + 1}/${page.pages}`,
       ...page.rows.flatMap((row, index) => [
         `${page.page * 10 + index + 1}. <b>${esc(trunc(row.title, 48))}</b> · ${DASHBOARD_PHASE_LABELS[row.lifecycle]} · ${DASHBOARD_WORK_LABELS[row.work]}`,
@@ -1003,6 +1021,123 @@ export class Bot {
       page.unverified ? `${page.unverified} phiên chưa xác minh đủ. Số đang chạy/chờ chỉ tính dữ liệu đã xác minh; làm mới từng trang khi cần.` : "Trạng thái là dữ liệu đã quan sát, không tự thay đổi vòng đời.",
     ].join("\n");
     await this.tg.sendMessage(conv, text, { reply_markup: { inline_keyboard: keyboard } });
+  }
+
+  private async startSearch(conv: ConvKey, user: number): Promise<void> {
+    for (const [key, value] of this.searchInputs) if (value.expires < Date.now()) this.searchInputs.delete(key);
+    while (this.searchInputs.size >= 100) this.searchInputs.delete(this.searchInputs.keys().next().value!);
+    const token = randomBytes(6).toString("hex");
+    const messageID = await this.tg.sendMessageId(conv, "<b>Tìm phiên</b>\nTrả lời đúng tin này trong 10 phút bằng từ khóa 1–120 ký tự. Tìm tên, thư mục và đoạn yêu cầu/kết quả đã lưu; hỗ trợ không dấu. Không đọc toàn bộ hội thoại hoặc gửi ra công cụ tìm kiếm ngoài.",
+      { reply_markup: { inline_keyboard: [[{ text: "Hủy tìm", callback_data: `ss:cancel:${token}` }]] } });
+    if (messageID < 1) throw new Error("Chưa xác nhận được tin nhập từ khóa.");
+    this.searchInputs.set(`${conv}:${user}`, { token, messageID, expires: Date.now() + 600_000 });
+  }
+
+  private async handleSearchInput(conv: ConvKey, user: number, msg: Message, text: string): Promise<boolean> {
+    const key = `${conv}:${user}`;
+    const input = this.searchInputs.get(key);
+    if (!input || msg.reply_to_message?.message_id !== input.messageID || text.startsWith("/")) return false;
+    this.searchInputs.delete(key);
+    try {
+      if (input.expires < Date.now()) throw new Error("Luồng tìm kiếm hết hạn; bấm Tìm phiên lại.");
+      searchQuery(text);
+      await this.showSearchPage({ chat: conv, user, query: text.trim(), mode: "managed", filter: "all", includeClosed: false,
+        directory: resolve(this.st.peek(conv)?.directory || this.cfg.opencodeDirectory), page: 0, expires: Date.now() + 600_000, visible: [] });
+    } catch (error) { await this.tg.sendMessage(conv, esc((error as Error).message)); }
+    return true;
+  }
+
+  private async showSearchPage(input: SearchCard, refresh = false): Promise<void> {
+    const card: SearchCard = { ...input, visible: [], expires: Date.now() + 600_000 };
+    const keyboard: Btn[][] = [];
+    const lines = [`<b>Tìm phiên · ${card.mode === "managed" ? "Đang quản lý" : "Có thể gắn"}</b>`, `Từ khóa: ${esc(card.query)}`];
+    let pages = 1, total = 0;
+    if (card.mode === "managed") {
+      let rows = await this.dashboard.read(card.chat);
+      let result = searchManaged(card.chat, rows, card.query, card.filter, card.page, card.includeClosed);
+      if (refresh) {
+        const subset = result.rows.length ? result.rows : searchManaged(card.chat, rows, card.query, "all", card.page, card.includeClosed).rows;
+        rows = await this.dashboard.read(card.chat, { refresh: true, force: true, ids: subset.map(row => row.id) });
+        result = searchManaged(card.chat, rows, card.query, card.filter, card.page, card.includeClosed);
+      }
+      card.page = result.page; pages = result.pages; total = result.total;
+      for (const row of result.rows) {
+        const link = this.topics.get(row.id);
+        if (!link || link.chat !== card.chat || link.sessionID !== row.sessionID) continue;
+        card.visible.push({ id: row.id, sessionID: row.sessionID, binding: this.summaryBinding(link) });
+        lines.push(`${card.page * 10 + card.visible.length}. <b>${esc(trunc(row.title, 70))}</b> · ${DASHBOARD_PHASE_LABELS[row.lifecycle]} · ${DASHBOARD_WORK_LABELS[row.work]}\n<code>${esc(trunc(row.directory, 120))}</code>`);
+      }
+      lines.push(`Bộ lọc: ${DASHBOARD_FILTERS[card.filter]} · ${card.includeClosed ? "có kèm đã đóng" : "không kèm đã đóng"}. Chỉ trạng thái đã xác minh mới tính đang chạy/chờ.`);
+    } else {
+      const listing = await this.attachmentChoices(card.chat);
+      if (listing.directory !== card.directory && !refresh) throw new Error("Thư mục khám phá đã đổi; làm mới hoặc tìm lại, không dùng kết quả gắn cũ.");
+      card.directory = listing.directory;
+      const choices = rankedSearch(listing.choices.map(session => ({ ...session, title: session.title || "Phiên chưa đặt tên",
+        directory: session.directory || this.st.peek(this.st.findChatBySession(session.id) ?? "")?.directory || listing.directory, at: session.updated ?? 0 })), card.query);
+      pages = Math.max(1, Math.ceil(choices.length / 10)); card.page = Math.max(0, Math.min(card.page, pages - 1)); total = choices.length;
+      for (const session of choices.slice(card.page * 10, card.page * 10 + 10)) {
+        card.visible.push({ id: session.id, sessionID: session.id, binding: JSON.stringify([session.id, session.title, session.directory]) });
+        lines.push(`${card.page * 10 + card.visible.length}. ${esc(trunc(session.title, 70))}\n<code>${esc(trunc(session.directory, 120))}</code>`);
+      }
+      lines.push(`Thư mục khám phá: <code>${esc(card.directory)}</code>`, listing.failed ? "Nguồn đang lỗi; chỉ dữ liệu cũ của nhóm, gắn vẫn phải kiểm tra nguồn lại." : "Chỉ phiên cũ của nhóm và phiên gốc chưa có chủ trong thư mục này; không tìm hội thoại.");
+    }
+    for (const [key, value] of this.searchCards) if (value.expires < Date.now()) this.searchCards.delete(key);
+    while (this.searchCards.size >= 500) this.searchCards.delete(this.searchCards.keys().next().value!);
+    const token = randomBytes(6).toString("hex");
+    this.searchCards.set(token, card);
+    for (const [index, entry] of card.visible.entries()) keyboard.push([{ text: `${card.mode === "managed" ? "Chi tiết" : "Gắn phiên"} ${card.page * 10 + index + 1}`, callback_data: `ss:pick:${token}:${index}` }]);
+    const navigation: Btn[] = [];
+    if (card.page > 0) navigation.push({ text: "⬅️ Trang trước", callback_data: `ss:page:${token}:${card.page - 1}` });
+    if (card.page + 1 < pages) navigation.push({ text: "Trang sau ➡️", callback_data: `ss:page:${token}:${card.page + 1}` });
+    if (navigation.length) keyboard.push(navigation);
+    if (card.mode === "managed") {
+      const filters = Object.entries(DASHBOARD_FILTERS).map(([key, label]) => ({ text: label, callback_data: `ss:filter:${token}:${key}` }));
+      for (let n = 0; n < filters.length; n += 2) keyboard.push(filters.slice(n, n + 2));
+      keyboard.push([{ text: card.includeClosed ? "Không kèm đã đóng" : "Kèm phiên đã đóng", callback_data: `ss:closed:${token}:0` }]);
+    }
+    keyboard.push([{ text: card.mode === "managed" ? "Tìm phiên có thể gắn" : "Tìm phiên đang quản lý", callback_data: `ss:mode:${token}:${card.mode === "managed" ? "attach" : "managed"}` }]);
+    keyboard.push([{ text: "Làm mới", callback_data: `ss:refresh:${token}:0` }, { text: "Bỏ bộ lọc", callback_data: `ss:clear:${token}:0` }]);
+    keyboard.push([{ text: "Từ khóa mới", callback_data: "ss:start" }, { text: "Bảng điều khiển", callback_data: "cmd:ls" }]);
+    lines.push(`Trang ${card.page + 1}/${pages} · ${total} kết quả. Chỉ dữ liệu của nhóm và đoạn CV04 đã lưu, không tìm nội dung chưa thu thập. Tin trong General là tin chung, không riêng tư theo người bấm.`);
+    await this.tg.sendMessage(card.chat, lines.join("\n"), { reply_markup: { inline_keyboard: keyboard } });
+  }
+
+  private async handleSearchCallback(conv: ConvKey, cb: CallbackQuery): Promise<void> {
+    const [, action, token, value] = (cb.data ?? "").split(":");
+    const user = cb.from!.id;
+    if (action === "start") { await this.startSearch(conv, user); return; }
+    if (action === "cancel") {
+      if (this.searchInputs.get(`${conv}:${user}`)?.token !== token) throw new Error("Không có bản nhập tìm kiếm thuộc bạn.");
+      this.searchInputs.delete(`${conv}:${user}`); await this.tg.sendMessage(conv, "Đã hủy tìm; không thay đổi phiên."); return;
+    }
+    const card = this.searchCards.get(token);
+    if (!card || card.chat !== conv || card.user !== user || card.expires < Date.now()) throw new Error("Thẻ tìm kiếm hết hạn hoặc không thuộc bạn/nhóm này.");
+    if (action === "pick") {
+      if (!/^[0-9]$/.test(value ?? "")) throw new Error("Kết quả không hợp lệ.");
+      const item = card.visible[Number(value)];
+      if (!item) throw new Error("Kết quả không còn trên thẻ.");
+      if (card.mode === "managed") {
+        const link = this.topics.get(item.id);
+        if (!link || link.chat !== conv || link.sessionID !== item.sessionID || this.summaryBinding(link) !== item.binding) throw new Error("Liên kết kết quả đã đổi; tìm lại.");
+        await this.showTopicLink(conv, link);
+      } else {
+        const listing = await this.attachmentChoices(conv);
+        const session = listing.choices.find(session => session.id === item.id);
+        const directory = session?.directory || this.st.peek(this.st.findChatBySession(item.id) ?? "")?.directory || listing.directory;
+        if (listing.directory !== card.directory || !session || JSON.stringify([session.id, session.title || "Phiên chưa đặt tên", directory]) !== item.binding) throw new Error("Phạm vi, chủ sở hữu hoặc metadata đã đổi; làm mới kết quả trước khi gắn.");
+        const link = await this.topics.attach(conv, item.id);
+        await this.showTopicLink(conv, link);
+      }
+      return;
+    }
+    const next = { ...card };
+    if (action === "page") { if (!/^(?:0|[1-9]\d{0,5})$/.test(value ?? "")) throw new Error("Trang không hợp lệ."); next.page = Number(value); }
+    else if (action === "filter") { if (!Object.hasOwn(DASHBOARD_FILTERS, value)) throw new Error("Bộ lọc không hợp lệ."); next.filter = value as DashboardFilter; next.page = 0; if (next.filter === "closed") next.includeClosed = true; }
+    else if (action === "closed") { next.includeClosed = !next.includeClosed; next.page = 0; if (!next.includeClosed && next.filter === "closed") next.filter = "all"; }
+    else if (action === "clear") { next.filter = "all"; next.includeClosed = false; next.page = 0; }
+    else if (action === "mode") { if (value !== "managed" && value !== "attach") throw new Error("Loại kết quả không hợp lệ."); next.mode = value; next.page = 0; next.directory = resolve(this.st.peek(conv)?.directory || this.cfg.opencodeDirectory); }
+    else if (action !== "refresh") throw new Error("Nút tìm kiếm không hợp lệ.");
+    await this.showSearchPage(next, action === "refresh");
   }
 
   private async showPendingActions(conv: ConvKey, user: number, id: string, requestedPage = 0): Promise<void> {
@@ -3209,6 +3344,13 @@ export class Bot {
           else if (["s15", "s60", "wake"].includes(action)) await this.snoozePendingAction(conv, cb.from!.id, target, Number(value), action === "wake" ? undefined : action === "s15" ? 15 : 60);
           else throw new Error("Thao tác không hợp lệ.");
         } catch (error) { await this.tg.sendMessage(conv, esc((error as Error).message)); }
+        return;
+      }
+      if (data.startsWith("ss:")) {
+        await this.tg.answerCallbackQuery(cb.id);
+        if (conv !== chatOf(conv)) { await this.tg.sendMessage(conv, "Tìm phiên từ General; tin trong chủ đề vẫn là công việc của phiên đó."); return; }
+        try { await this.handleSearchCallback(conv, cb); }
+        catch (error) { await this.tg.sendMessage(conv, esc((error as Error).message)); }
         return;
       }
       if (data.startsWith("db:")) {

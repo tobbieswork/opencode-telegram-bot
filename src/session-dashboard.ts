@@ -50,14 +50,16 @@ export const DASHBOARD_PHASE_LABELS: Record<SessionTopic["phase"], string> = {
   creating: "Đang tạo", open: "Đang mở", closing: "Đang đóng", closed: "Đã đóng", restoring: "Đang mở lại",
   missing: "Không còn phiên", attention: "Cần kiểm tra",
 };
-export function dashboardPage(rows: readonly DashboardRow[], filter: DashboardFilter, requestedPage = 0) {
-  const matches = (row: DashboardRow, kind: DashboardFilter) => kind === "all" ||
+export function dashboardMatches(row: DashboardRow, kind: DashboardFilter): boolean {
+  return kind === "all" ||
     (kind === "waiting" && row.pending.some(item => item.verified)) ||
     (kind === "running" && row.work === "running") || (kind === "closed" && row.lifecycle === "closed") ||
     (kind === "error" && (row.work === "failed" || ["attention", "missing"].includes(row.lifecycle) || Boolean(row.titleError)));
+}
+export function dashboardPage(rows: readonly DashboardRow[], filter: DashboardFilter, requestedPage = 0) {
   const counts = Object.fromEntries(Object.keys(DASHBOARD_FILTERS).map(kind => [kind,
-    rows.filter(row => matches(row, kind as DashboardFilter)).length])) as Record<DashboardFilter, number>;
-  const selected = rows.filter(row => matches(row, filter)).sort((a, b) =>
+    rows.filter(row => dashboardMatches(row, kind as DashboardFilter)).length])) as Record<DashboardFilter, number>;
+  const selected = rows.filter(row => dashboardMatches(row, filter)).sort((a, b) =>
     Number(b.pending.length > 0) - Number(a.pending.length > 0) || b.lastActivityAt - a.lastActivityAt || a.id.localeCompare(b.id));
   const pages = Math.max(1, Math.ceil(selected.length / 10));
   const page = Math.min(Math.max(0, requestedPage), pages - 1);

@@ -59,6 +59,12 @@ and all command/button handlers enforce General versus work-topic scope.
   Trong **Đang chờ bạn**, Hoãn 15 phút/1 giờ áp dụng đúng mục; Bỏ hoãn không
   đặt lại ngân sách. Mốc lưu qua khởi động/hiển thị lại. Không đổi câu trả lời,
   quyền hoặc dung lượng thực thi. Khi hết giờ không bắn lại các nhịp đã bỏ qua.
+- **Tìm phiên** ở `/sessions`: trả lời đúng tin nhập bằng 1–120 ký tự trong
+  10 phút. Hỗ trợ không dấu, tên/thư mục/đoạn yêu cầu-kết quả đã lưu; không tìm
+  toàn bộ hội thoại. Tách Đang quản lý và Có thể gắn; bấm chi tiết không mở lại
+  hay chạy tiếp, bấm gắn vẫn kiểm tra nguồn và trạng thái thật. Đổi thư mục
+  khám phá không đổi các phiên đang làm. Kết quả/nội dung gửi trong General
+  vẫn chung cho nhóm; khóa người dùng chỉ ngăn người khác thao tác trên nút.
 - **Gắn phiên có sẵn**, `/attach` hoặc `/use` không có mã mở danh sách chọn
   có tên. Danh sách chỉ đọc, không gửi lại thẻ của mọi phiên đã quản lý.
   Saved legacy sessions of this group are included, even outside the

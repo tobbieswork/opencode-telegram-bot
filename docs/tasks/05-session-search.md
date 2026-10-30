@@ -1,7 +1,7 @@
 # Đầu việc 5 — Tìm và ghim phiên
 
-**Trạng thái:** chưa triển khai. **Thứ tự:** CV13 → CV14.
-**Điều kiện bắt đầu:** CV12 đã nghiệm thu; tái sử dụng bảng điều khiển CV01–CV04.
+**Trạng thái:** CV13 đã triển khai; CV14 chưa triển khai. **Thứ tự:** CV13 → CV14.
+**Điều kiện bắt đầu:** CV12 đạt kiểm thử tự động; thử nhóm thật ở CV15. Dùng bảng điều khiển CV01–CV04.
 Xem [kế hoạch tổng](../plan-session-workflow-improvements.md).
 
 ## Mục tiêu và phạm vi
@@ -22,42 +22,60 @@ Hai loại kết quả phải tách biệt:
 
 ### Công việc
 
-- [ ] Thêm nút **Tìm phiên** trong bảng điều khiển; có thể bổ sung lệnh ngắn
+- [x] Thêm nút **Tìm phiên** trong bảng điều khiển; có thể bổ sung lệnh ngắn
   nếu thống nhất vào danh mục lệnh. Không biến mọi tin ở General thành truy vấn
   hoặc yêu cầu mô hình một cách ngầm định.
-- [ ] Luồng nhập từ khóa có người sở hữu, nhóm, thời hạn và nút Hủy. Không
+- [x] Luồng nhập từ khóa có người sở hữu, nhóm, thời hạn và nút Hủy. Không
   nhận nhầm tin nhắn từ chủ đề làm việc hoặc người khác làm từ khóa.
-- [ ] Thiết kế phần tìm kiếm trên mô hình đọc của CV01; vị trí dự kiến
+- [x] Thiết kế phần tìm kiếm trên mô hình đọc của CV01; vị trí dự kiến
   `src/session-search.ts`. Ưu tiên lọc dữ liệu nhỏ trong bộ nhớ, chưa cần một hệ
   thống lập chỉ mục riêng nếu số phiên thực tế chưa đòi hỏi.
-- [ ] Chuẩn hóa Unicode và chữ hoa/thường; hỗ trợ gõ không dấu tiếng Việt.
+- [x] Chuẩn hóa Unicode và chữ hoa/thường; hỗ trợ gõ không dấu tiếng Việt.
   Tìm theo tên, đường dẫn và các đoạn có giới hạn từ CV04. Không giả vờ có thể
   tìm nội dung chưa từng thu thập; ghi rõ phạm vi trên giao diện.
-- [ ] Xếp hạng ổn định: khớp tên đầy đủ, khớp tên một phần, thư mục/tóm tắt,
+- [x] Xếp hạng ổn định: khớp tên đầy đủ, khớp tên một phần, thư mục/tóm tắt,
   rồi mốc hoạt động và mã liên kết. Ghim chỉ ưu tiên trong các kết quả thực sự
   khớp và được phép xem, không đưa phiên ngoài phạm vi vào kết quả.
-- [ ] Kết hợp bộ lọc trạng thái và phân trang tối đa 10 hàng; giữ nguyên từ
+- [x] Kết hợp bộ lọc trạng thái và phân trang tối đa 10 hàng; giữ nguyên từ
   khóa/bộ lọc khi chuyển trang, có nút xóa bộ lọc và quay lại bảng điều khiển.
-- [ ] Bấm kết quả thuộc phiên đã quản lý không tự mở lại/chạy tiếp. Bấm kết
+- [x] Bấm kết quả thuộc phiên đã quản lý không tự mở lại/chạy tiếp. Bấm kết
   quả có thể gắn đi qua `SessionTopics.attach`, không dùng kết quả tìm kiếm cũ
   làm bằng chứng quyền sở hữu hoặc trạng thái nghỉ.
-- [ ] Khóa bộ nhớ kết quả theo nhóm/người/thẻ; kiểm tra lại khi bấm, làm mới
+- [x] Khóa bộ nhớ kết quả theo nhóm/người/thẻ; kiểm tra lại khi bấm, làm mới
   hoặc phân trang. Thay thư mục ở General chỉ ảnh hưởng phạm vi khám phá, không
   thay thư mục của phiên/chủ đề đang làm việc.
 
 ### Kiểm thử và nghiệm thu
 
-- [ ] Tìm có dấu/không dấu, Unicode tổ hợp, biểu tượng, ký tự HTML, từ khóa
+- [x] Tìm có dấu/không dấu, Unicode tổ hợp, biểu tượng, ký tự HTML, từ khóa
   trống/quá dài, nhiều kết quả đồng hạng, dữ liệu đổi giữa hai trang.
-- [ ] Hai nhóm có cùng tiêu đề; phiên con/lưu trữ; phiên đã được nhóm khác sở
+- [x] Hai nhóm có cùng tiêu đề; phiên con/lưu trữ; phiên đã được nhóm khác sở
   hữu sau lúc tìm; không còn kết nối OpenCode; dữ liệu tóm tắt chưa có.
-- [ ] Tìm không tải toàn bộ lịch sử, không gọi mô hình, không tạo/gắn/mở lại
+- [x] Tìm không tải toàn bộ lịch sử, không gọi mô hình, không tạo/gắn/mở lại
   phiên chỉ vì liệt kê; thao tác gắn vẫn bị chặn khi phiên bận hoặc xung đột.
 
 **Tệp liên quan:** `src/bot.ts`, `src/commands.ts`, mô hình đọc bảng điều khiển,
 `src/session-topics.ts`, `src/format.ts`; mở rộng
 `scripts/test-session-picker.ts`, kiểm thử bảng điều khiển, HTML và kiểm thử
 tìm kiếm dự kiến `scripts/test-session-search.ts`.
+
+`src/session-search.ts` chuẩn hóa NFKD, bỏ dấu kết hợp và chuyển đ→d; xếp hạng
+tên đầy đủ, tên một phần, rồi đường dẫn/đoạn CV04, sau đó hoạt động và mã ổn
+định. Không dùng toàn bộ hội thoại hoặc `WorkerInfo.task` làm chỉ mục. Từ khóa
+1–120 ký tự, nhập bằng trả lời đúng tin General trong 10 phút; Hủy và `/cancel`
+không đổi phiên. Bộ nhớ tối đa 100 bản nhập, 500 thẻ. Mỗi trang có mã thẻ mới
+và danh sách chọn bất biến, nên nút trang cũ không bị trỏ sang chỉ số trang mới.
+
+Mặc định không kèm phiên đóng; có nút kèm hoặc lọc Đã đóng. Giữ từ khóa/bộ lọc
+khi phân trang 10 hàng; Bỏ bộ lọc và Bảng điều khiển là hai hành động riêng.
+Làm mới chỉ đọc trạng thái trang được chọn, không tải lịch sử. Tách chế độ
+**Đang quản lý** và **Có thể gắn**; chế độ gắn dùng chính bộ khám phá hiện có
+qua `attachmentChoices`, loại nhóm khác/phiên con/lưu trữ. Đổi thư mục khám
+phá làm kết quả gắn cũ không còn áp dụng; không đổi thư mục liên kết đang chạy.
+Khi bấm gắn, đọc lại danh sách/phạm vi rồi gọi `SessionTopics.attach`, không
+dùng danh sách làm bằng chứng đã nghỉ. Nguồn lỗi vẫn có thể tìm dữ liệu đã lưu,
+nhưng gắn không được vượt kiểm tra nguồn. Kết quả trong General là tin chung,
+không phải tin riêng tư của người sở hữu nút.
 
 ## CV14 — Ghim phiên theo người dùng trong từng nhóm
 

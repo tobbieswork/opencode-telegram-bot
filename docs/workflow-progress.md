@@ -18,8 +18,8 @@ khi bắt đầu đầu việc tiếp theo. Không bật chính sách mới trê
 | CV09 | Đã triển khai và áp dụng | `267f30e`; kiểu, đơn vị và đầu-cuối đạt; đã khởi động lại, giữ 5 liên kết |
 | CV10 | Đã triển khai và áp dụng | `61435b2`; kiểu, đơn vị, đầu-cuối đạt; đã khởi động lại, giữ 5 liên kết |
 | CV11 | Đã triển khai và áp dụng | `a1d17f3`; kiểu, đơn vị, đầu-cuối đạt; đã khởi động lại, giữ 5 liên kết |
-| CV12 | Đã triển khai, chờ chốt commit và khởi động lại | Giờ IANA do người dùng xác nhận, qua ngày/giờ mùa; hoãn đúng request, giữ ngân sách; gộp có nhịp, không đổi hạn lịch |
-| CV13 | Chưa bắt đầu | Tìm kiếm |
+| CV12 | Đã triển khai và áp dụng | `e4944c5`; kiểu, đơn vị, đầu-cuối đạt; đã khởi động lại, giữ 5 liên kết |
+| CV13 | Đã triển khai, chờ chốt commit và khởi động lại | Tìm không dấu/Unicode trong nhóm, lọc và trang 10 hàng, tách quản lý/khám phá gắn; thẻ bất biến đúng người và phạm vi |
 | CV14 | Chưa bắt đầu | Ghim |
 | CV15 | Chưa bắt đầu | Nghiệm thu tổng hợp |
 
