@@ -19,6 +19,7 @@ import { purgeConv, cmdPrune, handlePruneCallback } from "./orchestrator/purge.j
 import { onTopicDeleted, reapPendingTopicDeletes } from "./orchestrator/topics.js";
 import type { Schedule } from "./schedule.js";
 import type { Advisor } from "./advisor/advisor.js";
+import { AGENTS, agentLabel, resolveAgent } from "./advisor/agents.js";
 
 type Btn = { text: string; callback_data: string };
 type Keyboard = { inline_keyboard: Btn[][] };
@@ -31,7 +32,7 @@ export interface Host {
   cfg: Config;
   /** Shared retention for the busy-reply "Thêm vào note" button (owned by the Bot). */
   busyNotes: BusyNoteStore;
-  /** Claude advisor (topic + Claude session on the Mac). Present only when enabled. */
+  /** Advisor (topic + Claude/Gemini session on the advisor machine). Present only when enabled. */
   advisor?: Advisor;
   sendHtml(conv: ConvKey, html: string, opts?: { reply_markup?: Keyboard }): Promise<void>;
   applyModelAndVariant(sessionID: string, state: ChatState): Promise<void>;
@@ -1436,28 +1437,34 @@ export class Orchestrator {
         {
           name: "list_advisor_threads",
           description:
-            "List open Claude advisor threads in this chat: id, title, turns used. Pass an id to consult(threadId=...) to continue it.",
+            "List open advisor threads in this chat: id, agent, title, turns used. Pass an id to consult(threadId=...) to continue it.",
           inputSchema: { type: "object", properties: {} },
           run: async () => {
             const ts = adv.listThreads(chat);
             if (!ts.length) return "No open advisor threads.";
             return ts
-              .map((t) => `- id ${parseConv(t.conv).threadId} · ${t.title} · ${t.turns}/${cap} turns · ${timeAgo(t.lastActive)}`)
+              .map((t) => `- id ${parseConv(t.conv).threadId} · ${agentLabel(t.agent)} · ${t.title} · ${t.turns}/${cap} turns · ${timeAgo(t.lastActive)}`)
               .join("\n");
           },
         },
         {
           name: "consult",
           description:
-            "Ask Claude (on the Mac, a different model) for a second opinion — a hard design decision, a risky assumption, or a plan review. " +
+            "Ask a different model (Claude or Gemini, on the advisor machine) for a second opinion — a hard design decision, a risky assumption, or a plan review. " +
             "It advises only and does NOT run code, so put any relevant context (code snippets, constraints, prior decisions) in `context`. " +
-            "It opens a topic the user can also join. To continue a previous thread pass its `threadId` (from list_advisor_threads); omit for a fresh one.",
+            "It opens a topic the user can also join. To continue a previous thread pass its `threadId` (from list_advisor_threads); omit for a fresh one. " +
+            `\`agent\` picks the model for a NEW thread (default ${agentLabel(this.h.cfg.advisorDefaultAgent)}); a continued thread keeps its own.`,
           inputSchema: {
             type: "object",
             properties: {
               question: { type: "string", description: "The question or decision you want a second opinion on" },
               context: { type: "string", description: "Relevant context: code snippets, constraints, prior decisions" },
               threadId: { type: "number", description: "Continue an existing advisor thread (id from list_advisor_threads)" },
+              agent: {
+                type: "string",
+                enum: Object.values(AGENTS).flatMap((x) => [x.id, ...x.aliases]),
+                description: "Model for a new thread: claude, or gemini (alias agy)",
+              },
             },
             required: ["question"],
           },
@@ -1465,6 +1472,8 @@ export class Orchestrator {
             const question = String(a.question ?? "").trim();
             if (!question) throw new Error("question is required");
             const context = a.context ? String(a.context) : undefined;
+            const agent = a.agent !== undefined ? resolveAgent(String(a.agent)) : undefined;
+            if (a.agent !== undefined && !agent) throw new Error(`Unknown agent "${String(a.agent)}" — use claude or gemini.`);
             if (a.threadId !== undefined) {
               const want = Number(a.threadId);
               const conv = this.h.st.convsOfChat(chat).find(([c]) => parseConv(c).threadId === want && this.h.st.peek(c)?.advisor)?.[0];
@@ -1473,7 +1482,7 @@ export class Orchestrator {
               const tid = parseConv(conv).threadId;
               return `${answer.answer}\n\n[advisor thread id ${tid}${capped ? " — CAP REACHED: start a new thread (no threadId) for the next question" : ""}]`;
             }
-            const r = await adv.startThread({ chat, title: question.replace(/\s+/g, " ").slice(0, 60), message: question, context });
+            const r = await adv.startThread({ chat, title: question.replace(/\s+/g, " ").slice(0, 60), message: question, context, agent });
             return `${r.answer.answer}\n\n[advisor thread id ${r.threadId} — pass it as threadId to continue this thread]`;
           },
         },
