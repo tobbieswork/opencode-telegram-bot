@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.9.0...opencode-telegram-bot-v1.9.1) (2026-10-30)
+
+
+### Bug Fixes
+
+* **ask:** guard /ask against silent-drop on unexpected throw ([#105](https://github.com/tobbieswork/opencode-telegram-bot/issues/105)) ([#95](https://github.com/tobbieswork/opencode-telegram-bot/issues/95)) ([8875354](https://github.com/tobbieswork/opencode-telegram-bot/commit/8875354ceac126bec3e78875571539bd6b2bb407))
+
 ## [1.9.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.8.0...opencode-telegram-bot-v1.9.0) (2026-10-30)
 
 
