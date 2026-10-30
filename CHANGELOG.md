@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.7.0...opencode-telegram-bot-v1.8.0) (2026-10-30)
+
+
+### Features
+
+* **advisor:** Claude + Gemini advisor with one-command setup; remove Mac node ([#89](https://github.com/tobbieswork/opencode-telegram-bot/issues/89)) ([cfaa8a4](https://github.com/tobbieswork/opencode-telegram-bot/commit/cfaa8a49bd41ae0d397fc087f9659438f2032e07))
+
 ## [1.7.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.6.0...opencode-telegram-bot-v1.7.0) (2026-10-30)
 
 
