@@ -119,6 +119,13 @@ export async function cmdStatus(bot: Bot, conv: ConvKey, state: ChatState): Prom
     `agent: ${state.agent ? `<code>${state.agent}</code>` : "default"}`,
     `state: ${busy ? "⏳ busy" : "🟢 idle"}`,
   ];
+  // The Manager's context FLOOR (min sent-context over 24h) — the persistent
+  // baseline that drifts up over days and drives auto-rotation. Manager convs
+  // only; a read failure just omits the line (never breaks /status).
+  if (state.manager && state.sessionID) {
+    const floor = await bot.managerFloor(state.sessionID).catch(() => 0);
+    if (floor > 0) lines.push(`ctx floor: ~${Math.round(floor / 1000)}K`);
+  }
   await bot.sendHtml(conv, lines.join("\n"));
 }
 

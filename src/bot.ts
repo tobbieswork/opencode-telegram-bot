@@ -49,6 +49,7 @@ import type { NodeDone } from "./node/node-github.js";
 import { cmdHelp, cmdStatus, cmdContext, cmdUsage, cmdHistory, cmdNote, handleNoteCallback } from "./commands/meta.js";
 import { cmdBtw } from "./btw.js";
 import { cmdAsk } from "./ask.js";
+import { managerFloorFromMessages } from "./rotation.js";
 
 /** The message carries media (sticker/photo/video/voice/…) — used to acknowledge non-text input. */
 function hasNonTextContent(m: Message): boolean {
@@ -1888,6 +1889,17 @@ export class Bot {
       `⚠️ <b>/new</b> xoá ngữ cảnh hiện tại.\nBấm nút để xác nhận — hoặc gõ <code>/new --keep</code> nếu muốn giữ mạch hội thoại.`,
       { reply_markup: kb },
     );
+  }
+
+  /**
+   * M1 — the manager session's FLOOR: the MIN sent-context (input + cache.read)
+   * across its assistant messages from the last 24h. 0 when there are none (a
+   * fresh session). Drives the auto-rotation trigger and the /status floor line.
+   * Never throws — a read failure just reports no floor (0).
+   */
+  async managerFloor(sessionID: string, now = Date.now()): Promise<number> {
+    const msgs = (await this.oc.listMessages(sessionID, 700).catch(() => [] as any[])) as any[];
+    return managerFloorFromMessages(msgs, now);
   }
 
   /** Actually create the fresh session (cmdNew --keep, or the nw:cf confirm button). */
