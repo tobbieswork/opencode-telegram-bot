@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.4.1...opencode-telegram-bot-v1.5.0) (2026-10-30)
+
+
+### Features
+
+* add /review command + review-code skill to project ([#84](https://github.com/tobbieswork/opencode-telegram-bot/issues/84)) ([7605bb1](https://github.com/tobbieswork/opencode-telegram-bot/commit/7605bb19d8529779a263ee49d6a200fdb1b684c9))
+
 ## [1.4.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.4.0...opencode-telegram-bot-v1.4.1) (2026-10-29)
 
 
