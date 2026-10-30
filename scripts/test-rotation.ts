@@ -15,6 +15,27 @@ import {
   HANDOFF_BRIEF_WORDS,
   rotationGate,
 } from "../src/rotation.js";
+import {
+  appendRotationHistory,
+  ROTATION_HISTORY_CAP,
+  dayKey,
+  upsertFloorTrend,
+  FLOOR_TREND_DAYS,
+  buildRotationSnapshot,
+  SNAPSHOT_ROTATIONS,
+  rotationVerdict,
+  ROTATION_WATCH_K,
+  ROTATION_UNBOUNDED_K,
+  writeRotationHealth,
+  readRotationHealth,
+  rotationHealthPath,
+  renderRotationReport,
+  type RotationHistoryEntry,
+  type FloorTrendEntry,
+} from "../src/rotation-health.js";
+import { StateManager } from "../src/state.js";
+import { rm } from "node:fs/promises";
+import { join } from "node:path";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: string): void {
@@ -147,6 +168,125 @@ const inWindow = (t: number, tokens: object) => ({ type: "assistant", time: { cr
 
   // auto takes priority over confirm (a floor above auto never offers confirm)
   check("gate: above auto, recently prompted → still auto (not throttled to idle)", rotationGate({ floorK: 120, busy: false, lastRotationPromptMs: NOW - 1 * 3600_000, ...base }) === "auto");
+}
+
+// ── Part 1: rotation tracking — appendRotationHistory (cap + append) ──────
+{
+  const mk = (i: number): RotationHistoryEntry => ({ at: i, floorK: 100, tier: "auto", outcome: "success" });
+  check("appendRotationHistory empty → 1", appendRotationHistory(undefined, mk(1)).length === 1);
+  const two = appendRotationHistory(appendRotationHistory(undefined, mk(1)), mk(2));
+  check("appendRotationHistory appends", two.length === 2 && two[0].at === 1 && two[1].at === 2);
+  let h: RotationHistoryEntry[] | undefined;
+  for (let i = 1; i <= ROTATION_HISTORY_CAP + 5; i++) h = appendRotationHistory(h, mk(i));
+  check("appendRotationHistory caps at ROTATION_HISTORY_CAP", h!.length === ROTATION_HISTORY_CAP, `len=${h!.length}`);
+  check("appendRotationHistory keeps the most recent", h![0].at === 6 && h![h!.length - 1].at === ROTATION_HISTORY_CAP + 5, `first=${h![0].at} last=${h![h!.length - 1].at}`);
+  const before = [{ at: 1, floorK: 5, tier: "confirm" as const, outcome: "fail" as const }];
+  appendRotationHistory(before, mk(2));
+  check("appendRotationHistory does not mutate input", before.length === 1);
+}
+
+// ── Part 1: dayKey ───────────────────────────────────────────────────────────
+{
+  const k = dayKey(1_767_626_000_000); // some fixed instant
+  check("dayKey format YYYY-MM-DD", /^\d{4}-\d{2}-\d{2}$/.test(k), k);
+  check("dayKey deterministic", dayKey(1_767_626_000_000) === k);
+}
+
+// ── Part 1: upsertFloorTrend (daily min/max + prune) ─────────────────────
+{
+  const d1 = "2026-01-01", d2 = "2026-01-02", d3 = "2026-01-03";
+  let t = upsertFloorTrend(undefined, d1, 50);
+  check("upsertFloorTrend first insert min=max", t.length === 1 && t[0].min === 50 && t[0].max === 50, JSON.stringify(t));
+  t = upsertFloorTrend(t, d1, 30);
+  check("upsertFloorTrend same-day lower widens min", t.length === 1 && t[0].min === 30 && t[0].max === 50, JSON.stringify(t));
+  t = upsertFloorTrend(t, d1, 80);
+  check("upsertFloorTrend same-day higher widens max", t.length === 1 && t[0].min === 30 && t[0].max === 80, JSON.stringify(t));
+  t = upsertFloorTrend(t, d3, 20);
+  t = upsertFloorTrend(t, d2, 40);
+  check("upsertFloorTrend sorts days ascending", t.map((e) => e.day).join(",") === `${d1},${d2},${d3}`, JSON.stringify(t.map((e) => e.day)));
+  let pr: FloorTrendEntry[] | undefined;
+  for (let i = 1; i <= FLOOR_TREND_DAYS + 3; i++) pr = upsertFloorTrend(pr, `2026-01-${String(i).padStart(2, "0")}`, i);
+  check("upsertFloorTrend prunes to FLOOR_TREND_DAYS", pr!.length === FLOOR_TREND_DAYS, `len=${pr!.length}`);
+  check("upsertFloorTrend keeps the most recent days", pr![pr!.length - 1].day === `2026-01-${String(FLOOR_TREND_DAYS + 3).padStart(2, "0")}`, JSON.stringify(pr!.map((e) => e.day)));
+}
+
+// ── Part 1: buildRotationSnapshot ───────────────────────────────────────────
+{
+  const hist: RotationHistoryEntry[] = Array.from({ length: 15 }, (_, i) => ({ at: i + 1, floorK: 100 + i, tier: i % 2 ? ("confirm" as const) : ("auto" as const), outcome: "success" as const }));
+  const trend: FloorTrendEntry[] = [{ day: "2026-01-01", min: 10, max: 20 }];
+  const snap = buildRotationSnapshot({ now: 999, currentFloorK: 125, floorTrend: trend, rotationHistory: hist, lastRotationAt: 15, lastRotationOutcome: "success", autoK: 110, confirmK: 90 });
+  check("snapshot rotations = last SNAPSHOT_ROTATIONS", snap.rotations.length === SNAPSHOT_ROTATIONS, `len=${snap.rotations.length}`);
+  check("snapshot rotations are the most recent", snap.rotations[snap.rotations.length - 1].at === 15, `last=${snap.rotations[snap.rotations.length - 1].at}`);
+  check("snapshot bounded false when floor > UNBOUNDED", snap.bounded === false);
+  check("snapshot thresholds carried", snap.thresholds.autoK === 110 && snap.thresholds.confirmK === 90);
+  check("snapshot floorTrend passed through", snap.floorTrend.length === 1);
+  check("snapshot bounded true when floor < UNBOUNDED", buildRotationSnapshot({ now: 999, currentFloorK: 80, floorTrend: [], rotationHistory: [], lastRotationAt: null, lastRotationOutcome: null, autoK: 110, confirmK: 90 }).bounded === true);
+  check("snapshot bounded false when floor null", buildRotationSnapshot({ now: 999, currentFloorK: null, floorTrend: [], rotationHistory: [], lastRotationAt: null, lastRotationOutcome: null, autoK: 110, confirmK: 90 }).bounded === false);
+}
+
+// ── Part 1: rotationVerdict ──────────────────────────────────────────────────
+{
+  check("verdict bounded < WATCH", rotationVerdict(50, null) === "bounded");
+  check("verdict bounded == WATCH-1", rotationVerdict(ROTATION_WATCH_K - 1, null) === "bounded");
+  check("verdict watch == WATCH", rotationVerdict(ROTATION_WATCH_K, null) === "watch");
+  check("verdict watch == UNBOUNDED (boundary)", rotationVerdict(ROTATION_UNBOUNDED_K, null) === "watch");
+  check("verdict unbounded > UNBOUNDED", rotationVerdict(ROTATION_UNBOUNDED_K + 1, null) === "unbounded");
+  check("verdict watch when floor null", rotationVerdict(null, null) === "watch");
+  check("verdict unbounded when lastOutcome fail (low floor)", rotationVerdict(50, "fail") === "unbounded");
+  check("verdict unbounded when lastOutcome fail (null floor)", rotationVerdict(null, "fail") === "unbounded");
+  check("verdict ignores success outcome (bounded floor)", rotationVerdict(50, "success") === "bounded");
+}
+
+// ── Part 1: snapshot file (atomic write + read + missing) ──────────────────
+{
+  const file = join("/tmp/opencode", `rotation-health-${process.pid}.json`);
+  await rm(file, { force: true });
+  check("readRotationHealth missing → null", readRotationHealth(file) === null);
+  const snap = buildRotationSnapshot({ now: 12345, currentFloorK: 95, floorTrend: [{ day: "2026-01-01", min: 1, max: 2 }], rotationHistory: [{ at: 1, floorK: 90, tier: "auto", outcome: "success", newFloorK: 0 }], lastRotationAt: 1, lastRotationOutcome: "success", autoK: 110, confirmK: 90 });
+  writeRotationHealth(file, snap);
+  const back = readRotationHealth(file);
+  check("write+read round-trips", back !== null && back.now === 12345 && back.currentFloorK === 95 && back.rotations.length === 1, back ? JSON.stringify(back) : "null");
+  check("rotationHealthPath sits in stateFile's dir", rotationHealthPath("/some/dir/state.json") === "/some/dir/rotation-health.json", rotationHealthPath("/some/dir/state.json"));
+  await rm(file, { force: true });
+}
+
+// ── Part 1: renderRotationReport (bounded/watch/unbounded + HTML sanity) ─────
+{
+  const base = {
+    now: Date.now(),
+    floorTrend: [{ day: "2026-01-01", min: 10, max: 20 }],
+    rotations: [{ at: Date.now() - 3600_000, floorK: 110, tier: "auto" as const, outcome: "success" as const, newFloorK: 0 }],
+    lastRotationAt: Date.now() - 3600_000,
+    thresholds: { autoK: 110, confirmK: 90 },
+  };
+  const bounded = renderRotationReport({ ...base, currentFloorK: 50, lastRotationOutcome: "success" as const, bounded: true });
+  check("report(bounded) shows floor + verdict", bounded.includes("Nền hiện tại: ~50K") && bounded.includes("bounded"), bounded);
+  const watch = renderRotationReport({ ...base, currentFloorK: 110, lastRotationOutcome: "success" as const, bounded: false });
+  check("report(watch) shows theo dõi", watch.includes("theo dõi"), watch);
+  const unbounded = renderRotationReport({ ...base, currentFloorK: 130, lastRotationOutcome: "fail" as const, bounded: false });
+  check("report(unbounded) shows vượt ngưỡng", unbounded.includes("vượt ngưỡng"), unbounded);
+  const b = (bounded.match(/<b>/g) ?? []).length, bc = (bounded.match(/<\/b>/g) ?? []).length;
+  check("report balanced <b> tags", b === bc, `${b} vs ${bc}`);
+  const body = bounded.replace(/<\/?b>/g, "").replace(/<\/?(pre|code)><\/?(code|pre)>/g, "");
+  check("report has no raw < (all escaped)", !body.includes("<"), body);
+}
+
+// ── Part 1: persisted fields survive a restart (StateManager round-trip) ────
+{
+  const file = join("/tmp/opencode", `rotation-state-${process.pid}.json`);
+  await rm(file, { force: true });
+  const st = new StateManager(file);
+  st.set("m", {
+    manager: true,
+    sessionID: "ses_mgr",
+    rotationHistory: [{ at: 1, floorK: 110, tier: "auto", outcome: "success", newFloorK: 0 }],
+    floorTrend: [{ day: "2026-01-01", min: 10, max: 20 }],
+  });
+  const st2 = new StateManager(file); // simulate a bot restart
+  const s2 = st2.get("m");
+  check("rotationHistory survives restart", s2.rotationHistory?.length === 1 && s2.rotationHistory![0].floorK === 110, JSON.stringify(s2.rotationHistory));
+  check("floorTrend survives restart", s2.floorTrend?.length === 1 && s2.floorTrend![0].max === 20, JSON.stringify(s2.floorTrend));
+  await rm(file, { force: true });
 }
 
 if (failures > 0) {
