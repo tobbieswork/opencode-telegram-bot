@@ -109,8 +109,15 @@ function waitFor(daemon: ChildProcess, needle: string, timeoutMs: number): Promi
   });
 }
 
+/** Own process group, so stopDaemon also kills the node child tsx starts. */
 function startDaemon(env: Record<string, string>): ChildProcess {
-  return spawn(TSX, [ADVISOR], { cwd: REPO, env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"] });
+  return spawn(TSX, [ADVISOR], { cwd: REPO, env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"], detached: true });
+}
+
+function stopDaemon(d: ChildProcess | undefined): void {
+  try {
+    if (d?.pid) process.kill(-d.pid, "SIGKILL");
+  } catch {}
 }
 
 function agyArgv(workroot: string): string[] {
@@ -264,8 +271,8 @@ async function main(): Promise<void> {
     check("disabled agent → 400 naming it", r2.status === 400 && String(j2.error).includes("Gemini"), `${r2.status} ${JSON.stringify(j2)}`);
     rmSync(root2, { recursive: true, force: true });
   } finally {
-    daemon.kill("SIGKILL");
-    daemon2?.kill("SIGKILL");
+    stopDaemon(daemon);
+    stopDaemon(daemon2);
     rmSync(workroot, { recursive: true, force: true });
   }
 
