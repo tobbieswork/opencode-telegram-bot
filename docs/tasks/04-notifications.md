@@ -1,6 +1,6 @@
 # Đầu việc 4 — Thông báo ít nhưng đúng lúc
 
-**Trạng thái:** CV10 đã triển khai; CV11–CV12 chưa triển khai. **Thứ tự:** CV10 → CV11 → CV12.
+**Trạng thái:** CV10–CV11 đã triển khai; CV12 chưa triển khai. **Thứ tự:** CV10 → CV11 → CV12.
 **Điều kiện bắt đầu:** CV09 đạt kiểm thử tự động; thử thiết bị thật giữ ở CV15 theo
 [kế hoạch tổng](../plan-session-workflow-improvements.md).
 
@@ -74,34 +74,61 @@ làm hàng đợi người dùng. Kiểm thử bảng: `scripts/test-notificatio
 
 ### Công việc
 
-- [ ] Lưu ý định thông báo tối thiểu, khóa chống lặp theo nguồn và trạng thái
+- [x] Lưu ý định thông báo tối thiểu, khóa chống lặp theo nguồn và trạng thái
   giao tin qua `StateManager`. Giới hạn số lượng, thời gian lưu và kích thước.
-- [ ] Gộp các báo cáo hoàn tất cùng nhóm trong một khoảng ngắn có giới hạn tối
+- [x] Gộp các báo cáo hoàn tất cùng nhóm trong một khoảng ngắn có giới hạn tối
   đa; công việc phát sinh liên tục không được hoãn bản tin vô hạn.
-- [ ] Trước khi gửi lại câu hỏi/quyền, kiểm tra nó còn hợp lệ. Đã trả lời, hủy,
+- [x] Trước khi gửi lại câu hỏi/quyền, kiểm tra nó còn hợp lệ. Đã trả lời, hủy,
   mất quyền sở hữu hoặc không còn thuộc phiên đó thì không gửi nút cũ.
-- [ ] Giới hạn số lời gọi đồng thời và tôn trọng `retry_after`; một nhóm lỗi
+- [x] Giới hạn số lời gọi đồng thời và tôn trọng `retry_after`; một nhóm lỗi
   không làm nghẽn mọi nhóm. Hỗ trợ chỉnh sửa tin nhắn đã biết thay vì tạo bản
   trùng khi đó là thao tác lặp an toàn.
-- [ ] Xử lý mất phản hồi trung thực: có thể Telegram đã nhận dù bot chưa ghi
+- [x] Xử lý mất phản hồi trung thực: có thể Telegram đã nhận dù bot chưa ghi
   được mã tin. Giữ trạng thái chưa xác nhận, không đánh dấu đã gửi hoặc hứa chỉ
   gửi một lần. Quy tắc thử lại phải được ghi rõ theo loại thao tác; không tự
   gửi lại mù quáng tin mới có kết quả không rõ.
-- [ ] Khi khởi động lại, khôi phục phần chưa xử lý nhưng không phát lại toàn
+- [x] Khi khởi động lại, khôi phục phần chưa xử lý nhưng không phát lại toàn
   bộ thông báo cũ. Dọn dữ liệu chỉ sau trạng thái cuối hoặc hết thời gian lưu
   đã quy định; không xóa một câu hỏi còn chờ chỉ vì đã hết lượt nhắc.
-- [ ] Giữ luồng chuyển tiếp câu trả lời hiện có với `lastRelayedTime`; không
+- [x] Giữ luồng chuyển tiếp câu trả lời hiện có với `lastRelayedTime`; không
   cùng gửi một kết quả từ cả hàng đợi mới và bộ chuyển tiếp cũ.
-- [ ] Đối chiếu phạm vi với phần giao tin trong
+- [x] Đối chiếu phạm vi với phần giao tin trong
   [kế hoạch ổn định](../plan-reliability-hardening.md); chỉ dùng chung phần đã
   chứng minh có cùng trách nhiệm, không coi toàn bộ phần đó đã được giải quyết.
 
 ### Kiểm thử và nghiệm thu
 
-- [ ] Sự kiện trùng; hai lượt cùng phiên; nhiều nhóm; 429; lỗi ghi trước/sau
+- [x] Sự kiện trùng; hai lượt cùng phiên; nhiều nhóm; 429; lỗi ghi trước/sau
   gửi; mất phản hồi; khởi động lại; câu hỏi đã giải quyết khi thông báo đang chờ.
-- [ ] Dòng sự kiện liên tục vẫn có bản tin trong hạn tối đa đã chọn.
-- [ ] Không mất lời nhắc đang chờ hoặc đặt lại ngân sách nhắc sau khởi động lại.
+- [x] Dòng sự kiện liên tục vẫn có bản tin trong hạn tối đa đã chọn.
+- [x] Không mất lời nhắc đang chờ hoặc đặt lại ngân sách nhắc sau khởi động lại.
+
+Hàng đợi phiên bản 1 ở mục General của `StateManager`: tối đa 500 ý định,
+hạn giữ 7 ngày; từ chối sự kiện gốc quá hạn thay vì coi kết nối lại là sự kiện
+mới. Gộp 5 giây từ mục đầu, tối đa 8 mục/tin; không trượt hạn khi có dòng mới.
+Hai nhóm được xét đồng thời, quay vòng; một nhóm lỗi không chặn nhóm khác.
+Bật riêng có xem trước gắn người/nhóm/mốc 10 phút, mặc định vẫn tắt.
+
+Lưu `sending` trước HTTP. Thành công cần mã tin dương và lưu xác nhận. 429
+chờ đúng `retry_after` của nhóm; 4xx khác dừng ở lỗi. Mất mạng/5xx/hết thời gian
+khi tạo tin giữ `unknown`, không tự gửi mới. Khởi động gặp `sending` cũng giữ
+chưa rõ. **Kiểm tra/sửa tin đã biết** chỉ xếp edit theo mã tin đã biết, kiểm
+tra lại nguồn; no-op edit hợp lệ. Không biết mã thì kiểm tra bảng điều khiển,
+không phát lại bản tin. Không bảo đảm chống trùng khi mất cả kho/bản ghi.
+
+Đọc lại danh tính/quyền sở hữu và danh sách form/permission trước gửi; nội
+dung chỉ tên/trạng thái/đường dẫn, không mang nút cấp quyền cũ. Kết quả chỉ
+phát từ phản hồi ghép đúng input, không suy từ SSE chỉ có sessionID. Lỗi tên
+là loại riêng. Không chuyển thẻ gốc/đáp án hoặc phản hồi sang hàng đợi, không
+sửa `lastRelayedTime`, không gọi mô hình Manager. Nhắc và ngân sách vẫn do
+`pendingPrompts` quản lý; CV12 nối phần hoãn. Cảnh báo máy/PR và thẻ vận hành
+có nút chuyên biệt hiện có không âm thầm bị thay bằng bản tin tối giản.
+
+**Đối chiếu PR5 của kế hoạch ổn định:** dùng cùng nguyên tắc phân loại thao
+tác, 429, lưu trước gửi và trạng thái chưa rõ, nhưng chỉ cho tóm lược General.
+Chưa giải quyết final reply nhiều mảnh, tiến độ từng mảnh, khôi phục từng mảnh
+hay thứ tự với orphan sweep của PR5. Không đánh dấu toàn bộ PR5 hoàn thành.
+Kiểm thử: `scripts/test-notification-queue.ts`.
 
 **Tệp liên quan:** module thông báo dự kiến, `src/state.ts`, `src/bot.ts`,
 `src/telegram.ts`, `src/reminders.ts`; mở rộng kiểm thử giao tin và nhắc.

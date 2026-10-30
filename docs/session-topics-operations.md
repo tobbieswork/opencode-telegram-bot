@@ -46,6 +46,12 @@ and all command/button handlers enforce General versus work-topic scope.
   lượt lịch còn sở hữu thì không gửi. Mất phản hồi không tự gửi lại: dùng Làm
   mới/đến chủ đề để kiểm tra; không coi mất phản hồi là chưa chạy. Xác nhận đã
   dùng và thẻ trước khi bot khởi động lại không được bấm để phát lại yêu cầu.
+- **Quy tắc thông báo General** có xem trước/bật riêng theo nhóm, mặc định
+  tắt. Khi bật, câu hỏi/quyền/lỗi chặn được ưu tiên; kết quả chỉ tên/trạng thái/
+  đường dẫn, gộp 5 giây và tối đa 8 mục/tin. Phản hồi gốc vẫn ở chủ đề. Mất xác
+  nhận giao không tự gửi mới: trang quy tắc hiện số chưa rõ; chỉ sửa tin đã biết
+  mã. Không biết mã thì kiểm tra bảng điều khiển/Đang chờ bạn. Không hứa chống
+  trùng khi mất kho. Tắt không dừng việc, hủy yêu cầu hoặc đặt lại lượt nhắc.
 - **Gắn phiên có sẵn**, `/attach` hoặc `/use` không có mã mở danh sách chọn
   có tên. Danh sách chỉ đọc, không gửi lại thẻ của mọi phiên đã quản lý.
   Saved legacy sessions of this group are included, even outside the

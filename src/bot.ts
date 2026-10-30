@@ -15,7 +15,7 @@ import { SessionDashboard, dashboardPage, DASHBOARD_FILTERS, DASHBOARD_WORK_LABE
 import { SessionActivityLog, ACTIVITY_SOURCE_LABELS } from "./session-activity.js";
 import { buildSessionSummary } from "./session-summary.js";
 import { ResumeConfirmations, type ResumeConfirmation } from "./session-resume.js";
-import { Notifications } from "./notifications.js";
+import { Notifications, type Notice, type NoticeKind } from "./notifications.js";
 import { Schedule, SchedSpec, formatSchedule, nextRunAfter, parseScheduleSpec } from "./schedule.js";
 import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure, topicTitle } from "./format.js";
@@ -258,6 +258,7 @@ export class Bot {
   private sessionActivity: SessionActivityLog;
   private resumeConfirmations: ResumeConfirmations;
   private notifications: Notifications;
+  private noticePreviews = new Map<string, { chat: ConvKey; user: number; revision: number; expires: number }>();
   private resumeInputs = new Map<string, { id: string; token: string; messageID: number; binding: string; marker: string; expires: number }>();
   private activityReads = new Map<ConvKey, Promise<void>>();
   private activityAgain = new Set<ConvKey>();
@@ -293,7 +294,9 @@ export class Bot {
     this.sessionActivity = new SessionActivityLog(st);
     this.resumeConfirmations = new ResumeConfirmations(st);
     this.notifications = new Notifications(st, { now: () => Date.now(), deliver: (chat, text, links) => tg.sendMessageId(chat, text,
-      { reply_markup: { inline_keyboard: links.map(link => [link]) } }) });
+      { reply_markup: { inline_keyboard: links.map(link => [link]) } }), edit: async (chat, id, text, links) => {
+        await tg.editMessageText(chat, id, text, { reply_markup: { inline_keyboard: links.map(link => [link]) } });
+      }, resolve: event => this.resolveNotice(event) });
     this.topics = new SessionTopics(st, {
       createSession: (input) => oc.createTopicSession(input),
       session: (id) => oc.topicSession(id),
@@ -418,6 +421,7 @@ export class Bot {
     this.resumePromptReminders();
     // Deadline của lượt đã nhận vẫn phải được khôi phục khi công tắc lịch tắt.
     this.scheduler?.start();
+    this.notifications.start();
     this.topics.requestTitleSync(undefined, true);
     void this.reconcileTopics().catch(() => warn("Session/topic reconciliation failed."));
     if (!this.topicTimer) {
@@ -449,6 +453,8 @@ export class Bot {
     this.summaryCards.clear();
     this.resumeInputs.clear();
     this.scheduler?.stop();
+    this.notifications.stop();
+    this.noticePreviews.clear();
     this.orch.shutdown();
     this.topics.stopTitleSync();
     this.titlePreviews.clear();
@@ -1089,6 +1095,75 @@ export class Bot {
       link.identity?.source, link.identity?.projectID, link.identity?.createdAt]);
   }
 
+  private publishNotice(conv: ConvKey, kind: NoticeKind, reference: Notice["reference"], occurredAt: number, occurrence?: number): void {
+    try {
+      const link = this.topics.forTopic(conv);
+      if (!link?.sessionID || !link.identity || this.st.peek(conv)?.sessionID !== link.sessionID) return;
+      const pending = reference && this.st.peek(conv)?.pendingPrompts?.[reference.id];
+      this.notifications.enqueue({ chat: link.chat, conv, linkID: link.id, sessionID: link.sessionID, binding: this.summaryBinding(link), kind,
+        title: [...link.title].slice(0, 128).join(""), reference, occurrence, occurredAt,
+        url: topicMessageUrl(conv, pending?.messageId) });
+    } catch (error) { warn("Thông báo General:", (error as Error).message); }
+  }
+
+  private async resolveNotice(event: Notice): Promise<Notice | undefined> {
+    const link = this.topics.get(event.linkID);
+    if (!link || link.chat !== event.chat || link.conv !== event.conv || link.sessionID !== event.sessionID ||
+      this.summaryBinding(link) !== event.binding || this.st.peek(event.conv)?.sessionID !== event.sessionID || !link.identity ||
+      this.st.findChatBySession(event.sessionID) !== event.conv || Object.values(this.st.all()).filter(state => state.sessionID === event.sessionID).length !== 1) return;
+    const info = await this.oc.topicSessionTitle(event.sessionID, AbortSignal.timeout(3000));
+    if (info.id !== event.sessionID || info.source !== link.identity.source || info.projectID !== link.identity.projectID || info.createdAt !== link.identity.createdAt) return;
+    if (["question", "permission", "reminder"].includes(event.kind)) {
+      if (info.archived || !this.topics.canInteract(event.conv, event.sessionID) || !event.reference) return;
+      const ids = event.reference.kind === "form" ? await this.oc.listForms(event.sessionID, AbortSignal.timeout(3000)) : await this.oc.listPermissions(event.sessionID, AbortSignal.timeout(3000));
+      if (!ids.some(item => item.id === event.reference!.id)) return;
+    }
+    if (event.kind === "naming" && !link.titleSync?.error) return;
+    const latest = this.topics.get(event.linkID);
+    if (!latest || this.summaryBinding(latest) !== event.binding || latest.chat !== event.chat || this.st.peek(event.conv)?.sessionID !== event.sessionID) return;
+    if (["question", "permission", "reminder"].includes(event.kind) && !this.topics.canInteract(event.conv, event.sessionID)) return;
+    return { ...event, title: [...latest.title].slice(0, 128).join(""), url: topicMessageUrl(event.conv,
+      event.reference && this.st.peek(event.conv)?.pendingPrompts?.[event.reference.id]?.messageId) };
+  }
+
+  private publishActivityOutcome(conv: ConvKey): void {
+    const activity = this.sessionActivity.read(conv);
+    const result = activity?.result;
+    if (!activity || !result || result.inputID !== activity.input.id || !["succeeded", "failed", "interrupted"].includes(result.outcome ?? "")) return;
+    this.publishNotice(conv, result.outcome === "failed" ? "blocked" : "completed", { kind: "input", id: activity.input.id }, result.createdAt ?? result.observedAt);
+  }
+
+  private async showNoticeSettings(conv: ConvKey, user: number, action: string, token?: string): Promise<void> {
+    if (action === "preview") {
+      for (const [key, value] of this.noticePreviews) if (value.expires < Date.now()) this.noticePreviews.delete(key);
+      while (this.noticePreviews.size >= 500) this.noticePreviews.delete(this.noticePreviews.keys().next().value!);
+      const id = randomBytes(6).toString("hex");
+      this.noticePreviews.set(id, { chat: conv, user, revision: this.notifications.settings(conv).revision, expires: Date.now() + 10 * 60_000 });
+      await this.tg.sendMessage(conv, this.notifications.rules(conv) + "\n\nBật sẽ thêm thông báo sự kiện mới tại General. Kết quả gộp 5 giây, tối đa 8 mục/tin; không sao chép phản hồi và không chạy mô hình. Giao tin chưa xác nhận không được gửi mới mù quáng.",
+        { reply_markup: { inline_keyboard: [[{ text: "Xác nhận bật thông báo General", callback_data: `nt:enable:${id}` }, { text: "Hủy", callback_data: `nt:cancel:${id}` }]] } });
+      return;
+    }
+    if (action === "enable" || action === "cancel") {
+      const preview = token && this.noticePreviews.get(token);
+      if (!preview || preview.chat !== conv || preview.user !== user || preview.expires < Date.now()) throw new Error("Bản xem trước không thuộc bạn/nhóm này hoặc hết hạn.");
+      if (action === "enable") this.notifications.configure(conv, preview.revision, true);
+      this.noticePreviews.delete(token!);
+    } else if (action === "off") {
+      if (token !== conv) throw new Error("Nút tắt không thuộc nhóm này.");
+      this.notifications.configure(conv, this.notifications.settings(conv).revision, false);
+    } else if (action === "repair") {
+      if (token !== conv) throw new Error("Thao tác giao tin không thuộc nhóm này.");
+      const count = this.notifications.repairKnown(conv);
+      await this.tg.sendMessage(conv, `Đã xếp ${count} mục để kiểm tra/chỉnh sửa tin đã biết. Mục không có mã tin không được gửi mới; dùng bảng điều khiển để kiểm tra công việc.`);
+    } else if (action !== "rules") throw new Error("Nút thông báo không hợp lệ.");
+    const settings = this.notifications.settings(conv);
+    const status = this.notifications.status(conv);
+    await this.tg.sendMessage(conv, this.notifications.rules(conv) + `\nHàng đợi: ${status.pending} chờ · ${status.unknown + status.sending} chưa xác nhận · ${status.failed} bị từ chối.`,
+      { reply_markup: { inline_keyboard: [[{ text: settings.enabled ? "Tắt thông báo General" : "Xem trước bật", callback_data: settings.enabled ? `nt:off:${conv}` : "nt:preview" }],
+        ...(status.unknown ? [[{ text: "Kiểm tra/sửa tin đã biết", callback_data: `nt:repair:${conv}` }]] : []),
+        [{ text: "Bảng điều khiển phiên", callback_data: "cmd:ls" }]] } });
+  }
+
   private refreshSummary(conv: ConvKey, link: SessionTopic, bypassCache = false): Promise<{ at: number; refreshedAt?: number; error?: string }> {
     const key = this.summaryBinding(link);
     const existing = this.summaryLoads.get(key);
@@ -1461,6 +1536,7 @@ export class Bot {
         this.resumePromptReminders();
         for (const link of this.topics.list()) {
           if (this.topicAnnouncements.get(link.id) !== this.topicSignature(link)) await this.showTopicLink(link.chat, link);
+          if (link.conv && link.titleSync?.error) this.publishNotice(link.conv, "naming", { kind: "operation", id: `name:${this.topics.titlePolicyStamp(link.chat, link.id)}` }, Date.now());
         }
       } while (this.topicSyncAgain);
     })().finally(() => { this.topicSync = undefined; });
@@ -2438,6 +2514,7 @@ export class Bot {
         { sessionID: sid, inputID: messageID, messageID: res.replyID!, text: res.reply, outcome: res.replyOutcome, createdAt: res.replyTime }));
       else this.recordSessionActivity(() => this.sessionActivity.uncertain(conv, sid, messageID, "Chưa đối chiếu được phản hồi với đúng đầu vào."));
       if (res.replyInputID === messageID) this.recordSessionActivity(() => this.resumeConfirmations.observe(conv, [messageID]));
+      this.recordSessionActivity(() => this.publishActivityOutcome(conv));
       this.stopTyping(conv);
       // Drop the live preview before the final message lands (group transport
       // keeps a real, self-editing message that must not outlive the reply).
@@ -2990,10 +3067,10 @@ export class Bot {
         } catch (error) { await this.tg.sendMessage(conv, esc((error as Error).message)); }
         return;
       }
-      if (data === "nt:rules") {
+      if (data.startsWith("nt:")) {
         await this.tg.answerCallbackQuery(cb.id);
         if (conv !== chatOf(conv)) { await this.tg.sendMessage(conv, "Xem thiết lập thông báo trong General."); return; }
-        try { await this.tg.sendMessage(conv, this.notifications.rules(conv)); }
+        try { const [, action, token] = data.split(":"); await this.showNoticeSettings(conv, cb.from!.id, action, token); }
         catch (error) { await this.tg.sendMessage(conv, esc((error as Error).message)); }
         return;
       }
@@ -4329,6 +4406,7 @@ export class Bot {
             !this.topics.canInteract(conv, sid))) throw new Error("Danh tính phiên đổi trong lúc đọc hoạt động.");
           this.sessionActivity.observe(conv, sid, revision, snapshot.messages);
           this.resumeConfirmations.observe(conv, snapshot.messages.filter(message => message.type === "user").map(message => message.id));
+          this.recordSessionActivity(() => this.publishActivityOutcome(conv));
         } finally { clearTimeout(timer); this.activityAborts.delete(conv); }
         if (!this.activityAgain.has(conv)) break;
       }
@@ -4478,6 +4556,7 @@ export class Bot {
     // — but ONLY when the card was actually sent, else a reminder would re-send
     // buttons that were never delivered.
     if (messageId > 0) this.startPromptReminder(conv, formID, "form", v.text, v.keyboard, messageId);
+    if (!resurface && messageId > 0) this.publishNotice(conv, "question", { kind: "form", id: formID }, this.st.peek(conv)?.pendingPrompts?.[formID]?.firstShownAt ?? Date.now());
   }
 
   /** A form was answered/cancelled out-of-band (e.g. in the TUI) — clean up. */
@@ -4678,6 +4757,7 @@ export class Bot {
       // A failed send (messageId = -1) would leave a reminder re-sending a card
       // whose buttons are no longer valid (dead buttons).
       this.startPromptReminder(conv, requestID, "permission", lines.join("\n"), kb, messageId);
+      if (!resurface) this.publishNotice(conv, "permission", { kind: "permission", id: requestID }, this.st.peek(conv)?.pendingPrompts?.[requestID]?.firstShownAt ?? Date.now());
     }
   }
 

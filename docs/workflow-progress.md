@@ -16,8 +16,8 @@ khi bắt đầu đầu việc tiếp theo. Không bật chính sách mới trê
 | CV07 | Đã triển khai và áp dụng | `aa57067`; kiểu, đơn vị và đầu-cuối đạt; đã khởi động lại, giữ 5 liên kết; thử thiết bị/nhóm thật giữ riêng cho CV15 |
 | CV08 | Đã triển khai và áp dụng | `23795e2`; kiểu, đơn vị, đầu-cuối đạt; đã khởi động lại, giữ 5 liên kết |
 | CV09 | Đã triển khai và áp dụng | `267f30e`; kiểu, đơn vị và đầu-cuối đạt; đã khởi động lại, giữ 5 liên kết |
-| CV10 | Đã triển khai, chờ chốt commit và khởi động lại | Bảng nguồn/mức khẩn, chính sách mặc định tắt, khóa đúng định danh và trang quy tắc chỉ đọc; giao tin tích hợp ở CV11 |
-| CV11 | Chưa bắt đầu | Hàng đợi và gộp |
+| CV10 | Đã triển khai và áp dụng | `61435b2`; kiểu, đơn vị, đầu-cuối đạt; đã khởi động lại, giữ 5 liên kết |
+| CV11 | Đã triển khai, chờ chốt commit và khởi động lại | Hàng đợi General bền vững, gộp có hạn, kiểm tra nguồn, 429 và giao chưa rõ; không thay bộ chuyển tiếp phản hồi |
 | CV12 | Chưa bắt đầu | Giờ yên lặng, tạm hoãn |
 | CV13 | Chưa bắt đầu | Tìm kiếm |
 | CV14 | Chưa bắt đầu | Ghim |

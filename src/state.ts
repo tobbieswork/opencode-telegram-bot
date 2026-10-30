@@ -5,7 +5,7 @@ import type { PrSnapshot } from "./pr-watch.js";
 import type { SessionTopicsData } from "./session-topics.js";
 import type { SessionActivity } from "./session-activity.js";
 import type { ResumeData } from "./session-resume.js";
-import type { NotificationSettings } from "./notifications.js";
+import type { NotificationSettings, NotificationQueue } from "./notifications.js";
 
 export interface ModelRef {
   id: string;
@@ -97,6 +97,7 @@ export interface ChatState {
   resumeConfirmations?: ResumeData;
   /** Chính sách thông báo General, độc lập với lịch chạy và chuyển tiếp phản hồi. */
   notificationSettings?: NotificationSettings;
+  notificationQueue?: NotificationQueue;
   /** Machine-wide lifecycle data; only SessionTopics writes this field. */
   sessionTopics?: SessionTopicsData;
   sessionID?: string;
