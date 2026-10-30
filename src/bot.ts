@@ -43,9 +43,7 @@ import { QUESTIONS_PREAMBLE, NOTES_KEY } from "./shared.js";
 import type { Btn, Keyboard } from "./shared.js";
 import { cmdAgents, cmdAgent, handleAgentCallback } from "./commands/agents.js";
 import { cmdSchedule, handleScheduleCallback } from "./commands/schedule.js";
-import { cmdNode, MacNode } from "./node/mac-node.js";
 import { Advisor } from "./node/advisor.js";
-import type { NodeDone } from "./node/node-github.js";
 import { cmdHelp, cmdStatus, cmdContext, cmdUsage, cmdHistory, cmdNote, handleNoteCallback } from "./commands/meta.js";
 import { cmdBtw } from "./btw.js";
 import { cmdAsk } from "./ask.js";
@@ -284,8 +282,6 @@ export class Bot {
   public scheduleStore: ScheduleStore;
   /** /schedule tick engine — only constructed/started when cfg.schedule is on. */
   private scheduler?: Scheduler;
-  /** Mac node poller — public because cmdNode (node/mac-node.ts) reads it. */
-  public node?: MacNode;
   /** Claude advisor (topic + Claude session on the Mac) — present only when enabled. */
   public advisor?: Advisor;
 
@@ -375,20 +371,6 @@ export class Bot {
       });
       this.scheduler.start();
     }
-    // Queue tasks to the Mac node (Claude CLI) over the node/mac git branch.
-    // Default ON; the poller is a no-op until the first /node task seeds the branch.
-    if (this.cfg.nodeMac) {
-      this.node = new MacNode({
-        dir: this.cfg.nodeMacDir,
-        repoDir: this.cfg.nodeRepoDir,
-        pollMs: this.cfg.nodePollMs,
-        now: () => Date.now(),
-        relay: (done, conv) => {
-          void this.relayNodeReport(done, conv).catch((e) => warn("node relay:", e?.message));
-        },
-      });
-      this.node.start();
-    }
     // Close topics left open by workers that finished before auto-close existed
     // (or while the service was down). Fire-and-forget; never fails startup.
     void closeFinishedTopicsAtStartup(this.orch).catch((e) => warn("startup topic close:", e?.message));
@@ -407,11 +389,6 @@ export class Bot {
     this.scheduler?.stop();
   }
 
-  /** Stop the Mac node poller (called from index.ts during shutdown). */
-  stopNode(): void {
-    this.node?.stop();
-  }
-
   /** Register fire-and-forget reply work so a shutdown drain waits for it. */
   private trackPending(p: Promise<void>): void {
     this.pendingSends.add(p);
@@ -420,7 +397,7 @@ export class Bot {
 
   /**
    * Graceful-shutdown drain (called from index.ts between tg.stop() and
-   * stopNode): wait until no turn is in flight (an inflight runPrompt or a
+   * the OpenCode teardown): wait until no turn is in flight (an inflight runPrompt or a
    * manager turn) and no fire-and-forget reply (pendingSends — the unrelayed-
    * reply sweeps that carry a finished turn's final send) remains, or until
    * the cap elapses. The OpenCode service + event stream stay alive for the
@@ -449,14 +426,6 @@ export class Bot {
       timeoutMs: opts.timeoutMs,
       isBusy: () => this.inflight.size > 0 || this.orch.managerInflight || this.pendingSends.size > 0,
     });
-  }
-
-  /** Render a node report and send it via the standard reply path (rich/HTML). */
-  private async relayNodeReport(done: NodeDone, conv: ConvKey): Promise<void> {
-    const icon = done.status === "done" ? "✅" : done.status === "failed" ? "❌" : "⏱️";
-    let text = `📦 ${done.id} — ${icon} ${done.status} · ${(done.durationMs / 1000).toFixed(0)}s · $${done.costUsd.toFixed(2)} · ${done.tokensIn}→${done.tokensOut} tok\n\n${done.report}`;
-    if (done.codeBranch) text += `\n\n🌿 Code branch: ${done.codeBranch} (đã push — merge tay nếu cần)`;
-    await this.sendReply(conv, text);
   }
 
   // ── Uptime monitor + reboot ─────────────────────────────────────────────────
@@ -1600,8 +1569,6 @@ export class Bot {
         return cmdAsk(this, conv, arg);
       case "/schedule":
         return cmdSchedule(this, conv, arg, state, uid);
-      case "/node":
-        return cmdNode(this, conv, arg, uid);
       default:
         return this.tg.sendMessage(conv, `Unknown command: ${esc(cmd)}\nSend /help`);
     }

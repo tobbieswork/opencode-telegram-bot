@@ -27,7 +27,7 @@ const GOLDEN = new Set([
   // model
   "mode", "models", "model", "agents", "agent", "variants", "variant",
   // manager
-  "spawn", "board", "kill", "stopall", "manager", "auto", "wt", "prune", "node",
+  "spawn", "board", "kill", "stopall", "manager", "auto", "wt", "prune",
   // control
   "stop", "note", "btw", "ask", "context", "usage", "history", "status", "reboot", "clear", "schedule", "help",
 ]);

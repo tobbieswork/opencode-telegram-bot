@@ -72,7 +72,6 @@ export const COMMANDS: BotCommand[] = [
   { cmd: "auto", arg: "on|off", desc: "Manager tự giao việc hay chờ duyệt", group: "manager" },
   { cmd: "wt", desc: "Worktree: diff / merge / xoá (trong topic worker)", group: "manager" },
   { cmd: "prune", arg: "[số_ngày]", desc: "Dọn topic worker đã xong (mặc định >7 ngày)", group: "manager" },
-  { cmd: "node", arg: "task <prompt> | status | log <id>", desc: "Giao việc cho node Mac (Claude CLI) — report về chat", group: "manager" },
 
   // ── control ────────────────────────────────────────────────────────────
   { cmd: "stop", desc: "Dừng task đang chạy", button: "⏹ Dừng", group: "control" },

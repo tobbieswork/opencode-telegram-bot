@@ -1,12 +1,12 @@
 /**
- * Run one task with the Claude Code CLI in headless mode:
+ * Run one consultation with the Claude Code CLI in headless mode:
  *
  *   claude -p --output-format stream-json --verbose --max-turns N
  *
  * The prompt goes on STDIN (never argv) so long/special-character prompts
  * can't break quoting. Output is NDJSON; the final `result` event carries
- * the report, cost, tokens and the session id (enables future follow-ups
- * via `claude --resume`). A wall-clock timeout kills the whole process
+ * the report, cost, tokens and the session id (follow-ups use
+ * `claude --resume`). A wall-clock timeout kills the whole process
  * group (detached spawn + kill -pgid).
  */
 import { spawn, type ChildProcess } from "node:child_process";
@@ -25,32 +25,6 @@ export interface ClaudeResult {
 }
 
 /**
- * v1 permission profile: file edits inside the worktree + a small allowlist
- * of read-only/build bash commands. No sudo, no network, no arbitrary exec —
- * so the headless run can never hang on an unanswered permission prompt.
- */
-export const CLAUDE_ALLOWED_TOOLS = [
-  "Read",
-  "Grep",
-  "Glob",
-  "Edit",
-  "Write",
-  "Bash(git status:*)",
-  "Bash(git diff:*)",
-  "Bash(git log:*)",
-  "Bash(git add:*)",
-  "Bash(git commit:*)",
-  "Bash(git branch:*)",
-  "Bash(git fetch:*)",
-  "Bash(npm run:*)",
-  "Bash(npx:*)",
-  "Bash(node:*)",
-  "Bash(ls:*)",
-  "Bash(cat:*)",
-  "Bash(wc:*)",
-];
-
-/**
  * Read-only profile for the advisor (pure consultation): the model answers from
  * the context the caller provides — it may peek at files but never edits or runs
  * commands. Same tools Claude needs for the future "read the repo" advisor role.
@@ -65,8 +39,9 @@ export function runClaude(opts: {
   timeoutMs: number;
   /** When set, `claude --resume <id>` continues that session instead of a new one. */
   resumeSessionId?: string;
-  permissionMode?: "acceptEdits" | "plan";
-  /** Defaults to CLAUDE_ALLOWED_TOOLS; pass CLAUDE_ADVISOR_TOOLS for the read-only advisor. */
+  /** Defaults to "plan" (read-only). */
+  permissionMode?: "plan";
+  /** Defaults to CLAUDE_ADVISOR_TOOLS (read-only). */
   allowedTools?: string[];
   log?: (line: string) => void;
 }): Promise<ClaudeResult> {
@@ -77,8 +52,8 @@ export function runClaude(opts: {
     maxTurns,
     timeoutMs,
     resumeSessionId,
-    permissionMode = "acceptEdits",
-    allowedTools = CLAUDE_ALLOWED_TOOLS,
+    permissionMode = "plan",
+    allowedTools = CLAUDE_ADVISOR_TOOLS,
     log = () => {},
   } = opts;
   return new Promise((resolve) => {
