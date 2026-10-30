@@ -15,6 +15,7 @@ import { SessionDashboard, dashboardPage, DASHBOARD_FILTERS, DASHBOARD_WORK_LABE
 import { SessionActivityLog, ACTIVITY_SOURCE_LABELS } from "./session-activity.js";
 import { buildSessionSummary } from "./session-summary.js";
 import { ResumeConfirmations, type ResumeConfirmation } from "./session-resume.js";
+import { Notifications } from "./notifications.js";
 import { Schedule, SchedSpec, formatSchedule, nextRunAfter, parseScheduleSpec } from "./schedule.js";
 import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure, topicTitle } from "./format.js";
@@ -256,6 +257,7 @@ export class Bot {
   private dashboard: SessionDashboard;
   private sessionActivity: SessionActivityLog;
   private resumeConfirmations: ResumeConfirmations;
+  private notifications: Notifications;
   private resumeInputs = new Map<string, { id: string; token: string; messageID: number; binding: string; marker: string; expires: number }>();
   private activityReads = new Map<ConvKey, Promise<void>>();
   private activityAgain = new Set<ConvKey>();
@@ -290,6 +292,8 @@ export class Bot {
     );
     this.sessionActivity = new SessionActivityLog(st);
     this.resumeConfirmations = new ResumeConfirmations(st);
+    this.notifications = new Notifications(st, { now: () => Date.now(), deliver: (chat, text, links) => tg.sendMessageId(chat, text,
+      { reply_markup: { inline_keyboard: links.map(link => [link]) } }) });
     this.topics = new SessionTopics(st, {
       createSession: (input) => oc.createTopicSession(input),
       session: (id) => oc.topicSession(id),
@@ -1056,6 +1060,7 @@ export class Bot {
     if (link.conv && link.sessionID && link.identity) rows.push([{ text: "Thiết lập tên", callback_data: `tc:open:${link.id}` }]);
     if (link.conv && link.sessionID) rows.push([{ text: "Xem yêu cầu đang chờ", callback_data: `pa:list:${link.id}:0` }]);
     rows.push([{ text: "Xem tóm tắt", callback_data: `sum:show:${link.id}` }]);
+    rows.push([{ text: "Quy tắc thông báo General", callback_data: "nt:rules" }]);
     const nameStatus = link.conv && link.sessionID && link.identity ? this.topics.titleStatus(conv, link.id) : undefined;
     const retryDate = nameStatus?.retryAt ? new Date(nameStatus.retryAt) : undefined;
     const titleLines = nameStatus ? [
@@ -2983,6 +2988,13 @@ export class Bot {
             else await this.showSessionSummary(conv, cb.from!.id, card.id, true);
           } else throw new Error("Nút tóm tắt không hợp lệ.");
         } catch (error) { await this.tg.sendMessage(conv, esc((error as Error).message)); }
+        return;
+      }
+      if (data === "nt:rules") {
+        await this.tg.answerCallbackQuery(cb.id);
+        if (conv !== chatOf(conv)) { await this.tg.sendMessage(conv, "Xem thiết lập thông báo trong General."); return; }
+        try { await this.tg.sendMessage(conv, this.notifications.rules(conv)); }
+        catch (error) { await this.tg.sendMessage(conv, esc((error as Error).message)); }
         return;
       }
       if (data.startsWith("resume:")) {

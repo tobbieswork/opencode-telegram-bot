@@ -1,7 +1,7 @@
 # Đầu việc 4 — Thông báo ít nhưng đúng lúc
 
-**Trạng thái:** chưa triển khai. **Thứ tự:** CV10 → CV11 → CV12.
-**Điều kiện bắt đầu:** CV09 đã nghiệm thu theo
+**Trạng thái:** CV10 đã triển khai; CV11–CV12 chưa triển khai. **Thứ tự:** CV10 → CV11 → CV12.
+**Điều kiện bắt đầu:** CV09 đạt kiểm thử tự động; thử thiết bị thật giữ ở CV15 theo
 [kế hoạch tổng](../plan-session-workflow-improvements.md).
 
 ## Mục tiêu và phạm vi
@@ -20,29 +20,52 @@ người dùng và không được tái sử dụng với tác dụng phụ đó
 
 ### Công việc
 
-- [ ] Lập bảng nguồn phát: câu hỏi, xin quyền, lỗi không thể tiếp tục, kết thúc
+- [x] Lập bảng nguồn phát: câu hỏi, xin quyền, lỗi không thể tiếp tục, kết thúc
   công việc, nhắc lại yêu cầu đang chờ, thông báo vận hành và tiến độ thông thường.
-- [ ] Phân biệt nội dung trực tiếp ở chủ đề với thông báo nhắc ở General.
+- [x] Phân biệt nội dung trực tiếp ở chủ đề với thông báo nhắc ở General.
   Tóm tắt General ưu tiên tên phiên, trạng thái và đường dẫn, không chép toàn bộ
   câu trả lời hoặc nội dung công cụ vào nhóm quản lý.
-- [ ] Thiết kế module quyết định gửi/gộp/hoãn/bỏ, vị trí dự kiến
+- [x] Thiết kế module quyết định gửi/gộp/hoãn/bỏ, vị trí dự kiến
   `src/notifications.ts`; nhận phụ thuộc đồng hồ, lưu trữ và giao tin. Các nơi
   phát sự kiện không tự triển khai lại quy tắc.
-- [ ] Mỗi thông báo có nhóm, phiên, loại, mã yêu cầu/lượt thực thi nếu biết,
+- [x] Mỗi thông báo có nhóm, phiên, loại, mã yêu cầu/lượt thực thi nếu biết,
   mốc phát sinh và đường dẫn; dữ liệu thiếu định danh không được gộp nhầm vào
   công việc khác chỉ vì cùng tên phiên.
-- [ ] Đặt mặc định tương thích: không tự bật giờ yên lặng hoặc đổi cách nhận
+- [x] Đặt mặc định tương thích: không tự bật giờ yên lặng hoặc đổi cách nhận
   thông báo của nhóm cũ khi cập nhật mã. Các chính sách mới có bản xem trước.
-- [ ] Phân loại mức khẩn theo quy tắc xác định, không nhờ mô hình tự quyết.
+- [x] Phân loại mức khẩn theo quy tắc xác định, không nhờ mô hình tự quyết.
   Mặc định đề xuất: câu hỏi/quyền/lỗi chặn việc được báo ngay; tiến độ và hoàn
   tất có thể gộp. Cho người dùng xem rõ quy tắc trước khi bật.
 
 ### Kiểm thử và nghiệm thu
 
-- [ ] Có bảng kiểm thử cho mọi loại và chế độ; kiểm tra thứ tự ưu tiên.
-- [ ] Không hoãn trả lời trực tiếp, không gửi dữ liệu khác nhóm, không tạo
+- [x] Có bảng kiểm thử cho mọi loại và chế độ; kiểm tra thứ tự ưu tiên.
+- [x] Không hoãn trả lời trực tiếp, không gửi dữ liệu khác nhóm, không tạo
   yêu cầu mô hình do phân loại hoặc gom thông báo.
-- [ ] Thông báo lỗi đặt tên không bị nâng thành lỗi thực thi.
+- [x] Thông báo lỗi đặt tên không bị nâng thành lỗi thực thi.
+
+| Loại | Nguồn gốc và định danh | Đầu ra trực tiếp hiện có | Thông báo General khi bật ở CV11 |
+| --- | --- | --- | --- |
+| Câu hỏi | Bộ chuyển tiếp form; mã form | Thẻ câu hỏi ở chủ đề | Ngay; tên/trạng thái/liên kết, không chép nội dung |
+| Xin quyền | Bộ chuyển tiếp permission; mã request | Thẻ xin quyền ở chủ đề | Ngay; không cấp quyền thay người dùng |
+| Lỗi chặn | Kết quả đúng mã đầu vào đã đối chiếu | Lỗi/kết quả ở chủ đề | Ngay; không suy từ sự kiện chỉ có sessionID |
+| Hoàn tất | Kết quả đúng mã đầu vào hoặc chủ sở hữu lượt lịch | Phản hồi chuyển tiếp cũ | Gộp tóm lược, không chuyển tiếp lại phản hồi |
+| Nhắc lại | `pendingPrompts`, mã request và số lần nhắc | Cơ chế nhắc hiện có | Không đặt lại ngân sách; CV12 tích hợp hoãn |
+| Vận hành | Sự kiện vận hành có mã thao tác nếu biết | Cảnh báo vận hành hiện có | Gộp theo chính sách, không gọi phiên quản lý |
+| Tiến độ | Tín hiệu tiến độ | Bản tiến độ ở chủ đề | Không thêm bản General |
+| Lỗi tên | `SessionTopics.titleSync` | Trạng thái tên trên thẻ phiên | Mức riêng, không đổi thành lỗi thực thi |
+
+`src/notifications.ts` sở hữu hợp đồng sự kiện, quyết định và chính sách phiên
+bản 1; nhận kho, đồng hồ và cổng giao tin. CV10 chỉ thêm tầng phân loại và trang
+**Quy tắc thông báo General**, chưa chuyển các đầu ra cũ sang hàng đợi chưa có.
+CV11 tích hợp giao tin; CV12 bổ sung giờ yên lặng và nhắc. Mặc định `enabled=false`,
+không có giờ yên lặng tự bật. Chưa có nút bật ở CV10 để tránh áp dụng nửa luồng.
+
+Khóa gồm nhóm, chủ đề, phiên, dấu danh tính, loại và tham chiếu/số lần nếu có;
+thiếu tham chiếu thì dùng mã ý định riêng, không gộp theo tên hoặc giờ SSE.
+Nội dung trực tiếp được phân loại trước khi đọc chính sách, nên cấu hình mới
+không được cản câu trả lời của thao tác người dùng. Không dùng `queueReport()`
+làm hàng đợi người dùng. Kiểm thử bảng: `scripts/test-notifications.ts`.
 
 **Tệp liên quan:** `src/bot.ts`, `src/orchestrator.ts`, `src/reminders.ts`,
 `src/state.ts`; kiểm thử dự kiến: `scripts/test-notifications.ts`.
