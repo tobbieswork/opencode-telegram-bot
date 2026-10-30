@@ -4,6 +4,7 @@ import { ConvKey, chatOf } from "./conv.js";
 import type { PrSnapshot } from "./pr-watch.js";
 import type { SessionTopicsData } from "./session-topics.js";
 import type { SessionActivity } from "./session-activity.js";
+import type { ResumeData } from "./session-resume.js";
 
 export interface ModelRef {
   id: string;
@@ -91,6 +92,8 @@ export interface PendingPrompt {
 export interface ChatState {
   /** Bản ghi yêu cầu/kết quả gần nhất, có mã đối chiếu và giới hạn kích thước. */
   sessionActivity?: SessionActivity;
+  /** Xác nhận tiếp tục và mã đầu vào đã dùng; không tự phát lại khi khởi động. */
+  resumeConfirmations?: ResumeData;
   /** Machine-wide lifecycle data; only SessionTopics writes this field. */
   sessionTopics?: SessionTopicsData;
   sessionID?: string;

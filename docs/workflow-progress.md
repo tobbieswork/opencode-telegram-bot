@@ -14,8 +14,8 @@ khi bắt đầu đầu việc tiếp theo. Không bật chính sách mới trê
 | CV05 | Hoàn thành | `026f3ec`; kiểu, đơn vị và đầu-cuối đạt; đã khởi động lại, giữ 5 liên kết |
 | CV06 | Hoàn thành | `e688e11`; kiểu, đơn vị và đầu-cuối đạt; đã khởi động lại, giữ 5 liên kết |
 | CV07 | Đã triển khai và áp dụng | `aa57067`; kiểu, đơn vị và đầu-cuối đạt; đã khởi động lại, giữ 5 liên kết; thử thiết bị/nhóm thật giữ riêng cho CV15 |
-| CV08 | Đã triển khai, chờ chốt commit và khởi động lại | Tóm tắt chỉ đọc, nguồn/mốc riêng, không suy đoán bước tiếp theo; làm mới đúng phiên tối đa 40 tin, có hạn và chống đọc lặp |
-| CV09 | Chưa bắt đầu | Tiếp tục có xác nhận |
+| CV08 | Đã triển khai và áp dụng | `23795e2`; kiểu, đơn vị, đầu-cuối đạt; đã khởi động lại, giữ 5 liên kết |
+| CV09 | Đã triển khai, chờ chốt commit và khởi động lại | Nhập mục tiêu/xem nguyên văn/xác nhận một lần; sổ bền vững, kiểm tra lại nguồn và dùng bộ nhận cũ; không tự gửi lại hoặc hồi sinh lượt lịch |
 | CV10 | Chưa bắt đầu | Phân loại thông báo |
 | CV11 | Chưa bắt đầu | Hàng đợi và gộp |
 | CV12 | Chưa bắt đầu | Giờ yên lặng, tạm hoãn |

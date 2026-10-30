@@ -44,6 +44,7 @@ export interface SessionTopic {
   phase: "creating" | "open" | "closing" | "closed" | "restoring" | "missing" | "attention";
   step?: string;
   configured: boolean;
+  lifecycleRevision?: number;
   error?: string;
   titleSync?: { pending: boolean; error?: string; retryAt?: number; attempts?: number; desiredName?: string; desiredStamp?: string; desiredBinding?: string };
   titlePolicy?: TopicTitlePolicy;
@@ -124,7 +125,8 @@ export class SessionTopics {
     for (const [id, link] of Object.entries(data.links)) {
       if (!record(link) || link.id !== id || !/^[a-f0-9]{16}$/.test(id) || typeof link.chat !== "string" ||
         data.groups[link.chat] !== true || !phases.includes(link.phase) || typeof link.operationID !== "string" ||
-        typeof link.directory !== "string" || typeof link.title !== "string") throw new Error("Unsupported or invalid session/topic link.");
+        typeof link.directory !== "string" || typeof link.title !== "string" || (link.lifecycleRevision !== undefined &&
+          (!Number.isSafeInteger(link.lifecycleRevision) || link.lifecycleRevision < 0))) throw new Error("Unsupported or invalid session/topic link.");
       if (link.sessionID) {
         if (typeof link.sessionID !== "string" || sessions.has(link.sessionID)) throw new Error("Invalid duplicate session ownership.");
         sessions.add(link.sessionID);
@@ -526,6 +528,11 @@ export class SessionTopics {
     const previous = data.links[id];
     if (!previous) throw new Error("Session/topic link does not exist.");
     const link = { ...previous, ...patch };
+    if (link.phase !== previous.phase || link.configured !== previous.configured) {
+      const revision = (previous.lifecycleRevision ?? 0) + 1;
+      if (!Number.isSafeInteger(revision)) throw new Error("Mốc vòng đời không còn hợp lệ; giữ liên kết để kiểm tra.");
+      link.lifecycleRevision = revision;
+    }
     data.links[id] = link;
     this.store.commitSessionTopics(data);
     return structuredClone(link);

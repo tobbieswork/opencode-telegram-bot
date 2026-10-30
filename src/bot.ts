@@ -14,6 +14,7 @@ import { SessionTopics, TITLE_POLICY_LABELS, type SessionTopic, type TopicTitleP
 import { SessionDashboard, dashboardPage, DASHBOARD_FILTERS, DASHBOARD_WORK_LABELS, DASHBOARD_PHASE_LABELS, type DashboardFilter } from "./session-dashboard.js";
 import { SessionActivityLog, ACTIVITY_SOURCE_LABELS } from "./session-activity.js";
 import { buildSessionSummary } from "./session-summary.js";
+import { ResumeConfirmations, type ResumeConfirmation } from "./session-resume.js";
 import { Schedule, SchedSpec, formatSchedule, nextRunAfter, parseScheduleSpec } from "./schedule.js";
 import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, fmtNum, timeAgo, formatTurnFailure, topicTitle } from "./format.js";
@@ -254,6 +255,8 @@ export class Bot {
   private topics: SessionTopics;
   private dashboard: SessionDashboard;
   private sessionActivity: SessionActivityLog;
+  private resumeConfirmations: ResumeConfirmations;
+  private resumeInputs = new Map<string, { id: string; token: string; messageID: number; binding: string; marker: string; expires: number }>();
   private activityReads = new Map<ConvKey, Promise<void>>();
   private activityAgain = new Set<ConvKey>();
   private activityAborts = new Map<ConvKey, AbortController>();
@@ -286,6 +289,7 @@ export class Bot {
       this.cfg.maxSchedules,
     );
     this.sessionActivity = new SessionActivityLog(st);
+    this.resumeConfirmations = new ResumeConfirmations(st);
     this.topics = new SessionTopics(st, {
       createSession: (input) => oc.createTopicSession(input),
       session: (id) => oc.topicSession(id),
@@ -439,6 +443,7 @@ export class Bot {
     this.activityAgain.clear();
     for (const controller of this.summaryAborts) controller.abort();
     this.summaryCards.clear();
+    this.resumeInputs.clear();
     this.scheduler?.stop();
     this.orch.shutdown();
     this.topics.stopTitleSync();
@@ -778,7 +783,16 @@ export class Bot {
     }
     // Remember the user's top-level chat so proactive notices (e.g. DNS heal)
     // have a destination even mid-polling-failure.
-    if (uid !== undefined && this.topics.enabled(conv) && conv === chatOf(conv) && await this.handleTitleInput(conv, uid, msg, text)) return;
+    if (uid !== undefined && this.topics.enabled(conv) && conv === chatOf(conv)) {
+      if (/^\/cancel(?:@\w+)?$/i.test(text) && (this.titleInputs.has(`${conv}:${uid}`) || this.resumeInputs.has(`${conv}:${uid}`))) {
+        this.titleInputs.delete(`${conv}:${uid}`);
+        this.resumeInputs.delete(`${conv}:${uid}`);
+        await this.tg.sendMessage(conv, "Đã hủy các bản nhập của bạn; không gửi công việc hoặc đổi tên.");
+        return;
+      }
+      if (await this.handleTitleInput(conv, uid, msg, text)) return;
+      if (await this.handleResumeInput(conv, uid, msg, text)) return;
+    }
     this.lastActiveConv = chatOf(conv);
     // Reaction UX: index every user message so a reaction on it can be
     // resolved (the update carries no topic info) — and give the user a quick
@@ -1097,6 +1111,7 @@ export class Bot {
           if (this.sessionActivity.read(link.conv)?.revision !== revision) throw new Error("Có hoạt động mới trong lúc đọc; mở hoặc làm mới lại bản tóm tắt.");
           if (snapshot.messages.length && !snapshot.messages.some(message => message.type === "user")) throw new Error("Chưa tìm thấy ranh giới đầu vào trong 40 tin; không ghép kết quả bằng suy đoán.");
           this.sessionActivity.observe(link.conv, link.sessionID, revision, snapshot.messages);
+          this.resumeConfirmations.observe(link.conv, snapshot.messages.filter(message => message.type === "user").map(message => message.id));
           refreshedAt = Date.now();
         } finally { if (timer) clearTimeout(timer); controller.abort(); this.summaryAborts.delete(controller); }
       })().catch(error => { errors.push((error as Error).message); });
@@ -1131,10 +1146,118 @@ export class Bot {
     if (row.pending.length) keyboard.push([{ text: row.pending.some(item => item.verified) ? "Đến yêu cầu đang chờ" : "Kiểm tra yêu cầu đã lưu", callback_data: `pa:list:${id}:0` }]);
     if (latest.conv) keyboard.push([{ text: "Đến chủ đề", url: topicMessageUrl(latest.conv)! }]);
     keyboard.push([{ text: "Làm mới thông tin", callback_data: `sum:refresh:${token}` }]);
+    if (latest.phase === "open") keyboard.push([{ text: "Chuẩn bị tiếp tục", callback_data: `sum:prepare:${token}` }]);
     if (latest.phase === "closed") keyboard.push([{ text: "Mở lại phiên", callback_data: `st:restore:${id}` }]);
     else if (latest.phase !== "open") keyboard.push([{ text: "Kiểm tra trạng thái", callback_data: `st:sync:${id}` }]);
     keyboard.push([{ text: "Bảng điều khiển phiên", callback_data: "cmd:ls" }]);
     await this.tg.sendMessage(conv, summary.text, { reply_markup: { inline_keyboard: keyboard } });
+  }
+
+  private async readyForResume(conv: ConvKey, id: string, ignoreToken?: string, reserved = false) {
+    const link = this.topics.get(id);
+    if (!link || link.chat !== conv || !link.conv || !link.sessionID || link.phase !== "open" || !this.topics.canPrompt(link.conv)) throw new Error("Phiên chưa mở/đủ quyền. Mở lại bằng luồng riêng rồi xem và chuẩn bị lại; không tự mở để chạy.");
+    const binding = this.summaryBinding(link);
+    if (!this.scheduler || this.scheduler.owns(link.conv) || this.orch.ownsScheduledConv(link.conv)) throw new Error("Quyền sở hữu lượt lịch chưa được giải phóng/xác minh; không dùng đường tiếp tục để vượt qua.");
+    if (!reserved && this.inflight.has(link.conv)) throw new Error("Phiên đang có công việc; chưa thể chuẩn bị tiếp tục.");
+    const refreshed = await this.refreshSummary(conv, link, true);
+    if (refreshed.error || refreshed.refreshedAt === undefined) throw new Error(`Chưa xác minh đủ dữ liệu nguồn: ${refreshed.error ?? "thiếu mốc đọc"}`);
+    const latest = this.topics.get(id);
+    const row = (await this.dashboard.read(conv)).find(row => row.id === id);
+    if (!latest || this.summaryBinding(latest) !== binding || latest.phase !== "open" || !this.topics.canPrompt(link.conv) || !row || row.stale ||
+      !row.pendingVerified || row.pending.length || !["idle", "done", "failed", "stopped"].includes(row.work)) throw new Error("Phiên đang bận/chờ hoặc chưa xác minh kết thúc; xem lại tóm tắt, không gửi yêu cầu.");
+    if (row.activityError || row.activity?.uncertainty || (row.activity && !row.activity.input.observed)) throw new Error("Đầu vào/kết quả trước chưa được đối chiếu. Kiểm tra tại chủ đề; không tự phát lại.");
+    if (this.resumeConfirmations.unobserved(link.conv).some(item => item.token !== ignoreToken)) throw new Error("Có đầu vào đã dùng xác nhận nhưng chưa thấy ở nguồn. Làm mới/kiểm tra trước; không gửi lại hoặc đoán đã thất bại.");
+    if (this.scheduler.owns(link.conv) || this.orch.ownsScheduledConv(link.conv)) throw new Error("Một lượt lịch vừa nhận quyền; chuẩn bị lại sau khi kết thúc đã được xác nhận.");
+    return { link: latest, row, binding, marker: buildSessionSummary(conv, row, { now: Date.now() }).marker };
+  }
+
+  private async prepareResumeInput(conv: ConvKey, user: number, card: { id: string; marker: string; binding: string }): Promise<void> {
+    const ready = await this.readyForResume(conv, card.id);
+    if (ready.marker !== card.marker || ready.binding !== card.binding) {
+      await this.showSessionSummary(conv, user, card.id);
+      await this.tg.sendMessage(conv, "Mốc tóm tắt đã đổi; xem thông tin mới rồi bấm Chuẩn bị tiếp tục lại.");
+      return;
+    }
+    for (const [key, value] of this.resumeInputs) if (value.expires < Date.now()) this.resumeInputs.delete(key);
+    while (this.resumeInputs.size >= 100) this.resumeInputs.delete(this.resumeInputs.keys().next().value!);
+    const token = randomBytes(6).toString("hex");
+    const messageID = await this.tg.sendMessageId(conv, `<b>Nhập mục tiêu tiếp tục</b>\nPhiên: <code>${esc(ready.link.sessionID!)}</code>\nTrả lời trực tiếp tin này trong 10 phút bằng yêu cầu mới bạn muốn gửi. Không tự lấy lại yêu cầu cũ hay suy đoán bước tiếp theo. Sau đó còn bước xem trước/xác nhận.`,
+      { reply_markup: { inline_keyboard: [[{ text: "Hủy nhập mục tiêu", callback_data: `resume:cancel-input:${token}` }]] } });
+    if (!Number.isSafeInteger(messageID) || messageID <= 0) throw new Error("Chưa xác nhận được tin nhập mục tiêu; mở lại từ tóm tắt.");
+    this.resumeInputs.set(`${conv}:${user}`, { id: card.id, token, messageID, marker: ready.marker, binding: ready.binding, expires: Date.now() + 10 * 60_000 });
+  }
+
+  private async handleResumeInput(conv: ConvKey, user: number, msg: Message, text: string): Promise<boolean> {
+    const key = `${conv}:${user}`;
+    const input = this.resumeInputs.get(key);
+    if (!input || msg.reply_to_message?.message_id !== input.messageID || text.startsWith("/")) return false;
+    this.resumeInputs.delete(key);
+    try {
+      if (input.expires < Date.now() || text.length > 1200) throw new Error("Bản nhập hết hạn hoặc mục tiêu dài quá 1200 ký tự; chuẩn bị lại.");
+      const ready = await this.readyForResume(conv, input.id);
+      if (ready.binding !== input.binding || ready.marker !== input.marker) throw new Error("Có hoạt động/mốc mới trong lúc nhập; xem lại tóm tắt và chuẩn bị lại.");
+      const state = this.st.peek(ready.link.conv!)!;
+      const payload = !state.manager && this.cfg.guideQuestions && !state.guided ? QUESTIONS_PREAMBLE + "\n\n" + text : text;
+      if (payload.length + ready.link.directory.length > 3300) throw new Error("Nội dung và thư mục quá dài để xem trước đầy đủ; rút gọn mục tiêu hoặc dùng chủ đề làm việc.");
+      const item = this.resumeConfirmations.prepare({ actor: user, chat: conv, conv: ready.link.conv!, sessionID: ready.link.sessionID!,
+        directory: ready.link.directory, binding: ready.binding, marker: ready.marker, goal: text, payload, inputID: newMessageID() });
+      await this.tg.sendMessage(conv, `<b>Xác nhận yêu cầu mới</b>\nPhiên: <code>${esc(item.sessionID)}</code>\nThư mục: <code>${esc(item.directory)}</code>\nMốc công việc: <code>${esc(item.marker)}</code>\n<b>Nội dung sẽ gửi</b>\n<pre>${esc(item.payload)}</pre>\nDùng cấu hình/hướng dẫn hiện tại của phiên. Nút chỉ dùng một lần trong 10 phút; không tự gửi lại khi kết quả gửi chưa rõ.`,
+        { reply_markup: { inline_keyboard: [[{ text: "Xác nhận tiếp tục", callback_data: `resume:yes:${input.id}:${item.token}` },
+          { text: "Hủy xác nhận", callback_data: `resume:no:${input.id}:${item.token}` }]] } });
+    } catch (error) { await this.tg.sendMessage(conv, esc((error as Error).message),
+      { reply_markup: { inline_keyboard: [[{ text: "Xem lại tóm tắt", callback_data: `sum:show:${input.id}` }]] } }); }
+    return true;
+  }
+
+  private async handleResumeCallback(conv: ConvKey, cb: CallbackQuery): Promise<void> {
+    const [, action, id, token] = (cb.data ?? "").split(":");
+    const user = cb.from!.id;
+    if (action === "cancel-input") {
+      const key = `${conv}:${user}`;
+      const input = this.resumeInputs.get(key);
+      if (!input || input.token !== id) throw new Error("Không có bản nhập mục tiêu thuộc bạn trên thẻ này.");
+      this.resumeInputs.delete(key);
+      await this.tg.sendMessage(conv, "Đã hủy nhập mục tiêu; không gửi công việc.");
+      return;
+    }
+    const link = this.topics.get(id);
+    if (!link || link.chat !== conv || !link.conv) throw new Error("Xác nhận không thuộc nhóm/phiên này.");
+    const item = this.resumeConfirmations.get(link.conv, token);
+    if (!item || item.actor !== user || item.chat !== conv || item.state !== "ready") throw new Error("Xác nhận không thuộc bạn hoặc đã dùng; không gửi lại.");
+    if (action === "no") {
+      this.resumeConfirmations.cancelReady(link.conv, token, user);
+      await this.tg.sendMessage(conv, "Đã hủy xác nhận; không gửi công việc.");
+      return;
+    }
+    if (action !== "yes") throw new Error("Nút xác nhận không hợp lệ.");
+    await this.dispatchResumeConfirmation(conv, user, id, item);
+  }
+
+  private async dispatchResumeConfirmation(conv: ConvKey, user: number, id: string, item: ResumeConfirmation, noticeConv = conv): Promise<void> {
+    const link = this.topics.get(id);
+    if (!link || link.chat !== conv || !link.conv || item.conv !== link.conv || item.sessionID !== link.sessionID) throw new Error("Xác nhận không còn thuộc liên kết hiện tại.");
+    const token = item.token;
+    const ready = await this.readyForResume(conv, id, token);
+    if (!this.allowed(user)) throw new Error("Quyền người xác nhận đã thay đổi; không gửi yêu cầu.");
+    const used = this.resumeConfirmations.consume(link.conv, token, user, ready.binding, ready.marker);
+    let launched = false;
+    const options = { inputID: undefined as string | undefined, payload: used.payload, onDispatch: () => { launched = true; }, beforeDispatch: async () => {
+      const current = await this.readyForResume(conv, id, token, true);
+      if (!this.allowed(user)) throw new Error("Quyền người xác nhận đã thay đổi trong lúc chuẩn bị.");
+      if (current.binding !== used.binding || current.marker !== used.marker || current.link.sessionID !== used.sessionID || current.link.directory !== used.directory) throw new Error("Mốc hoặc danh tính đổi sau khi nhận; chưa gửi yêu cầu, cần chuẩn bị lại.");
+      const inputID = newMessageID();
+      this.resumeConfirmations.bindInput(link.conv!, token, inputID);
+      options.inputID = inputID;
+    } };
+    try {
+      const state = this.st.peek(link.conv)!;
+      const accepted = state.manager ? await this.orch.promptManager(link.conv, used.goal, undefined, options) : await this.runPrompt(link.conv, used.goal, state, undefined, options);
+      if (!accepted) { this.resumeConfirmations.notStarted(link.conv, token); await this.tg.sendMessage(noticeConv, "Bộ điều phối chưa nhận công việc; xác nhận đã dùng, hãy kiểm tra chủ đề rồi chuẩn bị mới khi phù hợp."); }
+      else await this.tg.sendMessage(noticeConv, "Đã nhận qua bộ điều phối của đúng phiên. Kết quả sẽ về chủ đề; chưa xác nhận hoàn tất và không tự gửi lại nếu mất phản hồi.");
+    } catch (error) {
+      if (!launched) this.resumeConfirmations.notStarted(link.conv, token);
+      await this.tg.sendMessage(noticeConv, `${launched ? "Kết quả gửi chưa xác nhận; không tự gửi lại." : "Chưa gửi đầu vào mới."} ${esc((error as Error).message)}`);
+    }
   }
 
   private newTitleSettings(conv: ConvKey, user: number, id?: string, preview?: TopicTitlePreview, customName?: string): string {
@@ -2188,7 +2311,8 @@ export class Bot {
   }
 
   // ── the long-running prompt ──────────────────────────────────────────────
-  private async runPrompt(conv: ConvKey, text: string, state: ChatState, userMsgId?: number): Promise<void> {
+  private async runPrompt(conv: ConvKey, text: string, state: ChatState, userMsgId?: number,
+    options?: { inputID?: string; payload: string; onDispatch(): void; beforeDispatch(): Promise<void> }): Promise<boolean> {
     // A closed worker topic reopens itself when the user speaks in it
     // (openForumTopic is a no-op on an already-open topic, so safe every time).
     if (state.worker && !this.topics.enabled(conv)) void this.tg.openForumTopic(conv).catch(() => {});
@@ -2203,12 +2327,14 @@ export class Bot {
       } else {
         await this.tg.sendMessage(conv, BUSY_REPLY_TEXT);
       }
-      return;
+      return false;
     }
     // Keep the "typing…" indicator alive for the whole turn (until the reply is sent).
     let releaseWorker: (() => void) | undefined;
     try { releaseWorker = this.orch.beginWorkerTurn(conv); }
-    catch (e) { await this.tg.sendMessage(conv, esc((e as Error).message)); return; }
+    catch (e) { await this.tg.sendMessage(conv, esc((e as Error).message)); return false; }
+    const ac = new AbortController();
+    this.inflight.set(conv, ac);
     this.startTyping(conv);
     this.startWorking(conv); // "⏳ Đang xử lý…" — General top-level only (native typing doesn't render there)
     try {
@@ -2247,31 +2373,38 @@ export class Bot {
         if (state.guidedLanguageSession === sid) this.st.set(conv, { guidedLanguageSession: undefined });
       }
       // Scratchpad notes (/note): retire last turn's notes or surface pending ones.
+      if (ac.signal.aborted) throw new Error("Yêu cầu đã bị dừng trong lúc chuẩn bị; chưa gửi đầu vào mới.");
       await this.prepareNotesTurn(conv, sid);
       // Inject the "ask via question tool" preamble once per session so the agent
       // knows it is headless and should surface decisions as answerable questions.
       let promptText = text;
-      if (this.cfg.guideQuestions && !state.guided) {
+      const needsGuide = this.cfg.guideQuestions && !state.guided;
+      if (needsGuide) {
         promptText = QUESTIONS_PREAMBLE + "\n\n" + text;
-        this.st.set(conv, { guided: true });
       }
-      const ac = new AbortController();
-      this.inflight.set(conv, ac);
+      if (options && promptText !== options.payload) throw new Error("Nội dung chỉ dẫn đã đổi; cần chuẩn bị lại trước khi gửi.");
+      await options?.beforeDispatch();
+      if (options && !options.inputID) throw new Error("Chưa ghi được mã đầu vào; không gửi yêu cầu.");
+      if (ac.signal.aborted) throw new Error("Yêu cầu đã bị dừng trong lúc chuẩn bị; chưa gửi đầu vào mới.");
+      if (needsGuide) this.st.set(conv, { guided: true });
       log(`[chat ${conv}] prompt on ${sid} (${text.length} chars)`);
+      options?.onDispatch();
       // Fire-and-forget: don't block the polling loop; /stop aborts `ac`.
-      void this.runPromptTask(conv, sid, promptText, ac, userMsgId, text).catch((e) => error("prompt task:", e?.message)).finally(() => releaseWorker?.());
+      void this.runPromptTask(conv, sid, promptText, ac, userMsgId, text, options?.inputID).catch((e) => error("prompt task:", e?.message)).finally(() => releaseWorker?.());
+      return true;
     } catch (e) {
       this.stopTyping(conv); // don't leave "typing…" running if the prompt never started
+      if (this.inflight.get(conv) === ac) this.inflight.delete(conv);
       releaseWorker?.();
       throw e;
     }
   }
 
-  private async runPromptTask(conv: ConvKey, sid: string, text: string, ac: AbortController, userMsgId?: number, originalText = text): Promise<void> {
+  private async runPromptTask(conv: ConvKey, sid: string, text: string, ac: AbortController, userMsgId?: number, originalText = text, suppliedMessageID?: string): Promise<void> {
     // One id for this user message, reused by the reconnect retry below: the
     // server dedupes on it, so the retry waits on the same turn instead of
     // running the instruction a second time.
-    const messageID = newMessageID();
+    const messageID = suppliedMessageID ?? newMessageID();
     this.recordSessionActivity(() => this.sessionActivity.begin(conv, { sessionID: sid, inputID: messageID, text: originalText, source: "topic" }));
     // Bump the turn generation: invalidates any preview state from a previous
     // turn (its wrapper may still linger to absorb late deltas) and starts the
@@ -2287,7 +2420,7 @@ export class Bot {
         // A persistent "Transport: fetch failed" usually means the OpenCode
         // service restarted on a new port (stale URL). Re-discover and retry
         // once; the retry rides out the reconnect.
-        if (!ac.signal.aborted && isTransportError(e)) {
+        if (!suppliedMessageID && !ac.signal.aborted && isTransportError(e)) {
           warn("prompt failed (transport) — reconnecting to OpenCode and retrying…");
           await this.oc.reconnect();
           res = await run();
@@ -2299,6 +2432,7 @@ export class Bot {
       if (res.replyID && res.replyInputID === messageID) this.recordSessionActivity(() => this.sessionActivity.complete(conv,
         { sessionID: sid, inputID: messageID, messageID: res.replyID!, text: res.reply, outcome: res.replyOutcome, createdAt: res.replyTime }));
       else this.recordSessionActivity(() => this.sessionActivity.uncertain(conv, sid, messageID, "Chưa đối chiếu được phản hồi với đúng đầu vào."));
+      if (res.replyInputID === messageID) this.recordSessionActivity(() => this.resumeConfirmations.observe(conv, [messageID]));
       this.stopTyping(conv);
       // Drop the live preview before the final message lands (group transport
       // keeps a real, self-editing message that must not outlive the reply).
@@ -2347,7 +2481,7 @@ export class Bot {
       // by the generation bump in dropPreview) so late deltas of this turn
       // cannot spawn a stray preview after the final message. The NEXT turn
       // removes it (see the turnGen bump at the top of runPromptTask).
-      this.inflight.delete(conv);
+      if (this.inflight.get(conv) === ac) this.inflight.delete(conv);
       this.busyNotes.clear(conv); // the turn ended: the note-button retention window is over
     }
   }
@@ -2841,13 +2975,21 @@ export class Bot {
         try {
           const [, action, value] = data.split(":");
           if (action === "show") await this.showSessionSummary(conv, cb.from!.id, value);
-          else if (action === "refresh") {
+          else if (action === "refresh" || action === "prepare") {
             const card = this.summaryCards.get(value);
             const link = card && this.topics.get(card.id);
             if (!card || card.chat !== conv || card.user !== cb.from!.id || card.expires < Date.now() || !link || this.summaryBinding(link) !== card.binding) throw new Error("Thẻ tóm tắt hết hạn hoặc không thuộc bạn/nhóm/phiên này.");
-            await this.showSessionSummary(conv, cb.from!.id, card.id, true);
+            if (action === "prepare") await this.prepareResumeInput(conv, cb.from!.id, card);
+            else await this.showSessionSummary(conv, cb.from!.id, card.id, true);
           } else throw new Error("Nút tóm tắt không hợp lệ.");
         } catch (error) { await this.tg.sendMessage(conv, esc((error as Error).message)); }
+        return;
+      }
+      if (data.startsWith("resume:")) {
+        if (conv !== chatOf(conv)) { await this.tg.answerCallbackQuery(cb.id, "Xác nhận tiếp tục trong General."); return; }
+        await this.tg.answerCallbackQuery(cb.id);
+        try { await this.handleResumeCallback(conv, cb); }
+        catch (error) { await this.tg.sendMessage(conv, esc((error as Error).message)); }
         return;
       }
       if (data.startsWith("pa:")) {
@@ -3544,8 +3686,22 @@ export class Bot {
       await this.tg.answerCallbackQuery(cb.id, "Đang chạy task — hẵng thử lại sau.");
       return;
     }
+    if (this.topics.enabled(conv)) {
+      await this.tg.answerCallbackQuery(cb.id, "Đang kiểm tra điều kiện chạy tiếp…");
+      try {
+        const link = this.topics.forTopic(conv);
+        if (!link || !cb.from) throw new Error("Không xác định được liên kết/người xác nhận.");
+        const ready = await this.readyForResume(chatOf(conv), link.id);
+        const turn = this.st.peek(conv)?.continueOfferedTurn;
+        if (!turn || ready.row.activity?.input.id !== turn || ready.row.work !== "failed") throw new Error("Nút lỗi cũ không còn áp dụng cho mốc hiện tại; xem tóm tắt để chuẩn bị yêu cầu mới.");
+        const payload = !state.manager && this.cfg.guideQuestions && !state.guided ? QUESTIONS_PREAMBLE + "\n\n" + CONTINUE_PROMPT : CONTINUE_PROMPT;
+        const item = this.resumeConfirmations.prepare({ actor: cb.from.id, chat: chatOf(conv), conv, sessionID: target, directory: link.directory,
+          binding: ready.binding, marker: ready.marker, goal: CONTINUE_PROMPT, payload, inputID: newMessageID(), failureTurn: turn });
+        await this.dispatchResumeConfirmation(chatOf(conv), cb.from.id, link.id, item, conv);
+      } catch (error) { await this.tg.sendMessage(conv, esc((error as Error).message)); }
+      return;
+    }
     await this.tg.answerCallbackQuery(cb.id, "⏯ Đang chạy tiếp…");
-    if (this.topics.enabled(conv)) { await this.runPrompt(conv, CONTINUE_PROMPT, state); return; }
     this.startTyping(conv);
     const ac = new AbortController();
     this.inflight.set(conv, ac);
@@ -4160,6 +4316,7 @@ export class Bot {
             this.topics.forTopic(conv)?.id !== link.id || JSON.stringify(this.topics.forTopic(conv)?.identity) !== JSON.stringify(link.identity) ||
             !this.topics.canInteract(conv, sid))) throw new Error("Danh tính phiên đổi trong lúc đọc hoạt động.");
           this.sessionActivity.observe(conv, sid, revision, snapshot.messages);
+          this.resumeConfirmations.observe(conv, snapshot.messages.filter(message => message.type === "user").map(message => message.id));
         } finally { clearTimeout(timer); this.activityAborts.delete(conv); }
         if (!this.activityAgain.has(conv)) break;
       }

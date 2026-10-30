@@ -1,6 +1,6 @@
 # Đầu việc 3 — Quay lại phiên và tiếp tục công việc có xác nhận
 
-**Trạng thái:** CV08 đã triển khai; CV09 chưa triển khai. **Thứ tự:** CV08 → CV09.
+**Trạng thái:** CV08–CV09 đã triển khai và kiểm thử tự động. **Thứ tự:** CV08 → CV09.
 **Điều kiện bắt đầu:** CV07 đạt kiểm thử tự động; nghiệm thu thiết bị/nhóm thật
 được giữ rõ ở CV15, chưa đánh dấu hoàn tất. Dùng dữ liệu hoạt động của CV04 trong
 [kế hoạch tổng](../plan-session-workflow-improvements.md).
@@ -69,35 +69,35 @@ bảng điều khiển. Kiểm thử dự kiến: `scripts/test-session-summary.
 
 ### Công việc
 
-- [ ] Thêm hành động riêng **Chuẩn bị tiếp tục**; hiển thị chính xác nội dung
+- [x] Thêm hành động riêng **Chuẩn bị tiếp tục**; hiển thị chính xác nội dung
   sẽ gửi, phiên/thư mục đích và nguồn mốc tóm tắt. Nếu chưa có nội dung đủ rõ,
   yêu cầu người dùng nhập mục tiêu trong luồng có thể hủy; không tự suy đoán.
-- [ ] Lưu xác nhận có thời hạn, gắn người dùng, nhóm, liên kết, phiên và mốc
+- [x] Lưu xác nhận có thời hạn, gắn người dùng, nhóm, liên kết, phiên và mốc
   công việc. Bấm nút ở General không tự mở lại phiên đã đóng: phải qua luồng
   mở lại rõ ràng rồi xem/chuẩn bị lại khi cần.
-- [ ] Khi xác nhận, đọc lại danh tính, quyền, vòng đời, độ mới của mốc, trạng
+- [x] Khi xác nhận, đọc lại danh tính, quyền, vòng đời, độ mới của mốc, trạng
   thái thực thi và các yêu cầu đang chờ. Nếu có hoạt động mới, hủy bản xác nhận
   cũ và yêu cầu xem lại, không gửi nội dung đã lỗi thời.
-- [ ] Đi qua cùng cơ chế nhận công việc như tin nhắn/nút đang có; không gọi
+- [x] Đi qua cùng cơ chế nhận công việc như tin nhắn/nút đang có; không gọi
   thẳng OpenCode để vượt giới hạn tác vụ, điều kiện bận hoặc chủ sở hữu lượt lịch.
-- [ ] Không tiếp tục bằng đường này khi lượt chạy lịch còn được sở hữu hoặc
+- [x] Không tiếp tục bằng đường này khi lượt chạy lịch còn được sở hữu hoặc
   việc kết thúc chưa xác minh. Khi đã kết thúc, mọi hành động mới vẫn theo quy
   tắc hiện có, không hồi sinh lượt lịch hoặc cấp lại hạn chót cho lượt cũ.
-- [ ] Ghi nhận xác nhận đã dùng trước khi gửi; định danh đầu vào mới để theo
+- [x] Ghi nhận xác nhận đã dùng trước khi gửi; định danh đầu vào mới để theo
   dõi. Bấm lặp hoặc đồng thời chỉ được nhận một lần; kết quả gửi không rõ đi
   qua khôi phục/kiểm tra, không tự gửi lại.
-- [ ] Rà soát nút chạy tiếp sau lỗi hiện có để chia sẻ kiểm tra cần thiết,
+- [x] Rà soát nút chạy tiếp sau lỗi hiện có để chia sẻ kiểm tra cần thiết,
   nhưng giữ ý nghĩa của nút đó; không biến mọi lần mở phiên thành chạy tiếp.
 
 ### Kiểm thử và nghiệm thu
 
-- [ ] Bấm đôi; hai người bấm; xác nhận hết hạn; phiên đổi trạng thái; có đầu
+- [x] Bấm đôi; hai người bấm; xác nhận hết hạn; phiên đổi trạng thái; có đầu
   vào mới; phiên chờ cấp quyền; chỗ thực thi đã đầy; lượt lịch chưa kết thúc.
-- [ ] Mất phản hồi trước/sau khi gửi, khởi động lại và lỗi lưu không gây gửi
+- [x] Mất phản hồi trước/sau khi gửi, khởi động lại và lỗi lưu không gây gửi
   trùng hoặc báo thành công giả. Không tự phát lại sau khởi động lại.
-- [ ] Kiểm thử qua đường vào Telegram và đường nhận công việc thật trong bot,
+- [x] Kiểm thử qua đường vào Telegram và đường nhận công việc thật trong bot,
   không chỉ giả lập lời gọi gửi yêu cầu.
-- [ ] Cả xem tóm tắt lẫn mở lại phiên đều không tạo thực thi mới nếu chưa có
+- [x] Cả xem tóm tắt lẫn mở lại phiên đều không tạo thực thi mới nếu chưa có
   xác nhận riêng của người dùng.
 
 **Tệp liên quan:** `src/bot.ts`, `src/continue.ts`, `src/orchestrator.ts`,
@@ -105,10 +105,37 @@ bảng điều khiển. Kiểm thử dự kiến: `scripts/test-session-summary.
 `src/scheduled-run.ts`. Kiểm thử dự kiến:
 `scripts/test-session-resume.ts`, mở rộng kiểm thử chạy tiếp và nút/lệnh lịch.
 
+`src/session-resume.ts` chỉ sở hữu sổ xác nhận phiên bản 1, tối đa 20 mục mỗi
+chủ đề. Luồng nhập đòi trả lời đúng tin General của đúng người trong 10 phút;
+có nút hủy và `/cancel`. Xem trước hiện nguyên văn đầu vào, kể cả chỉ dẫn
+giao diện đầu tiên nếu cơ chế chuẩn sẽ thêm, cùng phiên, thư mục và mốc nguồn.
+
+Khi xác nhận, kiểm tra nguồn lại không dùng khoảng đệm 5 giây của thao tác
+đọc thông thường; kiểm tra lần nữa ngay trước gửi sau khi nhận chỗ. Đầu vào
+được định danh và lưu trước cổng gửi. Phiên quản lý đi qua `promptManager`,
+phiên làm việc đi qua `runPrompt`/`beginWorkerTurn`; không thêm cơ chế cấp chỗ.
+`lifecycleRevision` tăng khi đổi pha/cấu hình, nên đóng rồi mở lại cùng phiên
+cũng làm xác nhận cũ hết hiệu lực, không bị lẫn với sửa tên.
+
+Lưu đánh dấu dùng trước khi gọi bộ nhận; lỗi lưu chặn gửi. Sau điểm gọi cổng
+gửi, mất phản hồi giữ chưa xác minh, không kết nối rồi tự gửi lại yêu cầu này.
+Chỉ quan sát đúng mã user trong lịch sử/đúng phản hồi mới ghi nhận đã thấy ở
+nguồn. Khởi động lại không phát lại; thẻ chưa dùng của tiến trình cũ cũng phải
+chuẩn bị mới. Nếu chưa đối chiếu được, người dùng dùng Làm mới/đến chủ đề để
+kiểm tra, không bấm lại hoặc mặc định yêu cầu đã thất bại. Không khởi động hay
+cấp lại hạn cho lượt lịch. Sổ đã dùng không bị xóa khi đóng/mở chủ đề.
+
+Nút chạy tiếp sau lỗi của diễn đàn quản lý vẫn gửi câu chạy tiếp cũ, nhưng dùng
+chung kiểm tra/sổ nhận một lần theo đúng lượt lỗi; nút lỗi cũ không chạy lượt
+mới. Đăng ký trạng thái đang chuẩn bị sớm để `/stop` chặn trước gửi, kể cả khi
+đang chờ cập nhật hướng dẫn. Kiểm thử qua `Bot.handle` và bộ nhận công việc
+thật, có lỗi lưu đánh dấu/mã đầu vào, nguồn lịch hỏng, chờ quyền/câu hỏi,
+đổi vòng đời rồi mở lại, dừng khi chuẩn bị và khởi động lại.
+
 ## Điều kiện bàn giao nhóm tính năng
 
-- [ ] CV08–CV09 đạt; phân biệt rõ xem, mở lại và tiếp tục.
-- [ ] Có hướng dẫn xử lý bản tóm tắt cũ và kết quả gửi chưa rõ, không yêu cầu
+- [x] CV08–CV09 đạt kiểm thử tự động; phân biệt rõ xem, mở lại và tiếp tục.
+- [x] Có hướng dẫn xử lý bản tóm tắt cũ và kết quả gửi chưa rõ, không yêu cầu
   người dùng thao tác ở thiết bị đầu cuối.
 
 **Tiếp theo:** [CV10–CV12 — Thông báo](04-notifications.md).

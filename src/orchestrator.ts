@@ -225,6 +225,7 @@ export class Orchestrator {
    * Manager chat, which the fire-and-forget prompt path otherwise skips.
    */
   private managerBusy = new Set<ConvKey>();
+  private managerGeneration = new Map<ConvKey, number>();
   /**
    * Chats whose bridge route is open. Opened BEFORE the bridge is registered:
    * OpenCode connects (initialize + tools/list) the moment it is added and marks
@@ -727,8 +728,8 @@ export class Orchestrator {
     return `${ICON[w.status]} ${w.name}`;
   }
 
-  private async dispatchObserved(conv: ConvKey, sessionID: string, text: string, source: ActivitySource, originalText = text): Promise<string> {
-    const messageID = newMessageID();
+  private async dispatchObserved(conv: ConvKey, sessionID: string, text: string, source: ActivitySource, originalText = text, suppliedMessageID?: string): Promise<string> {
+    const messageID = suppliedMessageID ?? newMessageID();
     try { this.h.activity?.begin(conv, { sessionID, inputID: messageID, text: originalText, source }); }
     catch (error) { warn("Không lưu được bản ghi hoạt động:", (error as Error).message); }
     return this.h.oc.prompt(sessionID, text, { messageID });
@@ -1341,12 +1342,12 @@ export class Orchestrator {
 
   // ── Manager ───────────────────────────────────────────────────────────────
   /** A user message for the Manager: admit it without blocking; the reply is relayed when the turn ends. */
-  async promptManager(conv: ConvKey, text: string, messageId?: number): Promise<void> {
+  async promptManager(conv: ConvKey, text: string, messageId?: number, options?: { inputID?: string; onDispatch(): void; beforeDispatch(): Promise<void> }): Promise<boolean> {
     if (this.h.topics?.enabled(conv) && !this.h.topics.canPrompt(conv)) throw new Error("Manager topic is not open; manage it from General.");
     const s = this.h.st.get(conv);
     if (!s.sessionID) {
       await this.cmdManager(conv, "on");
-      if (!this.h.st.get(conv).sessionID) return;
+      if (!this.h.st.get(conv).sessionID) return false;
     }
     // A turn is already running (this user's previous message, or a bot event
     // such as a worker report): block and notify, matching normal chats.
@@ -1361,19 +1362,25 @@ export class Orchestrator {
       } else {
         await this.h.tg.sendMessage(conv, BUSY_REPLY_TEXT);
       }
-      return;
+      return false;
     }
     this.managerBusy.add(conv); // mark before the await so a 2nd message can't slip through
+    const generation = this.managerGeneration.get(conv) ?? 0;
     this.budget.set(chatOf(conv), DISPATCH_BUDGET); // the user spoke: refill the dispatch budget
-    await this.h.prepareNotes?.(conv, this.h.st.get(conv).sessionID!); // /note: surface pending notes this turn
     try {
-      await this.dispatchObserved(conv, this.h.st.get(conv).sessionID!, text, "manager");
+      await this.h.prepareNotes?.(conv, this.h.st.get(conv).sessionID!);
+      await options?.beforeDispatch();
+      if (!this.managerBusy.has(conv) || (this.managerGeneration.get(conv) ?? 0) !== generation) throw new Error("Yêu cầu quản lý đã bị dừng trước khi gửi.");
+      if (options && !options.inputID) throw new Error("Chưa ghi được mã đầu vào quản lý; không gửi yêu cầu.");
+      options?.onDispatch();
+      await this.dispatchObserved(conv, this.h.st.get(conv).sessionID!, text, "manager", text, options?.inputID);
     } catch (e) {
-      this.dropManagerTurn(conv); // the prompt was never accepted — don't stay busy forever
+      if ((this.managerGeneration.get(conv) ?? 0) === generation) this.dropManagerTurn(conv);
       throw e;
     }
     this.h.startTyping(conv);
     this.h.startWorking(conv); // "⏳ Đang xử lý…" for the manager turn (event-stream-driven, not runPrompt)
+    return true;
   }
 
   /** Drop the Manager busy flag (used by /stop so a stuck flag can't wedge the chat). */
@@ -1388,6 +1395,7 @@ export class Orchestrator {
    * turn ends (or on /stop, /new, /clear, manager off, or purge) is "not found".
    */
   private dropManagerTurn(conv: ConvKey): void {
+    this.managerGeneration.set(conv, (this.managerGeneration.get(conv) ?? 0) + 1);
     this.managerBusy.delete(conv);
     this.h.busyNotes.clear(conv);
   }

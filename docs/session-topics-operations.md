@@ -39,6 +39,13 @@ and all command/button handlers enforce General versus work-topic scope.
   **Làm mới thông tin** chỉ đọc tối đa 40 tin của phiên đó và trạng thái nhẹ,
   có thời hạn và chống bấm dồn; không gọi mô hình, mở lại hay chạy tiếp. Đọc
   lỗi giữ chưa xác minh. **Mở lại phiên** là nút vòng đời riêng, không thực thi.
+- **Chuẩn bị tiếp tục** là bước riêng: trả lời đúng tin nhập mục tiêu trong
+  General, xem nguyên văn yêu cầu và phiên/thư mục đích rồi mới xác nhận. Có
+  Hủy hoặc `/cancel`, hạn 10 phút. Phiên đóng phải mở lại riêng và chuẩn bị lại.
+  Có đầu vào mới, thay đổi vòng đời, việc chưa kết thúc/chờ quyền/câu hỏi hoặc
+  lượt lịch còn sở hữu thì không gửi. Mất phản hồi không tự gửi lại: dùng Làm
+  mới/đến chủ đề để kiểm tra; không coi mất phản hồi là chưa chạy. Xác nhận đã
+  dùng và thẻ trước khi bot khởi động lại không được bấm để phát lại yêu cầu.
 - **Gắn phiên có sẵn**, `/attach` hoặc `/use` không có mã mở danh sách chọn
   có tên. Danh sách chỉ đọc, không gửi lại thẻ của mọi phiên đã quản lý.
   Saved legacy sessions of this group are included, even outside the

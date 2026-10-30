@@ -25,7 +25,7 @@ export function buildSessionSummary(chat: ConvKey, row: DashboardRow, options: {
   if (row.chat !== chat) throw new Error("Bản tóm tắt không thuộc nhóm này.");
   const activity = row.activity?.sessionID === row.sessionID ? row.activity : undefined;
   const pending = [...row.pending].sort((a, b) => `${a.kind}:${a.id}`.localeCompare(`${b.kind}:${b.id}`));
-  const marker = createHash("sha256").update(JSON.stringify([row.id, row.sessionID, row.conv, row.directory, row.lifecycle,
+  const marker = createHash("sha256").update(JSON.stringify([row.id, row.sessionID, row.conv, row.directory, row.lifecycle, row.lifecycleRevision ?? 0,
     row.work, activity?.revision, pending.map(item => [item.kind, item.id, item.verified]), row.pendingVerified])).digest("hex");
   const render = (scale: number) => {
     const q = (value: string, budget: number) => quote(value, Math.floor(budget * scale));

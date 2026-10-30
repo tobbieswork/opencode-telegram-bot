@@ -101,6 +101,7 @@ try {
   assert.equal(restored.phase, "open");
   assert.equal(restored.sessionID, a.sessionID);
   assert.equal(restored.conv, a.conv);
+  assert.ok((restored.lifecycleRevision ?? 0) > (a.lifecycleRevision ?? 0), "Đóng rồi mở lại phải đổi mốc dù vẫn cùng phiên/chủ đề");
   assert.equal(nextTopic, 103);
   assert.deepEqual(calls.slice(-2), ["unarchive", "open-topic"]);
   console.log("ok: partial close stays pending; restore reuses the original session and topic");

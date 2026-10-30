@@ -27,6 +27,7 @@ export interface DashboardRow {
   title: string;
   directory: string;
   lifecycle: SessionTopic["phase"];
+  lifecycleRevision?: number;
   work: DashboardWork;
   lastKnownWork?: DashboardWork;
   checkedAt?: number;
@@ -199,7 +200,7 @@ export class SessionDashboard {
     }
     const work = workVerified ? snap?.work ?? "unknown" : "unknown";
     return { id: link.id, chat: link.chat, conv: link.conv, sessionID: link.sessionID,
-      title: link.title, directory: link.directory, lifecycle: link.phase, work,
+      title: link.title, directory: link.directory, lifecycle: link.phase, lifecycleRevision: link.lifecycleRevision ?? 0, work,
       lastKnownWork: snap?.work, checkedAt: snap?.workAt,
       lastActivityAt: activity ? Math.max(activity.input.createdAt ?? activity.input.receivedAt, activity.result?.createdAt ?? activity.result?.observedAt ?? 0) : state?.worker?.updatedAt ?? link.identity?.createdAt ?? 0,
       stale: work === "unknown" || !pendingVerified, pendingVerified, pending,
