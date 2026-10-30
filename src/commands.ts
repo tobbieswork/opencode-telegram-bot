@@ -72,15 +72,15 @@ export const COMMANDS: BotCommand[] = [
   { cmd: "auto", arg: "on|off", desc: "Manager tự giao việc hay chờ duyệt", group: "manager" },
   { cmd: "wt", desc: "Worktree: diff / merge / xoá (trong topic worker)", group: "manager" },
   { cmd: "prune", arg: "[số_ngày]", desc: "Dọn topic worker đã xong (mặc định >7 ngày)", group: "manager" },
-  { cmd: "node", arg: "task <prompt> | status | log <id>", desc: "Giao việc cho node Mac (Claude CLI) — report về chat", group: "manager" },
 
   // ── control ────────────────────────────────────────────────────────────
   { cmd: "stop", desc: "Dừng task đang chạy", button: "⏹ Dừng", group: "control" },
   { cmd: "btw", arg: "<câu hỏi>", desc: "Hỏi nhanh trên phiên tạm — không lẫn ngữ cảnh manager", group: "control" },
-  { cmd: "ask", arg: "<câu hỏi>", desc: "Hỏi Claude (cố vấn) — topic riêng, hỏi tiếp được", group: "control" },
+  { cmd: "ask", arg: "[claude|gemini] <câu hỏi>", desc: "Hỏi cố vấn Claude/Gemini — topic riêng, hỏi tiếp được", group: "control" },
   { cmd: "review", arg: "[PR|branch|commit]", desc: "Review code (chỉ đọc, chạy skill review-code)", group: "control" },
   { cmd: "context", aliases: ["ctx"], desc: "Ảnh chụp phiên hiện tại (usage + files)", button: "📸 Context", group: "control" },
   { cmd: "usage", desc: "Mức dùng context theo phiên + cảnh báo gần tràn", button: "📊 Usage", group: "control" },
+  { cmd: "rotation", desc: "Sức khoẻ xoay phiên Manager (nền + lịch sử)", button: "♻️ Rotation", group: "control" },
   { cmd: "history", desc: "Xem tin nhắn gần đây", button: "📜 Lịch sử", group: "control" },
   { cmd: "status", desc: "Trạng thái kết nối", button: "🔌 Trạng thái", group: "control" },
   { cmd: "reboot", desc: "Reboot máy (2 bước xác nhận)", button: "🔄 Reboot", group: "control" },

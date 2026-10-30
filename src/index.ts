@@ -63,18 +63,16 @@ async function main(): Promise<void> {
     // 2. No new scheduled work.
     bot.stopScheduler();
     // 3. Keep the OpenCode service + event stream ALIVE for the drain (no
-    //    stopNode yet): in-flight turns finish and their terminal events
+    //    teardown yet): in-flight turns finish and their terminal events
     //    arrive over the stream; the final send only needs Telegram.
     void bot
       .drainInflight({ timeoutMs: DRAIN_TIMEOUT_MS })
       .then((settled) => {
         log(settled ? "drain: all turns settled — exiting" : "drain: cap reached — exiting");
-        bot.stopNode();
         process.exit(0);
       })
       .catch((e) => {
         error("drain failed:", (e as Error)?.message ?? e);
-        bot.stopNode();
         process.exit(0);
       });
   };

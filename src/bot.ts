@@ -43,13 +43,22 @@ import { QUESTIONS_PREAMBLE, NOTES_KEY } from "./shared.js";
 import type { Btn, Keyboard } from "./shared.js";
 import { cmdAgents, cmdAgent, handleAgentCallback } from "./commands/agents.js";
 import { cmdSchedule, handleScheduleCallback } from "./commands/schedule.js";
-import { cmdNode, MacNode } from "./node/mac-node.js";
-import { Advisor } from "./node/advisor.js";
-import type { NodeDone } from "./node/node-github.js";
-import { cmdHelp, cmdStatus, cmdContext, cmdUsage, cmdHistory, cmdNote, handleNoteCallback } from "./commands/meta.js";
+import { Advisor } from "./advisor/advisor.js";
+import { cmdHelp, cmdStatus, cmdContext, cmdUsage, cmdHistory, cmdNote, cmdRotation, handleNoteCallback } from "./commands/meta.js";
 import { cmdBtw } from "./btw.js";
 import { cmdAsk } from "./ask.js";
 import { reviewPrompt, REVIEW_USAGE } from "./review.js";
+import { managerFloorFromMessages, runRotationHandoff, rotationGate } from "./rotation.js";
+import {
+  rotationHealthPath,
+  writeRotationHealth,
+  readRotationHealth,
+  buildRotationSnapshot,
+  appendRotationHistory,
+  dayKey,
+  upsertFloorTrend,
+} from "./rotation-health.js";
+import type { RotationHealthSnapshot } from "./rotation-health.js";
 
 /** The message carries media (sticker/photo/video/voice/…) — used to acknowledge non-text input. */
 function hasNonTextContent(m: Message): boolean {
@@ -231,6 +240,7 @@ export class Bot {
   private reminders = new Map<string, ReturnType<typeof setTimeout>>();
   private uptimeTimer?: ReturnType<typeof setInterval>;
   private prWatchTimer?: ReturnType<typeof setInterval>;
+  private rotationTimer?: ReturnType<typeof setInterval>;
   /** True while a PR-watch tick is running, so a slow tick can't overlap the next. */
   private prWatchBusy = false;
   /** A reboot is already armed (token minted, timer pending) — ignores a double-tap on "Xác nhận". */
@@ -285,8 +295,6 @@ export class Bot {
   public scheduleStore: ScheduleStore;
   /** /schedule tick engine — only constructed/started when cfg.schedule is on. */
   private scheduler?: Scheduler;
-  /** Mac node poller — public because cmdNode (node/mac-node.ts) reads it. */
-  public node?: MacNode;
   /** Claude advisor (topic + Claude session on the Mac) — present only when enabled. */
   public advisor?: Advisor;
 
@@ -376,20 +384,6 @@ export class Bot {
       });
       this.scheduler.start();
     }
-    // Queue tasks to the Mac node (Claude CLI) over the node/mac git branch.
-    // Default ON; the poller is a no-op until the first /node task seeds the branch.
-    if (this.cfg.nodeMac) {
-      this.node = new MacNode({
-        dir: this.cfg.nodeMacDir,
-        repoDir: this.cfg.nodeRepoDir,
-        pollMs: this.cfg.nodePollMs,
-        now: () => Date.now(),
-        relay: (done, conv) => {
-          void this.relayNodeReport(done, conv).catch((e) => warn("node relay:", e?.message));
-        },
-      });
-      this.node.start();
-    }
     // Close topics left open by workers that finished before auto-close existed
     // (or while the service was down). Fire-and-forget; never fails startup.
     void closeFinishedTopicsAtStartup(this.orch).catch((e) => warn("startup topic close:", e?.message));
@@ -401,16 +395,15 @@ export class Bot {
     // Post one line per new PR event (merged / comment / CI / review) on the
     // watched GitHub repo. Default OFF; see cfg.prWatch*.
     this.startPrWatchMonitor();
+    // Rotate the Manager's session to a fresh one when its context floor drifts
+    // high (see src/rotation.ts). Runs every 10 min; no-op until a manager conv
+    // crosses a threshold.
+    this.startRotationMonitor();
   }
 
   /** Stop the /schedule tick engine (called from index.ts during shutdown). */
   stopScheduler(): void {
     this.scheduler?.stop();
-  }
-
-  /** Stop the Mac node poller (called from index.ts during shutdown). */
-  stopNode(): void {
-    this.node?.stop();
   }
 
   /** Register fire-and-forget reply work so a shutdown drain waits for it. */
@@ -421,7 +414,7 @@ export class Bot {
 
   /**
    * Graceful-shutdown drain (called from index.ts between tg.stop() and
-   * stopNode): wait until no turn is in flight (an inflight runPrompt or a
+   * the OpenCode teardown): wait until no turn is in flight (an inflight runPrompt or a
    * manager turn) and no fire-and-forget reply (pendingSends — the unrelayed-
    * reply sweeps that carry a finished turn's final send) remains, or until
    * the cap elapses. The OpenCode service + event stream stay alive for the
@@ -450,14 +443,6 @@ export class Bot {
       timeoutMs: opts.timeoutMs,
       isBusy: () => this.inflight.size > 0 || this.orch.managerInflight || this.pendingSends.size > 0,
     });
-  }
-
-  /** Render a node report and send it via the standard reply path (rich/HTML). */
-  private async relayNodeReport(done: NodeDone, conv: ConvKey): Promise<void> {
-    const icon = done.status === "done" ? "✅" : done.status === "failed" ? "❌" : "⏱️";
-    let text = `📦 ${done.id} — ${icon} ${done.status} · ${(done.durationMs / 1000).toFixed(0)}s · $${done.costUsd.toFixed(2)} · ${done.tokensIn}→${done.tokensOut} tok\n\n${done.report}`;
-    if (done.codeBranch) text += `\n\n🌿 Code branch: ${done.codeBranch} (đã push — merge tay nếu cần)`;
-    await this.sendReply(conv, text);
   }
 
   // ── Uptime monitor + reboot ─────────────────────────────────────────────────
@@ -774,9 +759,12 @@ export class Bot {
 
     if (text.startsWith("/")) await this.handleCommand(conv, text, state, uid);
     else if (state.advisor && this.advisor) {
-      // A Claude advisor thread: the user's message is a follow-up question
-      // (resumes the session on the Mac). No OpenCode session is involved here.
-      await this.advisor.followUp(conv, text);
+      // An advisor thread: the user's message is a follow-up question (resumes
+      // the agent session). No OpenCode session is involved. A turn can take
+      // minutes, and updates are handled one at a time — so it runs off the
+      // update loop, tracked so a shutdown drain still waits for it. Errors were
+      // already shown in the topic.
+      this.trackPending(this.advisor.followUp(conv, text).then(() => {}, (e) => warn("advisor follow-up:", (e as Error)?.message)));
     }
     else {
       // (The "🤔 thinking" body-react on the user's message was removed 2026-10-27:
@@ -1591,6 +1579,8 @@ export class Bot {
         return cmdUsage(this, conv, arg);
       case "/history":
         return cmdHistory(this, conv, state);
+      case "/rotation":
+        return cmdRotation(this, conv);
       case "/clear":
         return this.cmdClear(conv, state);
       case "/note":
@@ -1598,7 +1588,10 @@ export class Bot {
       case "/btw":
         return cmdBtw(this, conv, state, arg);
       case "/ask":
-        return cmdAsk(this, conv, arg);
+        // An agent turn can take minutes: never hold the update loop on it
+        // (cmdAsk reports its own errors).
+        this.trackPending(cmdAsk(this, conv, arg));
+        return;
       case "/review": {
         // The Manager's folder is not a project: a review needs a worker topic / plain session.
         if (state.manager) return this.tg.sendMessage(conv, "🔍 Manager không có repo để review — dùng /review trong topic worker, hoặc /manager off.");
@@ -1608,8 +1601,6 @@ export class Bot {
       }
       case "/schedule":
         return cmdSchedule(this, conv, arg, state, uid);
-      case "/node":
-        return cmdNode(this, conv, arg, uid);
       default:
         return this.tg.sendMessage(conv, `Unknown command: ${esc(cmd)}\nSend /help`);
     }
@@ -1896,6 +1887,246 @@ export class Bot {
       `⚠️ <b>/new</b> xoá ngữ cảnh hiện tại.\nBấm nút để xác nhận — hoặc gõ <code>/new --keep</code> nếu muốn giữ mạch hội thoại.`,
       { reply_markup: kb },
     );
+  }
+
+  /**
+   * M1 — the manager session's FLOOR: the MIN sent-context (input + cache.read)
+   * across its assistant messages from the last 24h. 0 when there are none (a
+   * fresh session). Drives the auto-rotation trigger and the /status floor line.
+   * Never throws — a read failure just reports no floor (0).
+   */
+  async managerFloor(sessionID: string, now = Date.now()): Promise<number> {
+    const msgs = (await this.oc.listMessages(sessionID, 700).catch(() => [] as any[])) as any[];
+    return managerFloorFromMessages(msgs, now);
+  }
+
+  /**
+   * M2 — the handoff pass on the OLD manager session: prompt it to save its
+   * persistent state (memory + notes) and return a ≤300-word handoff brief.
+   * Never throws — a failed/interrupted pass just returns "" (the rotation can
+   * still proceed on memory + notes alone).
+   */
+  async rotateHandoff(sessionID: string, dir: string): Promise<string> {
+    return runRotationHandoff(sessionID, dir, {
+      prompt: async (sid, text) => ({ reply: (await this.oc.promptAndWait(sid, text)).reply ?? "" }),
+    });
+  }
+
+  /**
+   * M3 — start the rotation sweep: every 10 min, measure each manager conv's
+   * floor and apply the two-tier trigger. No-op until a manager conv crosses a
+   * threshold. Unref'd (the process is long-lived; shutdown is guarded by
+   * `this.draining` inside the tick). See src/rotation.ts.
+   */
+  private startRotationMonitor(): void {
+    this.rotationTimer = setInterval(() => {
+      for (const [conv, state] of Object.entries(this.st.all())) {
+        if (state.manager && state.sessionID) {
+          void this.checkManagerRotation(conv).catch((e) => warn("manager rotation:", e?.message));
+        }
+      }
+    }, 10 * 60_000);
+    this.rotationTimer.unref?.();
+  }
+
+  /**
+   * M3 — one rotation tick for a manager conv: measure the floor, run the
+   * two-tier gate, act on it. Auto → rotate now + notify; confirm → offer a
+   * one-time confirm button (throttled); defer/idle → nothing this tick.
+   */
+  private async checkManagerRotation(conv: ConvKey): Promise<void> {
+    if (this.draining) return;
+    const state = this.st.peek(conv);
+    if (!state?.manager || !state.sessionID) return;
+    const floor = await this.managerFloor(state.sessionID).catch(() => 0);
+    const floorK = floor / 1000;
+    // Part 1 (rotation tracking): record this tick's floor into the 7-day trend
+    // (daily min/max) and refresh the machine-wide durability snapshot. Best-
+    // effort — a tracking failure must never break the rotation gate below.
+    try {
+      this.st.set(conv, { floorTrend: upsertFloorTrend(this.st.peek(conv)?.floorTrend, dayKey(Date.now()), floorK) });
+      this.writeRotationSnapshot(conv, floorK);
+    } catch (e) {
+      warn("rotation tracking:", (e as Error)?.message);
+    }
+    const action = rotationGate({
+      floorK,
+      // Busy = an in-band turn (inflight) OR an OUT-OF-BAND manager turn (a
+      // schedule task / background wake on the manager session) tracked only in
+      // orch.managerInflight. Matches the shutdown drain's authoritative check
+      // (isBusy below); omitting it could rotate mid-turn and interrupt it.
+      busy: this.inflight.has(conv) || this.orch.managerInflight,
+      nowMs: Date.now(),
+      lastRotationMs: state.lastRotationMs,
+      lastRotationPromptMs: state.lastRotationPromptMs,
+      autoFloorK: this.cfg.rotationAutoFloorK,
+      confirmFloorK: this.cfg.rotationConfirmFloorK,
+      minIntervalMs: this.cfg.rotationMinIntervalMs,
+      confirmRepromptMs: this.cfg.rotationConfirmRepromptMs,
+    });
+    if (action === "auto") {
+      await this.doManagerRotation(conv, "auto", floorK);
+    } else if (action === "confirm") {
+      // Throttle the re-prompt (the gate already checked, but stamp here so a
+      // confirm is never re-offered more often than the interval, even if the
+      // floor is still high on the very next tick).
+      this.st.set(conv, { lastRotationPromptMs: Date.now() });
+      await this.sendRotationConfirm(conv, floorK);
+    }
+  }
+
+  /**
+   * M3 — actually rotate the manager: hand off (M2 — save memory + notes, get a
+   * brief), create a fresh session, inject the brief as carry-over, update
+   * state, notify. Never throws (a failure is reported, the old session kept).
+   */
+  private async doManagerRotation(conv: ConvKey, mode: "auto" | "confirm", floorK: number): Promise<void> {
+    const state = this.st.get(conv);
+    const oldSID = state.sessionID;
+    if (!oldSID) return;
+    const dir = state.directory || this.cfg.opencodeDirectory;
+    const how = mode === "auto" ? "tự động (nền đã cao)" : "theo yêu cầu của bạn";
+    await this.tg.sendMessage(conv, `🔄 Đang xoay phiên Manager (nền ~${Math.round(floorK)}K, ${how}) — tóm tắt + tạo phiên mới…`);
+    try {
+      const brief = await this.rotateHandoff(oldSID, dir);
+      await this.stopCurrent(conv, true);
+      this.cancelAllReminders(conv);
+      const sessionID = await this.oc.createSession(dir);
+      await this.applyModelAndVariant(sessionID, state);
+      if (state.agent) await this.oc.setAgent(sessionID, state.agent).catch((e) => warn("rotation setAgent:", e?.message));
+      if (brief) {
+        await this.oc
+          .setInstruction(
+            sessionID,
+            CARRYOVER_KEY,
+            `Bạn đang tiếp tục từ một phiên Manager đã bị xoay (nền cũ ~${Math.round(floorK)}K). Brief bàn giao từ phiên cũ:\n${brief}\nTiếp tục từ đây — memory + notes đã giữ các thực tế quan trọng.`,
+          )
+          .catch((e) => warn("rotation brief:", (e as Error).message));
+      }
+      const now = Date.now();
+      // Part 1 (rotation tracking): record this SUCCESSFUL attempt + the fresh
+      // session's (best-effort) post-rotation floor. A brand-new session has no
+      // assistant messages yet, so its floor reads 0 — the honest value.
+      const newFloorK = Math.round((await this.managerFloor(sessionID).catch(() => 0)) / 1000);
+      const cur = this.st.get(conv);
+      const nextHistory = appendRotationHistory(cur.rotationHistory, { at: now, floorK: Math.round(floorK), tier: mode, outcome: "success", newFloorK });
+      this.st.set(conv, {
+        sessionID,
+        directory: dir,
+        lastRotationMs: now,
+        lastRotationSID: oldSID,
+        lastRotationFloor: Math.round(floorK),
+        lastRotationPromptMs: undefined,
+        rotationHistory: nextHistory,
+      });
+      await this.tg.sendMessage(
+        conv,
+        `✅ Đã xoay Manager → session mới <code>${esc(sessionID)}</code>\nDir: <code>${esc(dir)}</code>\n${brief ? `📝 Brief: ${brief.split(/\s+/).length} từ` : "📝 (phiên cũ trống)"}`,
+      );
+      log(`manager rotation (${mode}) conv=${conv} ${oldSID} → ${sessionID} floor=${Math.round(floorK)}K brief=${brief ? brief.length : 0}ch`);
+      // Refresh the snapshot so it reflects the rotation just performed (the
+      // pre-action snapshot written by checkManagerRotation is now stale).
+      this.writeRotationSnapshot(conv, newFloorK);
+    } catch (e) {
+      warn("manager rotation failed (old session kept):", (e as Error)?.message ?? e);
+      // Part 1 (rotation tracking): record the FAILED attempt so /rotation and
+      // the durability check see it (lastOutcome=fail → "unbounded" verdict).
+      // The old session is kept, so its floor is still ~floorK.
+      try {
+        const cur = this.st.get(conv);
+        this.st.set(conv, { rotationHistory: appendRotationHistory(cur.rotationHistory, { at: Date.now(), floorK: Math.round(floorK), tier: mode, outcome: "fail" }) });
+        this.writeRotationSnapshot(conv, Math.round(floorK));
+      } catch (e2) {
+        warn("rotation tracking (fail):", (e2 as Error)?.message);
+      }
+      await this.tg.sendMessage(conv, `⚠️ Xoay phiên Manager thất bại — phiên cũ vẫn giữ nguyên.`).catch(() => {});
+    }
+  }
+
+  /**
+   * Part 1 (rotation tracking) — refresh the machine-wide rotation health
+   * snapshot for a manager conv (data/rotation-health.json). Best-effort: the
+   * caller wraps in try/catch. `floorK` is the manager's CURRENT floor (K)
+   * (null when not measured). Reads the conv's trend + history from state.
+   */
+  private writeRotationSnapshot(conv: ConvKey, floorK: number | null): void {
+    const state = this.st.peek(conv);
+    if (!state) return;
+    const hist = state.rotationHistory ?? [];
+    const last = hist[hist.length - 1];
+    const snap = buildRotationSnapshot({
+      now: Date.now(),
+      currentFloorK: floorK === null ? null : Math.round(floorK),
+      floorTrend: state.floorTrend ?? [],
+      rotationHistory: hist,
+      lastRotationAt: last ? last.at : state.lastRotationMs ?? null,
+      lastRotationOutcome: last ? last.outcome : null,
+      autoK: this.cfg.rotationAutoFloorK,
+      confirmK: this.cfg.rotationConfirmFloorK,
+    });
+    writeRotationHealth(rotationHealthPath(this.cfg.stateFile), snap);
+  }
+
+  /**
+   * Part 1 (rotation tracking) — the machine-wide rotation health snapshot for
+   * the /rotation command. Reads the on-disk file if present; otherwise builds
+   * one live from the first manager conv's state (so /rotation works even in
+   * the first 10 minutes, before the first tick has written the file — the
+   * current floor reads null in that fallback). Read-only, no REST calls.
+   */
+  public rotationHealthSnapshot(): RotationHealthSnapshot | null {
+    const onDisk = readRotationHealth(rotationHealthPath(this.cfg.stateFile));
+    if (onDisk) return onDisk;
+    const state = Object.values(this.st.all()).find((s) => s.manager && s.sessionID);
+    if (!state) return null;
+    const hist = state.rotationHistory ?? [];
+    const last = hist[hist.length - 1];
+    return buildRotationSnapshot({
+      now: Date.now(),
+      currentFloorK: null,
+      floorTrend: state.floorTrend ?? [],
+      rotationHistory: hist,
+      lastRotationAt: last ? last.at : state.lastRotationMs ?? null,
+      lastRotationOutcome: last ? last.outcome : null,
+      autoK: this.cfg.rotationAutoFloorK,
+      confirmK: this.cfg.rotationConfirmFloorK,
+    });
+  }
+
+  /** M3 — the one-time confirm (two-tier, L1): offer rotate / keep-old buttons. */
+  private async sendRotationConfirm(conv: ConvKey, floorK: number): Promise<void> {
+    await this.tg.sendMessage(
+      conv,
+      `🧹 Session Manager đang gần hết chỗ trống — nền (sau summarization) đã lên ~${Math.round(floorK)}K.\n\nĐề xuất: xoay sang phiên mới, giữ lại <b>memory + notes</b> cộng thêm một brief ngắn. Muốn xoay ngay?`,
+      {
+        reply_markup: {
+          inline_keyboard: [[{ text: "🔄 Xoay ngay", callback_data: "rot:cf" }, { text: "↩️ Giữ phiên cũ", callback_data: "rot:cx" }]],
+        },
+      },
+    );
+  }
+
+  /** M3 — rot:cf / rot:cx — confirm or cancel a manager rotation offer. */
+  private async handleRotationCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+    const op = (cb.data ?? "").split(":")[1];
+    if (op === "cx") {
+      await this.tg.answerCallbackQuery(cb.id, "↩️ Đã huỷ");
+      if (messageId) {
+        await this.tg
+          .editMessageText(conv, messageId, "↩️ Đã huỷ — phiên Manager giữ nguyên.", { reply_markup: { inline_keyboard: [] } })
+          .catch(() => {});
+      }
+      return;
+    }
+    if (op !== "cf") return;
+    const sid = this.st.peek(conv)?.sessionID;
+    if (!sid) {
+      await this.tg.answerCallbackQuery(cb.id, "Không có session để xoay");
+      return;
+    }
+    await this.tg.answerCallbackQuery(cb.id, "🔄 Đang xoay…");
+    const floor = await this.managerFloor(sid).catch(() => 0);
+    await this.doManagerRotation(conv, "confirm", floor / 1000);
   }
 
   /** Actually create the fresh session (cmdNew --keep, or the nw:cf confirm button). */
@@ -2232,6 +2463,10 @@ export class Bot {
       await this.handleRebootCallback(cb, conv, messageId);
       return;
     }
+    if (data.startsWith("rot:")) {
+      await this.handleRotationCallback(cb, conv, messageId);
+      return;
+    }
     if (data.startsWith("nw:")) {
       await this.handleNewConfirmCallback(cb, conv, messageId);
       return;
@@ -2410,6 +2645,9 @@ export class Bot {
           break;
         case "usage":
           await cmdUsage(this, conv);
+          break;
+        case "rotation":
+          await cmdRotation(this, conv);
           break;
         case "history":
           await cmdHistory(this, conv, state);

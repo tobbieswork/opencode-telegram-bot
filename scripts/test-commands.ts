@@ -27,9 +27,9 @@ const GOLDEN = new Set([
   // model
   "mode", "models", "model", "agents", "agent", "variants", "variant",
   // manager
-  "spawn", "board", "kill", "stopall", "manager", "auto", "wt", "prune", "node",
+  "spawn", "board", "kill", "stopall", "manager", "auto", "wt", "prune",
   // control
-  "stop", "note", "btw", "ask", "review", "context", "usage", "history", "status", "reboot", "clear", "schedule", "help",
+  "stop", "note", "btw", "ask", "review", "context", "usage", "rotation", "history", "status", "reboot", "clear", "schedule", "help",
 ]);
 const GOLDEN_ALIASES = new Set(["sessions", "b", "modes", "ctx", "workers"]);
 

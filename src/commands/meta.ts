@@ -12,6 +12,7 @@ import { formatUsageReport } from "../usage.js";
 import { appendNote, noteEntryText, showNotes, BUSY_REPLY_TEXT, parseNoteCallback } from "../notes.js";
 import { warn } from "../logger.js";
 import { QUESTIONS_PREAMBLE, NOTES_KEY } from "../shared.js";
+import { renderRotationReport } from "../rotation-health.js";
 
 export async function cmdHelp(bot: Bot, conv: ConvKey): Promise<void> {
   await bot.sendHtml(conv, helpText(), { reply_markup: commandGrid() });
@@ -119,6 +120,13 @@ export async function cmdStatus(bot: Bot, conv: ConvKey, state: ChatState): Prom
     `agent: ${state.agent ? `<code>${state.agent}</code>` : "default"}`,
     `state: ${busy ? "⏳ busy" : "🟢 idle"}`,
   ];
+  // The Manager's context FLOOR (min sent-context over 24h) — the persistent
+  // baseline that drifts up over days and drives auto-rotation. Manager convs
+  // only; a read failure just omits the line (never breaks /status).
+  if (state.manager && state.sessionID) {
+    const floor = await bot.managerFloor(state.sessionID).catch(() => 0);
+    if (floor > 0) lines.push(`ctx floor: ~${Math.round(floor / 1000)}K`);
+  }
   await bot.sendHtml(conv, lines.join("\n"));
 }
 
@@ -248,4 +256,25 @@ export async function cmdHistory(bot: Bot, conv: ConvKey, state: ChatState): Pro
     return "· " + m.type;
   });
   await bot.sendHtml(conv, `<b>Recent messages</b>\n${lines.join("\n")}`);
+}
+
+
+/**
+ * `/rotation` — a read-only snapshot of the Manager's rotation health: the
+ * current context floor, the 7-day floor trend, the recent rotations, and a
+ * bounded / watch / unbounded verdict. It only renders data the rotation
+ * monitor already recorded — it NEVER triggers a rotation (for that, wait for
+ * the confirm prompt, or use /new).
+ */
+export async function cmdRotation(bot: Bot, conv: ConvKey): Promise<void> {
+  let snap;
+  try {
+    snap = bot.rotationHealthSnapshot();
+  } catch (e) {
+    return bot.tg.sendMessage(conv, `⚠️ Không đọc được snapshot rotation: ${(e as Error).message}`);
+  }
+  if (!snap) {
+    return bot.tg.sendMessage(conv, "Chưa có dữ liệu rotation — session Manager chưa chạy qua tick xoay nào.");
+  }
+  await bot.sendHtml(conv, renderRotationReport(snap));
 }
