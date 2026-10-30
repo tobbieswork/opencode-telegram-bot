@@ -4,7 +4,8 @@
  * (topic + fresh session), followUp (--resume), the per-session turn cap,
  * forget, listThreads, startThread failure (topic undone), a Gemini thread
  * (agent kept across follow-ups), a thread saved before agents existed
- * (treated as Claude), and the /ask argument parser.
+ * (treated as Claude), an old daemon answering with the wrong agent, a second
+ * follow-up while one is in flight, and the /ask argument parser.
  *
  * Run:  npx tsx scripts/test-advisor-thread.ts
  */
@@ -65,6 +66,10 @@ async function main(): Promise<void> {
   let askCalls: { agent: string; sessionId?: string; message: string; context?: string }[] = [];
   let forgetCalls: string[] = [];
   let failNextAsk = false;
+  /** When set, the fake daemon answers as this agent (an old daemon says ""). */
+  let answerAs: string | undefined;
+  /** When set, ask() waits for it — a follow-up "in flight". */
+  let hold: Promise<void> | undefined;
   const client = {
     ask: async (req: { agent: "claude" | "agy"; sessionId?: string; message: string; context?: string }): Promise<import("../src/advisor/advisor-client.js").AdvisorAnswer> => {
       askCalls.push(req);
@@ -72,8 +77,9 @@ async function main(): Promise<void> {
         failNextAsk = false;
         throw new Error("claude down");
       }
+      if (hold) await hold;
       const sid = req.sessionId || `sid-${askCalls.length}`;
-      return { answer: `advice: ${req.message}`, status: "done", agent: req.agent, sessionId: sid, costUsd: 0, tokensIn: 1, tokensOut: 2, durationMs: 5, incomplete: false };
+      return { answer: `advice: ${req.message}`, status: "done", agent: answerAs ?? req.agent, sessionId: sid, costUsd: 0, tokensIn: 1, tokensOut: 2, durationMs: 5, incomplete: false };
     },
     forget: async (agent: string, sid: string): Promise<void> => {
       forgetCalls.push(`${agent}/${sid}`);
@@ -132,9 +138,48 @@ async function main(): Promise<void> {
     await advisor.forget(legacyConv);
     check("legacy thread forget names claude", forgetCalls.includes("claude/old-sid"), JSON.stringify(forgetCalls));
     st.clear(legacyConv);
+
+    // 4d) an old daemon ignores `agent` and answers with Claude → refused, topic undone
+    answerAs = "";
+    const deletedBefore = deleted.length;
+    let mismatch = "";
+    try {
+      await advisor.startThread({ chat, title: "x", message: "x", agent: "agy" });
+    } catch (e) {
+      mismatch = (e as Error).message;
+    }
+    check("old daemon answering as Claude for Gemini → clear error", /install\.sh/.test(mismatch) && /Gemini/.test(mismatch), mismatch);
+    check("…and the topic is undone", deleted.length === deletedBefore + 1, JSON.stringify(deleted));
+    const okOld = await advisor.startThread({ chat, title: "y", message: "y" }); // claude via an old daemon is fine
+    check("old daemon still serves Claude threads", okOld.answer.answer === "advice: y");
+    answerAs = undefined;
+    st.clear(okOld.conv);
+
+    // 4e) a second follow-up while one is in flight is refused (no extra ask)
+    st.set(g.conv, { advisor: { ...st.get(g.conv).advisor!, turns: 0 } }); // room under the cap
+    let release!: () => void;
+    hold = new Promise<void>((r) => (release = r));
+    const first = advisor.followUp(g.conv, "slow one");
+    await new Promise((r) => setTimeout(r, 10));
+    const callsBefore = askCalls.length;
+    let busyErr = "";
+    try {
+      await advisor.followUp(g.conv, "impatient");
+    } catch (e) {
+      busyErr = (e as Error).message;
+    }
+    check("second follow-up while busy is refused", /still answering/.test(busyErr), busyErr);
+    check("…without calling the daemon", askCalls.length === callsBefore, `${askCalls.length} vs ${callsBefore}`);
+    check("…and the user is told to wait", sent.some(([c, h]) => c === String(g.conv) && h.includes("vẫn đang trả lời")));
+    hold = undefined;
+    release();
+    await first;
+    await advisor.followUp(g.conv, "after");
+    check("thread accepts follow-ups again once the answer is in", askCalls[askCalls.length - 1].message === "after");
     st.clear(g.conv);
 
     // 6) startThread failure undoes the topic
+    const deletedBefore6 = deleted.length;
     failNextAsk = true;
     let threw = false;
     try {
@@ -143,7 +188,7 @@ async function main(): Promise<void> {
       threw = true;
     }
     check("failed startThread throws", threw);
-    check("failed startThread deletes the topic", deleted.length === 1, JSON.stringify(deleted));
+    check("failed startThread deletes the topic", deleted.length === deletedBefore6 + 1, JSON.stringify(deleted));
     check("failed startThread clears state", st.peek(convKey(-100, threadCounter)) === undefined);
 
     // 7) /ask argument parsing

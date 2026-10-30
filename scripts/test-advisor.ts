@@ -6,7 +6,8 @@
  *  - claude: new session, resume (proves --resume reached claude), /forget
  *  - agy: alias "gemini", the read-only flags in argv, resume routed by the
  *    session registry (--conversation), a prompt starting with "-", and the
- *    failure shapes agy really produces (denied_actions, non-SUCCESS, crash)
+ *    failure shapes agy really produces (denied_actions, non-SUCCESS, crash),
+ *    and a prompt too long for one Linux argv string (refused, agy not run)
  *  - validation: unknown agent, bad sessionId, oversized body (413)
  *  - a registry entry written before agents existed resumes with claude
  *  - a second daemon: default bind 127.0.0.1, a disabled agent is a 400
@@ -218,6 +219,12 @@ async function main(): Promise<void> {
     check("non-SUCCESS status → failed + status shown", bad.status === "failed" && String(bad.answer).includes("ERROR"), JSON.stringify(bad));
     const crash = (await post("/ask", { agent: "agy", message: "CRASH now" })).json;
     check("agy crash → failed + stderr shown", crash.status === "failed" && String(crash.answer).includes("boom"), JSON.stringify(crash));
+
+    // a prompt over agy's argv budget is refused before spawning agy
+    const argvBefore = readFileSync(join(workroot, "work", "agy.argv"), "utf8");
+    const long = (await post("/ask", { agent: "agy", message: "y".repeat(120 * 1024) })).json;
+    check("over-long agy prompt → failed, says too long", long.status === "failed" && String(long.answer).includes("quá dài"), String(long.answer).slice(0, 160));
+    check("over-long agy prompt never reaches agy", readFileSync(join(workroot, "work", "agy.argv"), "utf8") === argvBefore);
 
     // validation
     const unknown = await post("/ask", { agent: "gpt", message: "x" });

@@ -4,20 +4,25 @@
  *   agy --output-format json --mode plan --sandbox --settings <locked>
  *       [--conversation <id>] --print=<prompt>
  *
- * agy has no tool-allowlist flag, so read-only is enforced three ways:
- *  - `--mode plan`: the agent plans instead of acting (verified on agy 1.4.2:
- *    a command matching an allow rule is still refused);
- *  - `--settings` replaces the user's permission rules for this run only
- *    (their settings.json is never written) with an empty allow list and a
- *    deny-all for commands — allow rules a user keeps for interactive work,
- *    such as `command(git commit)`, do not apply here;
- *  - `--sandbox` restricts the terminal.
- * Headless mode cannot prompt, so any action needing permission is refused
- * and reported in `denied_actions` instead of hanging.
+ * agy has no tool-allowlist flag, so read-only rests on these layers (tested
+ * on agy 1.4.2 with a command the rules explicitly allow, `command(touch)`,
+ * which does run without them):
+ *  - `--mode plan`: with that allow rule, plan mode still did not run the
+ *    command — the agent wrote a plan instead;
+ *  - `--settings` replaces the GLOBAL permission scope for this run only (the
+ *    user's settings.json is never written): an empty allow list, so the
+ *    user's own global allow rules (e.g. `command(git commit)`) do not apply,
+ *    and `deny: command(*)`, which beat a matching allow in the same test.
+ *    agy's `project` and `shared` scopes are not replaced; the daemon runs in
+ *    a neutral work dir, and plan mode applies regardless;
+ *  - `--sandbox` restricts the terminal (not separately tested).
+ * Headless mode cannot prompt, so an action with no matching allow rule is
+ * refused and reported in `denied_actions` instead of hanging.
  *
  * The prompt goes in argv as `--print=<prompt>`: the `=` form keeps a prompt
- * starting with "-" from being read as a flag. (The daemon caps the request
- * body, which keeps argv well under the OS limit.) Output is ONE JSON object:
+ * starting with "-" from being read as a flag. Linux caps ONE argument at
+ * 128 KiB (MAX_ARG_STRLEN), so a longer prompt is refused with a clear answer
+ * (AGY_MAX_PROMPT_BYTES) instead of failing to spawn. Output is ONE JSON object:
  * {conversation_id, status, response, duration_seconds, usage, denied_actions?}.
  * agy reports tokens but no cost.
  */
@@ -33,6 +38,9 @@ export const AGY_LOCKED_SETTINGS = JSON.stringify({ permissions: { allow: [], de
  * plain question, gets refused, and returns an empty response.
  */
 export const AGY_TEXT_ONLY = "Answer in text only. Do not run commands, edit files, or write plans or artifacts.";
+
+/** Under Linux's 128 KiB single-argument limit, with room for the instruction. */
+export const AGY_MAX_PROMPT_BYTES = 100_000;
 
 export function agyArgs(prompt: string, resumeSessionId?: string): string[] {
   return [
@@ -85,6 +93,17 @@ export function runAgy(opts: AgentRun & { bin: string }): Promise<AgentResult> {
   const { bin, workdir, prompt, timeoutMs, resumeSessionId, log = () => {} } = opts;
   return new Promise((resolve) => {
     const startedAt = Date.now();
+    const bytes = Buffer.byteLength(prompt, "utf8");
+    if (bytes > AGY_MAX_PROMPT_BYTES) {
+      resolve(
+        failedResult(
+          `❌ Câu hỏi + ngữ cảnh quá dài cho Gemini (${Math.round(bytes / 1024)} KB, tối đa ${AGY_MAX_PROMPT_BYTES / 1000} KB) — rút gọn rồi hỏi lại.`,
+          startedAt,
+          resumeSessionId ?? "",
+        ),
+      );
+      return;
+    }
     const child: ChildProcess = spawn(bin, agyArgs(prompt, resumeSessionId), {
       cwd: workdir,
       detached: true,

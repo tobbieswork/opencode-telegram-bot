@@ -742,9 +742,12 @@ export class Bot {
 
     if (text.startsWith("/")) await this.handleCommand(conv, text, state, uid);
     else if (state.advisor && this.advisor) {
-      // A Claude advisor thread: the user's message is a follow-up question
-      // (resumes the session on the Mac). No OpenCode session is involved here.
-      await this.advisor.followUp(conv, text);
+      // An advisor thread: the user's message is a follow-up question (resumes
+      // the agent session). No OpenCode session is involved. A turn can take
+      // minutes, and updates are handled one at a time — so it runs off the
+      // update loop, tracked so a shutdown drain still waits for it. Errors were
+      // already shown in the topic.
+      this.trackPending(this.advisor.followUp(conv, text).then(() => {}, (e) => warn("advisor follow-up:", (e as Error)?.message)));
     }
     else {
       // (The "🤔 thinking" body-react on the user's message was removed 2026-10-27:
@@ -1566,7 +1569,10 @@ export class Bot {
       case "/btw":
         return cmdBtw(this, conv, state, arg);
       case "/ask":
-        return cmdAsk(this, conv, arg);
+        // An agent turn can take minutes: never hold the update loop on it
+        // (cmdAsk reports its own errors).
+        this.trackPending(cmdAsk(this, conv, arg));
+        return;
       case "/schedule":
         return cmdSchedule(this, conv, arg, state, uid);
       default:

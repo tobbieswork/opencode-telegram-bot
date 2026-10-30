@@ -101,13 +101,24 @@ Hệ khác hoặc chạy tay: `ADVISOR_TOKEN=… ADVISOR_HOST=… npx tsx adviso
 - **Chỉ đọc**:
   - Claude chạy `--permission-mode plan` với allowlist Read/Grep/Glob, không có
     tuỳ chọn nào để nới.
-  - agy không có cờ allowlist, nên khóa 3 lớp: `--mode plan`; `--settings`
-    **thay** quyền của bạn trong lượt chạy đó bằng `allow: []` +
-    `deny: command(*)` (các allow rule bạn dùng khi làm việc tay, như
-    `command(git commit)`, không áp dụng ở đây; `settings.json` của bạn không
-    bị sửa); và `--sandbox`. Chạy headless nên mọi thao tác cần quyền đều bị từ
-    chối thay vì treo — câu trả lời khi đó nói rõ công cụ nào bị chặn.
-- **Đầu vào**: body tối đa 256 KB; `sessionId` chỉ nhận ký tự chữ, số, `-`, `_`.
+  - agy không có cờ allowlist, nên dựa vào các lớp sau (đã thử trên agy 1.4.2
+    với một lệnh được allow rule cho phép, và lệnh đó chạy thật khi không có
+    các lớp này):
+    - `--mode plan`: cùng allow rule đó, plan mode vẫn không chạy lệnh — agent
+      chỉ viết plan;
+    - `--settings` **thay** scope quyền *global* trong lượt chạy đó bằng
+      `allow: []` + `deny: command(*)`. Allow rule global của bạn (như
+      `command(git commit)`) không áp dụng; deny này thắng allow khớp lệnh.
+      `settings.json` của bạn không bị sửa. Scope `project` / `shared` của agy
+      không bị thay — daemon chạy trong thư mục trung lập, và plan mode vẫn áp
+      dụng;
+    - `--sandbox` (chưa thử riêng).
+
+    Chạy headless nên thao tác nào không có allow rule khớp đều bị từ chối
+    thay vì treo — câu trả lời khi đó nói rõ công cụ nào bị chặn.
+- **Đầu vào**: body tối đa 256 KB (với Gemini: câu hỏi + ngữ cảnh tối đa
+  ~100 KB, vì Linux giới hạn một tham số dòng lệnh ở 128 KiB); `sessionId` chỉ
+  nhận ký tự chữ, số, `-`, `_`.
 - **Một lượt mỗi agent mỗi lúc** — resume không bao giờ chạy đua.
 - **Session** xoá khi `/forget` (hub gọi khi `/prune` topic) hoặc sau TTL 24h
   không dùng. Với agy, daemon chỉ xoá khỏi registry — agy giữ hội thoại trong

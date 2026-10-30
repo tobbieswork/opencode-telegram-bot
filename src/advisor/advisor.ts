@@ -25,7 +25,7 @@ import { esc } from "../format.js";
 import { log } from "../logger.js";
 import { AdvisorError, type AdvisorAnswer, type AdvisorEndpoint } from "./advisor-client.js";
 import { askAdvisor, forgetAdvisor } from "./advisor-client.js";
-import { agentLabel, LEGACY_AGENT, type AgentId } from "./agents.js";
+import { agentLabel, LEGACY_AGENT, resolveAgent, type AgentId } from "./agents.js";
 
 /** A client to the advisor daemon — injectable so tests can fake it. */
 export interface AdvisorClient {
@@ -53,6 +53,8 @@ export interface ThreadSummary {
 
 export class Advisor {
   private client: AdvisorClient;
+  /** Threads with a follow-up in flight — a second one would only queue behind it. */
+  private busy = new Set<ConvKey>();
 
   constructor(
     private h: AdvisorHost,
@@ -104,6 +106,14 @@ export class Advisor {
     this.h.startTyping?.(conv);
     try {
       const answer = await this.client.ask({ agent, message: opts.message, context: opts.context });
+      // A daemon from before agents existed ignores `agent` and answers with
+      // Claude — refuse rather than show Claude's answer under another name.
+      const answered = resolveAgent(answer.agent) ?? LEGACY_AGENT;
+      if (answered !== agent) {
+        throw new Error(
+          `daemon trả lời bằng ${agentLabel(answered)} thay vì ${agentLabel(agent)} — daemon bản cũ? Cài lại: advisor-daemon/install.sh`,
+        );
+      }
       const st = this.h.st.get(conv);
       st.advisor = {
         agent,
@@ -154,6 +164,11 @@ export class Advisor {
         capped: true,
       };
     }
+    if (this.busy.has(conv)) {
+      await this.h.sendHtml(conv, `⏳ ${esc(label)} vẫn đang trả lời câu trước — hỏi tiếp sau khi có câu trả lời.`).catch(() => {});
+      throw new Error(`${label} is still answering the previous question in this thread — wait for it.`);
+    }
+    this.busy.add(conv);
     this.h.startTyping?.(conv);
     let answer: AdvisorAnswer;
     try {
@@ -164,6 +179,8 @@ export class Advisor {
       const msg = e instanceof AdvisorError ? e.message : String(e);
       await this.h.sendHtml(conv, `⚠️ Không hỏi được ${esc(label)}: ${esc(msg)}`).catch(() => {});
       throw e;
+    } finally {
+      this.busy.delete(conv);
     }
     const next = {
       ...adv,
