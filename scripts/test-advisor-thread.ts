@@ -2,10 +2,12 @@
  * Unit test for the advisor thread module (src/advisor/advisor.ts) using the REAL
  * StateManager (temp file) + a fake Telegram + a fake client: startThread
  * (topic + fresh session), followUp (--resume), the per-session turn cap,
- * forget, listThreads, startThread failure (topic undone), a Gemini thread
- * (agent kept across follow-ups), a thread saved before agents existed
- * (treated as Claude), an old daemon answering with the wrong agent, a second
- * follow-up while one is in flight, and the /ask argument parser.
+ * a session the daemon's TTL pruned (exists → false: the user is told, a fresh
+ * session answers, turns reset), forget, listThreads, startThread failure
+ * (topic undone), a Gemini thread (agent kept across follow-ups), a thread
+ * saved before agents existed (treated as Claude), an old daemon answering
+ * with the wrong agent, a second follow-up while one is in flight, and the
+ * /ask argument parser.
  *
  * Run:  npx tsx scripts/test-advisor-thread.ts
  */
@@ -65,6 +67,9 @@ async function main(): Promise<void> {
 
   let askCalls: { agent: string; sessionId?: string; message: string; context?: string }[] = [];
   let forgetCalls: string[] = [];
+  const existsCalls: string[] = [];
+  /** The daemon's answer to exists() — false simulates a TTL-pruned session. */
+  let existsReply = true;
   let failNextAsk = false;
   /** When set, the fake daemon answers as this agent (an old daemon says ""). */
   let answerAs: string | undefined;
@@ -83,6 +88,10 @@ async function main(): Promise<void> {
     },
     forget: async (agent: string, sid: string): Promise<void> => {
       forgetCalls.push(`${agent}/${sid}`);
+    },
+    exists: async (agent: string, sid: string): Promise<boolean> => {
+      existsCalls.push(`${agent}/${sid}`);
+      return existsReply;
     },
   };
 
@@ -177,6 +186,29 @@ async function main(): Promise<void> {
     await advisor.followUp(g.conv, "after");
     check("thread accepts follow-ups again once the answer is in", askCalls[askCalls.length - 1].message === "after");
     st.clear(g.conv);
+
+    // 4f) the daemon's TTL pruned the session (exists → false): the user is
+    //     told, a fresh session answers the question, turns reset to 0
+    const expiredConv = convKey(-100, 998);
+    st.set(expiredConv, { advisor: { agent: "claude", title: "hết hạn", sessionId: "dead-sid", turns: 2, lastActive: Date.now(), createdAt: Date.now() } });
+    existsReply = false;
+    const expBefore = askCalls.length;
+    await advisor.followUp(expiredConv, "vẫn nhớ không?");
+    check("pruned: exists checked with the agent + dead id", existsCalls.includes("claude/dead-sid"), JSON.stringify(existsCalls));
+    check(
+      "pruned: the user is told the session expired",
+      sent.some(([c, h]) => c === String(expiredConv) && h.includes("đã hết hạn sau 24h im lặng")),
+      sent.filter(([c]) => c === String(expiredConv)).map(([, h]) => h).join("|"),
+    );
+    check(
+      "pruned: ask called WITHOUT sessionId (fresh start)",
+      askCalls.length === expBefore + 1 && askCalls[expBefore].sessionId === undefined,
+      JSON.stringify(askCalls[expBefore]),
+    );
+    check("pruned: turns reset to 0", st.get(expiredConv).advisor!.turns === 0, JSON.stringify(st.get(expiredConv).advisor));
+    check("pruned: the new sessionId is stored", st.get(expiredConv).advisor!.sessionId === `sid-${askCalls.length}`, JSON.stringify(st.get(expiredConv).advisor));
+    existsReply = true;
+    st.clear(expiredConv);
 
     // 6) startThread failure undoes the topic
     const deletedBefore6 = deleted.length;

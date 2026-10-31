@@ -24,13 +24,15 @@ import { TOPIC_COLORS as COLORS } from "../telegram.js";
 import { esc } from "../format.js";
 import { log } from "../logger.js";
 import { AdvisorError, type AdvisorAnswer, type AdvisorEndpoint } from "./advisor-client.js";
-import { askAdvisor, forgetAdvisor } from "./advisor-client.js";
+import { advisorSessionExists, askAdvisor, forgetAdvisor } from "./advisor-client.js";
 import { agentLabel, LEGACY_AGENT, resolveAgent, type AgentId } from "./agents.js";
 
 /** A client to the advisor daemon — injectable so tests can fake it. */
 export interface AdvisorClient {
   ask(req: { agent: AgentId; sessionId?: string; message: string; context?: string }): Promise<AdvisorAnswer>;
   forget(agent: AgentId, sessionId: string): Promise<void>;
+  /** False only when the daemon definitively says the session is gone. */
+  exists(agent: AgentId, sessionId: string): Promise<boolean>;
 }
 
 /** The narrow slice of the bot the advisor needs. */
@@ -66,6 +68,7 @@ export class Advisor {
       client ?? {
         ask: (r) => askAdvisor(ep, r),
         forget: (agent, sid) => forgetAdvisor(ep, agent, sid),
+        exists: (agent, sid) => advisorSessionExists(ep, agent, sid),
       };
   }
 
@@ -170,9 +173,26 @@ export class Advisor {
     }
     this.busy.add(conv);
     this.h.startTyping?.(conv);
+    // The daemon prunes idle sessions after its TTL while we still hold the
+    // sessionId — resuming a pruned one is CLI-version dependent (a fresh
+    // session or a stuck error). Check first and degrade to a fresh session
+    // transparently, so the question is never dropped.
+    let sessionId = adv.sessionId || undefined;
+    let fresh = false;
+    if (sessionId) {
+      const ex = await this.client.exists(agent, sessionId);
+      if (!ex) {
+        fresh = true;
+        await this.h.sendHtml(
+          conv,
+          "🧠 Session cố vấn (Claude) đã hết hạn sau 24h im lặng — mở session mới, ngữ cảnh các câu trước không còn. Câu trả lời dưới đây là từ session mới:",
+        ).catch(() => {});
+        sessionId = undefined; // drop the dead id → ask() starts a fresh session
+      }
+    }
     let answer: AdvisorAnswer;
     try {
-      answer = await this.client.ask({ agent, sessionId: adv.sessionId || undefined, message });
+      answer = await this.client.ask({ agent, sessionId, message });
     } catch (e) {
       // An offline machine / daemon error should not leave the user hanging:
       // report the reason and keep the thread (the user can retry).
@@ -186,7 +206,8 @@ export class Advisor {
       ...adv,
       agent,
       sessionId: answer.sessionId || adv.sessionId,
-      turns: adv.turns + 1,
+      // A fresh session after an expiry gets the full budget again.
+      turns: fresh ? 0 : adv.turns + 1,
       lastActive: Date.now(),
     };
     this.h.st.set(conv, { ...st, advisor: next });

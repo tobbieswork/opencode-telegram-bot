@@ -38,6 +38,8 @@ export interface AgentAdapter {
   run(opts: AgentRun): Promise<AgentResult>;
   /** Drop the agent's stored session, best-effort. True when something was deleted. */
   forget(sessionId: string): boolean;
+  /** True when the agent's store still has this session (claude: its .jsonl file; agy: always). */
+  exists(sessionId: string): boolean;
 }
 
 /** A failed result with no agent output (spawn error, crash, …). */

@@ -41,6 +41,7 @@ export function claudeAdapter(bin: string, home = process.env.CLAUDE_HOME?.trim(
         return false;
       }
     },
+    exists: (sessionId) => claudeSessionFile(home, sessionId) !== null,
   };
 }
 
