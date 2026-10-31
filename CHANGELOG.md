@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.10.0...opencode-telegram-bot-v1.11.0) (2026-10-31)
+
+
+### Features
+
+* accept document/photo uploads into the session ([2123e2d](https://github.com/tobbieswork/opencode-telegram-bot/commit/2123e2d6d0e08fe9294aa201e6f16a6e59cd5666))
+* accept document/photo uploads into the session (OPENCODE_TG_UPLOADS) ([35bb29e](https://github.com/tobbieswork/opencode-telegram-bot/commit/35bb29e8b026a9f377a967c7257468b4a5c78028))
+
 ## [1.10.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.9.2...opencode-telegram-bot-v1.10.0) (2026-10-31)
 
 
