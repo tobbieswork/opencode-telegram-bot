@@ -138,6 +138,7 @@ async function main(): Promise<void> {
     ADVISOR_AGENTS: "claude,agy",
     MAC_ADVISOR_CLAUDE_BIN: fakeClaude, // the pre-rename name still works
     ADVISOR_AGY_BIN: fakeAgy,
+    CLAUDE_HOME: join(workroot, "claude-home"), // /exists must see a temp home, not ~/.claude
     ADVISOR_PORT: String(PORT),
     ADVISOR_HOST: "127.0.0.1",
     ADVISOR_MAX_TURNS: "2",
@@ -150,6 +151,10 @@ async function main(): Promise<void> {
   const auth = { "content-type": "application/json", authorization: `Bearer ${TOKEN}` };
   const post = async (path: string, body: unknown, headers: Record<string, string> = auth): Promise<{ status: number; json: Record<string, unknown> }> => {
     const r = await fetch(`${base}${path}`, { method: "POST", headers, body: typeof body === "string" ? body : JSON.stringify(body) });
+    return { status: r.status, json: (await r.json().catch(() => ({}))) as Record<string, unknown> };
+  };
+  const get = async (path: string): Promise<{ status: number; json: Record<string, unknown> }> => {
+    const r = await fetch(`${base}${path}`, { headers: auth });
     return { status: r.status, json: (await r.json().catch(() => ({}))) as Record<string, unknown> };
   };
 
@@ -183,6 +188,22 @@ async function main(): Promise<void> {
     check("resume status done", ask2.status === "done");
     check("--resume flag reached claude", existsSync(join(workroot, "work", "resume.marker")));
 
+    // /exists: decided by the session .jsonl on disk — the TTL sweep deletes it
+    const sessionFile = join(workroot, "claude-home", "projects", "-tmp-work", `${sid}.jsonl`);
+    mkdirSync(join(workroot, "claude-home", "projects", "-tmp-work"), { recursive: true });
+    writeFileSync(sessionFile, "{}\n");
+    const ex1 = await get(`/exists?agent=claude&sessionId=${sid}`);
+    check("exists → true while the session file is present", ex1.status === 200 && ex1.json.exists === true, JSON.stringify(ex1));
+    rmSync(sessionFile); // what the TTL sweep does
+    const ex2 = await get(`/exists?agent=claude&sessionId=${sid}`);
+    check("exists → false once the session file is pruned", ex2.status === 200 && ex2.json.exists === false, JSON.stringify(ex2));
+    const exNoAgent = await get(`/exists?sessionId=${sid}`);
+    check("exists without agent uses the registry (claude session)", exNoAgent.json.exists === false, JSON.stringify(exNoAgent));
+    const exBad = await get(`/exists?sessionId=${encodeURIComponent("../../etc/x")}`);
+    check("exists with path-like sessionId → 400", exBad.status === 400, `${exBad.status}`);
+    const exMissing = await get("/exists");
+    check("exists without sessionId → 400", exMissing.status === 400, `${exMissing.status}`);
+
     // legacy session (no agent field) resumes with claude
     const legacy = (await post("/ask", { sessionId: "legacy-sid", message: "old thread" })).json;
     check("legacy session routes to claude", legacy.agent === "claude" && legacy.sessionId === "legacy-sid", JSON.stringify(legacy));
@@ -193,6 +214,8 @@ async function main(): Promise<void> {
     check("agy tokens + duration parsed", g1.tokensIn === 11 && g1.tokensOut === 13 && g1.durationMs === 2250, JSON.stringify(g1));
     const gsid = g1.sessionId as string;
     check("agy returns conversation id", typeof gsid === "string" && gsid.startsWith("c0ffee-"), String(gsid));
+    const exAgy = await get(`/exists?agent=agy&sessionId=${gsid}`);
+    check("agy exists → always true (never file-pruned)", exAgy.status === 200 && exAgy.json.exists === true, JSON.stringify(exAgy));
     let argv = agyArgv(workroot);
     check("agy runs in plan mode", argv.join(" ").includes("--mode plan"), argv.join(" "));
     check("agy runs sandboxed", argv.includes("--sandbox"), argv.join(" "));

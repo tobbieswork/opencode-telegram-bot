@@ -151,8 +151,10 @@ export function runAgy(opts: AgentRun & { bin: string }): Promise<AgentResult> {
 }
 
 /**
- * The agy adapter. forget() only drops the daemon's registry entry: agy keeps
- * conversations in its own store and offers no CLI to delete one.
+ * The agy adapter. forget() only drops the daemon's registry entry and
+ * exists() is always true: agy keeps conversations in its own store and
+ * offers no CLI to inspect or delete one, so the daemon never prunes agy
+ * sessions from under a resume.
  */
 export function agyAdapter(bin: string): AgentAdapter {
   return {
@@ -160,5 +162,6 @@ export function agyAdapter(bin: string): AgentAdapter {
     bin,
     run: (opts) => runAgy({ ...opts, bin }),
     forget: () => false,
+    exists: () => true,
   };
 }

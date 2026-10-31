@@ -19,7 +19,10 @@
  *
  * ONE run per agent at a time (per-agent lock) so a resume can never race.
  * Sessions are tracked on disk and pruned after ADVISOR_TTL_MS idle; /forget
- * drops one immediately (the hub calls it on /prune).
+ * drops one immediately (the hub calls it on /prune). GET /exists?sessionId=
+ * reports whether the agent's store still has a session — the hub checks it
+ * before resuming, since a TTL-pruned Claude session would otherwise be
+ * resumed blindly (fresh session or stuck error, CLI-version dependent).
  *
  * Env names: ADVISOR_*; the older MAC_ADVISOR_* names still work.
  */
@@ -226,6 +229,13 @@ async function handleAsk(body: string): Promise<Record<string, unknown>> {
   };
 }
 
+function handleExists(url: URL): Record<string, unknown> {
+  const id = sessionIdOf(url.searchParams.get("sessionId"));
+  if (!id) throw new HttpError(400, "thiếu 'sessionId'");
+  const adapter = pickAgent(url.searchParams.get("agent"), id);
+  return { exists: adapter.exists(id) };
+}
+
 function handleForget(body: string): Record<string, unknown> {
   const q = parseJson<{ agent?: string; sessionId?: string }>(body);
   const id = sessionIdOf(q.sessionId);
@@ -247,6 +257,9 @@ const server = createServer(async (req, res) => {
     if (!authorized(req)) return send(res, 401, { error: "unauthorized" });
     if (req.method === "POST" && url.pathname === "/ask") {
       return send(res, 200, await handleAsk(await readBody(req)));
+    }
+    if (req.method === "GET" && url.pathname === "/exists") {
+      return send(res, 200, handleExists(url));
     }
     if (req.method === "POST" && url.pathname === "/forget") {
       return send(res, 200, handleForget(await readBody(req)));

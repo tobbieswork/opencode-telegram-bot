@@ -1,16 +1,17 @@
 /**
  * Unit test for the hub advisor client (src/advisor/advisor-client.ts) against a
  * fake advisor HTTP server: /ask (new + resume, agent passed through),
- * /forget, /health (agents, old daemons), the "offline" path when nothing is
- * listening, "timeout" when the daemon is reached but slow, and the daemon's
- * JSON error surfacing in an "http" error.
+ * /forget, /exists (true/false passthrough, "unknown" → true when the daemon
+ * is offline or has no /exists yet), /health (agents, old daemons), the
+ * "offline" path when nothing is listening, "timeout" when the daemon is
+ * reached but slow, and the daemon's JSON error surfacing in an "http" error.
  *
  * Run:  npx tsx scripts/test-advisor-client.ts
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { askAdvisor, forgetAdvisor, advisorHealth, AdvisorError } from "../src/advisor/advisor-client.js";
+import { askAdvisor, forgetAdvisor, advisorSessionExists, advisorHealth, AdvisorError } from "../src/advisor/advisor-client.js";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 void REPO;
@@ -29,6 +30,13 @@ interface Seen {
   body: string;
 }
 const seen: Seen = { auth: "", body: "" };
+interface SeenExists {
+  agent: string;
+  sessionId: string;
+}
+const seenExists: SeenExists = { agent: "", sessionId: "" };
+let existsRoute = true;
+let existsReply = true;
 
 function startFake(): Promise<{ base: string; close: () => Promise<void> }> {
   return new Promise((resolve) => {
@@ -64,6 +72,12 @@ function startFake(): Promise<{ base: string; close: () => Promise<void> }> {
           });
         }
         if (url.pathname === "/forget") return send(200, { ok: true });
+        if (url.pathname === "/exists") {
+          if (!existsRoute) return send(404, { error: "nf" }); // a daemon from before /exists
+          seenExists.agent = url.searchParams.get("agent") ?? "";
+          seenExists.sessionId = url.searchParams.get("sessionId") ?? "";
+          return send(200, { exists: existsReply });
+        }
         return send(404, { error: "nf" });
       });
     });
@@ -108,6 +122,20 @@ async function main(): Promise<void> {
     await forgetAdvisor(ep, "agy", "new-sid");
     check("forget → sessionId in body", JSON.parse(seen.body).sessionId === "new-sid", seen.body);
     check("forget → agent in body", JSON.parse(seen.body).agent === "agy", seen.body);
+
+    // exists: passthrough, and "unknown" (offline / old daemon) degrades to true
+    check("exists → true when the daemon says so", (await advisorSessionExists(ep, "claude", "new-sid")) === true);
+    check("exists passes agent + sessionId", seenExists.agent === "claude" && seenExists.sessionId === "new-sid", JSON.stringify(seenExists));
+    existsReply = false;
+    check("exists → false when the daemon says so", (await advisorSessionExists(ep, "claude", "new-sid")) === false);
+    existsReply = true;
+    existsRoute = false;
+    check("exists on an old daemon (404) → true (resume as before)", (await advisorSessionExists(ep, "claude", "new-sid")) === true);
+    existsRoute = true;
+    check(
+      "exists offline → true, no throw",
+      (await advisorSessionExists({ url: "http://127.0.0.1:1", token: "t" }, "claude", "new-sid", 800)) === true,
+    );
 
     // the daemon's JSON error reaches the message
     let httpErr: unknown = null;

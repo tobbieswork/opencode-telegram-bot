@@ -121,6 +121,31 @@ export async function forgetAdvisor(ep: AdvisorEndpoint, agent: AgentId, session
   await call(ep, "/forget", { method: "POST", body: JSON.stringify({ agent, sessionId }) }, timeoutMs);
 }
 
+/**
+ * Whether the daemon's agent store still has the session. False ONLY on a
+ * definitive `exists: false` — offline / timeout / HTTP error (including an
+ * older daemon that has no /exists) is "unknown" and degrades to true, so an
+ * offline Mac keeps the existing path: the later /ask then reports offline.
+ */
+export async function advisorSessionExists(
+  ep: AdvisorEndpoint,
+  agent: AgentId,
+  sessionId: string,
+  timeoutMs = 5_000,
+): Promise<boolean> {
+  try {
+    const raw = (await call(
+      ep,
+      `/exists?agent=${encodeURIComponent(agent)}&sessionId=${encodeURIComponent(sessionId)}`,
+      { method: "GET" },
+      timeoutMs,
+    )) as Record<string, unknown>;
+    return raw.exists !== false;
+  } catch {
+    return true;
+  }
+}
+
 /** Liveness probe. Returns null when the daemon is unreachable. */
 export async function advisorHealth(
   ep: AdvisorEndpoint,
