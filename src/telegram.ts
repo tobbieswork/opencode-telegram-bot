@@ -1,4 +1,5 @@
 import { exec as execCb } from "node:child_process";
+import { createWriteStream, unlinkSync } from "node:fs";
 import { log, warn, error } from "./logger.js";
 import { ConvKey, parseConv } from "./conv.js";
 import {
@@ -33,6 +34,7 @@ export type Message = {
   audio?: Record<string, unknown>;
   document?: Record<string, unknown>;
   animation?: Record<string, unknown>;
+  video_note?: Record<string, unknown>;
 };
 
 export type CallbackQuery = {
@@ -232,6 +234,59 @@ export class Telegram {
   /** `has_topics_enabled` tells whether this bot has topic mode in private chats. */
   getMe(): Promise<{ id: number; username?: string; first_name?: string; has_topics_enabled?: boolean }> {
     return this.api("getMe");
+  }
+
+  /** Resolve a file_id (document/photo/…) to a short-lived path on Telegram's servers. */
+  async getFile(fileId: string): Promise<{ file_path: string; file_size?: number }> {
+    return this.api("getFile", { file_id: fileId });
+  }
+
+  /**
+   * Stream a Bot API file (`https://api.telegram.org/file/bot<token>/<filePath>`,
+   * a path from getFile) to disk. Guards: the body is aborted and the partial
+   * file removed when it exceeds `maxBytes`; the whole transfer is capped at
+   * `timeoutMs`. Returns the number of bytes actually written.
+   */
+  async downloadFile(
+    filePath: string,
+    dest: string,
+    opts: { maxBytes: number; timeoutMs: number },
+  ): Promise<number> {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), opts.timeoutMs);
+    const out = createWriteStream(dest, { mode: 0o644 });
+    let bytes = 0;
+    try {
+      const res = await fetch(`https://api.telegram.org/file/bot${this.token}/${filePath}`, {
+        signal: ac.signal,
+      });
+      if (!res.ok || !res.body) throw new Error(`download failed: HTTP ${res.status}`);
+      for await (const chunk of res.body) {
+        const c = chunk as Uint8Array;
+        bytes += c.byteLength;
+        if (bytes > opts.maxBytes) {
+          ac.abort();
+          throw new Error(`download aborted: exceeds ${opts.maxBytes} bytes`);
+        }
+        if (!out.write(c)) await new Promise<void>((r) => out.once("drain", r));
+      }
+      await new Promise<void>((resolveP, reject) => {
+        out.once("error", reject);
+        out.end(resolveP);
+      });
+      return bytes;
+    } catch (e) {
+      // A partial file is useless — remove it, then surface the error.
+      try {
+        unlinkSync(dest);
+      } catch {
+        /* may not exist yet */
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+      out.destroy();
+    }
   }
 
   /** Register the /command autocomplete menu shown while the user types "/". */

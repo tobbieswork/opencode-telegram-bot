@@ -13,6 +13,15 @@ import { ScheduleStore, Scheduler } from "./scheduler.js";
 import { isUserAllowed } from "./schedule.js";
 import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, formatTurnFailure } from "./format.js";
+import {
+  extractMedia,
+  buildPromptText,
+  sanitizeFileName,
+  downloadToFile,
+  humanBytes,
+  ensureUploadDir,
+  type UploadMedia,
+} from "./uploads.js";
 import { richMarkdownChunks } from "./rich.js";
 import { scheduleForRegistration, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
 import {
@@ -290,6 +299,14 @@ export class Bot {
   private lastActiveConv?: ConvKey;
   /** Reaction UX: index keys already logged as "not indexed", so a reaction storm doesn't spam the log. */
   private missingIdxLogged = new Set<string>();
+  /**
+   * Upload dedupe by file_id: an edited_message (the user edited a caption)
+   * re-sends the SAME file, so a hit reuses the saved path — no re-download,
+   * no second "Đã lưu". In-memory, capped at 200 (oldest evicted). After a
+   * restart the same file_id is re-downloaded once (harmless; the name gets a
+   * -1 suffix on collision).
+   */
+  private uploadedFiles = new Map<string, { path: string; name: string; size?: number }>();
 
   /** Worker topics + the Manager agent (multi-session layer). */
   public orch: Orchestrator;
@@ -728,6 +745,20 @@ export class Bot {
     const uid = msg.from?.id as number | undefined;
     // A media caption counts as text: it goes through the same dispatch as a plain message.
     const text = (msg.text ?? msg.caption ?? "").trim();
+    // document/photo upload (gate OPENCODE_TG_UPLOADS, default OFF): save the
+    // file and append its path to the prompt. Gate OFF → media is null →
+    // byte-identical to the old paths below. A caption starting with "/" is a
+    // command: the file is dropped and the caption dispatches exactly like
+    // today (logged).
+    const media = this.cfg.uploads ? extractMedia(msg) : null;
+    if (media) {
+      if (text.startsWith("/")) {
+        log(`Media with command caption from uid=${uid} chat=${conv} — file dropped, caption dispatched as command`);
+      } else {
+        await this.handleMediaMessage(conv, uid, msg, text, media);
+        return;
+      }
+    }
     if (!text) {
       // A media-only message (sticker/photo/voice/…): acknowledge instead of
       // dropping it silently. Strangers are still ignored, as before.
@@ -1134,6 +1165,80 @@ export class Bot {
     if (entry.purpose !== "worker-done") return;
     const workerConv = (entry.workerConv ?? entry.conv) as ConvKey;
     this.orch.rejectWorkerReport(workerConv);
+  }
+
+  /**
+   * A document/photo from an allowlisted user (gate OPENCODE_TG_UPLOADS): save
+   * it under data/uploads/<convSafe>/, then dispatch caption + file line (or
+   * the default instruction when there is no caption). Runs BEFORE the
+   * busy/in-flight check (that happens inside runPrompt/promptManager), so the
+   * file is saved even when the conv is busy — the busy note then carries the
+   * file line. Strangers never trigger a download (allowed() first, no reply).
+   */
+  private async handleMediaMessage(
+    conv: ConvKey,
+    uid: number | undefined,
+    msg: Message,
+    text: string,
+    media: UploadMedia,
+  ): Promise<void> {
+    if (!this.allowed(uid)) {
+      log(`Denied media from uid=${uid} chat=${conv}`);
+      return;
+    }
+    const state = this.st.get(conv);
+    if (state.advisor) {
+      // Advisor threads are context-only (no filesystem) — keep the current decline.
+      await this.noteNonText(conv, msg);
+      return;
+    }
+    if (media.fileSize && media.fileSize > this.cfg.uploadMaxBytes) {
+      await this.tg
+        .sendMessage(
+          conv,
+          `⚠️ File quá lớn: ${humanBytes(media.fileSize)} (giới hạn ${Math.round(this.cfg.uploadMaxBytes / (1024 * 1024))}MB).`,
+        )
+        .catch(() => {});
+      return;
+    }
+    // Same pre-dispatch bookkeeping as the plain-text path.
+    this.lastActiveConv = chatOf(conv);
+    if (!state.directory) {
+      const top = this.st.peek(chatOf(conv));
+      state.directory = top && !top.manager && top.directory ? top.directory : this.cfg.opencodeDirectory;
+    }
+    // Dedupe by file_id (edited_message re-sends the same file): hit → reuse
+    // the saved path, no re-download and no second "Đã lưu".
+    let saved = this.uploadedFiles.get(media.fileId);
+    if (!saved) {
+      const dir = ensureUploadDir(dirname(this.cfg.stateFile), conv);
+      const name = sanitizeFileName(media.fileName, media.kind, Date.now(), (p) => existsSync(join(dir, p)));
+      const absPath = join(dir, name);
+      try {
+        const { bytes } = await downloadToFile(this.tg, media, absPath, {
+          maxBytes: this.cfg.uploadMaxBytes,
+          timeoutMs: 30_000,
+        });
+        saved = { path: absPath, name, size: bytes };
+        if (this.uploadedFiles.size >= 200) {
+          const oldest = this.uploadedFiles.keys().next().value;
+          if (oldest !== undefined) this.uploadedFiles.delete(oldest);
+        }
+        this.uploadedFiles.set(media.fileId, saved);
+        await this.tg.sendMessage(conv, `📎 Đã lưu ${esc(name)} (${humanBytes(bytes)}).`).catch(() => {});
+      } catch (e) {
+        warn(`upload from uid=${uid} chat=${conv} failed: ${(e as Error)?.message ?? e}`);
+        await this.tg.sendMessage(conv, "⚠️ Không tải được file — thử lại sau.").catch(() => {});
+        return;
+      }
+    }
+    const text2 = buildPromptText(text || undefined, { absPath: saved.path, name: saved.name, size: saved.size });
+    if (msg.message_id) this.indexUserMessage(conv, msg.message_id, text2);
+    // Dispatch — identical to the plain-text path (the busy check happens
+    // inside, AFTER the file is already saved).
+    if (await this.handleFormText(conv, text2)) return;
+    else if (state.manager) await this.orch.promptManager(conv, text2, msg.message_id);
+    else await this.runPrompt(conv, text2, state, msg.message_id);
   }
 
   /** A media message with no text/caption — acknowledge it; the bot reads text only. */

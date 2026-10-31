@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { loadDotEnv, loadConfig } from "./config.js";
+import { sweepUploads, UPLOADS_MAX_TOTAL_BYTES } from "./uploads.js";
 import { OpenCodeCtl } from "./opencode.js";
 import { Telegram } from "./telegram.js";
 import { StateManager } from "./state.js";
@@ -37,6 +38,13 @@ async function main(): Promise<void> {
   log(`State file: ${cfg.stateFile}`);
 
   const st = new StateManager(cfg.stateFile);
+  // Sweep stale uploads (TTL + 500 MB cap) — data/uploads is bot-owned, never
+  // part of a user repo (see src/uploads.ts). One log line per startup.
+  const sweep = sweepUploads(join(dirname(cfg.stateFile), "uploads"), Date.now(), {
+    ttlMs: cfg.uploadTtlDays * 86_400_000,
+    maxBytes: UPLOADS_MAX_TOTAL_BYTES,
+  });
+  log(`uploads sweep: deleted ${sweep.files} files (${(sweep.bytes / 1024 / 1024).toFixed(1)} MB)`);
   const bot = new Bot(tg, oc, st, cfg);
   bot.start(); // relay OpenCode question forms to Telegram
   // Recover any reply a previous (crashed/restarted) process produced but never

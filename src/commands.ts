@@ -119,6 +119,7 @@ export function helpText(): string {
   const parts: string[] = [
     "<b>🤖 OpenCode Remote</b>",
     "Gửi tin nhắn cho tôi — tôi chạy bằng OpenCode và trả kết quả.",
+    "📎 Gửi file (ảnh, PDF, code, zip ≤ 20MB) — kèm caption = chỉ dẫn.",
     "",
   ];
   for (const g of CMD_GROUPS) {
