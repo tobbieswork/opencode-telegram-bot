@@ -243,6 +243,8 @@ export class Bot {
   private rotationTimer?: ReturnType<typeof setInterval>;
   /** True while a PR-watch tick is running, so a slow tick can't overlap the next. */
   private prWatchBusy = false;
+  /** Re-entrancy guard for the 10-min rotation tick, keyed by conv (mirrors prWatchBusy). */
+  private rotationTickInFlight = new Set<ConvKey>();
   /** A reboot is already armed (token minted, timer pending) — ignores a double-tap on "Xác nhận". */
   private rebootArmed = false;
   /** Sessions from which we already stripped the language instruction this process (when the toggle is off), so we don't call removeInstruction every prompt. */
@@ -1938,40 +1940,49 @@ export class Bot {
     if (this.draining) return;
     const state = this.st.peek(conv);
     if (!state?.manager || !state.sessionID) return;
-    const floor = await this.managerFloor(state.sessionID).catch(() => 0);
-    const floorK = floor / 1000;
-    // Part 1 (rotation tracking): record this tick's floor into the 7-day trend
-    // (daily min/max) and refresh the machine-wide durability snapshot. Best-
-    // effort — a tracking failure must never break the rotation gate below.
+    // Re-entrancy guard: an auto-rotation tick can run longer than the 10-min
+    // interval (doManagerRotation does an LLM handoff + session creation), so
+    // skip if this conv's previous tick is still in flight (mirrors prWatchBusy).
+    if (this.rotationTickInFlight.has(conv)) return;
+    this.rotationTickInFlight.add(conv);
     try {
-      this.st.set(conv, { floorTrend: upsertFloorTrend(this.st.peek(conv)?.floorTrend, dayKey(Date.now()), floorK) });
-      this.writeRotationSnapshot(conv, floorK);
-    } catch (e) {
-      warn("rotation tracking:", (e as Error)?.message);
-    }
-    const action = rotationGate({
-      floorK,
-      // Busy = an in-band turn (inflight) OR an OUT-OF-BAND manager turn (a
-      // schedule task / background wake on the manager session) tracked only in
-      // orch.managerInflight. Matches the shutdown drain's authoritative check
-      // (isBusy below); omitting it could rotate mid-turn and interrupt it.
-      busy: this.inflight.has(conv) || this.orch.managerInflight,
-      nowMs: Date.now(),
-      lastRotationMs: state.lastRotationMs,
-      lastRotationPromptMs: state.lastRotationPromptMs,
-      autoFloorK: this.cfg.rotationAutoFloorK,
-      confirmFloorK: this.cfg.rotationConfirmFloorK,
-      minIntervalMs: this.cfg.rotationMinIntervalMs,
-      confirmRepromptMs: this.cfg.rotationConfirmRepromptMs,
-    });
-    if (action === "auto") {
-      await this.doManagerRotation(conv, "auto", floorK);
-    } else if (action === "confirm") {
-      // Throttle the re-prompt (the gate already checked, but stamp here so a
-      // confirm is never re-offered more often than the interval, even if the
-      // floor is still high on the very next tick).
-      this.st.set(conv, { lastRotationPromptMs: Date.now() });
-      await this.sendRotationConfirm(conv, floorK);
+      const floor = await this.managerFloor(state.sessionID).catch(() => 0);
+      const floorK = floor / 1000;
+      // Part 1 (rotation tracking): record this tick's floor into the 7-day trend
+      // (daily min/max) and refresh the machine-wide durability snapshot. Best-
+      // effort — a tracking failure must never break the rotation gate below.
+      try {
+        this.st.set(conv, { floorTrend: upsertFloorTrend(this.st.peek(conv)?.floorTrend, dayKey(Date.now()), floorK) });
+        this.writeRotationSnapshot(conv, floorK);
+      } catch (e) {
+        warn("rotation tracking:", (e as Error)?.message);
+      }
+      const action = rotationGate({
+        floorK,
+        // Busy = an in-band turn (inflight) OR an OUT-OF-BAND manager turn (a
+        // schedule task / background wake on the manager session) tracked only in
+        // orch.managerInflight. Matches the shutdown drain's authoritative check
+        // (isBusy below); omitting it could rotate mid-turn and interrupt it.
+        busy: this.inflight.has(conv) || this.orch.managerInflight,
+        nowMs: Date.now(),
+        lastRotationMs: state.lastRotationMs,
+        lastRotationPromptMs: state.lastRotationPromptMs,
+        autoFloorK: this.cfg.rotationAutoFloorK,
+        confirmFloorK: this.cfg.rotationConfirmFloorK,
+        minIntervalMs: this.cfg.rotationMinIntervalMs,
+        confirmRepromptMs: this.cfg.rotationConfirmRepromptMs,
+      });
+      if (action === "auto") {
+        await this.doManagerRotation(conv, "auto", floorK);
+      } else if (action === "confirm") {
+        // Throttle the re-prompt (the gate already checked, but stamp here so a
+        // confirm is never re-offered more often than the interval, even if the
+        // floor is still high on the very next tick).
+        this.st.set(conv, { lastRotationPromptMs: Date.now() });
+        await this.sendRotationConfirm(conv, floorK);
+      }
+    } finally {
+      this.rotationTickInFlight.delete(conv);
     }
   }
 
