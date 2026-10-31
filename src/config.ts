@@ -99,6 +99,16 @@ export interface Config {
    * (the ephemeral draft is wiped when the real reply is sent). Default OFF.
    */
   stream: boolean;
+  /**
+   * Accept document/photo uploads: save them under data/uploads/<conv>/ and
+   * attach their path to the prompt. Default OFF; enable with
+   * OPENCODE_TG_UPLOADS=1. When off the bot behaves exactly as before.
+   */
+  uploads: boolean;
+  /** Per-file upload cap, bytes (the Bot API ceiling is 20 MB). */
+  uploadMaxBytes: number;
+  /** How long an uploaded file may live before the startup sweep removes it, days. */
+  uploadTtlDays: number;
   /** /usage: percentage of the context window at/above which a session is flagged with a warning mark. */
   usageWarnPct: number;
   /** /usage: maximum number of per-session rows to render (the rest are counted, not listed). */
@@ -232,6 +242,11 @@ export function loadConfig(root: string): Config {
     richReplies: process.env.OPENCODE_TG_RICH === "1" || process.env.OPENCODE_TG_RICH === "true",
     // Default OFF: only an explicit "1"/"true" enables live streaming drafts.
     stream: process.env.OPENCODE_TG_STREAM === "1" || process.env.OPENCODE_TG_STREAM === "true",
+    // Default OFF: only an explicit "1"/"true" accepts document/photo uploads.
+    uploads: process.env.OPENCODE_TG_UPLOADS === "1" || process.env.OPENCODE_TG_UPLOADS === "true",
+    // Per-file cap in MB (Bot API ceiling 20) → bytes; TTL in days.
+    uploadMaxBytes: parseIntSetting("OPENCODE_TG_UPLOAD_MAX_MB", 20, 1) * 1024 * 1024,
+    uploadTtlDays: parseIntSetting("OPENCODE_TG_UPLOAD_TTL_DAYS", 7, 1),
     usageWarnPct: parseIntSetting("OPENCODE_TG_USAGE_WARN_PCT", 80, 1),
     usageMaxRows: parseIntSetting("OPENCODE_TG_USAGE_MAX_ROWS", 10, 1),
     usageActiveHours: parseIntSetting("OPENCODE_TG_USAGE_ACTIVE_HOURS", 24, 1),
