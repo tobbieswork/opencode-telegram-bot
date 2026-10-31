@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.10.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.9.2...opencode-telegram-bot-v1.10.0) (2026-10-31)
+
+
+### Features
+
+* check advisor session exists before resume ([#100](https://github.com/tobbieswork/opencode-telegram-bot/issues/100)) ([769d502](https://github.com/tobbieswork/opencode-telegram-bot/commit/769d50215d13f2673f26d84b15d46f5cf7b3780e))
+* **new:** /new shows a 3-button card, drop the --keep flag ([#99](https://github.com/tobbieswork/opencode-telegram-bot/issues/99)) ([bb263c5](https://github.com/tobbieswork/opencode-telegram-bot/commit/bb263c54ed3df54fd85779d05b43b8ab7a174100))
+
 ## [1.9.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.9.1...opencode-telegram-bot-v1.9.2) (2026-10-31)
 
 
