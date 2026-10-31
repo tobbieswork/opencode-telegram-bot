@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.9.1...opencode-telegram-bot-v1.9.2) (2026-10-31)
+
+
+### Bug Fixes
+
+* **rotation:** guard the 10-min tick against re-entrancy ([#97](https://github.com/tobbieswork/opencode-telegram-bot/issues/97)) ([703489f](https://github.com/tobbieswork/opencode-telegram-bot/commit/703489fcd3d7e26e23c654e038ca2b543717c413))
+
 ## [1.9.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.9.0...opencode-telegram-bot-v1.9.1) (2026-10-30)
 
 
