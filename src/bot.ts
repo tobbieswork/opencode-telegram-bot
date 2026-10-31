@@ -89,7 +89,7 @@ const MODEL_PAGE_SIZE = 10;
 
 /** Key under which the per-session language instruction is stored (namespaced `api/<key>`). */
 const LANGUAGE_INSTRUCTION_KEY = "tgbot.language";
-/** Instruction key for /new --keep carry-over (recent-thread summary injected into the fresh session). */
+/** Instruction key for the /new "Clear + keep context" carry-over (recent-thread summary injected into the fresh session). */
 const CARRYOVER_KEY = "tgbot.carryover";
 /** Injected per-session so the model keeps the user's language and does not leak CJK. */
 const LANGUAGE_INSTRUCTION =
@@ -1542,7 +1542,7 @@ export class Bot {
       case "/help":
         return cmdHelp(this, conv);
       case "/new":
-        return this.cmdNew(conv, state, /--keep\b/i.test(arg));
+        return this.cmdNew(conv);
       case "/ls":
       case "/sessions":
         return this.cmdList(conv);
@@ -1867,26 +1867,21 @@ export class Bot {
     void this.tg.setMyCommands(myCommands()).catch((e) => warn("setMyCommands:", e?.message));
   }
 
-  private async cmdNew(conv: ConvKey, state: ChatState, keep = false): Promise<void> {
-    if (keep) {
-      await this.doNewSession(conv, state, true);
-      return;
-    }
-    // Destructive (wipes the current context) — two-step confirm by button,
-    // like /reboot. A mistyped fast /new just shows this card instead of
-    // nuking the session; /new --keep skips confirm because it preserves the
-    // recent thread.
+  private async cmdNew(conv: ConvKey): Promise<void> {
+    // Destructive — a fast mistyped /new just shows this card instead of nuking
+    // the session. Three choices: clear (drop context), clear + keep the recent
+    // context, or cancel. (The old /new --keep flag was removed; "keep" is now
+    // a button.)
     const kb: Keyboard = {
       inline_keyboard: [
-        [
-          { text: "🆕 Xác nhận — tạo phiên mới", callback_data: "nw:cf" },
-          { text: "↩️ Huỷ", callback_data: "nw:cx" },
-        ],
+        [{ text: "🗑️ Clear", callback_data: "nw:clear" }],
+        [{ text: "💾 Clear + giữ ngữ cảnh", callback_data: "nw:keep" }],
+        [{ text: "↩️ Huỷ", callback_data: "nw:cancel" }],
       ],
     };
     await this.tg.sendMessage(
       conv,
-      `⚠️ <b>/new</b> xoá ngữ cảnh hiện tại.\nBấm nút để xác nhận — hoặc gõ <code>/new --keep</code> nếu muốn giữ mạch hội thoại.`,
+      "⚠️ <b>/new</b> — chọn cách tạo phiên mới:",
       { reply_markup: kb },
     );
   }
@@ -2140,7 +2135,7 @@ export class Bot {
     await this.doManagerRotation(conv, "confirm", floor / 1000);
   }
 
-  /** Actually create the fresh session (cmdNew --keep, or the nw:cf confirm button). */
+  /** Actually create the fresh session (from the /new card's Clear / Clear+keep buttons). */
   private async doNewSession(conv: ConvKey, state: ChatState, keep: boolean): Promise<void> {
     // --keep: capture a short handoff summary of the CURRENT session before
     // replacing it, then inject it into the fresh session's context so the new
@@ -2177,20 +2172,30 @@ export class Bot {
     );
   }
 
-  /** nw:cf / nw:cx — confirm or cancel a bare /new (see cmdNew). */
+  /** nw:clear / nw:keep / nw:cancel — the bare /new card (see cmdNew). Each
+   *  settles the card in place: removes its buttons (empty inline_keyboard) and
+   *  updates the message, so it can't be tapped twice. */
   private async handleNewConfirmCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
     const op = (cb.data ?? "").split(":")[1];
-    if (op !== "cf") {
-      await this.tg.answerCallbackQuery(cb.id, "↩️ Đã huỷ");
-      if (messageId) {
-        await this.tg
-          .editMessageText(conv, messageId, "↩️ Đã huỷ — phiên cũ vẫn nguyên vẹn.", { reply_markup: { inline_keyboard: [] } })
-          .catch(() => {});
-      }
+    const settle = (text: string) =>
+      messageId
+        ? this.tg.editMessageText(conv, messageId, text, { reply_markup: { inline_keyboard: [] } }).catch(() => {})
+        : Promise.resolve();
+    if (op === "clear") {
+      await this.tg.answerCallbackQuery(cb.id, "🗑️ Đang tạo phiên mới…");
+      await settle("🗑️ Đã chọn: Clear");
+      await this.doNewSession(conv, this.st.get(conv), false); // fresh state at confirm time
       return;
     }
-    await this.tg.answerCallbackQuery(cb.id, "🆕 Đang tạo phiên mới…");
-    await this.doNewSession(conv, this.st.get(conv), false); // fresh state at confirm time
+    if (op === "keep") {
+      await this.tg.answerCallbackQuery(cb.id, "💾 Đang tạo phiên mới…");
+      await settle("💾 Đã chọn: Clear + giữ ngữ cảnh");
+      await this.doNewSession(conv, this.st.get(conv), true);
+      return;
+    }
+    // nw:cancel (or any unknown op) — keep the current session, just settle the card.
+    await this.tg.answerCallbackQuery(cb.id, "↩️ Đã huỷ");
+    await settle("↩️ Đã huỷ — phiên cũ vẫn nguyên vẹn.");
   }
 
   /**
@@ -2619,7 +2624,7 @@ export class Bot {
     try {
       switch (name) {
         case "new":
-          await this.cmdNew(conv, state);
+          await this.cmdNew(conv);
           break;
         case "ls":
           await this.cmdList(conv);
