@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.12.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.11.1...opencode-telegram-bot-v1.12.0) (2026-11-02)
+
+
+### Features
+
+* deep-link button to worker forum topic on spawn ([becb883](https://github.com/tobbieswork/opencode-telegram-bot/commit/becb8833e2ac3ec88775a826e7a760225a2814c1))
+* deep-link button to worker forum topic on spawn ([58cff64](https://github.com/tobbieswork/opencode-telegram-bot/commit/58cff64161f3f9475d983da54a74aa44046ff01f))
+
 ## [1.11.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.11.0...opencode-telegram-bot-v1.11.1) (2026-11-02)
 
 
