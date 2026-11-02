@@ -1995,10 +1995,23 @@ export class Bot {
    * M1 — the manager session's FLOOR: the MIN sent-context (input + cache.read)
    * across its assistant messages from the last 24h. 0 when there are none (a
    * fresh session). Drives the auto-rotation trigger and the /status floor line.
-   * Never throws — a read failure just reports no floor (0).
+   * Never throws — a read failure reports null (the caller decides: the
+   * rotation tick skips the gate and writes a "not measured" snapshot; display
+   * paths coalesce to 0).
+   *
+   * NOTE: the service caps `limit` at 200 — 700 was rejected by the schema and
+   * silently produced floor=0 on every tick (root-caused 2026-11-01).
    */
-  async managerFloor(sessionID: string, now = Date.now()): Promise<number> {
-    const msgs = (await this.oc.listMessages(sessionID, 700).catch(() => [] as any[])) as any[];
+  async managerFloor(sessionID: string, now = Date.now()): Promise<number | null> {
+    let msgs: any[];
+    try {
+      msgs = await this.oc.listMessages(sessionID, 200);
+    } catch (e) {
+      warn("managerFloor listMessages:", (e as Error)?.message ?? e);
+      return null;
+    }
+    // Healthy read, no messages = a fresh session (no floor yet — 0, not null).
+    if (msgs.length === 0) return 0;
     return managerFloorFromMessages(msgs, now);
   }
 
@@ -2046,17 +2059,22 @@ export class Bot {
     if (this.rotationTickInFlight.has(conv)) return;
     this.rotationTickInFlight.add(conv);
     try {
-      const floor = await this.managerFloor(state.sessionID).catch(() => 0);
-      const floorK = floor / 1000;
+      const floor = await this.managerFloor(state.sessionID);
       // Part 1 (rotation tracking): record this tick's floor into the 7-day trend
       // (daily min/max) and refresh the machine-wide durability snapshot. Best-
-      // effort — a tracking failure must never break the rotation gate below.
+      // effort — a tracking failure must never break the rotation gate below. A
+      // FAILED measurement (null) writes a "not measured" snapshot and skips the
+      // trend upsert (a 0 must not pollute the 7-day trend) and the gate.
       try {
-        this.st.set(conv, { floorTrend: upsertFloorTrend(this.st.peek(conv)?.floorTrend, dayKey(Date.now()), floorK) });
-        this.writeRotationSnapshot(conv, floorK);
+        if (floor !== null) {
+          this.st.set(conv, { floorTrend: upsertFloorTrend(this.st.peek(conv)?.floorTrend, dayKey(Date.now()), floor / 1000) });
+        }
+        this.writeRotationSnapshot(conv, floor === null ? null : floor / 1000);
       } catch (e) {
         warn("rotation tracking:", (e as Error)?.message);
       }
+      if (floor === null) return; // measurement failed — no gate decision this tick
+      const floorK = floor / 1000;
       const action = rotationGate({
         floorK,
         // Busy = an in-band turn (inflight) OR an OUT-OF-BAND manager turn (a
@@ -2118,7 +2136,7 @@ export class Bot {
       // Part 1 (rotation tracking): record this SUCCESSFUL attempt + the fresh
       // session's (best-effort) post-rotation floor. A brand-new session has no
       // assistant messages yet, so its floor reads 0 — the honest value.
-      const newFloorK = Math.round((await this.managerFloor(sessionID).catch(() => 0)) / 1000);
+      const newFloorK = Math.round(((await this.managerFloor(sessionID)) ?? 0) / 1000);
       const cur = this.st.get(conv);
       const nextHistory = appendRotationHistory(cur.rotationHistory, { at: now, floorK: Math.round(floorK), tier: mode, outcome: "success", newFloorK });
       this.st.set(conv, {
@@ -2236,7 +2254,7 @@ export class Bot {
       return;
     }
     await this.tg.answerCallbackQuery(cb.id, "🔄 Đang xoay…");
-    const floor = await this.managerFloor(sid).catch(() => 0);
+    const floor = (await this.managerFloor(sid)) ?? 0;
     await this.doManagerRotation(conv, "confirm", floor / 1000);
   }
 

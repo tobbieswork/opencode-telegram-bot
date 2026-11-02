@@ -254,7 +254,16 @@ export class Telegram {
   ): Promise<number> {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), opts.timeoutMs);
-    const out = createWriteStream(dest, { mode: 0o644 });
+    const out = createWriteStream(dest, { mode: 0o600 });
+    // A write-stream error during the loop (e.g. ENOSPC — disk full) must not
+    // become an unhandled 'error' event (that would CRASH the process) and the
+    // drain wait below must not hang forever if drain never comes after an
+    // error. Capture the first write error; the loop and drain waits react to
+    // it, the catch below cleans up the partial file and rethrows.
+    let writeError: Error | null = null;
+    out.on("error", (e) => {
+      if (!writeError) writeError = e;
+    });
     let bytes = 0;
     try {
       const res = await fetch(`https://api.telegram.org/file/bot${this.token}/${filePath}`, {
@@ -262,14 +271,25 @@ export class Telegram {
       });
       if (!res.ok || !res.body) throw new Error(`download failed: HTTP ${res.status}`);
       for await (const chunk of res.body) {
+        if (writeError) break; // break cancels the response stream
         const c = chunk as Uint8Array;
         bytes += c.byteLength;
         if (bytes > opts.maxBytes) {
           ac.abort();
           throw new Error(`download aborted: exceeds ${opts.maxBytes} bytes`);
         }
-        if (!out.write(c)) await new Promise<void>((r) => out.once("drain", r));
+        if (!out.write(c))
+          await new Promise<void>((resolveD) => {
+            const done = () => {
+              out.off("drain", done);
+              out.off("error", done);
+              resolveD();
+            };
+            out.once("drain", done);
+            out.once("error", done);
+          });
       }
+      if (writeError) throw writeError;
       await new Promise<void>((resolveP, reject) => {
         out.once("error", reject);
         out.end(resolveP);
