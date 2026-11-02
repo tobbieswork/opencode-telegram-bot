@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.11.0...opencode-telegram-bot-v1.11.1) (2026-11-02)
+
+
+### Bug Fixes
+
+* downloadFile — handle write-stream errors (crash/hang on ENOSPC) ([c4a85be](https://github.com/tobbieswork/opencode-telegram-bot/commit/c4a85be7b129eba644e8f4c7f070b312d0990a2d))
+* rotation floor probe (limit 200) + downloadFile error handling ([65f7257](https://github.com/tobbieswork/opencode-telegram-bot/commit/65f72579e4ad6447943c5eef2aa918c64d200b44))
+
 ## [1.11.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.10.0...opencode-telegram-bot-v1.11.0) (2026-10-31)
 
 
