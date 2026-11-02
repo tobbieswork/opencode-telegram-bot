@@ -21,7 +21,7 @@ import type { Schedule } from "./schedule.js";
 import type { Advisor } from "./advisor/advisor.js";
 import { AGENTS, agentLabel, resolveAgent } from "./advisor/agents.js";
 
-type Btn = { text: string; callback_data: string };
+type Btn = { text: string; callback_data?: string; url?: string };
 type Keyboard = { inline_keyboard: Btn[][] };
 
 /** What the orchestrator needs from the Bot (kept narrow on purpose). */
@@ -668,6 +668,19 @@ export class Orchestrator {
     if (spec.task) intro.push("", `📝 <b>Nhiệm vụ</b>\n${esc(trunc(spec.task, 1500))}`);
     else intro.push("", "Nhắn tin trong topic này để làm việc với worker.");
     await this.h.sendHtml(conv, intro.join("\n")).catch(() => {});
+
+    // Deep-link button so the user can jump from the main topic into the worker's topic.
+    // `t.me/c/` links only resolve for supergroups (negative -100… ids) — skip otherwise.
+    if (chatId < -1000000000000) {
+      const topicLink = `https://t.me/c/${Math.abs(chatId) - 1000000000000}/${threadId}`;
+      await this.h
+        .sendHtml(
+          convKey(chatId),
+          `🧩 <b>Worker ${esc(name)}</b> — bấm để mở topic`,
+          { reply_markup: { inline_keyboard: [[{ text: "🔎 Mở topic", url: topicLink }]] } },
+        )
+        .catch(() => {});
+    }
 
     if (spec.task) {
       await this.h.oc.prompt(sessionID, `${workerPreamble(name)}\n\n${spec.task}`);

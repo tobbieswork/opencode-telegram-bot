@@ -15,5 +15,5 @@ export const QUESTIONS_PREAMBLE =
 /** Instruction-entry key for /note scratchpad notes (see src/notes.ts). */
 export const NOTES_KEY = "tgbot.notes";
 
-export type Btn = { text: string; callback_data: string };
+export type Btn = { text: string; callback_data?: string; url?: string };
 export type Keyboard = { inline_keyboard: Btn[][] };
