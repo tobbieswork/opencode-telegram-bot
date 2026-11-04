@@ -73,6 +73,7 @@ export function respawnNotice(oldName: string, newName: string): string {
 /** Per-piece size caps for the handoff prompt (see design §2.1 budget). */
 export const FOLLOW_UPS_MAX = 2000;
 export const EVIDENCE_MAX = 1500;
+export const BOUNDARY_MAX = 1000;
 export const LAST_TEXT_MAX = 1500;
 
 /** The pieces of context carried into the replacement worker's first prompt. */
@@ -89,6 +90,8 @@ export interface HandoffParts {
   worktree?: { branch: string; base: string };
   /** Git evidence: diffSummary (worktree) or gitStatusBrief (plain directory). */
   gitEvidence?: string;
+  /** Fresh git boundary re-read at respawn time (branch/status/last commit/recent files). */
+  gitBoundary?: string;
   /** The raw provider error string (surfaced under "What happened"). */
   error?: string;
 }
@@ -104,7 +107,17 @@ function indent(s: string): string {
 }
 
 /**
- * Build the replacement worker's first task body (the five "##" sections). The
+ * The `DONE =` line of a task — its definition of done — or undefined when the
+ * task has no such line. The handoff re-injects it so a replacement worker
+ * starting fresh cannot drift off scope.
+ */
+export function definitionOfDone(task: string): string | undefined {
+  const m = task.match(/^\s*DONE\s*=\s*(.+)$/m);
+  return m ? m[1].trim() : undefined;
+}
+
+/**
+ * Build the replacement worker's first task body (the six "##" sections). The
  * caller prepends `workerPreamble(name2)` (kept in the orchestrator so this
  * module stays dependency-light) — the result is the full spawn prompt.
  */
@@ -113,6 +126,9 @@ export function buildHandoffPrompt(p: HandoffParts): string {
 
   out.push("## Original task");
   out.push(p.originalTask);
+
+  out.push("## Definition of done");
+  out.push(definitionOfDone(p.originalTask) ?? "The definition of done is in the task above.");
 
   if (p.followUps && p.followUps.length) {
     out.push("## Follow-up instructions issued before the crash (in order)");
@@ -124,6 +140,8 @@ export function buildHandoffPrompt(p: HandoffParts): string {
     ? `${p.directory} (git worktree, branch ${p.worktree.branch}, base ${p.worktree.base})`
     : p.directory;
   out.push(`- Directory: ${dir}`);
+  out.push("- Git boundary (fresh snapshot at respawn):");
+  out.push(indent(p.gitBoundary ? cap(p.gitBoundary, BOUNDARY_MAX) : "(unavailable)"));
   out.push("- Git evidence:");
   out.push(indent(p.gitEvidence ? cap(p.gitEvidence, EVIDENCE_MAX) : "(none)"));
   out.push("- Last message of the previous worker:");

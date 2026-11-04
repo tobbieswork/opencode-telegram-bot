@@ -7,7 +7,7 @@ import { StateManager, ChatState, WorkerInfo, WorkerStatus } from "./state.js";
 import { Config } from "./config.js";
 import { ConvKey, chatOf, convKey, parseConv } from "./conv.js";
 import { McpBridge, BridgeTool } from "./mcp-bridge.js";
-import { addWorktree, diffSummary, gitRoot, gitStatusBrief, mergeWorktree, removeWorktree } from "./worktree.js";
+import { addWorktree, diffSummary, gitBoundary, gitRoot, gitStatusBrief, mergeWorktree, removeWorktree } from "./worktree.js";
 import { listDirs } from "./fsbrowser.js";
 import { spawnRequestBody } from "./reactions.js";
 import { buildHandoffPrompt, followUpsFromMessages, respawnName, respawnNotice, shouldRespawnWorker } from "./recovery.js";
@@ -1009,6 +1009,9 @@ export class Orchestrator {
     const gitEvidence = w.worktree
       ? await diffSummary(w.worktree).catch(() => "")
       : await gitStatusBrief(s.directory);
+    // Fresh boundary re-read NOW (branch / uncommitted / last commit / recent
+    // files) — the replacement's current "where we are".
+    const boundary = await gitBoundary(s.directory).catch(() => "");
     const name2 = respawnName(w.name);
     // The full handoff prompt: the usual worker preamble (headless contract) +
     // the five handoff sections.
@@ -1019,6 +1022,7 @@ export class Orchestrator {
       directory: s.directory,
       worktree: w.worktree ? { branch: w.worktree.branch, base: w.worktree.base } : undefined,
       gitEvidence,
+      gitBoundary: boundary,
       error,
     })}`;
     // The single user-facing notice in the dead topic (sent before we try to spawn).

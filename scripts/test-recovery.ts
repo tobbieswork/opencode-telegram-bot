@@ -153,6 +153,19 @@ const OVF = "Requested token count exceeds the model's maximum context length of
   const short = buildHandoffPrompt({ originalTask: "t", directory: "/d", gitEvidence: "short stat", lastWorkerText: "short reply" });
   check("short evidence not truncated", short.includes("short stat"));
   check("short last reply not truncated", short.includes("short reply"));
+
+  // DoD re-injection: the DONE = line lifts into its own section; a task
+  // without one gets a pointer back to the task (noFollow's task is "t").
+  const dod = buildHandoffPrompt({ originalTask: "ship it\nDONE = typecheck green + tests pass", directory: "/d" });
+  check("DoD section lifts the DONE = line", dod.includes("## Definition of done") && dod.includes("typecheck green + tests pass"));
+  check("DoD fallback when task has no DONE = line", noFollow.includes("definition of done is in the task above"));
+  // Fresh git boundary: the where-we-are block (branch / uncommitted / last commit / recent files).
+  const withBoundary = buildHandoffPrompt({
+    originalTask: "t",
+    directory: "/d",
+    gitBoundary: "branch: tg/x-1\nuncommitted: M src/a.ts\nlast commit: abc1234 feat: x\nrecent files: src/a.ts, src/b.ts",
+  });
+  check("git boundary block present", withBoundary.includes("Git boundary") && withBoundary.includes("branch: tg/x-1") && withBoundary.includes("last commit: abc1234"));
 }
 
 // ── followUpsOf: drop the spawn prompt, drop empties, keep order ─────────────
