@@ -7,8 +7,8 @@ import type { ChatState } from "../state.js";
 import type { ConvKey } from "../conv.js";
 import { esc, trunc, stripTags, fmtNum, timeAgo } from "../format.js";
 import { helpText, commandGrid } from "../commands.js";
-import type { UsageRow } from "../usage.js";
-import { formatUsageReport } from "../usage.js";
+import type { UsageRow, RotationInfo } from "../usage.js";
+import { formatUsageReport, compactionCeiling } from "../usage.js";
 import { appendNote, noteEntryText, showNotes, BUSY_REPLY_TEXT, parseNoteCallback } from "../notes.js";
 import { warn } from "../logger.js";
 import { QUESTIONS_PREAMBLE, NOTES_KEY } from "../shared.js";
@@ -239,7 +239,27 @@ export async function cmdUsage(bot: Bot, conv: ConvKey, arg = ""): Promise<void>
   };
   // At most 4 sessions in flight, regardless of how many are tracked.
   await Promise.all(Array.from({ length: Math.min(4, sids.length) }, () => fetchRow()));
-  await bot.sendHtml(conv, formatUsageReport(rows, esc, { warnPct: bot.cfg.usageWarnPct, maxRows: bot.cfg.usageMaxRows, activeHours: bot.cfg.usageActiveHours, all }).join("\n"));
+  // Manager-rotation footer (display-only): the live floor + 7-day trend come
+  // from the rotation monitor's snapshot — the SAME read-only source /rotation
+  // renders; the thresholds come from the live config (the snapshot's copy can
+  // predate a config change). The compaction ceiling is derived from the
+  // manager row's model window. Any failure degrades to "no footer" — /usage
+  // must always reply with the session table.
+  let rotation: RotationInfo | undefined;
+  try {
+    const snap = bot.rotationHealthSnapshot();
+    const managerRow = rows.find((r) => r.label === "manager");
+    rotation = {
+      floorK: snap?.currentFloorK ?? null,
+      confirmK: bot.cfg.rotationConfirmFloorK,
+      autoK: bot.cfg.rotationAutoFloorK,
+      compaction: compactionCeiling(managerRow?.limit),
+      trend: snap?.floorTrend,
+    };
+  } catch (e) {
+    warn("rotation snapshot:", (e as Error).message);
+  }
+  await bot.sendHtml(conv, formatUsageReport(rows, esc, { warnPct: bot.cfg.usageWarnPct, maxRows: bot.cfg.usageMaxRows, activeHours: bot.cfg.usageActiveHours, all, rotation }).join("\n"));
 }
 
 export async function cmdHistory(bot: Bot, conv: ConvKey, state: ChatState): Promise<void> {
