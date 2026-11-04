@@ -72,7 +72,10 @@ const workerPreamble = (name: string) =>
   `[System note: You are worker "${name}", one of several agents working in parallel. You are driven ` +
   "through Telegram — the user has no terminal. When you need a decision, ask with the `question` tool " +
   "(clear multiple-choice options, ONE question at a time). When you finish, END your final message with " +
-  "a short summary (max ~10 lines): what you did, files changed, how to verify, and anything blocking.]";
+  "a short summary (max ~10 lines): what you did, files changed, how to verify, and anything blocking. " +
+  "Keep single-turn tool output bounded: locate with search/grep first, then read only the relevant slice " +
+  "(offset/limit) — never dump whole large files or full logs; stage big output to a file and report a " +
+  "one-line summary + path. Prefer small, targeted reads over broad ones.]";
 
 const MANAGER_PROMPT = (maxWorkers: number) => `---
 description: Telegram manager — splits work across parallel worker sessions

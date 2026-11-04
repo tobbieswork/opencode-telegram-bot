@@ -130,6 +130,9 @@ const OVF = "Requested token count exceeds the model's maximum context length of
   check("provider error surfaced", full.includes("Provider error:"));
   check("context-limit explanation present", full.includes("context limit"));
 
+  // Output-economy rule (anti-overflow): the handoff must carry the same bounded-output guidance.
+  check("output-economy rule present", full.includes("output bounded") && full.includes("offset/limit"));
+
   // Empty follow-ups → the whole section is omitted (not an empty header).
   const noFollow = buildHandoffPrompt({ originalTask: "t", directory: "/d" });
   check("follow-ups section omitted when empty", !noFollow.includes("## Follow-up"));
