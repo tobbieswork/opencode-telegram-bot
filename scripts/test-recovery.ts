@@ -133,6 +133,11 @@ const OVF = "Requested token count exceeds the model's maximum context length of
   // Output-economy rule (anti-overflow): the handoff must carry the same bounded-output guidance.
   check("output-economy rule present", full.includes("output bounded") && full.includes("offset/limit"));
 
+  // Constraint pinning (arXiv:2606.22528): the respawn re-injects the standing
+  // project constraints verbatim so they can't be lost when the dead session's
+  // context is gone — not left only to the AGENTS.md the fresh session loads.
+  check("standing constraints re-pinned verbatim", full.includes("Re-read the repo's standing rules (AGENTS.md at the root)"));
+
   // Empty follow-ups → the whole section is omitted (not an empty header).
   const noFollow = buildHandoffPrompt({ originalTask: "t", directory: "/d" });
   check("follow-ups section omitted when empty", !noFollow.includes("## Follow-up"));

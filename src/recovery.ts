@@ -158,9 +158,16 @@ export function buildHandoffPrompt(p: HandoffParts): string {
   out.push("2. If a file is left half-edited/broken, fix or revert it (git checkout -- <file>) before continuing.");
   out.push("3. Finish the remaining parts of the original task. If it is already complete,");
   out.push("   verify (typecheck/tests per the repo) and report done.");
-  out.push("4. END with the usual ≤10-line summary.");
-  out.push("5. Keep single-turn tool output bounded: search/grep first, read only the relevant slice (offset/limit) —");
+  out.push("4. Keep single-turn tool output bounded: search/grep first, read only the relevant slice (offset/limit) —");
   out.push("   never dump whole large files or full logs; stage big output to a file and report a one-line summary + path.");
+  // Standing project constraints are re-pinned here (not left to the AGENTS.md
+  // the fresh session auto-loads) so they survive this respawn — the compaction
+  // boundary the bot controls — verbatim, per the constraint-pinning defense
+  // for context compaction erasing safety rules (arXiv:2606.22528).
+  out.push("5. Re-read the repo's standing rules (AGENTS.md at the root) and honor them");
+  out.push("   throughout: verify with typecheck + unit tests before reporting done, keep");
+  out.push("   commits Conventional-Commits, and never run a second instance of the bot.");
+  out.push("6. END with the usual ≤10-line summary.");
 
   return out.join("\n");
 }
