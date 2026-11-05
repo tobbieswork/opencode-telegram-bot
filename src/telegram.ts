@@ -25,6 +25,8 @@ export type Message = {
   message_thread_id?: number;
   is_topic_message?: boolean;
   forum_topic_created?: { name: string };
+  /** The message this one replies to (same chat); used to detect replies to cards. */
+  reply_to_message?: { message_id?: number; message_thread_id?: number };
   /** Caption on media (photo/sticker/video/voice/document); counts as text. */
   caption?: string;
   sticker?: { file_id?: string; type?: string };

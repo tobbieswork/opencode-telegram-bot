@@ -13,9 +13,12 @@ import { appendNote, noteEntryText, showNotes, BUSY_REPLY_TEXT, parseNoteCallbac
 import { warn } from "../logger.js";
 import { QUESTIONS_PREAMBLE, NOTES_KEY } from "../shared.js";
 import { renderRotationReport } from "../rotation-health.js";
+import { tr, STRINGS } from "../i18n.js";
+import type { Lang } from "../state.js";
 
-export async function cmdHelp(bot: Bot, conv: ConvKey): Promise<void> {
-  await bot.sendHtml(conv, helpText(), { reply_markup: commandGrid() });
+/** `/help` — grouped command list + tappable button grid. Localized by the caller's lang. */
+export async function cmdHelp(bot: Bot, conv: ConvKey, lang?: Lang): Promise<void> {
+  await bot.sendHtml(conv, helpText(lang), { reply_markup: commandGrid() });
 }
 
 /**
@@ -277,4 +280,27 @@ export async function cmdRotation(bot: Bot, conv: ConvKey): Promise<void> {
     return bot.tg.sendMessage(conv, "Chưa có dữ liệu rotation — session Manager chưa chạy qua tick xoay nào.");
   }
   await bot.sendHtml(conv, renderRotationReport(snap));
+}
+
+/**
+ * `/lang vi|en` — set the user's preferred language. Stored per-user (not per-chat),
+ * so the same user gets the same language across all their chats.
+ */
+export async function cmdLang(bot: Bot, conv: ConvKey, arg: string, uid?: number): Promise<void> {
+  const lang = arg.trim().toLowerCase();
+  if (lang !== "vi" && lang !== "en") {
+    const cur = bot.userPrefs.getLang(uid ?? "");
+    await bot.tg.sendMessage(conv, tr(cur, STRINGS.lang_usage.vi, STRINGS.lang_usage.en));
+    return;
+  }
+  if (uid == null) {
+    await bot.tg.sendMessage(conv, "⚠️ Cannot identify user.");
+    return;
+  }
+  bot.userPrefs.setLang(uid, lang as Lang);
+  const cur = bot.userPrefs.getLang(uid);
+  await bot.tg.sendMessage(
+    conv,
+    lang === "en" ? STRINGS.lang_set_en.en : STRINGS.lang_set_vi.vi,
+  );
 }
