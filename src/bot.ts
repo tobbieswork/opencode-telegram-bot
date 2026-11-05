@@ -25,6 +25,7 @@ import {
   type UploadMedia,
 } from "./uploads.js";
 import { richMarkdownChunks } from "./rich.js";
+import { extractTrailingChoices, choiceKeyboard, registry } from "./choices.js";
 import { scheduleForRegistration, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
 import {
   classifyAction,
@@ -1014,6 +1015,16 @@ export class Bot {
   private async sendReply(conv: ConvKey, text: string): Promise<void> {
     const clean = stripTags(text ?? "");
     if (!clean) return;
+    // Pattern B (deterministic, model-agnostic): if the reply ENDS with a short
+    // sequentially-marked choice list, drop that list from the body and attach
+    // an inline keyboard mirroring it. The keyboard rides the LAST chunk only.
+    // Detection returns null when unsure → kb undefined → the reply is sent
+    // exactly as before (never broken).
+    const ch = extractTrailingChoices(clean);
+    const kb: Keyboard | undefined = ch
+      ? choiceKeyboard(registry.put(conv, this.st.peek(conv)?.sessionID, ch.options), ch.options)
+      : undefined;
+    const body = ch ? ch.body : clean;
     const worker = this.st.peek(conv)?.worker;
     const purpose: MsgPurpose = worker ? "worker-done" : "reply";
     // Body language (feature C): celebrate ONLY the report of a worker that
@@ -1022,15 +1033,23 @@ export class Bot {
     const celebrate = worker?.status === "done";
     let lastId = -1;
     if (this.cfg.richReplies) {
-      for (const c of richMarkdownChunks(clean)) {
+      const chunks = richMarkdownChunks(body);
+      for (let i = 0; i < chunks.length; i++) {
+        const c = chunks[i];
+        const last = i === chunks.length - 1;
         try {
-          lastId = await this.tg.sendRich(conv, c);
+          lastId = await this.tg.sendRich(conv, c, last && kb ? { reply_markup: kb } : {});
         } catch (e) {
           // Per-message graceful fallback: retry THIS chunk through the existing
           // HTML path (mdToHtmlChunks + sendMessage) so a rich parse/method error
-          // costs only this message, never a lost reply.
+          // costs only this message, never a lost reply. The keyboard (if any) rides
+          // the very last HTML chunk of the very last rich chunk.
           warn(`sendRich failed (${(e as Error)?.message ?? e}) — falling back to HTML for one chunk`);
-          for (const h of mdToHtmlChunks(c, this.cfg.replyMaxLen)) await this.tg.sendMessage(conv, h);
+          const htmlChunks = mdToHtmlChunks(c, this.cfg.replyMaxLen);
+          for (let j = 0; j < htmlChunks.length; j++) {
+            const hLast = last && j === htmlChunks.length - 1;
+            await this.tg.sendMessage(conv, htmlChunks[j], hLast && kb ? { reply_markup: kb } : {});
+          }
           lastId = -1;
         }
         this.indexSent(conv, lastId, c, purpose);
@@ -1038,9 +1057,10 @@ export class Bot {
       this.celebrateWorkerDone(conv, lastId, celebrate);
       return;
     }
-    for (const c of mdToHtmlChunks(clean, this.cfg.replyMaxLen)) {
-      lastId = await this.tg.sendMessageId(conv, c);
-      this.indexSent(conv, lastId, c, purpose);
+    const chunks = mdToHtmlChunks(body, this.cfg.replyMaxLen);
+    for (let i = 0; i < chunks.length; i++) {
+      lastId = await this.tg.sendMessageId(conv, chunks[i], i === chunks.length - 1 && kb ? { reply_markup: kb } : {});
+      this.indexSent(conv, lastId, chunks[i], purpose);
     }
     this.celebrateWorkerDone(conv, lastId, celebrate);
   }
@@ -2633,6 +2653,10 @@ export class Bot {
       await this.tg.answerCallbackQuery(cb.id);
       return;
     }
+    if (data.startsWith("ch:")) {
+      await this.handleChoiceCallback(cb, conv, messageId);
+      return;
+    }
     if (data.startsWith("fq:")) {
       await this.handleFormCallback(cb, conv, messageId);
       return;
@@ -3140,6 +3164,42 @@ export class Bot {
     const ac = new AbortController();
     this.inflight.set(conv, ac);
     void this.runPromptTask(conv, target, CONTINUE_PROMPT, ac).catch((e) => error("prompt task:", e?.message));
+  }
+
+  /**
+   * Handle a tap on a trailing choice-list button (data = `ch:<id>:<i>`).
+   *
+   * The chosen option is relayed to the session "as if typed" — a fresh user
+   * turn via `oc.prompt`. The session is idle at this point (the reply that
+   * produced the buttons already finished its turn), so the turn runs clean and
+   * the `session.execution.*` event loop relays the model's reply back to this
+   * conv (attaching buttons again, recursively, if that reply also ends in a
+   * choice list). The keyboard is one-shot: it is dropped immediately so a
+   * re-tap or a stale button (e.g. after a /new) can never fire a second turn.
+   */
+  private async handleChoiceCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+    const parts = (cb.data ?? "").split(":");
+    const id = parts[1];
+    const idx = Number(parts[2] ?? "");
+    // One-shot: drop the keyboard first so a double-tap can't double-fire.
+    if (messageId) {
+      await this.tg.editMessageReplyMarkup(conv, messageId, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+    }
+    const rec = id ? registry.get(id) : undefined;
+    const choice = rec?.options[idx];
+    const state = this.st.peek(conv);
+    // Stale button: unknown id, missing session, or the conv's session changed
+    // (a /new / /use replaced it) — tapping would hit the wrong session.
+    if (!rec || !rec.sessionID || choice === undefined || (state?.sessionID && state.sessionID !== rec.sessionID)) {
+      if (id) registry.delete(id);
+      await this.tg.answerCallbackQuery(cb.id, "Nút này không còn áp dụng.");
+      return;
+    }
+    await this.tg.answerCallbackQuery(cb.id);
+    registry.delete(id); // consume: the choice set is single-use
+    // Fire the new user turn; the event loop relays the reply when it ends. A
+    // failure here (session busy/gone) is non-fatal — the user can just retype.
+    await this.oc.prompt(rec.sessionID, choice).catch((e) => warn("choice prompt:", (e as Error)?.message));
   }
 
   /**
