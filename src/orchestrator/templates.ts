@@ -10,7 +10,7 @@
  */
 import type { Lang } from "../state.js";
 import { tr, STRINGS } from "../i18n.js";
-import { esc, trunc } from "../format.js";
+import { esc, trunc, mdToHtmlChunks } from "../format.js";
 
 /** The worktree info a worker intro may carry (branch + base only). */
 interface WorktreeLike {
@@ -43,7 +43,7 @@ export function workerIntroHtml(lang: Lang, spec: SpawnIntro): string {
     lines.push(`🌿 ${tr(lang, STRINGS.worker_worktree.vi, STRINGS.worker_worktree.en)} <code>${esc(spec.worktree.branch)}</code> (${from} <code>${esc(spec.worktree.base)}</code>)`);
   }
   lines.push("");
-  if (spec.task) lines.push(`📝 <b>${tr(lang, STRINGS.worker_task.vi, STRINGS.worker_task.en)}</b>\n${esc(trunc(spec.task, 1500))}`);
+  if (spec.task) lines.push(`📝 <b>${tr(lang, STRINGS.worker_task.vi, STRINGS.worker_task.en)}</b>\n${mdToHtmlChunks(trunc(spec.task, 1500), 9999).join("\n")}`);
   else lines.push(tr(lang, STRINGS.worker_message_topic.vi, STRINGS.worker_message_topic.en));
   return lines.join("\n");
 }
