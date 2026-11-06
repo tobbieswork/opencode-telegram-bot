@@ -13,6 +13,7 @@
     "start": "tsx src/index.ts",
     "smoke": "tsx scripts/smoke.ts",
     "test:format": "tsx scripts/test-format.ts",
+    "test:redact": "tsx scripts/test-redact.ts",
     "test:fsbrowser": "tsx scripts/test-fsbrowser.ts",
     "test:state": "tsx scripts/test-state.ts",
     "test:activity": "tsx scripts/test-activity.ts",
@@ -46,7 +47,7 @@
     "test:language": "tsx scripts/test-language.ts",
     "test:form-relay": "tsx scripts/test-form-relay.ts",
     "test:choices": "tsx scripts/test-choices.ts",
-    "test:unit": "npm run test:format && npm run test:fsbrowser && npm run test:state && npm run test:multi && npm run test:activity && npm run test:reminders && npm run test:schedule && npm run test:advisor && npm run test:advisor-client && npm run test:advisor-thread && npm run test:scheduler && npm run test:prune && npm run test:config && npm run test:rich && npm run test:stream && npm run test:continue && npm run test:dns-heal && npm run test:recovery && npm run test:topic-delete && npm run test:uptime && npm run test:usage && npm run test:notes && npm run test:notes-callback && npm run test:pr-watch && npm run test:reactions && npm run test:commands && npm run test:review && npm run test:drain && npm run test:rotation && npm run test:uploads && npm run test:i18n && npm run test:language && npm run test:form-relay && npm run test:choices",
+    "test:unit": "npm run test:format && npm run test:redact && npm run test:fsbrowser && npm run test:state && npm run test:multi && npm run test:activity && npm run test:reminders && npm run test:schedule && npm run test:advisor && npm run test:advisor-client && npm run test:advisor-thread && npm run test:scheduler && npm run test:prune && npm run test:config && npm run test:rich && npm run test:stream && npm run test:continue && npm run test:dns-heal && npm run test:recovery && npm run test:topic-delete && npm run test:uptime && npm run test:usage && npm run test:notes && npm run test:notes-callback && npm run test:pr-watch && npm run test:reactions && npm run test:commands && npm run test:review && npm run test:drain && npm run test:rotation && npm run test:uploads && npm run test:i18n && npm run test:language && npm run test:form-relay && npm run test:choices",
     "typecheck": "tsc --noEmit",
     "test:multi": "tsx scripts/test-multi.ts",
     "smoke:multi": "tsx scripts/smoke-multi.ts"
