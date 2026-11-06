@@ -6,7 +6,7 @@
  *
  * Run:  npx tsx scripts/test-usage.ts
  */
-import { UsageRow, pctOf, fmtTok, sortUsage, formatUsageReport, newestAssistantInfo, isActive } from "../src/usage.js";
+import { UsageRow, pctOf, fmtTok, sortUsage, formatUsageReport, newestAssistantInfo, isActive, compactionCeiling, floorDriftRateK, daysToAutoRotation } from "../src/usage.js";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: string): void {
@@ -215,6 +215,64 @@ const row = (over: Partial<UsageRow> & { label: string }): UsageRow => ({
   check("all dead → 0 active in header", allDead.includes("0 active"), allDead);
   check("all dead → collapse shows largest (90K)", allDead.includes("90K/200K (45%)"), allDead);
   check("all dead → no per-row listing", !allDead.includes("<b>d1</b>"), allDead);
+}
+
+// ── rotation footer: thresholds + live floor + drift estimate (additive) ────
+{
+  // No footer when the opt is absent (probes render exactly as before).
+  const plain = formatUsageReport([row({ label: "manager", current: 120_000, limit: 200_000 })], esc).join("\n");
+  check("no rotation opt → no footer", !plain.includes("Rotation manager"), plain);
+
+  // Floor + thresholds + compaction ceiling; no trend → no drift line.
+  const rot = { floorK: 98, confirmK: 90, autoK: 110, compaction: 170_000 };
+  const out = formatUsageReport([row({ label: "manager", current: 120_000, limit: 200_000 })], esc, { rotation: rot }).join("\n");
+  check("footer present", out.includes("Rotation manager"), out);
+  check("floor rendered (K)", out.includes("nền ~98K"), out);
+  check("thresholds rendered (escaped >)", out.includes("confirm &gt;90K · auto &gt;110K"), out);
+  check("compaction ceiling rendered", out.includes("compaction ~170K"), out);
+  check("no drift line without trend", !out.includes("xu hướng"), out);
+
+  // Null floor → "chưa đo"; thresholds still shown.
+  const noFloor = formatUsageReport([row({ label: "manager", current: 50_000, limit: 200_000 })], esc, { rotation: { floorK: null, confirmK: 90, autoK: 110 } }).join("\n");
+  check("null floor → chưa đo", noFloor.includes("nền chưa đo"), noFloor);
+  check("null floor → thresholds kept", noFloor.includes("confirm &gt;90K"), noFloor);
+  check("null floor → no drift line", !noFloor.includes("xu hướng"), noFloor);
+
+  // Drift: day maxes 90 → 102 over 2 days = +6K/day; floor 98K, auto 110K
+  // → (110−98)/6 = exactly 2 days.
+  const d = (n: number) => new Date(Date.UTC(2026, 10, 1) + n * 86_400_000).toISOString().slice(0, 10);
+  const trend = [
+    { day: d(0), min: 80, max: 90 },
+    { day: d(1), min: 86, max: 96 },
+    { day: d(2), min: 92, max: 102 },
+  ];
+  check("drift rate +6K/day", floorDriftRateK(trend) === 6, String(floorDriftRateK(trend)));
+  const drift = formatUsageReport([row({ label: "manager", current: 120_000, limit: 200_000 })], esc, { rotation: { floorK: 98, confirmK: 90, autoK: 110, trend } }).join("\n");
+  check("drift line rendered", drift.includes("+6K/ngày"), drift);
+  check("time-to-auto ~2 days", drift.includes("auto trong ~2 ngày"), drift);
+
+  // Flat trend → no positive rate → no drift line.
+  const flat = [{ day: d(0), min: 90, max: 90 }, { day: d(1), min: 90, max: 90 }];
+  check("flat trend → rate 0", floorDriftRateK(flat) === 0);
+  const flatOut = formatUsageReport([row({ label: "manager" })], esc, { rotation: { floorK: 98, confirmK: 90, autoK: 110, trend: flat } }).join("\n");
+  check("flat trend → no drift line", !flatOut.includes("xu hướng"), flatOut);
+
+  // Already past the auto threshold → "đã đạt ngưỡng auto", not "~N ngày".
+  const past = formatUsageReport([row({ label: "manager" })], esc, { rotation: { floorK: 115, confirmK: 90, autoK: 110, trend } }).join("\n");
+  check("past auto → flagged", past.includes("đã đạt ngưỡng auto"), past);
+
+  // compactionCeiling: window − max(15% window, 16K).
+  check("ceiling 200K → 170K", compactionCeiling(200_000) === 170_000, String(compactionCeiling(200_000)));
+  check("ceiling 100K → 84K (16K floor of the 15% term)", compactionCeiling(100_000) === 84_000, String(compactionCeiling(100_000)));
+  check("ceiling no limit → undefined", compactionCeiling(undefined) === undefined);
+
+  // daysToAutoRotation math + guards.
+  check("days (110−98)/6 = 2", daysToAutoRotation(98, 110, 6) === 2);
+  check("days already past → 0", daysToAutoRotation(115, 110, 6) === 0);
+  check("days no rate → null", daysToAutoRotation(98, 110, null) === null);
+  check("days zero rate → null", daysToAutoRotation(98, 110, 0) === null);
+  check("days no floor → null", daysToAutoRotation(null, 110, 6) === null);
+  check("days single-day trend → null rate", floorDriftRateK(trend.slice(0, 1)) === null);
 }
 
 if (failures > 0) {

@@ -73,6 +73,7 @@ export function respawnNotice(oldName: string, newName: string): string {
 /** Per-piece size caps for the handoff prompt (see design §2.1 budget). */
 export const FOLLOW_UPS_MAX = 2000;
 export const EVIDENCE_MAX = 1500;
+export const BOUNDARY_MAX = 1000;
 export const LAST_TEXT_MAX = 1500;
 
 /** The pieces of context carried into the replacement worker's first prompt. */
@@ -89,6 +90,8 @@ export interface HandoffParts {
   worktree?: { branch: string; base: string };
   /** Git evidence: diffSummary (worktree) or gitStatusBrief (plain directory). */
   gitEvidence?: string;
+  /** Fresh git boundary re-read at respawn time (branch/status/last commit/recent files). */
+  gitBoundary?: string;
   /** The raw provider error string (surfaced under "What happened"). */
   error?: string;
 }
@@ -104,7 +107,17 @@ function indent(s: string): string {
 }
 
 /**
- * Build the replacement worker's first task body (the five "##" sections). The
+ * The `DONE =` line of a task — its definition of done — or undefined when the
+ * task has no such line. The handoff re-injects it so a replacement worker
+ * starting fresh cannot drift off scope.
+ */
+export function definitionOfDone(task: string): string | undefined {
+  const m = task.match(/^\s*DONE\s*=\s*(.+)$/m);
+  return m ? m[1].trim() : undefined;
+}
+
+/**
+ * Build the replacement worker's first task body (the six "##" sections). The
  * caller prepends `workerPreamble(name2)` (kept in the orchestrator so this
  * module stays dependency-light) — the result is the full spawn prompt.
  */
@@ -113,6 +126,9 @@ export function buildHandoffPrompt(p: HandoffParts): string {
 
   out.push("## Original task");
   out.push(p.originalTask);
+
+  out.push("## Definition of done");
+  out.push(definitionOfDone(p.originalTask) ?? "The definition of done is in the task above.");
 
   if (p.followUps && p.followUps.length) {
     out.push("## Follow-up instructions issued before the crash (in order)");
@@ -124,6 +140,8 @@ export function buildHandoffPrompt(p: HandoffParts): string {
     ? `${p.directory} (git worktree, branch ${p.worktree.branch}, base ${p.worktree.base})`
     : p.directory;
   out.push(`- Directory: ${dir}`);
+  out.push("- Git boundary (fresh snapshot at respawn):");
+  out.push(indent(p.gitBoundary ? cap(p.gitBoundary, BOUNDARY_MAX) : "(unavailable)"));
   out.push("- Git evidence:");
   out.push(indent(p.gitEvidence ? cap(p.gitEvidence, EVIDENCE_MAX) : "(none)"));
   out.push("- Last message of the previous worker:");
@@ -140,7 +158,16 @@ export function buildHandoffPrompt(p: HandoffParts): string {
   out.push("2. If a file is left half-edited/broken, fix or revert it (git checkout -- <file>) before continuing.");
   out.push("3. Finish the remaining parts of the original task. If it is already complete,");
   out.push("   verify (typecheck/tests per the repo) and report done.");
-  out.push("4. END with the usual ≤10-line summary.");
+  out.push("4. Keep single-turn tool output bounded: search/grep first, read only the relevant slice (offset/limit) —");
+  out.push("   never dump whole large files or full logs; stage big output to a file and report a one-line summary + path.");
+  // Standing project constraints are re-pinned here (not left to the AGENTS.md
+  // the fresh session auto-loads) so they survive this respawn — the compaction
+  // boundary the bot controls — verbatim, per the constraint-pinning defense
+  // for context compaction erasing safety rules (arXiv:2606.22528).
+  out.push("5. Re-read the repo's standing rules (AGENTS.md at the root) and honor them");
+  out.push("   throughout: verify with typecheck + unit tests before reporting done, keep");
+  out.push("   commits Conventional-Commits, and never run a second instance of the bot.");
+  out.push("6. END with the usual ≤10-line summary.");
 
   return out.join("\n");
 }

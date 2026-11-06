@@ -7,7 +7,7 @@ import { StateManager, ChatState, WorkerInfo, WorkerStatus } from "./state.js";
 import { Config } from "./config.js";
 import { ConvKey, chatOf, convKey, parseConv } from "./conv.js";
 import { McpBridge, BridgeTool } from "./mcp-bridge.js";
-import { addWorktree, diffSummary, gitRoot, gitStatusBrief, mergeWorktree, removeWorktree } from "./worktree.js";
+import { addWorktree, diffSummary, gitBoundary, gitRoot, gitStatusBrief, mergeWorktree, removeWorktree } from "./worktree.js";
 import { listDirs } from "./fsbrowser.js";
 import { spawnRequestBody } from "./reactions.js";
 import { buildHandoffPrompt, followUpsFromMessages, respawnName, respawnNotice, shouldRespawnWorker } from "./recovery.js";
@@ -72,7 +72,10 @@ const workerPreamble = (name: string) =>
   `[System note: You are worker "${name}", one of several agents working in parallel. You are driven ` +
   "through Telegram — the user has no terminal. When you need a decision, ask with the `question` tool " +
   "(clear multiple-choice options, ONE question at a time). When you finish, END your final message with " +
-  "a short summary (max ~10 lines): what you did, files changed, how to verify, and anything blocking.]";
+  "a short summary (max ~10 lines): what you did, files changed, how to verify, and anything blocking. " +
+  "Keep single-turn tool output bounded: locate with search/grep first, then read only the relevant slice " +
+  "(offset/limit) — never dump whole large files or full logs; stage big output to a file and report a " +
+  "one-line summary + path. Prefer small, targeted reads over broad ones.]";
 
 const MANAGER_PROMPT = (maxWorkers: number) => `---
 description: Telegram manager — splits work across parallel worker sessions
@@ -1006,6 +1009,9 @@ export class Orchestrator {
     const gitEvidence = w.worktree
       ? await diffSummary(w.worktree).catch(() => "")
       : await gitStatusBrief(s.directory);
+    // Fresh boundary re-read NOW (branch / uncommitted / last commit / recent
+    // files) — the replacement's current "where we are".
+    const boundary = await gitBoundary(s.directory).catch(() => "");
     const name2 = respawnName(w.name);
     // The full handoff prompt: the usual worker preamble (headless contract) +
     // the five handoff sections.
@@ -1016,6 +1022,7 @@ export class Orchestrator {
       directory: s.directory,
       worktree: w.worktree ? { branch: w.worktree.branch, base: w.worktree.base } : undefined,
       gitEvidence,
+      gitBoundary: boundary,
       error,
     })}`;
     // The single user-facing notice in the dead topic (sent before we try to spawn).

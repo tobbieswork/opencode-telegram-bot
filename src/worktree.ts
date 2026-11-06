@@ -83,6 +83,39 @@ export async function gitStatusBrief(dir: string): Promise<string> {
 }
 
 /**
+ * A FRESH "where we are" snapshot of a worker's directory, re-read at
+ * respawn time for the overflow handoff: the current branch, the uncommitted
+ * work (`git status --short`), the last commit (what was already completed),
+ * and the up-to-3 most recently modified tracked files (where to continue).
+ * Best-effort — returns "" when the directory is not a git repo (the branch
+ * lookup fails); each remaining line degrades independently.
+ */
+export async function gitBoundary(dir: string): Promise<string> {
+  if (!dir) return "";
+  const branch = await git(dir, ["rev-parse", "--abbrev-ref", "HEAD"]).catch(() => "");
+  if (!branch) return ""; // not a repo (or a repo with no commits yet)
+  const [status, last, recentRaw] = await Promise.all([
+    git(dir, ["status", "--short"]).catch(() => ""),
+    git(dir, ["log", "-1", "--format=%h %s"]).catch(() => ""),
+    git(dir, ["log", "-3", "--name-only", "--format="]).catch(() => ""),
+  ]);
+  const lines: string[] = [
+    `branch: ${branch}`,
+    `uncommitted: ${status || "(clean)"}`,
+    `last commit: ${last || "(no commits yet)"}`,
+  ];
+  // Files touched by the last 3 commits, deduped most-recent-first.
+  const recent: string[] = [];
+  for (const f of recentRaw.split("\n").map((s) => s.trim())) {
+    if (!f || recent.includes(f)) continue;
+    recent.push(f);
+    if (recent.length === 3) break;
+  }
+  lines.push(`recent files: ${recent.length ? recent.join(", ") : "(none in recent commits)"}`);
+  return lines.join("\n");
+}
+
+/**
  * Merge a worker's branch back into its base in the main checkout. Refuses
  * unless the main checkout is clean and on the base branch; commits whatever
  * the worker left uncommitted first; aborts cleanly on conflict.

@@ -105,12 +105,17 @@ Khởi tạo bằng đúng `workerPreamble(name2)` (như spawn thường — gi�
 ## Original task
 {w.task}                                     ← đầy đủ, không truncate
 
+## Definition of done
+{dòng "DONE = …" của task; nếu task không có → trỏ về task}
+
 ## Follow-up instructions issued before the crash (in order)
 {follow-ups, mỗi dòng 1 chỉ thị, tổng ≤ 2000 char, "…" nếu cắt}
 (omit section nếu không có)
 
 ## State where the previous worker stopped
 - Directory: {s.directory}{ if worktree: " (git worktree, branch {branch}, base {base})"}
+- Git boundary (fresh snapshot at respawn):
+  {gitBoundary — branch / status --short / last commit / ≤3 recent files}  ← ≤ 1000 char
 - Git evidence:
   {worktree ? diffSummary : gitStatusBrief}  ← ≤ 1500 char
 - Last message of the previous worker:
@@ -143,12 +148,13 @@ export interface HandoffParts {
   directory: string;
   worktree?: { branch: string; base: string };
   gitEvidence?: string;
+  gitBoundary?: string;            // fresh snapshot re-read tại respawn (worktree.ts: gitBoundary)
   error?: string;
 }
 
 export function buildHandoffPrompt(p: HandoffParts): string;
-// truncate nội bộ: followUps tổng ≤2000, gitEvidence ≤1500, lastWorkerText ≤1500
-// (constant exported: FOLLOW_UPS_MAX = 2000, EVIDENCE_MAX = 1500, LAST_TEXT_MAX = 1500)
+// truncate nội bộ: followUps tổng ≤2000, gitEvidence ≤1500, gitBoundary ≤1000, lastWorkerText ≤1500
+// (constant exported: FOLLOW_UPS_MAX = 2000, EVIDENCE_MAX = 1500, BOUNDARY_MAX = 1000, LAST_TEXT_MAX = 1500)
 
 export function respawnName(oldName: string): string;
 // `${oldName}-2`, cut oldName về 21 char đầu nếu tổng > 24 (NAME_RE: max 24, [a-z0-9-])

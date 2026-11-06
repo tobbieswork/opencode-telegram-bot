@@ -7,6 +7,10 @@
  * what decides overflow is the CURRENT context size — the newest assistant
  * step's input+cache-read tokens versus the model's context limit. That is why
  * a row carries both numbers.
+ *
+ * The report can also carry the manager-rotation context (floor vs the
+ * confirm/auto thresholds, the compaction ceiling, a drift-based
+ * time-to-rotation estimate) as an ADDITIVE footer — see RotationInfo.
  */
 
 export interface UsageRow {
@@ -74,6 +78,27 @@ export function newestAssistantInfo(msgs: any[]): AssistantInfo {
   return out;
 }
 
+/**
+ * Manager-rotation context rendered as an ADDITIVE footer of the /usage
+ * report, so the user sees where the manager sits relative to the thresholds
+ * that trigger a rotation (see src/rotation.ts) — and roughly when.
+ */
+export interface RotationInfo {
+  /** The manager's current context floor (K); null/undefined = not measured yet. */
+  floorK?: number | null;
+  /** Confirm tier: a rotation is OFFERED when the floor exceeds this (K). */
+  confirmK: number;
+  /** Auto tier: rotation happens automatically when the floor exceeds this (K). */
+  autoK: number;
+  /** The model's auto-compaction ceiling (tokens); omitted when the window is unknown. */
+  compaction?: number;
+  /**
+   * The 7-day floor trend (oldest → newest, one entry per local day — structurally
+   * FloorTrendEntry from rotation-health.ts); used for the drift-rate estimate.
+   */
+  trend?: { day: string; min: number; max: number }[];
+}
+
 export interface UsageOpts {
   /** Percentage at/above which a row gets the warning mark (default 80). */
   warnPct?: number;
@@ -88,6 +113,12 @@ export interface UsageOpts {
   all?: boolean;
   /** Clock for liveness; injected for tests (default Date.now()). */
   now?: number;
+  /**
+   * Rotation footer (see RotationInfo). `undefined` = no footer (default —
+   * callers without rotation context, e.g. the probes, render exactly as
+   * before). Display-only: never changes the session rows.
+   */
+  rotation?: RotationInfo;
 }
 
 const DEFAULT_WARN_PCT = 80;
@@ -123,6 +154,49 @@ export function fmtTok(n: number): string {
 
 function trimTrailing(s: string): string {
   return s.endsWith(".0") ? s.slice(0, -2) : s;
+}
+
+// ── rotation footer (thresholds the manager is measured against) ─────────────
+
+/**
+ * The OpenCode auto-compaction ceiling for a model window: compaction fires
+ * when the sent context reaches `limit − max(15% of limit, 16K)` tokens
+ * (opencode core, compaction — verified against the 200K window → 170K).
+ * Undefined when the window is unknown/too small.
+ */
+export function compactionCeiling(limit?: number): number | undefined {
+  if (!limit || limit <= 0) return undefined;
+  const c = limit - Math.max(0.15 * limit, 16_000);
+  return c > 0 ? c : undefined;
+}
+
+/**
+ * Floor drift rate (K/day) from the daily trend: the slope between the
+ * OLDEST and NEWEST day's `max` (the day's floor high — the value that drives
+ * rotation). null when there are fewer than 2 distinct days or no positive
+ * date span (the trend is already oldest-first, but sort defensively).
+ */
+export function floorDriftRateK(trend: { day: string; min: number; max: number }[] | undefined): number | null {
+  if (!trend || trend.length < 2) return null;
+  const t = [...trend].sort((a, b) => (a.day < b.day ? -1 : 1));
+  const days = (Date.parse(t[t.length - 1].day) - Date.parse(t[0].day)) / 86_400_000;
+  if (!Number.isFinite(days) || days <= 0) return null;
+  return (t[t.length - 1].max - t[0].max) / days;
+}
+
+/**
+ * Estimated days until the floor reaches the auto threshold at `rateK` K/day:
+ * (autoK − floorK) / rateK. 0 when the floor already meets/exceeds the
+ * threshold; null when un-estimable (no floor, no positive rate).
+ */
+export function daysToAutoRotation(
+  floorK: number | null | undefined,
+  autoK: number,
+  rateK: number | null,
+): number | null {
+  if (floorK == null || !(floorK > 0) || rateK == null || !(rateK > 0)) return null;
+  if (floorK >= autoK) return 0;
+  return (autoK - floorK) / rateK;
 }
 
 /**
@@ -207,6 +281,26 @@ export function formatUsageReport(
   const totalOut = rows.reduce((s, r) => s + r.cumOutput, 0);
   lines.push("");
   lines.push(`Tổng cumulative: ${fmtTok(totalIn)} in / ${fmtTok(totalOut)} out`);
+
+  // Rotation footer (display-only, additive): where the manager floor sits
+  // relative to the confirm/auto thresholds + the compaction ceiling, and —
+  // when the trend gives a positive drift — roughly when auto-rotation lands.
+  if (opts.rotation) {
+    const r = opts.rotation;
+    const floor = r.floorK != null && r.floorK > 0 ? `~${Math.round(r.floorK)}K` : "chưa đo";
+    const comp = r.compaction !== undefined && r.compaction > 0 ? ` · compaction ~${fmtTok(r.compaction)}` : "";
+    lines.push(
+      `🧹 <b>Rotation manager</b> — nền ${floor} · confirm &gt;${r.confirmK}K · auto &gt;${r.autoK}K${comp}`,
+    );
+    const rate = floorDriftRateK(r.trend);
+    const days = daysToAutoRotation(r.floorK, r.autoK, rate);
+    if (rate !== null && days !== null) {
+      lines.push(
+        `📈 xu hướng ${rate >= 0 ? "+" : ""}${Math.round(rate)}K/ngày${days === 0 ? " — đã đạt ngưỡng auto" : ` → auto trong ~${Math.max(1, Math.round(days))} ngày`}`,
+      );
+    }
+  }
+
   lines.push(`<i>ctx = context hiện tại / cửa sổ của model · cum = tổng tokens cả phiên · 💤 = ${activeHours}h+ không hoạt động</i>`);
   return lines;
 }
