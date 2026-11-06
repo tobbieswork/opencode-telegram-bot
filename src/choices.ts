@@ -138,7 +138,12 @@ export interface ChoiceRecord {
   conv: ConvKey;
   sessionID?: string;
   options: string[];
+  /** When the record was created (for TTL pruning). */
+  createdAt: number;
 }
+
+/** Default TTL for unclicked choice records (24 h). */
+const CHOICE_TTL_MS = 24 * 60 * 60 * 1000;
 
 const records = new Map<string, ChoiceRecord>();
 
@@ -153,13 +158,27 @@ export const registry = {
     do {
       id = randomInt(0, 36 ** 4).toString(36).padStart(4, "0");
     } while (records.has(id));
-    records.set(id, { conv, sessionID, options });
+    records.set(id, { conv, sessionID, options, createdAt: Date.now() });
     return id;
   },
   get(id: string): ChoiceRecord | undefined {
-    return records.get(id);
+    const rec = records.get(id);
+    if (rec && Date.now() - rec.createdAt > CHOICE_TTL_MS) {
+      records.delete(id);
+      return undefined;
+    }
+    return rec;
   },
   delete(id: string): void {
     records.delete(id);
+  },
+  /** Remove records older than maxAgeMs (default 24 h). Returns count pruned. */
+  prune(maxAgeMs: number = CHOICE_TTL_MS): number {
+    const now = Date.now();
+    let n = 0;
+    for (const [id, rec] of records) {
+      if (now - rec.createdAt > maxAgeMs) { records.delete(id); n++; }
+    }
+    return n;
   },
 };
