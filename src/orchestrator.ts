@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Telegram, CallbackQuery, TOPIC_COLORS } from "./telegram.js";
 import { OpenCodeCtl, userText } from "./opencode.js";
-import { StateManager, ChatState, WorkerInfo, WorkerStatus } from "./state.js";
+import { StateManager, ChatState, WorkerInfo, WorkerStatus, UserPrefsStore, Lang } from "./state.js";
 import { Config } from "./config.js";
 import { ConvKey, chatOf, convKey, parseConv } from "./conv.js";
 import { McpBridge, BridgeTool } from "./mcp-bridge.js";
@@ -11,12 +11,14 @@ import { addWorktree, diffSummary, gitBoundary, gitRoot, gitStatusBrief, mergeWo
 import { listDirs } from "./fsbrowser.js";
 import { spawnRequestBody } from "./reactions.js";
 import { buildHandoffPrompt, followUpsFromMessages, respawnName, respawnNotice, shouldRespawnWorker } from "./recovery.js";
-import { ICON, esc, trunc, timeAgo, stripTags } from "./format.js";
+import { ICON, esc, trunc, timeAgo, stripTags, mdToHtmlChunks } from "./format.js";
 import { log, warn } from "./logger.js";
 import { BUSY_REPLY_TEXT, NOTE_BUTTON_LABEL, noteCallbackData, BusyNoteStore } from "./notes.js";
 import { queueReport } from "./orchestrator/report.js";
 import { purgeConv, cmdPrune, handlePruneCallback } from "./orchestrator/purge.js";
 import { onTopicDeleted, reapPendingTopicDeletes } from "./orchestrator/topics.js";
+import { workerIntroHtml, approvalLines } from "./orchestrator/templates.js";
+import { applyLanguagePin } from "./language.js";
 import type { Schedule } from "./schedule.js";
 import type { Advisor } from "./advisor/advisor.js";
 import { AGENTS, agentLabel, resolveAgent } from "./advisor/agents.js";
@@ -34,11 +36,13 @@ export interface Host {
   busyNotes: BusyNoteStore;
   /** Advisor (topic + Claude/Gemini session on the advisor machine). Present only when enabled. */
   advisor?: Advisor;
+  /** Per-user preferences (language). Optional so legacy test-mock Hosts still type-check; the real Bot always sets it. */
+  userPrefs?: UserPrefsStore;
   sendHtml(conv: ConvKey, html: string, opts?: { reply_markup?: Keyboard }): Promise<void>;
   applyModelAndVariant(sessionID: string, state: ChatState): Promise<void>;
   startTyping(conv: ConvKey): void;
   /** Show the "⏳ Đang xử lý…" line for a manager turn (the manager uses promptManager, not runPrompt). */
-  startWorking(conv: ConvKey): void;
+  startWorking(conv: ConvKey, lang?: Lang): void;
   /** Remove the "⏳ Đang xử lý…" line for a manager turn (at turn end). */
   stopWorking(conv: ConvKey): void;
   /**
@@ -125,7 +129,8 @@ decisions. For those: summarise for the user in a few lines (worker name + outco
 step — a follow-up with send_to_worker, a new worker, or telling the user the work is done. Do not start
 new work the user did not ask for. If nothing needs the user's attention, reply with one short line.
 
-Workers' permission requests and questions go to the user in each worker's topic; you never answer them.
+Workers' permission requests and questions are relayed to the main channel (the manager chat); you never
+answer them — the user clicks the buttons there. Their worker topics keep running as usual.
 Keep every reply short and concrete. Refer to workers by name.
 `;
 
@@ -319,6 +324,17 @@ export class Orchestrator {
     return !!this.h.st.peek(conv)?.manager;
   }
 
+  /**
+   * The conversation owner's language preference (default "vi"). The orchestrator
+   * has no message uid, so it resolves the uid from the conv's last driver
+   * (state.createdBy, set by the Bot on each user message) and looks up the
+   * per-user preference. Used to localize user-facing cards.
+   */
+  private langOf(conv: ConvKey): Lang {
+    // Degrade to vi if no pref store is wired (defensive: a spawn must never crash here).
+    return this.h.userPrefs?.getLang(this.h.st.peek(conv)?.createdBy ?? "") ?? "vi";
+  }
+
   // ── commands ──────────────────────────────────────────────────────────────
   /** Returns true when the command was one of ours. */
   async handleCommand(conv: ConvKey, cmd: string, arg: string): Promise<boolean> {
@@ -488,7 +504,7 @@ export class Orchestrator {
           "🧭 <b>Manager đã bật.</b>",
           "Nhắn yêu cầu ở đây — Manager sẽ chia việc và giao cho các worker, mỗi worker một topic riêng.",
           `Chế độ duyệt: <b>${top.auto ? "auto (tự giao việc)" : "hỏi trước khi giao việc"}</b> — đổi bằng /auto on|off.`,
-          "Xin quyền / câu hỏi của worker sẽ hiện trong topic của worker đó.",
+          "Xin quyền / câu hỏi của worker sẽ hiện ở kênh chính (nơi này) — bạn bấm nút trả lời ngay tại đây.",
         ].join("\n"),
       );
     } catch (e) {
@@ -663,14 +679,20 @@ export class Orchestrator {
     await this.h.applyModelAndVariant(sessionID, this.h.st.get(conv));
     log(`[chat ${chat}] spawned worker ${name} (${agent}) in ${directory}`);
 
-    const intro = [
-      `🧩 <b>Worker ${esc(name)}</b> · ${esc(agent)}${spec.spawnedBy === "manager" ? " · giao bởi Manager" : ""}`,
-      `📁 <code>${esc(directory)}</code>`,
-    ];
-    if (worktree) intro.push(`🌿 worktree riêng, nhánh <code>${esc(worktree.branch)}</code> (từ <code>${esc(worktree.base)}</code>)`);
-    if (spec.task) intro.push("", `📝 <b>Nhiệm vụ</b>\n${esc(trunc(spec.task, 1500))}`);
-    else intro.push("", "Nhắn tin trong topic này để làm việc với worker.");
-    await this.h.sendHtml(conv, intro.join("\n")).catch(() => {});
+    // Worker topic welcome, localized to the conv owner's language.
+    await this.h
+      .sendHtml(
+        conv,
+        workerIntroHtml(this.langOf(chat), {
+          name,
+          agent,
+          directory,
+          spawnedBy: spec.spawnedBy,
+          task: spec.task,
+          worktree: worktree ? { branch: worktree.branch, base: worktree.base } : undefined,
+        }),
+      )
+      .catch(() => {});
 
     // Deep-link button so the user can jump from the main topic into the worker's topic.
     // `t.me/c/` links only resolve for supergroups (negative -100… ids) — skip otherwise.
@@ -701,7 +723,14 @@ export class Orchestrator {
     // start a second turn on a busy worker or exceed the busy limit.
     if (BUSY.includes(s.worker.status)) throw new Error(`Worker "${s.worker.name}" đang ${s.worker.status}; chờ nó xong đã.`);
     this.assertCapacity(chatOf(conv), conv);
-    await this.h.sendHtml(conv, `📨 <b>Manager:</b> ${esc(trunc(message, 1500))}`).catch(() => {});
+    // Show the instruction in the topic as rendered Telegram HTML (bold/headers/code
+    // actually render), mirroring how manager replies are converted (stripTags +
+    // mdToHtmlChunks). The worker's OpenCode session below still gets the original
+    // Markdown — only the topic display is converted.
+    const header = "📨 <b>Manager:</b>";
+    const chunks = mdToHtmlChunks(trunc(stripTags(message), 1500), this.h.cfg.replyMaxLen - header.length - 1);
+    await this.h.sendHtml(conv, chunks.length ? `${header}\n${chunks[0]}` : header).catch(() => {});
+    for (let i = 1; i < chunks.length; i++) await this.h.sendHtml(conv, chunks[i]).catch(() => {});
     await this.h.oc.prompt(s.sessionID, message);
     this.setStatus(conv, "running");
     this.h.startTyping(conv);
@@ -1052,7 +1081,7 @@ export class Orchestrator {
 
   // ── Manager ───────────────────────────────────────────────────────────────
   /** A user message for the Manager: admit it without blocking; the reply is relayed when the turn ends. */
-  async promptManager(conv: ConvKey, text: string, messageId?: number): Promise<void> {
+  async promptManager(conv: ConvKey, text: string, messageId?: number, lang?: Lang): Promise<void> {
     const s = this.h.st.get(conv);
     if (!s.sessionID) {
       await this.cmdManager(conv, "on");
@@ -1075,6 +1104,9 @@ export class Orchestrator {
     }
     this.managerBusy.add(conv); // mark before the await so a 2nd message can't slip through
     this.budget.set(conv, DISPATCH_BUDGET); // the user spoke: refill the dispatch budget
+    // Per-user language preference: pin the Manager session to English when the
+    // user chose "en" ("vi"/unset clears it). Idempotent, self-tracked per session.
+    await applyLanguagePin(this.h.oc, this.h.st, conv, this.h.st.get(conv).sessionID!, lang);
     await this.h.prepareNotes?.(conv, this.h.st.get(conv).sessionID!); // /note: surface pending notes this turn
     try {
       await this.h.oc.prompt(this.h.st.get(conv).sessionID!, text);
@@ -1083,7 +1115,7 @@ export class Orchestrator {
       throw e;
     }
     this.h.startTyping(conv);
-    this.h.startWorking(conv); // "⏳ Đang xử lý…" for the manager turn (event-stream-driven, not runPrompt)
+    this.h.startWorking(conv, lang); // "⏳ Đang xử lý…" for the manager turn (event-stream-driven, not runPrompt)
   }
 
   /** Drop the Manager busy flag (used by /stop so a stuck flag can't wedge the chat). */
@@ -1125,18 +1157,7 @@ export class Orchestrator {
     // card's button would then approve a different, unseen request.
     const id = randomBytes(5).toString("hex");
     this.approvals.set(id, { ...a, id });
-    const lines = ["🛂 <b>Manager muốn giao việc</b>"];
-    if (a.kind === "spawn" && a.spawn) {
-      const sp = a.spawn;
-      lines.push(
-        `Worker mới: <b>${esc(sp.name)}</b> · ${esc(sp.agent ?? "build")}${sp.writes === false ? " · chỉ đọc" : ""}`,
-        `📁 <code>${esc(sp.directory)}</code>`,
-        "",
-        esc(trunc(sp.task ?? "", 1500)),
-      );
-    } else if (a.send) {
-      lines.push(`Gửi tới worker <b>${esc(a.send.name)}</b>:`, "", esc(trunc(a.send.message, 1500)));
-    }
+    const lines = approvalLines(this.langOf(a.chat), a);
     await this.h.sendHtml(a.chat, lines.join("\n"), {
       reply_markup: {
         inline_keyboard: [

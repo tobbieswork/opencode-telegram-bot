@@ -7,7 +7,7 @@
  */
 import { rm, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { StateManager } from "../src/state.js";
+import { StateManager, UserPrefsStore } from "../src/state.js";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: string): void {
@@ -49,6 +49,31 @@ const file = join("/tmp/opencode", `state-test-${process.pid}.json`);
   check("corrupt file -> empty store", Object.keys(st.all()).length === 0);
   st.set("9", { agent: "build" });
   check("recovers and persists", new StateManager(file).get("9").agent === "build");
+}
+
+// ── per-user language prefs ─────────────────────────────────────────────────────────
+{
+  const ufile = join("/tmp/opencode", `users-test-${process.pid}.json`);
+  await rm(ufile, { force: true });
+  const up = new UserPrefsStore(ufile);
+  check("default lang is vi (no prefs)", up.getLang("123") === "vi");
+
+  up.setLang("123", "en");
+  check("setLang + getLang roundtrip", up.getLang("123") === "en");
+
+  up.setLang("456", "vi");
+  check("per-user isolation (456=vi, 123=en)", up.getLang("456") === "vi" && up.getLang("123") === "en");
+
+  // Persistence across "restart"
+  const up2 = new UserPrefsStore(ufile);
+  check("prefs survive reload", up2.getLang("123") === "en" && up2.getLang("456") === "vi");
+  check("unknown user still defaults to vi", up2.getLang("999") === "vi");
+
+  // Overwrite
+  up2.setLang("123", "vi");
+  check("overwrite works", up2.getLang("123") === "vi");
+
+  await rm(ufile, { force: true });
 }
 
 await rm(file, { force: true });

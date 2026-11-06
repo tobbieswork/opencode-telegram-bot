@@ -2,6 +2,7 @@ import { exec as execCb } from "node:child_process";
 import { createWriteStream, unlinkSync } from "node:fs";
 import { log, warn, error } from "./logger.js";
 import { ConvKey, parseConv } from "./conv.js";
+import { redactSecrets } from "./redact.js";
 import {
   DnsHealConfig,
   HealState,
@@ -25,6 +26,8 @@ export type Message = {
   message_thread_id?: number;
   is_topic_message?: boolean;
   forum_topic_created?: { name: string };
+  /** The message this one replies to (same chat); used to detect replies to cards. */
+  reply_to_message?: { message_id?: number; message_thread_id?: number };
   /** Caption on media (photo/sticker/video/voice/document); counts as text. */
   caption?: string;
   sticker?: { file_id?: string; type?: string };
@@ -322,7 +325,7 @@ export class Telegram {
   async sendMessage(to: ConvKey | number, text: string, opts: Record<string, unknown> = {}): Promise<void> {
     await this.api("sendMessage", {
       ...dest(to),
-      text,
+      text: redactSecrets(text),
       parse_mode: "HTML",
       disable_web_page_preview: true,
       ...opts,
@@ -333,7 +336,7 @@ export class Telegram {
   async sendMessageId(to: ConvKey | number, text: string, opts: Record<string, unknown> = {}): Promise<number> {
     const res = await this.api<{ message_id: number }>("sendMessage", {
       ...dest(to),
-      text,
+      text: redactSecrets(text),
       parse_mode: "HTML",
       disable_web_page_preview: true,
       ...opts,
@@ -364,7 +367,7 @@ export class Telegram {
       await this.api("sendMessageDraft", {
         ...dest(to),
         draft_id: draftID,
-        text,
+        text: redactSecrets(text),
         ...(opts.canStop ? { can_stop: true } : {}),
       });
       return true;
@@ -386,7 +389,7 @@ export class Telegram {
   async sendRich(to: ConvKey | number, markdown: string, opts: { reply_markup?: unknown } = {}): Promise<number> {
     const res = await this.api<{ message_id: number }>("sendRichMessage", {
       ...dest(to),
-      rich_message: { markdown },
+      rich_message: { markdown: redactSecrets(markdown) },
       ...(opts.reply_markup ? { reply_markup: opts.reply_markup } : {}),
     });
     return res?.message_id ?? -1;
@@ -406,7 +409,7 @@ export class Telegram {
       await this.api("editMessageText", {
         chat_id: parseConv(to).chatId,
         message_id: messageId,
-        text,
+        text: redactSecrets(text),
         parse_mode: "HTML",
         disable_web_page_preview: true,
         ...opts,
@@ -432,7 +435,7 @@ export class Telegram {
     await this.api("editMessageText", {
       chat_id: parseConv(to).chatId,
       message_id: messageId,
-      text,
+      text: redactSecrets(text),
       parse_mode: "HTML",
       disable_web_page_preview: true,
       ...opts,

@@ -106,6 +106,13 @@ export interface PendingPrompt {
   remindersSent: number;
   /** When the next reminder is due (ms epoch). */
   nextReminderAt: number;
+  /**
+   * The chat where the prompt card is relayed (the owning conv's main channel,
+   * `chatOf(conv)`) — reminders edit/re-send the card THERE even though the
+   * schedule itself is persisted under the owning conv. Missing on entries
+   * written before main-channel relay (legacy) — fall back to the owning conv.
+   */
+  relayConv?: ConvKey;
 }
 
 export interface ChatState {
@@ -123,6 +130,20 @@ export interface ChatState {
    * setsess, or plan→build gets the instruction re-applied on its first prompt.
    */
   guidedLanguageSession?: string;
+  /**
+   * The sessionID the per-user language pin ("en" → English reply) was applied
+   * to, via the tgbot.language_en instruction. "en" sets it; "vi"/unset clears
+   * it. Per-session (not a boolean) so a fresh session after /new, /use, or
+   * rotation re-applies on its first prompt. See src/language.ts.
+   */
+  languageEnSession?: string;
+  /**
+   * The Telegram uid that last drove this conversation. Lets the orchestrator
+   * (which has no message uid) resolve the conv owner's language preference for
+   * user-facing cards (worker intro, confirm). Approximate for multi-user
+   * groups (last-speaker wins); exact for the single-manager case.
+   */
+  createdBy?: number;
   /**
    * Pending form/permission prompts awaiting the user's answer, keyed by the
    * prompt id (form id / permission request id). Each carries its reminder
@@ -226,6 +247,57 @@ export type StateMap = Record<string, ChatState>;
  * and it has no sessionID, so the session index skips it.
  */
 export const MACHINE_STATE_KEY = "__machine__";
+
+/** Supported UI languages. */
+export type Lang = "vi" | "en";
+
+/** Per-user preferences (keyed by Telegram user ID). */
+export interface UserPrefs {
+  language?: Lang;
+}
+
+/**
+ * Tiny JSON-backed store for per-user preferences (separate from the
+ * per-conversation state so /clear and topic sweeps never wipe them).
+ * File: data/users.json (same dir as state.json).
+ */
+export class UserPrefsStore {
+  private data: Record<string, UserPrefs> = {};
+
+  constructor(private file: string) {
+    if (existsSync(file)) {
+      try {
+        this.data = JSON.parse(readFileSync(file, "utf8")) as Record<string, UserPrefs>;
+      } catch {
+        this.data = {};
+      }
+    }
+  }
+
+  /** Returns the user's language preference, defaulting to "vi" (backward compatible). */
+  getLang(userId: string | number): Lang {
+    return this.data[String(userId)]?.language ?? "vi";
+  }
+
+  /** Set the user's language preference and persist. */
+  setLang(userId: string | number, lang: Lang): void {
+    const key = String(userId);
+    if (!this.data[key]) this.data[key] = {};
+    this.data[key].language = lang;
+    this.save();
+  }
+
+  private save(): void {
+    try {
+      mkdirSync(dirname(this.file), { recursive: true });
+      const tmp = `${this.file}.${process.pid}.tmp`;
+      writeFileSync(tmp, JSON.stringify(this.data, null, 2), { mode: 0o600 });
+      renameSync(tmp, this.file);
+    } catch {
+      /* best-effort persistence */
+    }
+  }
+}
 
 /**
  * Tiny JSON-backed store mapping a conversation (chat or chat:topic) to its

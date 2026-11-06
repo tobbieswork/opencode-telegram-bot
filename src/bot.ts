@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { Telegram, Update, CallbackQuery, Message, MessageGenerationStopped, MessageReactionUpdated } from "./telegram.js";
 import { OpenCodeCtl, newMessageID, assistantText, ModelInfo, SessionBrief } from "./opencode.js";
-import { StateManager, ChatState, MsgPurpose, MACHINE_STATE_KEY } from "./state.js";
+import { StateManager, ChatState, MsgPurpose, MACHINE_STATE_KEY, UserPrefsStore, Lang } from "./state.js";
 import { ConvKey, convKey, chatOf, parseConv } from "./conv.js";
 import { Orchestrator } from "./orchestrator.js";
 import { closeFinishedTopicsAtStartup } from "./orchestrator/topics.js";
@@ -13,6 +13,8 @@ import { ScheduleStore, Scheduler } from "./scheduler.js";
 import { isUserAllowed } from "./schedule.js";
 import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, formatTurnFailure } from "./format.js";
+import { tr, STRINGS } from "./i18n.js";
+import { applyLanguagePin } from "./language.js";
 import {
   extractMedia,
   buildPromptText,
@@ -23,6 +25,7 @@ import {
   type UploadMedia,
 } from "./uploads.js";
 import { richMarkdownChunks } from "./rich.js";
+import { extractTrailingChoices, choiceKeyboard, registry } from "./choices.js";
 import { scheduleForRegistration, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
 import {
   classifyAction,
@@ -53,7 +56,7 @@ import type { Btn, Keyboard } from "./shared.js";
 import { cmdAgents, cmdAgent, handleAgentCallback } from "./commands/agents.js";
 import { cmdSchedule, handleScheduleCallback } from "./commands/schedule.js";
 import { Advisor } from "./advisor/advisor.js";
-import { cmdHelp, cmdStatus, cmdContext, cmdUsage, cmdHistory, cmdNote, cmdRotation, handleNoteCallback } from "./commands/meta.js";
+import { cmdHelp, cmdStatus, cmdContext, cmdUsage, cmdHistory, cmdNote, cmdRotation, handleNoteCallback, cmdLang } from "./commands/meta.js";
 import { cmdBtw } from "./btw.js";
 import { cmdAsk } from "./ask.js";
 import { reviewPrompt, REVIEW_USAGE } from "./review.js";
@@ -152,6 +155,11 @@ interface QuestionFormState {
   formId: string;
   sessionID: string;
   conv: ConvKey;
+  /**
+   * Chat where the card is relayed and answered (the worker's main channel,
+   * `chatOf(conv)` — identical when the worker already sits in the main chat).
+   */
+  relayConv: ConvKey;
   messageId?: number;
   fields: QField[];
   index: number;
@@ -165,6 +173,8 @@ interface PermissionPrompt {
   requestID: string;
   sessionID: string;
   conv: ConvKey;
+  /** Chat where the card is relayed (the worker's main channel, `chatOf(conv)`). */
+  relayConv: ConvKey;
   messageId: number;
 }
 
@@ -211,6 +221,33 @@ export async function drainInflightCore(opts: {
     if (Date.now() >= deadline) return false;
     await new Promise((r) => setTimeout(r, Math.min(pollMs, deadline - Date.now())));
   }
+}
+
+/**
+ * Decide whether a typed message should be consumed as the answer to a question
+ * form, split out so it can be unit-tested without a bot or Telegram.
+ *
+ * The form must be in "typed answer" mode (`waitingCustom` set). Where the
+ * message lands matters:
+ *  - the worker's own topic (`qf.conv`): the user is clearly talking to the
+ *    worker, so the text is always consumed;
+ *  - the shared main channel (`qf.relayConv`, where the card is relayed): the
+ *    text is consumed ONLY when the user replied to the question card
+ *    (`replyToMessageId === qf.messageId`), so a prompt meant for the manager
+ *    is not hijacked as the worker's answer;
+ *  - anywhere else: never.
+ */
+export function formAcceptsTypedAnswer(
+  qf: { conv: ConvKey; relayConv: ConvKey; messageId?: number; waitingCustom?: number },
+  conv: ConvKey,
+  replyToMessageId?: number,
+): boolean {
+  if (qf.waitingCustom === undefined) return false;
+  // The worker's own topic: the user is clearly talking to the worker.
+  if (qf.conv === conv) return true;
+  // The shared main channel: only when the user replied to the question card.
+  if (qf.relayConv === conv) return qf.messageId !== undefined && replyToMessageId === qf.messageId;
+  return false;
 }
 
 /**
@@ -261,7 +298,7 @@ export class Bot {
   /** The self-editing "agent is doing…" line per conv: message id + current label. */
   private activity = new Map<ConvKey, { msgId: number; label: string; toolStart: number }>();
   /** The "⏳ Đang xử lý…" line per conv (General top-level only): msgId once sent + the elapsed-time timer. */
-  private working = new Map<ConvKey, { msgId?: number; startedAt: number; timer?: ReturnType<typeof setInterval> }>();
+  private working = new Map<ConvKey, { msgId?: number; startedAt: number; timer?: ReturnType<typeof setInterval>; base: string }>();
   /** Tool-call id → tool name per conv (learned from session.tool.input.started). */
   private toolNames = new Map<ConvKey, Map<string, string>>();
   /**
@@ -312,6 +349,8 @@ export class Bot {
   public orch: Orchestrator;
   /** Schedules, in their own file (data/schedules.json) — /clear must never touch them. */
   public scheduleStore: ScheduleStore;
+  /** Per-user preferences (data/users.json) — language, etc. */
+  public userPrefs: UserPrefsStore;
   /** /schedule tick engine — only constructed/started when cfg.schedule is on. */
   private scheduler?: Scheduler;
   /** Claude advisor (topic + Claude session on the Mac) — present only when enabled. */
@@ -329,6 +368,7 @@ export class Bot {
       join(dirname(this.cfg.stateFile), "schedules.json"),
       this.cfg.maxSchedules,
     );
+    this.userPrefs = new UserPrefsStore(join(dirname(this.cfg.stateFile), "users.json"));
     if (this.cfg.advisor) {
       this.advisor = new Advisor(
         { tg, st, cfg, sendHtml: (c, h) => this.sendHtml(c, h), startTyping: (c) => this.startTyping(c) },
@@ -342,11 +382,12 @@ export class Bot {
       cfg,
       busyNotes: this.busyNotes,
       advisor: this.advisor,
+      userPrefs: this.userPrefs,
       sendHtml: (conv, html, opts) => this.sendHtml(conv, html, opts),
       applyModelAndVariant: (sid, state) => this.applyModelAndVariant(sid, state),
       prepareNotes: (conv, sid) => this.prepareNotesTurn(conv, sid),
       startTyping: (conv) => this.startTyping(conv),
-      startWorking: (conv) => this.startWorking(conv),
+      startWorking: (conv, lang) => this.startWorking(conv, lang),
       stopWorking: (conv) => this.stopWorking(conv),
       onTopicGone: async (conv) => {
         // The topic is gone and the conv is being purged NOW (not the deferred
@@ -783,6 +824,11 @@ export class Bot {
     // "got it" 🤔 when a real prompt (not a command) starts a turn.
     if (msg.message_id) this.indexUserMessage(conv, msg.message_id, text);
     const state = this.st.get(conv);
+    // Record the conv owner (last driver) so the orchestrator can resolve the
+    // language for user-facing cards, and resolve this message's lang for the
+    // LLM instruction injection (per the user's /lang preference, default vi).
+    if (uid != null) this.st.set(conv, { createdBy: uid });
+    const lang = this.userPrefs.getLang(uid ?? "");
     if (!state.directory && !state.advisor) {
       // A topic the user opened by hand starts where the chat's main session works
       // (unless that is the Manager, whose folder is not a project).
@@ -802,9 +848,9 @@ export class Bot {
     else {
       // (The "🤔 thinking" body-react on the user's message was removed 2026-10-27:
       // the working indicator now covers "the bot is working" on new prompts.)
-      if (await this.handleFormText(conv, text)) return;
-      else if (state.manager) await this.orch.promptManager(conv, text, msg.message_id);
-      else await this.runPrompt(conv, text, state, msg.message_id);
+      if (await this.handleFormText(conv, text, msg.reply_to_message?.message_id)) return;
+      else if (state.manager) await this.orch.promptManager(conv, text, msg.message_id, lang);
+      else await this.runPrompt(conv, text, state, msg.message_id, lang);
     }
   }
 
@@ -969,6 +1015,16 @@ export class Bot {
   private async sendReply(conv: ConvKey, text: string): Promise<void> {
     const clean = stripTags(text ?? "");
     if (!clean) return;
+    // Pattern B (deterministic, model-agnostic): if the reply ENDS with a short
+    // sequentially-marked choice list, drop that list from the body and attach
+    // an inline keyboard mirroring it. The keyboard rides the LAST chunk only.
+    // Detection returns null when unsure → kb undefined → the reply is sent
+    // exactly as before (never broken).
+    const ch = extractTrailingChoices(clean);
+    const kb: Keyboard | undefined = ch
+      ? choiceKeyboard(registry.put(conv, this.st.peek(conv)?.sessionID, ch.options), ch.options)
+      : undefined;
+    const body = ch ? ch.body : clean;
     const worker = this.st.peek(conv)?.worker;
     const purpose: MsgPurpose = worker ? "worker-done" : "reply";
     // Body language (feature C): celebrate ONLY the report of a worker that
@@ -977,15 +1033,23 @@ export class Bot {
     const celebrate = worker?.status === "done";
     let lastId = -1;
     if (this.cfg.richReplies) {
-      for (const c of richMarkdownChunks(clean)) {
+      const chunks = richMarkdownChunks(body);
+      for (let i = 0; i < chunks.length; i++) {
+        const c = chunks[i];
+        const last = i === chunks.length - 1;
         try {
-          lastId = await this.tg.sendRich(conv, c);
+          lastId = await this.tg.sendRich(conv, c, last && kb ? { reply_markup: kb } : {});
         } catch (e) {
           // Per-message graceful fallback: retry THIS chunk through the existing
           // HTML path (mdToHtmlChunks + sendMessage) so a rich parse/method error
-          // costs only this message, never a lost reply.
+          // costs only this message, never a lost reply. The keyboard (if any) rides
+          // the very last HTML chunk of the very last rich chunk.
           warn(`sendRich failed (${(e as Error)?.message ?? e}) — falling back to HTML for one chunk`);
-          for (const h of mdToHtmlChunks(c, this.cfg.replyMaxLen)) await this.tg.sendMessage(conv, h);
+          const htmlChunks = mdToHtmlChunks(c, this.cfg.replyMaxLen);
+          for (let j = 0; j < htmlChunks.length; j++) {
+            const hLast = last && j === htmlChunks.length - 1;
+            await this.tg.sendMessage(conv, htmlChunks[j], hLast && kb ? { reply_markup: kb } : {});
+          }
           lastId = -1;
         }
         this.indexSent(conv, lastId, c, purpose);
@@ -993,9 +1057,10 @@ export class Bot {
       this.celebrateWorkerDone(conv, lastId, celebrate);
       return;
     }
-    for (const c of mdToHtmlChunks(clean, this.cfg.replyMaxLen)) {
-      lastId = await this.tg.sendMessageId(conv, c);
-      this.indexSent(conv, lastId, c, purpose);
+    const chunks = mdToHtmlChunks(body, this.cfg.replyMaxLen);
+    for (let i = 0; i < chunks.length; i++) {
+      lastId = await this.tg.sendMessageId(conv, chunks[i], i === chunks.length - 1 && kb ? { reply_markup: kb } : {});
+      this.indexSent(conv, lastId, chunks[i], purpose);
     }
     this.celebrateWorkerDone(conv, lastId, celebrate);
   }
@@ -1236,9 +1301,11 @@ export class Bot {
     if (msg.message_id) this.indexUserMessage(conv, msg.message_id, text2);
     // Dispatch — identical to the plain-text path (the busy check happens
     // inside, AFTER the file is already saved).
-    if (await this.handleFormText(conv, text2)) return;
-    else if (state.manager) await this.orch.promptManager(conv, text2, msg.message_id);
-    else await this.runPrompt(conv, text2, state, msg.message_id);
+    if (uid != null) this.st.set(conv, { createdBy: uid });
+    const lang = this.userPrefs.getLang(uid ?? "");
+    if (await this.handleFormText(conv, text2, msg.reply_to_message?.message_id)) return;
+    else if (state.manager) await this.orch.promptManager(conv, text2, msg.message_id, lang);
+    else await this.runPrompt(conv, text2, state, msg.message_id, lang);
   }
 
   /** A media message with no text/caption — acknowledge it; the bot reads text only. */
@@ -1294,14 +1361,15 @@ export class Bot {
    * for DMs (native typing renders fine there). Manager turns only — runPromptTask
    * is manager-only, so worker topics never reach here.
    */
-  private startWorking(conv: ConvKey): void {
+  private startWorking(conv: ConvKey, lang?: Lang): void {
     if (!this.cfg.working || isDmConv(conv)) return; // manager turns in groups/topics; DMs show native typing fine
     if (this.working.has(conv)) return;
     log(`⏳ working indicator shown for ${conv}`);
     const startedAt = Date.now();
-    this.working.set(conv, { msgId: undefined, startedAt, timer: undefined }); // sync marker (race-safe)
+    const base = tr(lang ?? "vi", STRINGS.working_indicator.vi, STRINGS.working_indicator.en);
+    this.working.set(conv, { msgId: undefined, startedAt, timer: undefined, base }); // sync marker (race-safe)
     void this.tg
-      .sendMessageId(conv, "⏳ Đang xử lý…")
+      .sendMessageId(conv, base)
       .then((id) => {
         const e = this.working.get(conv);
         if (id <= 0) {
@@ -1312,7 +1380,7 @@ export class Bot {
         e.msgId = id;
         e.timer = setInterval(() => {
           const secs = Math.round((Date.now() - startedAt) / 1000);
-          void this.tg.editMessageText(conv, id, `⏳ Đang xử lý… · ${secs}s`).catch(() => {});
+          void this.tg.editMessageText(conv, id, `${e.base} · ${secs}s`).catch(() => {});
         }, 10000);
         (e.timer as any).unref?.();
       })
@@ -1521,11 +1589,13 @@ export class Bot {
    * backoff: the 1st reminder fires after `remindBaseMs`, each later one farther
    * out (`base * factor^n`) — deliberately NOT a fixed interval.
    */
-  private startPromptReminder(conv: ConvKey, promptId: string, kind: "form" | "permission", text: string, keyboard?: unknown, messageId?: number): void {
+  private startPromptReminder(conv: ConvKey, promptId: string, kind: "form" | "permission", text: string, keyboard?: unknown, messageId?: number, relayConv?: ConvKey): void {
     if (!this.cfg.remind) return;
     const prev = this.st.get(conv).pendingPrompts?.[promptId];
     const sched = scheduleForRegistration(prev, kind, this.cfg.remindBaseMs, Date.now());
-    const pp = { kind, text, keyboard, messageId: messageId ?? prev?.messageId, ...sched };
+    // The SCHEDULE stays under the owning conv (reconcile's stale-prune is
+    // per-conv/per-session); `relayConv` only records where the CARD lives.
+    const pp = { kind, text, keyboard, messageId: messageId ?? prev?.messageId, relayConv: relayConv ?? prev?.relayConv, ...sched };
     this.st.set(conv, { pendingPrompts: { ...this.st.get(conv).pendingPrompts, [promptId]: pp } });
     this.armReminderTimer(conv, promptId);
   }
@@ -1598,6 +1668,9 @@ export class Bot {
     // schedule and re-arms it) or drops a settled one as stale.
     const live = pp.kind === "form" ? this.questionForms.has(promptId) : this.permissionPrompts.has(promptId);
     if (!live) return;
+    // The card may live in the main channel (relayConv) while the schedule is
+    // persisted under the owning conv — nudge the card where it actually is.
+    const target = pp.relayConv ?? conv;
     const max = this.cfg.remindMax;
     const sent = pp.remindersSent + 1;
     // Nudge by EDITING the original card in place (⏰ count line on top) — one
@@ -1605,11 +1678,11 @@ export class Bot {
     // message only when the original is gone (deleted by the user, too old).
     const text = `⏰ <i>Nhắc (${sent}/${max}): câu hỏi/quyền này vẫn đang chờ bạn trả lời — hoặc gõ /stop để bỏ.</i>\n\n${pp.text}`;
     const edited = pp.messageId
-      ? await this.editCardInPlace(conv, pp.messageId, text, pp.keyboard as Keyboard | undefined)
+      ? await this.editCardInPlace(target, pp.messageId, text, pp.keyboard as Keyboard | undefined)
       : -1;
     if (edited < 0) {
       const freshId = await this.tg
-        .sendMessageId(conv, text, { reply_markup: pp.keyboard as Keyboard | undefined })
+        .sendMessageId(target, text, { reply_markup: pp.keyboard as Keyboard | undefined })
         .catch(() => -1);
       if (freshId > 0) {
         this.st.set(conv, {
@@ -1645,7 +1718,7 @@ export class Bot {
     switch (cmd.toLowerCase()) {
       case "/start":
       case "/help":
-        return cmdHelp(this, conv);
+        return cmdHelp(this, conv, this.userPrefs.getLang(uid ?? ""));
       case "/new":
         return this.cmdNew(conv);
       case "/ls":
@@ -1708,13 +1781,15 @@ export class Bot {
       }
       case "/schedule":
         return cmdSchedule(this, conv, arg, state, uid);
+      case "/lang":
+        return cmdLang(this, conv, arg, uid);
       default:
         return this.tg.sendMessage(conv, `Unknown command: ${esc(cmd)}\nSend /help`);
     }
   }
 
   // ── the long-running prompt ──────────────────────────────────────────────
-  private async runPrompt(conv: ConvKey, text: string, state: ChatState, userMsgId?: number): Promise<void> {
+  private async runPrompt(conv: ConvKey, text: string, state: ChatState, userMsgId?: number, lang?: Lang): Promise<void> {
     // A closed worker topic reopens itself when the user speaks in it
     // (openForumTopic is a no-op on an already-open topic, so safe every time).
     if (state.worker) void this.tg.openForumTopic(conv).catch(() => {});
@@ -1733,7 +1808,7 @@ export class Bot {
     }
     // Keep the "typing…" indicator alive for the whole turn (until the reply is sent).
     this.startTyping(conv);
-    this.startWorking(conv); // "⏳ Đang xử lý…" — General top-level only (native typing doesn't render there)
+    this.startWorking(conv, lang); // "⏳ Đang xử lý…" — General top-level only (native typing doesn't render there)
     try {
       let sid = state.sessionID;
       if (!sid) {
@@ -1742,6 +1817,10 @@ export class Bot {
         if (state.agent) await this.oc.setAgent(sid, state.agent).catch((e) => warn("setAgent:", e?.message));
         this.st.set(conv, { sessionID: sid });
       }
+      // Per-user language preference: pin the session to English when the user
+      // chose "en" ("vi"/unset clears it). Idempotent and self-tracked per session,
+      // so a fresh session after /new, /use, or rotation re-applies on its prompt.
+      await applyLanguagePin(this.oc, this.st, conv, sid, lang);
       // "Stay in the user's language" is a per-session INSTRUCTION (OpenCode
       // injects `api/*` entries into the system context), not prepended text —
       // cleaner and it doesn't grow the user-turn context. Tracked per SESSION
@@ -2574,6 +2653,10 @@ export class Bot {
       await this.tg.answerCallbackQuery(cb.id);
       return;
     }
+    if (data.startsWith("ch:")) {
+      await this.handleChoiceCallback(cb, conv, messageId);
+      return;
+    }
     if (data.startsWith("fq:")) {
       await this.handleFormCallback(cb, conv, messageId);
       return;
@@ -2798,7 +2881,7 @@ export class Bot {
           await cmdSchedule(this, conv, "", state, cb.from?.id);
           break;
         case "help":
-          await cmdHelp(this, conv);
+          await cmdHelp(this, conv, this.userPrefs.getLang(cb.from?.id ?? ""));
           break;
         default:
           await this.tg.sendMessage(conv, "❓ Lệnh không rõ.");
@@ -3084,6 +3167,42 @@ export class Bot {
   }
 
   /**
+   * Handle a tap on a trailing choice-list button (data = `ch:<id>:<i>`).
+   *
+   * The chosen option is relayed to the session "as if typed" — a fresh user
+   * turn via `oc.prompt`. The session is idle at this point (the reply that
+   * produced the buttons already finished its turn), so the turn runs clean and
+   * the `session.execution.*` event loop relays the model's reply back to this
+   * conv (attaching buttons again, recursively, if that reply also ends in a
+   * choice list). The keyboard is one-shot: it is dropped immediately so a
+   * re-tap or a stale button (e.g. after a /new) can never fire a second turn.
+   */
+  private async handleChoiceCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+    const parts = (cb.data ?? "").split(":");
+    const id = parts[1];
+    const idx = Number(parts[2] ?? "");
+    // One-shot: drop the keyboard first so a double-tap can't double-fire.
+    if (messageId) {
+      await this.tg.editMessageReplyMarkup(conv, messageId, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+    }
+    const rec = id ? registry.get(id) : undefined;
+    const choice = rec?.options[idx];
+    const state = this.st.peek(conv);
+    // Stale button: unknown id, missing session, or the conv's session changed
+    // (a /new / /use replaced it) — tapping would hit the wrong session.
+    if (!rec || !rec.sessionID || choice === undefined || (state?.sessionID && state.sessionID !== rec.sessionID)) {
+      if (id) registry.delete(id);
+      await this.tg.answerCallbackQuery(cb.id, "Nút này không còn áp dụng.");
+      return;
+    }
+    await this.tg.answerCallbackQuery(cb.id);
+    registry.delete(id); // consume: the choice set is single-use
+    // Fire the new user turn; the event loop relays the reply when it ends. A
+    // failure here (session busy/gone) is non-fatal — the user can just retype.
+    await this.oc.prompt(rec.sessionID, choice).catch((e) => warn("choice prompt:", (e as Error)?.message));
+  }
+
+  /**
    * `/variants [id]` — list (no arg) or set the reasoning "variant" as a plain
    * text message. The button-pick version lives in cmdVariantSet (/variant).
    */
@@ -3280,7 +3399,7 @@ export class Bot {
     }
   }
 
-  /** A new question form appeared — relay its first field to the owning chat. */
+  /** A new question form appeared — relay its first field to the worker's main channel. */
   private async onFormCreated(form: any): Promise<void> {
     const sessionID = form.sessionID as string;
     const formID = form.id as string;
@@ -3290,6 +3409,10 @@ export class Bot {
       warn(`form.created for session ${sessionID} with no mapped chat — ignoring`);
       return;
     }
+    // Relay the card to the worker's main channel so the user answers it from
+    // the manager chat; the worker's conv stays the prompt's owner (status +
+    // reminder schedule).
+    const relayConv = chatOf(conv);
     const fields: QField[] = (form.fields ?? [])
       .filter((f: any) => !f.hidden)
       .map((f: any) => ({
@@ -3303,24 +3426,24 @@ export class Bot {
       }));
     if (!fields.length) {
       await this.tg
-        .sendMessage(conv, "❓ OpenCode đang hỏi (không có lựa chọn) — xem /history để biết chi tiết.")
+        .sendMessage(relayConv, "❓ OpenCode đang hỏi (không có lựa chọn) — xem /history để biết chi tiết.")
         .catch(() => {});
       return;
     }
-    const qf: QuestionFormState = { formId: formID, sessionID, conv, fields, index: 0, answers: {} };
+    const qf: QuestionFormState = { formId: formID, sessionID, conv, relayConv, fields, index: 0, answers: {} };
     this.orch.onWaiting(conv);
     this.questionForms.set(formID, qf);
     const v = this.renderQuestion(qf);
     // Re-registration after a restart (reconcile): the original card is usually
     // still in the chat — refresh it in place instead of posting a duplicate.
     const prevId = this.st.get(conv).pendingPrompts?.[formID]?.messageId;
-    let messageId = prevId ? await this.editCardInPlace(conv, prevId, v.text, v.keyboard) : -1;
-    if (messageId < 0) messageId = await this.tg.sendMessageId(conv, v.text, { reply_markup: v.keyboard }).catch(() => -1);
+    let messageId = prevId ? await this.editCardInPlace(relayConv, prevId, v.text, v.keyboard) : -1;
+    if (messageId < 0) messageId = await this.tg.sendMessageId(relayConv, v.text, { reply_markup: v.keyboard }).catch(() => -1);
     qf.messageId = messageId;
     // Start nudging if the user doesn't answer (exponential backoff; keyed by form id)
     // — but ONLY when the card was actually sent, else a reminder would re-send
     // buttons that were never delivered.
-    if (messageId > 0) this.startPromptReminder(conv, formID, "form", v.text, v.keyboard, messageId);
+    if (messageId > 0) this.startPromptReminder(conv, formID, "form", v.text, v.keyboard, messageId, relayConv);
   }
 
   /** A form was answered/cancelled out-of-band (e.g. in the TUI) — clean up. */
@@ -3340,7 +3463,7 @@ export class Bot {
         type === "form.cancelled"
           ? "ℹ️ Câu hỏi đã được huỷ bởi OpenCode."
           : "ℹ️ Câu hỏi đã được trả lời (nơi khác).";
-      await this.tg.editMessageText(qf.conv, qf.messageId, msg).catch(() => {});
+      await this.tg.editMessageText(qf.relayConv, qf.messageId, msg).catch(() => {});
     }
   }
 
@@ -3351,6 +3474,9 @@ export class Bot {
     const n = qf.index + 1;
     const lines: string[] = [];
     lines.push(`❓ <b>Câu ${n}/${total}</b>${f.title ? " · " + esc(f.title) : ""}`);
+    // The card lives in the shared main channel — name the worker that asks.
+    const workerName = this.st.peek(qf.conv)?.worker?.name;
+    if (workerName) lines.push(`<b>Worker: ${esc(workerName)}</b>`);
     if (f.description) lines.push(esc(f.description));
     if (qf.waitingCustom !== undefined) {
       lines.push("", "✍️ <i>Gõ câu trả lời của bạn trong tin nhắn kế tiếp (bấm Huỷ để bỏ qua).</i>");
@@ -3391,7 +3517,7 @@ export class Bot {
       if (op === "x") {
         await this.oc.cancelForm(qf.sessionID, qf.formId, "Cancelled by user via Telegram.");
         this.questionForms.delete(formID);
-        this.cancelReminder(conv, formID); // the form is really cancelled → stop nudging
+        this.cancelReminder(qf.conv, formID); // the form is really cancelled → stop nudging (schedule lives under the worker conv)
         await this.tg.answerCallbackQuery(cb.id);
         if (messageId) await this.tg.editMessageText(conv, messageId, "❌ Đã huỷ câu hỏi.").catch(() => {});
         return;
@@ -3412,7 +3538,7 @@ export class Bot {
         if (!opt) throw new Error("Đáp án không hợp lệ — vui lòng thử lại.");
         qf.answers[f.key] = opt.value;
         await this.tg.answerCallbackQuery(cb.id);
-        await this.advanceOrSubmit(qf, conv, messageId);
+        await this.advanceOrSubmit(qf, messageId);
         return;
       }
       await this.tg.answerCallbackQuery(cb.id);
@@ -3422,32 +3548,35 @@ export class Bot {
   }
 
   /** After recording an answer: show the next field, or submit if all answered. */
-  private async advanceOrSubmit(qf: QuestionFormState, conv: ConvKey, messageId?: number): Promise<void> {
+  private async advanceOrSubmit(qf: QuestionFormState, messageId?: number): Promise<void> {
     qf.waitingCustom = undefined;
+    // The card lives in the relay conv (main channel); the reminder schedule
+    // lives under the worker conv — regardless of where the user answered.
+    const cardConv = qf.relayConv ?? qf.conv;
     if (qf.index + 1 < qf.fields.length) {
       qf.index += 1;
       if (messageId) {
         const v = this.renderQuestion(qf);
-        await this.tg.editMessageText(conv, messageId, v.text, { reply_markup: v.keyboard });
+        await this.tg.editMessageText(cardConv, messageId, v.text, { reply_markup: v.keyboard });
         // Keep nudging about the NEXT field of the same form (same form id), with
         // its buttons so the reminder is answerable — on the SAME card.
-        this.startPromptReminder(conv, qf.formId, "form", v.text, v.keyboard, messageId);
+        this.startPromptReminder(qf.conv, qf.formId, "form", v.text, v.keyboard, messageId, qf.relayConv);
       } else {
         // Nothing was shown for the new field: don't keep nudging about the old one.
-        this.cancelReminder(conv, qf.formId);
+        this.cancelReminder(qf.conv, qf.formId);
       }
       return;
     }
     // All fields answered — submit the full answer to OpenCode.
     await this.oc.replyForm(qf.sessionID, qf.formId, qf.answers);
     this.questionForms.delete(qf.formId);
-    this.cancelReminder(conv, qf.formId); // form really submitted → stop nudging
+    this.cancelReminder(qf.conv, qf.formId); // form really submitted → stop nudging
     if (messageId) {
       const summary = Object.entries(qf.answers)
         .map(([k, v]) => `• ${esc(trunc(String(v), 80))}`)
         .join("\n");
       await this.tg
-        .editMessageText(conv, messageId, `✅ Đã gửi câu trả lời cho OpenCode.${summary ? "\n" + summary : ""}`)
+        .editMessageText(cardConv, messageId, `✅ Đã gửi câu trả lời cho OpenCode.${summary ? "\n" + summary : ""}`)
         .catch(() => {});
     }
   }
@@ -3455,21 +3584,25 @@ export class Bot {
   /**
    * If a question form in this chat is waiting for a typed (custom) answer,
    * consume this text as that answer. Returns true if the text was consumed.
+   *
+   * `replyToMessageId` is `msg.reply_to_message?.message_id`: in the shared main
+   * channel the text is only consumed when it is a reply to the question card
+   * (see {@link formAcceptsTypedAnswer}); in the worker's own topic it is
+   * consumed regardless.
    */
-  private async handleFormText(conv: ConvKey, text: string): Promise<boolean> {
+  private async handleFormText(conv: ConvKey, text: string, replyToMessageId?: number): Promise<boolean> {
     for (const qf of this.questionForms.values()) {
-      if (qf.conv === conv && qf.waitingCustom !== undefined) {
-        const f = qf.fields[qf.index];
-        qf.answers[f.key] = text;
-        await this.advanceOrSubmit(qf, conv, qf.messageId);
-        return true;
-      }
+      if (!formAcceptsTypedAnswer(qf, conv, replyToMessageId)) continue;
+      const f = qf.fields[qf.index];
+      qf.answers[f.key] = text;
+      await this.advanceOrSubmit(qf, qf.messageId);
+      return true;
     }
     return false;
   }
 
   // ── permission prompts (OpenCode tool permission asks) ────────────────────
-  /** A permission request is pending — relay it to the owning chat as buttons. */
+  /** A permission request is pending — relay it to the worker's main channel as buttons. */
   private async onPermissionAsked(d: any): Promise<void> {
     const requestID = d.id as string;
     const sessionID = d.sessionID as string;
@@ -3483,7 +3616,14 @@ export class Bot {
       return;
     }
     this.orch.onWaiting(conv);
+    // Relay the card to the worker's main channel so the user answers it from
+    // the manager chat; the worker's conv stays the prompt's owner (status +
+    // reminder schedule).
+    const relayConv = chatOf(conv);
     const lines: string[] = ["🔐 <b>OpenCode xin quyền</b>"];
+    // The card lives in the shared main channel — name the worker that asks.
+    const workerName = this.st.peek(conv)?.worker?.name;
+    if (workerName) lines.push(`<b>Worker: ${esc(workerName)}</b>`);
     lines.push(`action: <code>${esc(d.action ?? "?")}</code>`);
     for (const r of (d.resources ?? []) as string[]) {
       lines.push(`resource: <code>${esc(trunc(r, 150))}</code>`);
@@ -3502,14 +3642,14 @@ export class Bot {
     // Re-registration after a restart (reconcile): refresh the original card in
     // place instead of posting a duplicate permission prompt.
     const prevId = this.st.get(conv).pendingPrompts?.[requestID]?.messageId;
-    let messageId = prevId ? await this.editCardInPlace(conv, prevId, lines.join("\n"), kb) : -1;
-    if (messageId < 0) messageId = await this.tg.sendMessageId(conv, lines.join("\n"), { reply_markup: kb }).catch(() => -1);
+    let messageId = prevId ? await this.editCardInPlace(relayConv, prevId, lines.join("\n"), kb) : -1;
+    if (messageId < 0) messageId = await this.tg.sendMessageId(relayConv, lines.join("\n"), { reply_markup: kb }).catch(() => -1);
     if (messageId > 0) {
-      this.permissionPrompts.set(requestID, { requestID, sessionID, conv, messageId });
+      this.permissionPrompts.set(requestID, { requestID, sessionID, conv, relayConv, messageId });
       // Start nudging if unanswered — but ONLY when the card was actually sent.
       // A failed send (messageId = -1) would leave a reminder re-sending a card
       // whose buttons are no longer valid (dead buttons).
-      this.startPromptReminder(conv, requestID, "permission", lines.join("\n"), kb, messageId);
+      this.startPromptReminder(conv, requestID, "permission", lines.join("\n"), kb, messageId, relayConv);
     }
   }
 
@@ -3528,7 +3668,7 @@ export class Bot {
     const label = reply === "reject" ? "từ chối" : reply === "always" ? "duyệt luôn" : "duyệt";
     if (p.messageId) {
       await this.tg
-        .editMessageText(p.conv, p.messageId, `ℹ️ Quyền đã được ${label} ở nơi khác.`)
+        .editMessageText(p.relayConv, p.messageId, `ℹ️ Quyền đã được ${label} ở nơi khác.`)
         .catch(() => {});
     }
   }
@@ -3552,14 +3692,14 @@ export class Bot {
       if (!labels[decision]) throw new Error("Lựa chọn không hợp lệ.");
       await this.oc.replyPermission(p.sessionID, p.requestID, decision as "once" | "always" | "reject");
       this.permissionPrompts.delete(requestID);
-      this.cancelReminder(conv, requestID); // answered → stop nudging
+      this.cancelReminder(p.conv, requestID); // answered → stop nudging (schedule lives under the worker conv)
       await this.tg.answerCallbackQuery(cb.id);
       if (messageId) await this.tg.editMessageText(conv, messageId, labels[decision]).catch(() => {});
     } catch (e) {
       const msg = (e as Error)?.message ?? "";
-      if (/not found|permission/i.test(msg)) {
-        this.permissionPrompts.delete(requestID);
-        this.cancelReminder(conv, requestID); // answered elsewhere → stop nudging
+        if (/not found|permission/i.test(msg)) {
+          this.permissionPrompts.delete(requestID);
+          this.cancelReminder(p.conv, requestID); // answered elsewhere → stop nudging (schedule lives under the worker conv)
         await this.tg.answerCallbackQuery(cb.id, "Yêu cầu này đã được xử lý ở nơi khác.");
         if (messageId) {
           await this.tg.editMessageText(conv, messageId, "ℹ️ Quyền đã được xử lý ở nơi khác.").catch(() => {});

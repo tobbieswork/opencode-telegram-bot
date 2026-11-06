@@ -1,6 +1,7 @@
 import type { Bot } from "./bot.js";
 import { chatOf, parseConv, type ConvKey } from "./conv.js";
 import { esc, trunc, timeAgo } from "./format.js";
+import { errorText } from "./i18n.js";
 import { agentLabel, resolveAgent, type AgentId } from "./advisor/agents.js";
 
 /**
@@ -50,7 +51,8 @@ export async function cmdAsk(bot: Bot, conv: ConvKey, arg: string): Promise<void
     await bot.advisor.startThread({ chat, title, message: q, agent });
     await bot.sendHtml(conv, "🧠 Đã mở thread cố vấn — câu trả lời đã gửi trong topic mới. Nhắn tiếp trong topic đó để hỏi thêm.");
   } catch (e) {
-    await bot.sendHtml(conv, `❌ Lỗi: ${esc(trunc(String((e as Error)?.message ?? e), 300))}`).catch(() => {});
+    const lang = bot.userPrefs.getLang(bot.st.peek(conv)?.createdBy ?? "");
+    await bot.sendHtml(conv, errorText(lang, esc(trunc(String((e as Error)?.message ?? e), 300)))).catch(() => {});
   }
 }
 

@@ -1,12 +1,13 @@
 import type { Bot } from "../bot.js";
 import type { CallbackQuery } from "../telegram.js";
-import type { ChatState } from "../state.js";
+import type { ChatState, Lang } from "../state.js";
 import type { ConvKey } from "../conv.js";
 import { isAbsolute, resolve } from "node:path";
 import { existsSync, statSync } from "node:fs";
 import { randomInt } from "node:crypto";
 import { Schedule, SchedSpec, formatSchedule, nextRunAfter, parseScheduleSpec } from "../schedule.js";
 import { esc } from "../format.js";
+import { errorText } from "../i18n.js";
 import { isUnderRoot } from "../fsbrowser.js";
 import { AGENT_WHITELIST } from "../shared.js";
 import type { Keyboard } from "../shared.js";
@@ -52,14 +53,20 @@ function scheduleListMarkup(bot: Bot, mine: Schedule[]): { html: string; kb: Key
   return { html: `<b>⏰ Lịch (${mine.length})</b>\n${lines.join("\n")}`, kb: { inline_keyboard: rows } };
 }
 
-/** The /schedule usage card, HTML-escaped (sendMessage is parse_mode HTML). */
-function scheduleUsageText(bot: Bot): string {
+/** The /schedule usage card, HTML-escaped (sendMessage is parse_mode HTML). Localized by lang. */
+function scheduleUsageText(bot: Bot, lang: Lang): string {
   const usage =
-    "Đặt lịch: /schedule <spec> <prompt> [dir=<đường dẫn> agent=<tên>]\n" +
-    "spec: daily|weekdays HH:MM · weekly mon..sun HH:MM · every <N>h · once YYYY-MM-DD HH:MM\n" +
-    `vd: /schedule daily 08:00 Review commit 24h qua dir=${bot.cfg.opencodeDirectory}\n\n` +
-    "Quản lý: /schedule help · pause|resume|run|rm <id>\n" +
-    "Lưu ý: phải có dir= (thư mục ngoài data/manager) — lịch không chạy trong thư mục Manager. Agent mặc định: build.";
+    lang === "en"
+      ? "Schedule: /schedule <spec> <prompt> [dir=<path> agent=<name>]\n" +
+        "spec: daily|weekdays HH:MM · weekly mon..sun HH:MM · every <N>h · once YYYY-MM-DD HH:MM\n" +
+        `e.g.: /schedule daily 08:00 Review commits from the last 24h dir=${bot.cfg.opencodeDirectory}\n\n` +
+        "Manage: /schedule help · pause|resume|run|rm <id>\n" +
+        "Note: dir= is required (a folder outside data/manager) — schedules don't run in the Manager folder. Default agent: build."
+      : "Đặt lịch: /schedule <spec> <prompt> [dir=<đường dẫn> agent=<tên>]\n" +
+        "spec: daily|weekdays HH:MM · weekly mon..sun HH:MM · every <N>h · once YYYY-MM-DD HH:MM\n" +
+        `vd: /schedule daily 08:00 Review commit 24h qua dir=${bot.cfg.opencodeDirectory}\n\n` +
+        "Quản lý: /schedule help · pause|resume|run|rm <id>\n" +
+        "Lưu ý: phải có dir= (thư mục ngoài data/manager) — lịch không chạy trong thư mục Manager. Agent mặc định: build.";
   return esc(usage);
 }
 
@@ -71,7 +78,7 @@ export async function cmdSchedule(bot: Bot, conv: ConvKey, arg: string, state: C
   } catch (e) {
     const m = (e as Error)?.message ?? String(e);
     try {
-      await bot.tg.sendMessage(conv, `❌ Lỗi: ${m}`);
+      await bot.tg.sendMessage(conv, errorText(bot.userPrefs.getLang(uid ?? ""), m));
     } catch {
       /* swallow — last resort */
     }
@@ -83,7 +90,7 @@ async function cmdScheduleInner(bot: Bot, conv: ConvKey, arg: string, state: Cha
   if (!arg) {
     const mine = bot.scheduleStore.load().filter((s) => s.conv === conv);
     if (!mine.length) {
-      await bot.tg.sendMessage(conv, "⏰ Chưa có lịch nào cho chat này.\n\n" + scheduleUsageText(bot));
+      await bot.tg.sendMessage(conv, "⏰ Chưa có lịch nào cho chat này.\n\n" + scheduleUsageText(bot, bot.userPrefs.getLang(uid ?? "")));
       return;
     }
     const v = scheduleListMarkup(bot, mine);
@@ -95,7 +102,7 @@ async function cmdScheduleInner(bot: Bot, conv: ConvKey, arg: string, state: Cha
   const [sub, ...rest] = arg.split(/\s+/);
   const subLc = sub.toLowerCase();
   if (subLc === "help" || subLc === "--help" || subLc === "-h") {
-    await bot.tg.sendMessage(conv, "⏰ Cách dùng /schedule\n\n" + scheduleUsageText(bot));
+    await bot.tg.sendMessage(conv, "⏰ Cách dùng /schedule\n\n" + scheduleUsageText(bot, bot.userPrefs.getLang(uid ?? "")));
     return;
   }
   if (["pause", "resume", "run", "rm", "del", "delete"].includes(subLc)) {
