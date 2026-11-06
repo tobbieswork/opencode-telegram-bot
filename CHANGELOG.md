@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.13.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.12.0...opencode-telegram-bot-v1.13.0) (2026-11-06)
+
+
+### Features
+
+* overnight improvements (anti-overflow, DoD re-inject, /usage footer, constraint-pinning) ([#110](https://github.com/tobbieswork/opencode-telegram-bot/issues/110)) ([baadb0c](https://github.com/tobbieswork/opencode-telegram-bot/commit/baadb0c9fe32192dae9d4c736deb9fff776b7c38))
+* per-user language + perm relay + worker HTML + choice buttons + secret redaction ([#111](https://github.com/tobbieswork/opencode-telegram-bot/issues/111)) ([f7c2fb7](https://github.com/tobbieswork/opencode-telegram-bot/commit/f7c2fb7fd27e51272839c04946ae0445ce881694))
+
 ## [1.12.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.11.1...opencode-telegram-bot-v1.12.0) (2026-11-02)
 
 
