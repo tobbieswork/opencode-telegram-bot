@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.15.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.14.0...opencode-telegram-bot-v1.15.0) (2026-11-07)
+
+
+### Features
+
+* **mcp:** register run_script tool in MCP bridge (zero-context wiring) ([#117](https://github.com/tobbieswork/opencode-telegram-bot/issues/117)) ([a06d0ea](https://github.com/tobbieswork/opencode-telegram-bot/commit/a06d0eaf4e35dac933537173461ad9ced9e29a1d))
+
 ## [1.14.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.13.1...opencode-telegram-bot-v1.14.0) (2026-11-07)
 
 
