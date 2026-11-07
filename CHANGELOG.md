@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.14.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.13.1...opencode-telegram-bot-v1.14.0) (2026-11-07)
+
+
+### Features
+
+* **sandbox:** zero-context-cost worker script pipeline (3 slices) ([#115](https://github.com/tobbieswork/opencode-telegram-bot/issues/115)) ([1b2769c](https://github.com/tobbieswork/opencode-telegram-bot/commit/1b2769ca171c1dcb280eba2ec076600ef30e05de))
+
 ## [1.13.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.13.0...opencode-telegram-bot-v1.13.1) (2026-11-07)
 
 
