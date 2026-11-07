@@ -6,7 +6,7 @@ import { OpenCodeCtl, userText } from "./opencode.js";
 import { StateManager, ChatState, WorkerInfo, WorkerStatus, UserPrefsStore, Lang } from "./state.js";
 import { Config } from "./config.js";
 import { ConvKey, chatOf, convKey, parseConv } from "./conv.js";
-import { McpBridge, BridgeTool } from "./mcp-bridge.js";
+import { McpBridge, BridgeTool, makeRunScriptTool } from "./mcp-bridge.js";
 import { addWorktree, diffSummary, gitBoundary, gitRoot, gitStatusBrief, mergeWorktree, removeWorktree } from "./worktree.js";
 import { listDirs } from "./fsbrowser.js";
 import { spawnRequestBody } from "./reactions.js";
@@ -1474,6 +1474,10 @@ export class Orchestrator {
           return `Stopped "${this.h.st.get(conv).worker!.name}".`;
         },
       },
+      // Zero-context sandbox: runs a script and returns only its final result.
+      // The bridge has no per-session scoping, so it is offered to every caller
+      // of this route (the sandbox guards keep it safe).
+      makeRunScriptTool(),
     ];
     if (this.h.advisor) {
       const adv = this.h.advisor;
