@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.16.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.15.0...opencode-telegram-bot-v1.16.0) (2026-11-07)
+
+
+### Features
+
+* **ux:** long worker reports sent as .md file attachment ([#119](https://github.com/tobbieswork/opencode-telegram-bot/issues/119)) ([8b8c3d2](https://github.com/tobbieswork/opencode-telegram-bot/commit/8b8c3d22f1be33dd175c02640e001c87566170ee))
+
 ## [1.15.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.14.0...opencode-telegram-bot-v1.15.0) (2026-11-07)
 
 
