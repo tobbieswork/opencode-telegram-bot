@@ -1,7 +1,8 @@
 import { isAbsolute, resolve, dirname, join } from "node:path";
 import { existsSync, statSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { writeFile, unlink } from "node:fs/promises";
 import { execFile } from "node:child_process";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { Telegram, Update, CallbackQuery, Message, MessageGenerationStopped, MessageReactionUpdated } from "./telegram.js";
 import { OpenCodeCtl, newMessageID, assistantText, ModelInfo, SessionBrief } from "./opencode.js";
@@ -71,6 +72,15 @@ import {
   upsertFloorTrend,
 } from "./rotation-health.js";
 import type { RotationHealthSnapshot } from "./rotation-health.js";
+
+/**
+ * A worker report longer than this many chars is sent as a `.md` file attachment
+ * (with a short caption) instead of a wall of text. Short reports keep the
+ * normal message path.
+ */
+const LONG_CONTENT_THRESHOLD = 1500;
+/** Telegram's hard cap on a document caption, chars. */
+const DOCUMENT_CAPTION_MAX = 1024;
 
 /** The message carries media (sticker/photo/video/voice/…) — used to acknowledge non-text input. */
 function hasNonTextContent(m: Message): boolean {
@@ -329,7 +339,13 @@ export class Bot {
    * shared instance — handed to the Orchestrator so the Manager's busy reply
    * retains into the same store and taps are handled identically.
    */
-  public busyNotes = new BusyNoteStore();
+   public busyNotes = new BusyNoteStore();
+  /**
+   * How long a report's temp `.md` file stays on disk after it is sent, before
+   * it is unlinked — long enough for Telegram to finish uploading it. 60s
+   * default; tests shorten it. (A per-file setTimeout, unref'd.)
+   */
+  public reportFileCleanupMs = 60_000;
   /** Open /model button pickers, one per conv (in-memory; dead buttons after a restart are handled). */
   private modelPickers = new Map<ConvKey, { models: ModelInfo[]; page: number }>();
   /** The user's most recent top-level chat, for proactive notices (e.g. DNS heal). */
@@ -993,6 +1009,49 @@ export class Bot {
   }
 
   // ── send helpers ─────────────────────────────────────────────────────────
+  /**
+   * Send content to the user. If it is long (> LONG_CONTENT_THRESHOLD chars),
+   * write it to a temp `.md` file and send it as a document attachment with a
+   * 2-line caption; if short, send it as a normal HTML message. If the document
+   * send fails, fall back to the HTML path so a long report is never lost. The
+   * temp file is unlinked after `reportFileCleanupMs` (giving Telegram time to
+   * upload). Only the worker DONE relay uses this — conversational replies keep
+   * the existing message path untouched.
+   */
+  private async sendContentSmart(conv: ConvKey, content: string, title?: string): Promise<void> {
+    if (content.length <= LONG_CONTENT_THRESHOLD) {
+      await this.sendHtml(conv, content);
+      return;
+    }
+    const file = join(tmpdir(), `report-${Date.now()}.md`);
+    let sent = false;
+    try {
+      await writeFile(file, content, "utf8");
+      await this.tg.sendDocument(conv, file, this.reportCaption(content, title));
+      sent = true;
+    } catch (e) {
+      warn(`sendContentSmart: sendDocument failed (${(e as Error)?.message ?? e}) — falling back to HTML`);
+    }
+    // Give Telegram time to upload before unlinking; unlink immediately if we fell back.
+    const t = setTimeout(() => {
+      unlink(file).catch(() => {});
+    }, sent ? this.reportFileCleanupMs : 0);
+    t.unref?.();
+    if (!sent) await this.sendHtml(conv, content);
+  }
+
+  /**
+   * Build a document caption (capped at Telegram's DOCUMENT_CAPTION_MAX): the
+   * `title` if given, else the first two lines of the content, plus an
+   * attachment marker. The head is HTML-escaped (it may hold code with <>&)
+   * while the marker stays live HTML.
+   */
+  private reportCaption(content: string, title?: string): string {
+    const head = esc((title ?? content.split("\n").slice(0, 2).join("\n")).trim());
+    return `${head}\n📎 <i>(full report attached)</i>`.
+      slice(0, DOCUMENT_CAPTION_MAX);
+  }
+
   /** Send short, already-formatted HTML (commands, status). */
   public async sendHtml(conv: ConvKey, html: string, opts: { reply_markup?: Keyboard } = {}): Promise<void> {
     const chunks = chunk(html, this.cfg.replyMaxLen);
@@ -1027,6 +1086,13 @@ export class Bot {
     const body = ch ? ch.body : clean;
     const worker = this.st.peek(conv)?.worker;
     const purpose: MsgPurpose = worker ? "worker-done" : "reply";
+    // Worker DONE relay: a LONG report becomes a `.md` file attachment (the
+    // main case — research, design docs, test summaries). A short report, or
+    // any conversational (manager) reply, keeps the existing message path.
+    if (purpose === "worker-done" && clean.length > LONG_CONTENT_THRESHOLD) {
+      await this.sendContentSmart(conv, clean);
+      return;
+    }
     // Body language (feature C): celebrate ONLY the report of a worker that
     // has already settled to "done" (the settle races the relay; when the
     // status isn't done yet this is simply skipped — best-effort by design).

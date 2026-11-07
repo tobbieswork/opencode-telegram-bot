@@ -1,5 +1,7 @@
 import { exec as execCb } from "node:child_process";
 import { createWriteStream, unlinkSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { basename } from "node:path";
 import { log, warn, error } from "./logger.js";
 import { ConvKey, parseConv } from "./conv.js";
 import { redactSecrets } from "./redact.js";
@@ -393,6 +395,34 @@ export class Telegram {
       ...(opts.reply_markup ? { reply_markup: opts.reply_markup } : {}),
     });
     return res?.message_id ?? -1;
+  }
+
+  /**
+   * Send a local file as a document attachment (Bot API `sendDocument`) using
+   * multipart/form-data — a separate transport from the JSON `api()` path above.
+   * The caption supports the same HTML as sendMessage (via `caption_parse_mode`).
+   * `to` is a conversation key or a bare chat id: a forum topic routes through
+   * `message_thread_id` exactly like every other send.
+   */
+  async sendDocument(to: ConvKey | number, filePath: string, caption?: string): Promise<void> {
+    const { chat_id, message_thread_id } = dest(to);
+    const form = new FormData();
+    form.append("chat_id", String(chat_id));
+    if (message_thread_id) form.append("message_thread_id", String(message_thread_id));
+    form.append("document", new Blob([await readFile(filePath)], { type: "text/markdown" }), basename(filePath));
+    if (caption) {
+      form.append("caption", redactSecrets(caption));
+      form.append("caption_parse_mode", "HTML");
+      form.append("disable_web_page_preview", "true");
+    }
+    const res = await fetch(this.url("sendDocument"), { method: "POST", body: form });
+    const json: any = await res.json().catch(() => null);
+    if (!json?.ok) {
+      const err: any = new Error(`Telegram sendDocument failed: ${json?.description ?? `HTTP ${res.status}`}`);
+      err.code = json?.error_code ?? res.status;
+      err.retryAfter = json?.parameters?.retry_after;
+      throw err;
+    }
   }
 
   /**
