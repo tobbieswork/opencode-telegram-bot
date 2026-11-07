@@ -11,6 +11,7 @@ import { addWorktree, diffSummary, gitBoundary, gitRoot, gitStatusBrief, mergeWo
 import { listDirs } from "./fsbrowser.js";
 import { spawnRequestBody } from "./reactions.js";
 import { buildHandoffPrompt, followUpsFromMessages, respawnName, respawnNotice, shouldRespawnWorker } from "./recovery.js";
+import { scriptInstruction } from "./sandbox/scriptPreamble.js";
 import { ICON, esc, trunc, timeAgo, stripTags, mdToHtmlChunks } from "./format.js";
 import { log, warn } from "./logger.js";
 import { BUSY_REPLY_TEXT, NOTE_BUTTON_LABEL, noteCallbackData, BusyNoteStore } from "./notes.js";
@@ -72,14 +73,17 @@ const BUSY: WorkerStatus[] = ["running", "waiting"];
 /** Manager-initiated dispatches allowed between two user messages (loop/cost guard). */
 const DISPATCH_BUDGET = 12;
 
-const workerPreamble = (name: string) =>
+const workerPreamble = (name: string, agent?: string, lang?: Lang) =>
   `[System note: You are worker "${name}", one of several agents working in parallel. You are driven ` +
   "through Telegram — the user has no terminal. When you need a decision, ask with the `question` tool " +
   "(clear multiple-choice options, ONE question at a time). When you finish, END your final message with " +
   "a short summary (max ~10 lines): what you did, files changed, how to verify, and anything blocking. " +
   "Keep single-turn tool output bounded: locate with search/grep first, then read only the relevant slice " +
   "(offset/limit) — never dump whole large files or full logs; stage big output to a file and report a " +
-  "one-line summary + path. Prefer small, targeted reads over broad ones.]";
+  "one-line summary + path. Prefer small, targeted reads over broad ones.]" +
+  // Zero-Context-Workers: build workers additionally get the language-neutral
+  // script-mode capability note (last section, before the task).
+  (agent === "build" ? "\n\n" + scriptInstruction(lang ?? "en") : "");
 
 const MANAGER_PROMPT = (maxWorkers: number) => `---
 description: Telegram manager — splits work across parallel worker sessions
@@ -708,7 +712,7 @@ export class Orchestrator {
     }
 
     if (spec.task) {
-      await this.h.oc.prompt(sessionID, `${workerPreamble(name)}\n\n${spec.task}`);
+      await this.h.oc.prompt(sessionID, `${workerPreamble(name, agent, this.langOf(chat))}\n\n${spec.task}`);
       this.h.startTyping(conv);
     }
     return { conv, worker };
@@ -809,7 +813,7 @@ export class Orchestrator {
     this.h.st.set(conv, { sessionID, guided: true, lastRelayedTime: 1 });
     await this.h.applyModelAndVariant(sessionID, this.h.st.get(conv));
     this.setStatus(conv, "running");
-    await this.h.oc.prompt(sessionID, workerPreamble(name) + "\n\n" + sch.prompt);
+    await this.h.oc.prompt(sessionID, workerPreamble(name, sch.agent, this.langOf(chat)) + "\n\n" + sch.prompt);
     this.h.startTyping(conv);
     // Anti-hang timeout: if still BUSY when it fires, stop it and report once.
     // Tied to THIS run: the timer is cancelled when the worker leaves BUSY (setStatus)
@@ -1044,7 +1048,7 @@ export class Orchestrator {
     const name2 = respawnName(w.name);
     // The full handoff prompt: the usual worker preamble (headless contract) +
     // the five handoff sections.
-    const task = `${workerPreamble(name2)}\n\n${buildHandoffPrompt({
+    const task = `${workerPreamble(name2, s.agent, this.langOf(chatOf(conv)))}\n\n${buildHandoffPrompt({
       originalTask: w.task ?? "",
       followUps,
       lastWorkerText: tail,
