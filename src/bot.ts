@@ -3199,7 +3199,10 @@ export class Bot {
     registry.delete(id); // consume: the choice set is single-use
     // Fire the new user turn; the event loop relays the reply when it ends. A
     // failure here (session busy/gone) is non-fatal — the user can just retype.
-    await this.oc.prompt(rec.sessionID, choice).catch((e) => warn("choice prompt:", (e as Error)?.message));
+    await this.oc.prompt(rec.sessionID, choice).catch(async (e) => {
+      warn("choice prompt:", (e as Error)?.message);
+      await this.tg.answerCallbackQuery(cb.id, "❌ Không thể xử lý — thử nhập lại.").catch(() => {});
+    });
   }
 
   /**
