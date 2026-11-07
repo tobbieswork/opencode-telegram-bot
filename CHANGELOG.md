@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.13.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.13.0...opencode-telegram-bot-v1.13.1) (2026-11-07)
+
+
+### Bug Fixes
+
+* type-safe STRINGS keys + user feedback on choice tap failure ([#113](https://github.com/tobbieswork/opencode-telegram-bot/issues/113)) ([9da3ae2](https://github.com/tobbieswork/opencode-telegram-bot/commit/9da3ae2ffa143468be5238e42695dfe3dc4907d2))
+
 ## [1.13.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.12.0...opencode-telegram-bot-v1.13.0) (2026-11-06)
 
 
