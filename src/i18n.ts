@@ -33,7 +33,7 @@ export interface Str {
  * Initial i18n table — key strings for worker templates and UI.
  * Expand in the follow-up worker.
  */
-export const STRINGS: Record<string, Str> = {
+export const STRINGS = {
   // ── Worker template strings ─────────────────────────────────────────────
   worker_spawned: {
     vi: "🧩 Worker đã được tạo",
