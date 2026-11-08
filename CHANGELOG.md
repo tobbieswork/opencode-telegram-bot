@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.17.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.16.2...opencode-telegram-bot-v1.17.0) (2026-11-08)
+
+
+### Features
+
+* **i18n:** localize remaining user-facing strings to EN ([e6ba143](https://github.com/tobbieswork/opencode-telegram-bot/commit/e6ba1434583f458b09a801bd54a8404a66804b0f))
+* **i18n:** localize remaining user-facing strings to EN ([f669fdb](https://github.com/tobbieswork/opencode-telegram-bot/commit/f669fdb40f1e6b4bdb077a3bf2f5a769fd695f13))
+* language-aware /autocomplete menu, /help card and command grid ([8df8f55](https://github.com/tobbieswork/opencode-telegram-bot/commit/8df8f55c066e8942098097aa98ab8c8670e41052))
+
 ## [1.16.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.16.1...opencode-telegram-bot-v1.16.2) (2026-11-08)
 
 
