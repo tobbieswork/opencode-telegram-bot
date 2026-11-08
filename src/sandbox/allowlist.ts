@@ -56,7 +56,7 @@ export function validatePath(p: string, worktree: string): boolean {
  */
 export function validateExec(cmd: string): boolean {
   if (typeof cmd !== "string" || cmd.length === 0) return false;
-  if (/[;|&<>`]/.test(cmd)) return false;
+  if (/[;|&<>`\n\r]/.test(cmd)) return false;
   if (cmd.includes("$(")) return false;
   return true;
 }

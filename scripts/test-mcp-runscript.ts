@@ -140,11 +140,11 @@ const run = async (route: string, args: Record<string, unknown>, id = 1) => {
   check("empty code: isError", noCode?.isError === true, JSON.stringify(noCode));
 }
 
-// ── no worktree -> uses cwd (should work) ─────────────────────────────────────
+// ── no worktree + no default -> error (not process.cwd()) ────────────────────
 {
-  // Route "44" has no injected defaultWorktree, so it resolves to process.cwd().
-  const r = await run("44", { code: "return 'cwd-ok';" });
-  check("no worktree -> uses cwd (works)", r?.content?.[0]?.text === "cwd-ok" && r?.isError !== true, JSON.stringify(r));
+  // Route "44" has no injected defaultWorktree, so omitting worktree is an error.
+  const r = await run("44", { code: "return 'ok';" });
+  check("no worktree + no default -> error", r?.isError === true && (r?.content?.[0]?.text ?? "").includes("worktree is required"), JSON.stringify(r));
 }
 
 // ── timeout (short 2s timeout via route "43") ─────────────────────────────────
