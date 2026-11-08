@@ -26,6 +26,7 @@ import {
   type UploadMedia,
 } from "./uploads.js";
 import { richMarkdownChunks } from "./rich.js";
+import { redactSecrets } from "./redact.js";
 import { extractTrailingChoices, choiceKeyboard, registry } from "./choices.js";
 import { scheduleForRegistration, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
 import {
@@ -1016,7 +1017,10 @@ export class Bot {
    * send fails, fall back to the HTML path so a long report is never lost. The
    * temp file is unlinked after `reportFileCleanupMs` (giving Telegram time to
    * upload). Only the worker DONE relay uses this — conversational replies keep
-   * the existing message path untouched.
+   * the existing message path untouched. The `.md` body is an egress channel the
+   * message-layer secret guard (redactSecrets in Telegram) never sees, so the
+   * file is written redacted: a token leaked into a worker report must not land
+   * on disk or reach Telegram in the attachment.
    */
   private async sendContentSmart(conv: ConvKey, content: string, title?: string): Promise<void> {
     if (content.length <= LONG_CONTENT_THRESHOLD) {
@@ -1026,7 +1030,7 @@ export class Bot {
     const file = join(tmpdir(), `report-${Date.now()}.md`);
     let sent = false;
     try {
-      await writeFile(file, content, "utf8");
+      await writeFile(file, redactSecrets(content), "utf8");
       await this.tg.sendDocument(conv, file, this.reportCaption(content, title));
       sent = true;
     } catch (e) {

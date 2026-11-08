@@ -8,7 +8,7 @@
  *
  * Run:  npx tsx scripts/test-ux-file.ts
  */
-import { mkdtempSync, existsSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Bot } from "../src/bot.js";
@@ -125,6 +125,20 @@ async function main(): Promise<void> {
     check("fallback: sendDocument was attempted", attempted);
     check("fallback: sendHtml used instead", htmlCalls.length === 1, `got ${htmlCalls.length}`);
     check("fallback: HTML carries the full content", htmlCalls[0] === longContent);
+  }
+
+  // ── the .md body is an egress channel: secrets are redacted before write ───
+  // (ChatGPT-connector / Claude-Code leak class: agent output carrying a token
+  //  must not ride to Telegram in an attachment the message-layer guard can't see)
+  {
+    const { bot, docCalls } = makeBot();
+    const token = "ghp_" + "a1b2c3d4e5f6g7h8i9j0"; // fake PAT, matches the redact pattern
+    const contentWithSecret = "Line one\nLine two\n" + token + "\n" + "x".repeat(1600);
+    await (bot as any).sendContentSmart("123", contentWithSecret);
+    const body = readFileSync(docCalls[0].file, "utf8");
+    check("redact: raw PAT NOT in the .md body", !body.includes(token));
+    check("redact: first4…last4 fingerprint in the .md body", body.includes("ghp_…i9j0"), body.slice(0, 120));
+    check("redact: non-secret content passes through", body.includes("x".repeat(1600)));
   }
 
   if (failures > 0) {
