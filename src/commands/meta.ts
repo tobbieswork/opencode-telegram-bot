@@ -6,7 +6,7 @@ import { MACHINE_STATE_KEY } from "../state.js";
 import type { ChatState } from "../state.js";
 import type { ConvKey } from "../conv.js";
 import { esc, trunc, stripTags, fmtNum, timeAgo } from "../format.js";
-import { helpText, commandGrid } from "../commands.js";
+import { helpText, commandGrid, myCommands } from "../commands.js";
 import type { UsageRow, RotationInfo } from "../usage.js";
 import { formatUsageReport, compactionCeiling } from "../usage.js";
 import { appendNote, noteEntryText, showNotes, BUSY_REPLY_TEXT, parseNoteCallback } from "../notes.js";
@@ -28,10 +28,16 @@ export async function cmdHelp(bot: Bot, conv: ConvKey, lang?: Lang): Promise<voi
  * on the turn after that (see src/notes.ts).
  */
 export async function cmdNote(bot: Bot, conv: ConvKey, arg: string): Promise<void> {
+  const lang = bot.userPrefs.getLang(bot.st.peek(conv)?.createdBy ?? "");
   const text = arg.trim();
   if (!text) {
     const pending = showNotes(bot.st.get(conv));
-    await bot.tg.sendMessage(conv, pending ? `📝 Ghi chú đang chờ:\n${esc(pending)}` : "Chưa có ghi chú nào. Dùng: /note (nội dung)");
+    await bot.tg.sendMessage(
+      conv,
+      pending
+        ? tr(lang, "📝 Ghi chú đang chờ:\n", "📝 Pending notes:\n") + esc(pending)
+        : tr(lang, "Chưa có ghi chú nào. Dùng: /note (nội dung)", "No notes yet. Use: /note <content>"),
+    );
     return;
   }
   const cur = bot.st.get(conv);
@@ -41,9 +47,9 @@ export async function cmdNote(bot: Bot, conv: ConvKey, arg: string): Promise<voi
   if (sid) {
     // Best-effort immediate PUT so the note is in context by the time the next
     // turn starts; prepareNotesTurn re-puts at turn start anyway (self-healing).
-    await bot.oc.setInstruction(sid, NOTES_KEY, noteEntryText(next.notes!)).catch((e) => warn("note put:", (e as Error).message));
+    await bot.oc.setInstruction(sid, NOTES_KEY, noteEntryText(next.notes!, lang)).catch((e) => warn("note put:", (e as Error).message));
   }
-  await bot.tg.sendMessage(conv, "📝 Đã ghi — agent sẽ xem ở lượt tiếp theo.");
+  await bot.tg.sendMessage(conv, tr(lang, "📝 Đã ghi — agent sẽ xem ở lượt tiếp theo.", "📝 Saved — the agent will see it on the next turn."));
 }
 
 /**
@@ -54,6 +60,7 @@ export async function cmdNote(bot: Bot, conv: ConvKey, arg: string): Promise<voi
  * already ended (or the bot restarted) the entry is gone → "not found".
  */
 export async function handleNoteCallback(bot: Bot, cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+  const lang = bot.userPrefs.getLang(cb.from?.id ?? "");
   const id = parseNoteCallback(cb.data);
   if (id == null) {
     await bot.tg.answerCallbackQuery(cb.id);
@@ -62,7 +69,7 @@ export async function handleNoteCallback(bot: Bot, cb: CallbackQuery, conv: Conv
   // Consume the entry NOW (before any await) so a double-tap can't append twice.
   const text = bot.busyNotes.take(conv, id);
   if (text == null) {
-    await bot.tg.answerCallbackQuery(cb.id, "Không tìm thấy nội dung tin nhắn đó.");
+    await bot.tg.answerCallbackQuery(cb.id, tr(lang, "Không tìm thấy nội dung tin nhắn đó.", "That message's content is no longer available."));
     return;
   }
   // Save via the SAME path as cmdNote: append + persist + best-effort PUT.
@@ -71,9 +78,9 @@ export async function handleNoteCallback(bot: Bot, cb: CallbackQuery, conv: Conv
   bot.st.set(conv, next);
   const sid = cur.sessionID; // appendNote spreads the full state, so sessionID is unchanged
   if (sid) {
-    await bot.oc.setInstruction(sid, NOTES_KEY, noteEntryText(next.notes!)).catch((e) => warn("note put:", (e as Error).message));
+    await bot.oc.setInstruction(sid, NOTES_KEY, noteEntryText(next.notes!, lang)).catch((e) => warn("note put:", (e as Error).message));
   }
-  await bot.tg.answerCallbackQuery(cb.id, "📝 Đã ghi — agent sẽ xem ở lượt tiếp theo.");
+  await bot.tg.answerCallbackQuery(cb.id, tr(lang, "📝 Đã ghi — agent sẽ xem ở lượt tiếp theo.", "📝 Saved — the agent will see it on the next turn."));
   // Remove the button: edit the busy message back to plain text (empty keyboard).
   // Best-effort — the message may be too old or deleted; ignore gracefully.
   if (messageId != null) {
@@ -262,7 +269,8 @@ export async function cmdUsage(bot: Bot, conv: ConvKey, arg = ""): Promise<void>
   } catch (e) {
     warn("rotation snapshot:", (e as Error).message);
   }
-  await bot.sendHtml(conv, formatUsageReport(rows, esc, { warnPct: bot.cfg.usageWarnPct, maxRows: bot.cfg.usageMaxRows, activeHours: bot.cfg.usageActiveHours, all, rotation }).join("\n"));
+  const lang = bot.userPrefs.getLang(bot.st.peek(conv)?.createdBy ?? "");
+  await bot.sendHtml(conv, formatUsageReport(rows, esc, { warnPct: bot.cfg.usageWarnPct, maxRows: bot.cfg.usageMaxRows, activeHours: bot.cfg.usageActiveHours, all, rotation, lang }).join("\n"));
 }
 
 export async function cmdHistory(bot: Bot, conv: ConvKey, state: ChatState): Promise<void> {
@@ -290,16 +298,17 @@ export async function cmdHistory(bot: Bot, conv: ConvKey, state: ChatState): Pro
  * the confirm prompt, or use /new).
  */
 export async function cmdRotation(bot: Bot, conv: ConvKey): Promise<void> {
+  const lang = bot.userPrefs.getLang(bot.st.peek(conv)?.createdBy ?? "");
   let snap;
   try {
     snap = bot.rotationHealthSnapshot();
   } catch (e) {
-    return bot.tg.sendMessage(conv, `⚠️ Không đọc được snapshot rotation: ${(e as Error).message}`);
+    return bot.tg.sendMessage(conv, tr(lang, `⚠️ Không đọc được snapshot rotation: ${(e as Error).message}`, `⚠️ Can't read the rotation snapshot: ${(e as Error).message}`));
   }
   if (!snap) {
-    return bot.tg.sendMessage(conv, "Chưa có dữ liệu rotation — session Manager chưa chạy qua tick xoay nào.");
+    return bot.tg.sendMessage(conv, tr(lang, "Chưa có dữ liệu rotation — session Manager chưa chạy qua tick xoay nào.", "No rotation data yet — the Manager session has not run a rotation tick."));
   }
-  await bot.sendHtml(conv, renderRotationReport(snap));
+  await bot.sendHtml(conv, renderRotationReport(snap, lang));
 }
 
 /**
@@ -323,4 +332,7 @@ export async function cmdLang(bot: Bot, conv: ConvKey, arg: string, uid?: number
     conv,
     lang === "en" ? STRINGS.lang_set_en.en : STRINGS.lang_set_vi.vi,
   );
+  // The /autocomplete menu is bot-global: re-register it in the new language
+  // so it doesn't stay in the old one until the next bot restart.
+  void bot.tg.setMyCommands(myCommands(lang as Lang)).catch((e) => warn("setMyCommands:", (e as Error).message));
 }

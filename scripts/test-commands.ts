@@ -115,6 +115,25 @@ const cmds = COMMANDS.map((c) => c.cmd);
   check("grid includes reboot (regression: menu-only before)", buttons.some((b) => b.callback_data === "cmd:reboot"));
 }
 
+// ── en variants (lang = "en") ──────────────────────────────────────────────
+{
+  const mEn = myCommands("en");
+  check("autocomplete en descs use descEn", mEn.every((x) => {
+    const c = COMMANDS.find((y) => y.cmd === x.command);
+    return c && c.descEn === x.description;
+  }));
+  const hEn = helpText("en");
+  check("help en has all four EN group headings", CMD_GROUPS.every((g) => hEn.includes(`<b>${g.titleEn}</b>`)));
+  check("help en ends with the EN button prompt", hEn.trimEnd().endsWith("run a command:"));
+  const gridEn = commandGrid("en");
+  const btnsEn = gridEn.inline_keyboard.flat();
+  check("grid en uses buttonEn where present, else button", btnsEn.every((b) => {
+    const name = b.callback_data.replace(/^cmd:/, "");
+    const c = COMMANDS.find((y) => y.cmd === name);
+    return c && b.text === (c.buttonEn ?? c.button);
+  }));
+}
+
 if (failures > 0) {
   console.error(`\n${failures} failure(s)`);
   process.exit(1);

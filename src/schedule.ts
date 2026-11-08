@@ -11,6 +11,8 @@
  * (we never add a fixed UTC offset).
  */
 import type { ConvKey } from "./conv.js";
+import { tr } from "./i18n.js";
+import type { Lang } from "./state.js";
 
 /** A parsed schedule spec — the recurring/one-shot "when" (not the "what"). */
 export interface SchedSpec {
@@ -52,42 +54,42 @@ const DOW_FULL: Record<string, number> = {
   sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6,
 };
 
-function parseDow(tok: string | undefined): number {
-  if (tok === undefined) throw new Error("schedule: thiếu thứ trong tuần (vd mon)");
+function parseDow(tok: string | undefined, lang: Lang): number {
+  if (tok === undefined) throw new Error(tr(lang, "schedule: thiếu thứ trong tuần (vd mon)", "schedule: missing weekday (e.g. mon)"));
   const t = tok.toLowerCase();
   if (t in DOW_ABBR) return DOW_ABBR[t];
   if (t in DOW_FULL) return DOW_FULL[t];
-  throw new Error(`schedule: thứ trong tuần không hợp lệ '${tok}' (dùng mon/tue/… hoặc monday/…)`);
+  throw new Error(tr(lang, `schedule: thứ trong tuần không hợp lệ '${tok}' (dùng mon/tue/… hoặc monday/…)`, `schedule: invalid weekday '${tok}' (use mon/tue/… or monday/…)`));
 }
 
 /** Strict `HH:MM`, hour 00–23, minute 00–59 (both 2-digit). */
-function parseTime(tok: string | undefined): { h: number; m: number } {
-  if (tok === undefined) throw new Error("schedule: thiếu giờ HH:MM");
+function parseTime(tok: string | undefined, lang: Lang): { h: number; m: number } {
+  if (tok === undefined) throw new Error(tr(lang, "schedule: thiếu giờ HH:MM", "schedule: missing time HH:MM"));
   const m = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(tok);
-  if (!m) throw new Error(`schedule: giờ không hợp lệ '${tok}' (dùng HH:MM, 00–23:00–59)`);
+  if (!m) throw new Error(tr(lang, `schedule: giờ không hợp lệ '${tok}' (dùng HH:MM, 00–23:00–59)`, `schedule: invalid time '${tok}' (use HH:MM, 00–23:00–59)`));
   return { h: parseInt(m[1], 10), m: parseInt(m[2], 10) };
 }
 
 /** `<Nh>` (integer hours), 1 ≤ N ≤ 168. */
-function parseHours(tok: string | undefined): number {
-  if (tok === undefined) throw new Error("schedule: thiếu khoảng cách (vd 6h)");
+function parseHours(tok: string | undefined, lang: Lang): number {
+  if (tok === undefined) throw new Error(tr(lang, "schedule: thiếu khoảng cách (vd 6h)", "schedule: missing interval (e.g. 6h)"));
   const m = /^(\d+)h$/.exec(tok);
-  if (!m) throw new Error(`schedule: khoảng cách không hợp lệ '${tok}' (dùng số giờ, vd 6h)`);
+  if (!m) throw new Error(tr(lang, `schedule: khoảng cách không hợp lệ '${tok}' (dùng số giờ, vd 6h)`, `schedule: invalid interval '${tok}' (use hours, e.g. 6h)`));
   const n = parseInt(m[1], 10);
-  if (n < 1) throw new Error("schedule: 'every' phải ≥ 1h");
-  if (n > 168) throw new Error("schedule: 'every' phải ≤ 168h (7 ngày)");
+  if (n < 1) throw new Error(tr(lang, "schedule: 'every' phải ≥ 1h", "schedule: 'every' must be ≥ 1h"));
+  if (n > 168) throw new Error(tr(lang, "schedule: 'every' phải ≤ 168h (7 ngày)", "schedule: 'every' must be ≤ 168h (7 days)"));
   return n;
 }
 
 /** `<YYYY-MM-DD>` that is a real calendar date. */
-function parseDate(tok: string | undefined): { y: number; mo: number; d: number } {
-  if (tok === undefined) throw new Error("schedule: thiếu ngày (vd 2026-12-01)");
+function parseDate(tok: string | undefined, lang: Lang): { y: number; mo: number; d: number } {
+  if (tok === undefined) throw new Error(tr(lang, "schedule: thiếu ngày (vd 2026-12-01)", "schedule: missing day (e.g. 2026-12-01)"));
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(tok);
-  if (!m) throw new Error(`schedule: ngày không hợp lệ '${tok}' (dùng YYYY-MM-DD)`);
+  if (!m) throw new Error(tr(lang, `schedule: ngày không hợp lệ '${tok}' (dùng YYYY-MM-DD)`, `schedule: invalid day '${tok}' (use YYYY-MM-DD)`));
   const y = +m[1], mo = +m[2], d = +m[3];
   const dt = new Date(Date.UTC(y, mo - 1, d));
   if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d)
-    throw new Error(`schedule: ngày không tồn tại '${tok}'`);
+    throw new Error(tr(lang, `schedule: ngày không tồn tại '${tok}'`, `schedule: day doesn't exist '${tok}'`));
   return { y, mo, d };
 }
 
@@ -100,9 +102,9 @@ function parseDate(tok: string | undefined): { y: number; mo: number; d: number 
  * rejects a genuinely-future `once`, and rejects clearly-past ones; the
  * tz-exact check happens at fire time (slice 2).
  */
-export function parseScheduleSpec(arg: string, nowMs?: number): { spec: SchedSpec; prompt: string } {
+export function parseScheduleSpec(arg: string, nowMs?: number, lang: Lang = "vi"): { spec: SchedSpec; prompt: string } {
   const raw = (arg ?? "").trim();
-  if (!raw) throw new Error("schedule: thiếu thông số");
+  if (!raw) throw new Error(tr(lang, "schedule: thiếu thông số", "schedule: missing spec"));
   const tokens = raw.split(/\s+/);
   const kindTok = tokens[0];
 
@@ -110,33 +112,33 @@ export function parseScheduleSpec(arg: string, nowMs?: number): { spec: SchedSpe
   let i = 1;
   switch (kindTok) {
     case "daily":
-      spec = { kind: "daily", time: parseTime(tokens[i]) };
+      spec = { kind: "daily", time: parseTime(tokens[i], lang) };
       i++;
       break;
     case "weekdays":
-      spec = { kind: "weekdays", time: parseTime(tokens[i]) };
+      spec = { kind: "weekdays", time: parseTime(tokens[i], lang) };
       i++;
       break;
     case "weekly": {
-      const day = parseDow(tokens[i]);
+      const day = parseDow(tokens[i], lang);
       i++;
-      spec = { kind: "weekly", day, time: parseTime(tokens[i]) };
+      spec = { kind: "weekly", day, time: parseTime(tokens[i], lang) };
       i++;
       break;
     }
     case "every":
-      spec = { kind: "every", hours: parseHours(tokens[i]) };
+      spec = { kind: "every", hours: parseHours(tokens[i], lang) };
       i++;
       break;
     case "once": {
-      const date = parseDate(tokens[i]);
+      const date = parseDate(tokens[i], lang);
       i++;
-      spec = { kind: "once", date, time: parseTime(tokens[i]) };
+      spec = { kind: "once", date, time: parseTime(tokens[i], lang) };
       i++;
       break;
     }
     default:
-      throw new Error(`schedule: loại không hợp lệ '${kindTok}' (dùng daily/weekdays/weekly/every/once)`);
+      throw new Error(tr(lang, `schedule: loại không hợp lệ '${kindTok}' (dùng daily/weekdays/weekly/every/once)`, `schedule: invalid kind '${kindTok}' (use daily/weekdays/weekly/every/once)`));
   }
 
   if (spec.kind === "once" && nowMs !== undefined) {
@@ -144,7 +146,7 @@ export function parseScheduleSpec(arg: string, nowMs?: number): { spec: SchedSpe
     const { h, m } = spec.time!;
     const MAX_TZ_OFFSET_MS = 14 * 3600 * 1000; // largest possible zone offset (UTC+14)
     const onceUtcLatest = Date.UTC(y, mo - 1, d, h, m, 0) + MAX_TZ_OFFSET_MS;
-    if (nowMs > onceUtcLatest) throw new Error("schedule: 'once' không thể ở quá khứ");
+    if (nowMs > onceUtcLatest) throw new Error(tr(lang, "schedule: 'once' không thể ở quá khứ", "schedule: 'once' cannot be in the past"));
   }
 
   // Free-form prompt = the rest, minus the `dir=`/`agent=` option tokens.
@@ -239,7 +241,7 @@ function weekdayOf(y: number, mo: number, d: number): number {
  * `once` returns its single fixed instant regardless of `afterMs`; the
  * scheduler marks a fired `once` disabled, so it is never evaluated again.
  */
-export function nextRunAfter(spec: SchedSpec, afterMs: number, tz: string): number {
+export function nextRunAfter(spec: SchedSpec, afterMs: number, tz: string, lang: Lang = "vi"): number {
   switch (spec.kind) {
     case "daily": {
       const p = localParts(afterMs, tz);
@@ -263,7 +265,7 @@ export function nextRunAfter(spec: SchedSpec, afterMs: number, tz: string): numb
         const nd = addDaysLocal(y, mo, d, 1);
         y = nd.y; mo = nd.mo; d = nd.d;
       }
-      throw new Error("schedule: weekdays không tìm được lượt kế tiếp"); // unreachable
+      throw new Error(tr(lang, "schedule: weekdays không tìm được lượt kế tiếp", "schedule: weekdays found no next run")); // unreachable
     }
     case "weekly": {
       const p = localParts(afterMs, tz);
@@ -278,7 +280,7 @@ export function nextRunAfter(spec: SchedSpec, afterMs: number, tz: string): numb
         const nd = addDaysLocal(y, mo, d, 1);
         y = nd.y; mo = nd.mo; d = nd.d;
       }
-      throw new Error("schedule: weekly không tìm được lượt kế tiếp"); // unreachable
+      throw new Error(tr(lang, "schedule: weekly không tìm được lượt kế tiếp", "schedule: weekly found no next run")); // unreachable
     }
     case "every": {
       const n = spec.hours!;

@@ -16,6 +16,8 @@
 
 export type NotesStage = "pending" | "shown";
 
+import type { Lang } from "./state.js";
+
 /** The two ChatState fields this module manages (kept structural, no import cycle). */
 export interface NoteState {
   notes?: string;
@@ -38,11 +40,14 @@ export function showNotes(state: NoteState): string | null {
 }
 
 /** The instruction-entry value: self-describing, so the model knows what to do with it. */
-export function noteEntryText(notes: string): string {
-  return (
-    "Ghi chú của người dùng (viết bằng /note khi agent đang bận). " +
-    "Đọc và xử lý theo nội dung; xác nhận ngắn gọn 1 dòng ở đầu phản hồi.\n" + notes
-  );
+export function noteEntryText(notes: string, lang: Lang = "vi"): string {
+  const preamble =
+    lang === "en"
+      ? "User notes (written with /note while the agent was busy). " +
+        "Read and act on them; acknowledge with one short line at the top of your reply.\n"
+      : "Ghi chú của người dùng (viết bằng /note khi agent đang bận). " +
+        "Đọc và xử lý theo nội dung; xác nhận ngắn gọn 1 dòng ở đầu phản hồi.\n";
+  return preamble + notes;
 }
 
 export interface NotePrep {
@@ -58,10 +63,10 @@ export interface NotePrep {
  * visible on the previous turn → retire them; "pending" notes → make them
  * visible this turn and mark "shown".
  */
-export function prepareNotes(state: NoteState): NotePrep {
+export function prepareNotes(state: NoteState, lang: Lang = "vi"): NotePrep {
   if (!state.notes) return { state };
   if (state.notesStage === "shown") return { state: { ...state, notes: undefined, notesStage: undefined }, remove: true };
-  return { state: { ...state, notesStage: "shown" }, put: noteEntryText(state.notes) };
+  return { state: { ...state, notesStage: "shown" }, put: noteEntryText(state.notes, lang) };
 }
 
 /** Patch for /new (merged via st.set): drop any pending notes. */
@@ -88,6 +93,11 @@ export const NOTE_CB_PREFIX = "note:";
 
 /** Button label on the busy reply (Vietnamese, per repo convention). */
 export const NOTE_BUTTON_LABEL = "📝 Thêm vào note";
+
+/** Localized busy-reply note button label. */
+export function noteButtonLabel(lang: Lang = "vi"): string {
+  return lang === "en" ? "📝 Save as note" : NOTE_BUTTON_LABEL;
+}
 
 /** How many busy messages are retained per conv (the oldest are dropped beyond this). */
 export const NOTE_RETENTION_CAP = 10;

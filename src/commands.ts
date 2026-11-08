@@ -33,8 +33,12 @@ export interface BotCommand {
   descEn: string;
   /** Argument hint for the /help line only: "<id>", "[path]", "on|off", … */
   arg?: string;
+  /** English variant of the arg hint (shown when the user's language is "en"). */
+  argEn?: string;
   /** When set, the command gets a tappable button in the /help grid. */
   button?: string;
+  /** English variant of the button label (used when the user's language is "en"). */
+  buttonEn?: string;
   group: CmdGroupId;
 }
 
@@ -51,12 +55,12 @@ export const COMMANDS: BotCommand[] = [
   // two are adjacent and easy to mistype when tapping fast, and note is the
   // safe one. The /help card is grouped (note stays in the control group),
   // so this only affects the flat menu order.
-  { cmd: "note", arg: "[ghi chú]", desc: "Ghi chú khi agent bận (trống = xem ghi chú)", descEn: "Jot a note while the agent is busy (empty = view notes)", group: "control" },
-  { cmd: "new", desc: "Bắt đầu phiên làm việc mới", descEn: "Start a new work session", button: "🆕 Session mới", group: "session" },
+  { cmd: "note", arg: "[ghi chú]", argEn: "[note]", desc: "Ghi chú khi agent bận (trống = xem ghi chú)", descEn: "Jot a note while the agent is busy (empty = view notes)", group: "control" },
+  { cmd: "new", desc: "Bắt đầu phiên làm việc mới", descEn: "Start a new work session", button: "🆕 Session mới", buttonEn: "🆕 New session", group: "session" },
   { cmd: "ls", aliases: ["sessions"], desc: "Liệt kê phiên gần đây", descEn: "List recent sessions", button: "📄 Sessions", group: "session" },
   { cmd: "use", arg: "<id>", desc: "Chuyển sang một phiên", descEn: "Switch to a session", group: "session" },
-  { cmd: "dir", arg: "[path]", desc: "Xem/đặt thư mục làm việc", descEn: "View/set working directory", button: "📍 Thư mục", group: "session" },
-  { cmd: "browse", aliases: ["b"], arg: "[path]", desc: "Duyệt thư mục bằng nút bấm", descEn: "Browse directories with buttons", button: "📁 Duyệt", group: "session" },
+  { cmd: "dir", arg: "[path]", desc: "Xem/đặt thư mục làm việc", descEn: "View/set working directory", button: "📍 Thư mục", buttonEn: "📍 Directory", group: "session" },
+  { cmd: "browse", aliases: ["b"], arg: "[path]", desc: "Duyệt thư mục bằng nút bấm", descEn: "Browse directories with buttons", button: "📁 Duyệt", buttonEn: "📁 Browse", group: "session" },
 
   // ── model ──────────────────────────────────────────────────────────────
   { cmd: "mode", aliases: ["modes"], desc: "Chọn mode: build / plan / general / explore", descEn: "Pick mode: build / plan / general / explore", button: "🎛 Mode", group: "model" },
@@ -64,32 +68,32 @@ export const COMMANDS: BotCommand[] = [
   { cmd: "model", arg: "<id>", desc: "Đặt model cho phiên này", descEn: "Set the model for this session", group: "model" },
   { cmd: "agents", desc: "Liệt kê agent khả dụng", descEn: "List available agents", button: "🤵 Agents", group: "model" },
   { cmd: "agent", arg: "<id>", desc: "Đặt agent cho phiên này", descEn: "Set the agent for this session", group: "model" },
-  { cmd: "variants", arg: "[tên]", desc: "Xem/đặt reasoning variant (vd: xhigh)", descEn: "View/set reasoning variant (e.g. xhigh)", button: "🎚 Variants", group: "model" },
-  { cmd: "variant", arg: "<tên>", desc: "Đặt reasoning variant", descEn: "Set reasoning variant", group: "model" },
+  { cmd: "variants", arg: "[tên]", argEn: "[name]", desc: "Xem/đặt reasoning variant (vd: xhigh)", descEn: "View/set reasoning variant (e.g. xhigh)", button: "🎚 Variants", group: "model" },
+  { cmd: "variant", arg: "<tên>", argEn: "<name>", desc: "Đặt reasoning variant", descEn: "Set reasoning variant", group: "model" },
 
   // ── manager ────────────────────────────────────────────────────────────
-  { cmd: "spawn", arg: "<tên> [dir]", desc: "Tạo worker: topic + session riêng", descEn: "Create a worker: own topic + session", group: "manager" },
+  { cmd: "spawn", arg: "<tên> [dir]", argEn: "<name> [dir]", desc: "Tạo worker: topic + session riêng", descEn: "Create a worker: own topic + session", group: "manager" },
   { cmd: "board", aliases: ["workers"], desc: "Trạng thái mọi worker", descEn: "Status of all workers", group: "manager" },
   { cmd: "kill", arg: "<tên>", desc: "Dừng một worker", descEn: "Stop a worker", group: "manager" },
   { cmd: "stopall", desc: "Dừng mọi worker", descEn: "Stop all workers", group: "manager" },
   { cmd: "manager", arg: "on|off", desc: "Manager nhận việc ở chat chính và giao cho worker", descEn: "Manager takes work in the main chat, delegates to workers", group: "manager" },
   { cmd: "auto", arg: "on|off", desc: "Manager tự giao việc hay chờ duyệt", descEn: "Manager auto-dispatches or waits for approval", group: "manager" },
   { cmd: "wt", desc: "Worktree: diff / merge / xoá (trong topic worker)", descEn: "Worktree: diff / merge / remove (in worker topic)", group: "manager" },
-  { cmd: "prune", arg: "[số_ngày]", desc: "Dọn topic worker đã xong (mặc định >7 ngày)", descEn: "Clean up finished worker topics (default >7 days)", group: "manager" },
+  { cmd: "prune", arg: "[số_ngày]", argEn: "[days]", desc: "Dọn topic worker đã xong (mặc định >7 ngày)", descEn: "Clean up finished worker topics (default >7 days)", group: "manager" },
 
   // ── control ────────────────────────────────────────────────────────────
-  { cmd: "stop", desc: "Dừng task đang chạy", descEn: "Stop the running task", button: "⏹ Dừng", group: "control" },
-  { cmd: "btw", arg: "<câu hỏi>", desc: "Hỏi nhanh trên phiên tạm — không lẫn ngữ cảnh manager", descEn: "Quick question on a temp session — no manager context", group: "control" },
-  { cmd: "ask", arg: "[claude|gemini] <câu hỏi>", desc: "Hỏi cố vấn Claude/Gemini — topic riêng, hỏi tiếp được", descEn: "Ask the Claude/Gemini advisor — own topic, follow-ups ok", group: "control" },
+  { cmd: "stop", desc: "Dừng task đang chạy", descEn: "Stop the running task", button: "⏹ Dừng", buttonEn: "⏹ Stop", group: "control" },
+  { cmd: "btw", arg: "<câu hỏi>", argEn: "<question>", desc: "Hỏi nhanh trên phiên tạm — không lẫn ngữ cảnh manager", descEn: "Quick question on a temp session — no manager context", group: "control" },
+  { cmd: "ask", arg: "[claude|gemini] <câu hỏi>", argEn: "[claude|gemini] <question>", desc: "Hỏi cố vấn Claude/Gemini — topic riêng, hỏi tiếp được", descEn: "Ask the Claude/Gemini advisor — own topic, follow-ups ok", group: "control" },
   { cmd: "review", arg: "[PR|branch|commit]", desc: "Review code (chỉ đọc, chạy skill review-code)", descEn: "Review code (read-only, runs review-code skill)", group: "control" },
   { cmd: "context", aliases: ["ctx"], desc: "Ảnh chụp phiên hiện tại (usage + files)", descEn: "Snapshot of the current session (usage + files)", button: "📸 Context", group: "control" },
   { cmd: "usage", desc: "Mức dùng context theo phiên + cảnh báo gần tràn", descEn: "Context usage per session + near-overflow warning", button: "📊 Usage", group: "control" },
   { cmd: "rotation", desc: "Sức khoẻ xoay phiên Manager (nền + lịch sử)", descEn: "Manager session rotation health (floor + history)", button: "♻️ Rotation", group: "control" },
-  { cmd: "history", desc: "Xem tin nhắn gần đây", descEn: "View recent messages", button: "📜 Lịch sử", group: "control" },
-  { cmd: "status", desc: "Trạng thái kết nối", descEn: "Connection status", button: "🔌 Trạng thái", group: "control" },
+  { cmd: "history", desc: "Xem tin nhắn gần đây", descEn: "View recent messages", button: "📜 Lịch sử", buttonEn: "📜 History", group: "control" },
+  { cmd: "status", desc: "Trạng thái kết nối", descEn: "Connection status", button: "🔌 Trạng thái", buttonEn: "🔌 Status", group: "control" },
   { cmd: "reboot", desc: "Reboot máy (2 bước xác nhận)", descEn: "Reboot the machine (2-step confirm)", button: "🔄 Reboot", group: "control" },
-  { cmd: "clear", desc: "Xoá state của chat này", descEn: "Clear this chat's state", button: "🧹 Xoá state", group: "control" },
-  { cmd: "schedule", arg: "<spec> <prompt>", desc: "Đặt lịch chạy prompt tự động", descEn: "Schedule an automated prompt run", button: "⏰ Lịch", group: "control" },
+  { cmd: "clear", desc: "Xoá state của chat này", descEn: "Clear this chat's state", button: "🧹 Xoá state", buttonEn: "🧹 Clear state", group: "control" },
+  { cmd: "schedule", arg: "<spec> <prompt>", desc: "Đặt lịch chạy prompt tự động", descEn: "Schedule an automated prompt run", button: "⏰ Lịch", buttonEn: "⏰ Schedule", group: "control" },
   { cmd: "lang", arg: "vi|en", desc: "Đặt ngôn ngữ: vi (Tiếng Việt) / en (English)", descEn: "Set language: vi (Tiếng Việt) / en (English)", group: "control" },
   { cmd: "help", desc: "Danh sách lệnh + nút bấm", descEn: "Command list + buttons", button: "📖 Help", group: "control" },
 ];
@@ -103,7 +107,7 @@ function esc(s: string): string {
 
 /** One "/cmd [arg] — desc" line for the help card, localized by lang. */
 function cmdLine(c: BotCommand, lang: Lang): string {
-  const arg = c.arg ? ` ${c.arg}` : "";
+  const arg = c.arg ? ` ${lang === "en" ? c.argEn ?? c.arg : c.arg}` : "";
   const desc = lang === "en" ? c.descEn : c.desc;
   return `/${c.cmd}${esc(arg)} — ${esc(desc)}`;
 }
@@ -112,11 +116,11 @@ function cmdLine(c: BotCommand, lang: Lang): string {
  * The Telegram /autocomplete menu. `help` is pinned first (it's the
  * discovery entry point); the rest follow catalog order.
  */
-export function myCommands(): Array<{ command: string; description: string }> {
+export function myCommands(lang: Lang = "vi"): Array<{ command: string; description: string }> {
   const rest = COMMANDS.filter((c) => c.cmd !== "help");
   const help = COMMANDS.find((c) => c.cmd === "help");
   const ordered = help ? [help, ...rest] : rest;
-  return ordered.map((c) => ({ command: c.cmd, description: c.desc }));
+  return ordered.map((c) => ({ command: c.cmd, description: lang === "en" ? c.descEn : c.desc }));
 }
 
 /**
@@ -156,12 +160,12 @@ export function helpText(lang: Lang = "vi"): string {
  * The tappable button grid under /help — two buttons per row, in catalog
  * order. Button callback data is `cmd:<name>`, handled by runCommandButton.
  */
-export function commandGrid(): { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } {
+export function commandGrid(lang: Lang = "vi"): { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } {
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
   let row: Array<{ text: string; callback_data: string }> = [];
   for (const c of COMMANDS) {
     if (!c.button) continue;
-    row.push({ text: c.button, callback_data: `cmd:${c.cmd}` });
+    row.push({ text: lang === "en" ? c.buttonEn ?? c.button : c.button, callback_data: `cmd:${c.cmd}` });
     if (row.length === 2) {
       rows.push(row);
       row = [];

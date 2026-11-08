@@ -17,11 +17,12 @@
  * refused and a new thread is opened instead.
  */
 import { convKey, parseConv, type ConvKey } from "../conv.js";
-import type { StateManager } from "../state.js";
+import type { StateManager, Lang, UserPrefsStore } from "../state.js";
 import type { Telegram } from "../telegram.js";
 import type { Config } from "../config.js";
 import { TOPIC_COLORS as COLORS } from "../telegram.js";
 import { esc } from "../format.js";
+import { tr } from "../i18n.js";
 import { log } from "../logger.js";
 import { AdvisorError, type AdvisorAnswer, type AdvisorEndpoint } from "./advisor-client.js";
 import { advisorSessionExists, askAdvisor, forgetAdvisor } from "./advisor-client.js";
@@ -40,6 +41,7 @@ export interface AdvisorHost {
   tg: Pick<Telegram, "createForumTopic" | "deleteForumTopic" | "closeForumTopic" | "openForumTopic">;
   st: StateManager;
   cfg: Config;
+  userPrefs?: UserPrefsStore;
   sendHtml(conv: ConvKey, html: string): Promise<void>;
   startTyping?(conv: ConvKey): void;
 }
@@ -76,6 +78,11 @@ export class Advisor {
     return this.h.cfg.advisorMaxTurnsPerSession;
   }
 
+  /** The conv owner's preferred language (falls back to vi; undefined in minimal test hosts). */
+  private langOf(conv: ConvKey): Lang {
+    return this.h.userPrefs?.getLang(this.h.st.peek(conv)?.createdBy ?? "") ?? "vi";
+  }
+
   /** The agent /ask uses when the user names none. */
   defaultAgent(): AgentId {
     return this.h.cfg.advisorDefaultAgent;
@@ -101,7 +108,7 @@ export class Advisor {
     try {
       threadId = await this.h.tg.createForumTopic(chatId, this.topicName(agent, opts.title), COLORS[3]);
     } catch (e) {
-      throw new Error(`Không tạo được topic cố vấn (${(e as Error).message}). Cần supergroup bật Topics và bot là admin.`);
+      throw new Error(tr(this.langOf(opts.chat), `Không tạo được topic cố vấn (${(e as Error).message}). Cần supergroup bật Topics và bot là admin.`, `Could not create an advisor topic (${(e as Error).message}). A supergroup with Topics enabled and the bot as admin is required.`));
     }
     const conv = convKey(chatId, threadId);
     const now = Date.now();
@@ -114,7 +121,7 @@ export class Advisor {
       const answered = resolveAgent(answer.agent) ?? LEGACY_AGENT;
       if (answered !== agent) {
         throw new Error(
-          `daemon trả lời bằng ${agentLabel(answered)} thay vì ${agentLabel(agent)} — daemon bản cũ? Cài lại: advisor-daemon/install.sh`,
+          tr(this.langOf(conv), `daemon trả lời bằng ${agentLabel(answered)} thay vì ${agentLabel(agent)} — daemon bản cũ? Cài lại: advisor-daemon/install.sh`, `daemon answered with ${agentLabel(answered)} instead of ${agentLabel(agent)} — old daemon? Reinstall: advisor-daemon/install.sh`),
         );
       }
       const st = this.h.st.get(conv);
@@ -144,13 +151,17 @@ export class Advisor {
   async followUp(conv: ConvKey, message: string): Promise<{ answer: AdvisorAnswer; capped: boolean }> {
     const st = this.h.st.get(conv);
     const adv = st.advisor;
-    if (!adv) throw new Error("Topic này không phải thread cố vấn.");
+    if (!adv) throw new Error(tr(this.langOf(conv), "Topic này không phải thread cố vấn.", "This topic is not an advisor thread."));
     const agent = adv.agent ?? LEGACY_AGENT;
     const label = agentLabel(agent);
     if (adv.turns >= this.cap()) {
       const html =
-        `⛔ Đã đủ ${this.cap()} lượt trong thread này — ${esc(label)} sẽ không nhớ các câu trước nữa.\n` +
-        "Mở thread mới để bắt đầu lại (Manager gọi <code>consult</code> không truyền <code>threadId</code>, hoặc dùng /ask).";
+        tr(this.langOf(conv),
+          `⛔ Đã đủ ${this.cap()} lượt trong thread này — ${esc(label)} sẽ không nhớ các câu trước nữa.\n` +
+          "Mở thread mới để bắt đầu lại (Manager gọi <code>consult</code> không truyền <code>threadId</code>, hoặc dùng /ask).",
+          `⛔ Reached the ${this.cap()}-turn cap in this thread — ${esc(label)} will no longer remember earlier questions.\n` +
+          "Open a new thread to restart (Manager calls <code>consult</code> without a <code>threadId</code>, or use /ask).",
+        );
       await this.h.sendHtml(conv, html).catch(() => {});
       return {
         answer: {
@@ -168,7 +179,7 @@ export class Advisor {
       };
     }
     if (this.busy.has(conv)) {
-      await this.h.sendHtml(conv, `⏳ ${esc(label)} vẫn đang trả lời câu trước — hỏi tiếp sau khi có câu trả lời.`).catch(() => {});
+      await this.h.sendHtml(conv, tr(this.langOf(conv), `⏳ ${esc(label)} vẫn đang trả lời câu trước — hỏi tiếp sau khi có câu trả lời.`, `⏳ ${esc(label)} is still answering the previous question — ask again once it replies.`)).catch(() => {});
       throw new Error(`${label} is still answering the previous question in this thread — wait for it.`);
     }
     this.busy.add(conv);
@@ -185,7 +196,7 @@ export class Advisor {
         fresh = true;
         await this.h.sendHtml(
           conv,
-          "🧠 Session cố vấn (Claude) đã hết hạn sau 24h im lặng — mở session mới, ngữ cảnh các câu trước không còn. Câu trả lời dưới đây là từ session mới:",
+          tr(this.langOf(conv), "🧠 Session cố vấn (Claude) đã hết hạn sau 24h im lặng — mở session mới, ngữ cảnh các câu trước không còn. Câu trả lời dưới đây là từ session mới:", "🧠 The advisor session expired after 24h of inactivity — a fresh session was opened, so earlier context is gone. The answer below is from the new session:"),
         ).catch(() => {});
         sessionId = undefined; // drop the dead id → ask() starts a fresh session
       }
@@ -197,7 +208,7 @@ export class Advisor {
       // An offline machine / daemon error should not leave the user hanging:
       // report the reason and keep the thread (the user can retry).
       const msg = e instanceof AdvisorError ? e.message : String(e);
-      await this.h.sendHtml(conv, `⚠️ Không hỏi được ${esc(label)}: ${esc(msg)}`).catch(() => {});
+      await this.h.sendHtml(conv, tr(this.langOf(conv), `⚠️ Không hỏi được ${esc(label)}: ${esc(msg)}`, `⚠️ Couldn't ask ${esc(label)}: ${esc(msg)}`)).catch(() => {});
       throw e;
     } finally {
       this.busy.delete(conv);

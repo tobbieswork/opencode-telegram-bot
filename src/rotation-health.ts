@@ -21,6 +21,8 @@
 import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { esc, timeAgo } from "./format.js";
+import { tr } from "./i18n.js";
+import type { Lang } from "./state.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -202,25 +204,31 @@ export function readRotationHealth(file: string): RotationHealthSnapshot | null 
  * The /rotation report body (Telegram HTML) for one snapshot. Read-only — it
  * renders the snapshot; it never triggers a rotation.
  */
-export function renderRotationReport(snap: RotationHealthSnapshot): string {
+export function renderRotationReport(snap: RotationHealthSnapshot, lang: Lang = "vi"): string {
   const lines: string[] = [];
   lines.push("🧹 <b>Rotation Manager</b>");
   lines.push(
     snap.currentFloorK === null
-      ? "Nền hiện tại: chưa đo được"
-      : `Nền hiện tại: ~${Math.round(snap.currentFloorK)}K`,
+      ? tr(lang, "Nền hiện tại: chưa đo được", "Current floor: not measured")
+      : tr(lang, `Nền hiện tại: ~${Math.round(snap.currentFloorK)}K`, `Current floor: ~${Math.round(snap.currentFloorK)}K`),
   );
-  lines.push(`Ngưỡng: confirm &gt;${snap.thresholds.confirmK}K · auto &gt;${snap.thresholds.autoK}K`);
+  lines.push(
+    tr(
+      lang,
+      `Ngưỡng: confirm &gt;${snap.thresholds.confirmK}K · auto &gt;${snap.thresholds.autoK}K`,
+      `Thresholds: confirm &gt;${snap.thresholds.confirmK}K · auto &gt;${snap.thresholds.autoK}K`,
+    ),
+  );
 
   lines.push("");
-  lines.push("📊 <b>Xu hướng nền 7 ngày</b> (min–max):");
-  if (snap.floorTrend.length === 0) lines.push("  chưa có dữ liệu");
+  lines.push(tr(lang, "📊 <b>Xu hướng nền 7 ngày</b> (min–max):", "📊 <b>7-day floor trend</b> (min–max):"));
+  if (snap.floorTrend.length === 0) lines.push(tr(lang, "  chưa có dữ liệu", "  no data yet"));
   else for (const d of snap.floorTrend) lines.push(`  ${esc(d.day)}: ${Math.round(d.min)}–${Math.round(d.max)}K`);
 
   lines.push("");
-  lines.push("🔄 <b>Xoay gần đây</b> (5):");
+  lines.push(tr(lang, "🔄 <b>Xoay gần đây</b> (5):", "🔄 <b>Recent rotations</b> (5):"));
   const recent = snap.rotations.slice(-5);
-  if (recent.length === 0) lines.push("  chưa có");
+  if (recent.length === 0) lines.push(tr(lang, "  chưa có", "  none yet"));
   else
     for (const r of recent) {
       const to = r.newFloorK !== undefined ? ` → ~${r.newFloorK}K` : "";
@@ -230,14 +238,14 @@ export function renderRotationReport(snap: RotationHealthSnapshot): string {
   const v = rotationVerdict(snap.currentFloorK, snap.lastRotationOutcome);
   const verdict =
     v === "bounded"
-      ? "✅ bounded — nền &lt;100K, ổn định"
+      ? tr(lang, "✅ bounded — nền &lt;100K, ổn định", "✅ bounded — floor &lt;100K, stable")
       : v === "watch"
         ? snap.currentFloorK === null
-          ? "⚠️ theo dõi — chưa đo được nền"
-          : "⚠️ theo dõi — nền 100–120K"
-        : "❌ vượt ngưỡng — nền &gt;120K hoặc lần xoay cuối thất bại";
+          ? tr(lang, "⚠️ theo dõi — chưa đo được nền", "⚠️ watch — floor not measured")
+          : tr(lang, "⚠️ theo dõi — nền 100–120K", "⚠️ watch — floor 100–120K")
+        : tr(lang, "❌ vượt ngưỡng — nền &gt;120K hoặc lần xoay cuối thất bại", "❌ over threshold — floor &gt;120K or last rotation failed");
   lines.push("");
-  lines.push(`🎯 <b>Đánh giá</b>: ${verdict}`);
+  lines.push(`${tr(lang, "🎯 <b>Đánh giá</b>", "🎯 <b>Verdict</b>")}: ${verdict}`);
 
   return lines.join("\n");
 }

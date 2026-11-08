@@ -2,6 +2,7 @@ import type { Bot } from "./bot.js";
 import type { ChatState } from "./state.js";
 import type { ConvKey } from "./conv.js";
 import { esc, trunc, stripTags, mdToHtmlChunks } from "./format.js";
+import { tr } from "./i18n.js";
 import { richMarkdownChunks } from "./rich.js";
 
 /**
@@ -21,18 +22,25 @@ const BTW_TIMEOUT_MS = 3 * 60 * 1000;
 const BTW_REPLY_MAX = 4000;
 
 export async function cmdBtw(bot: Bot, conv: ConvKey, state: ChatState, arg: string): Promise<void> {
+  const lang = bot.userPrefs.getLang(bot.st.peek(conv)?.createdBy ?? "");
   const q = arg.trim();
   if (!q) {
     await bot.sendHtml(
       conv,
-      "Cú pháp: <code>/btw &lt;câu hỏi&gt;</code>\n" +
-        "Hỏi nhanh trên một phiên tạm (đồng dir/model với chat này) — trả lời hiện ở đây, " +
-        "không lẫn vào ngữ cảnh của manager. Dùng được cả khi manager đang bận."
+      tr(
+        lang,
+        "Cú pháp: <code>/btw &lt;câu hỏi&gt;</code>\n" +
+          "Hỏi nhanh trên một phiên tạm (đồng dir/model với chat này) — trả lời hiện ở đây, " +
+          "không lẫn vào ngữ cảnh của manager. Dùng được cả khi manager đang bận.",
+        "Usage: <code>/btw &lt;question&gt;</code>\n" +
+          "Ask a quick question on a throwaway session (same dir/model as this chat) — the answer shows here, " +
+          "without bloating the manager's context. Works while the manager is busy.",
+      ),
     );
     return;
   }
   if (bot.btwRunning.has(conv)) {
-    await bot.sendHtml(conv, "⏳ Đang có một /btw chạy trong chat này — đợi nó xong rồi hỏi tiếp nhé.");
+    await bot.sendHtml(conv, tr(lang, "⏳ Đang có một /btw chạy trong chat này — đợi nó xong rồi hỏi tiếp nhé.", "⏳ A /btw is already running in this chat — wait for it to finish, then ask again."));
     return;
   }
   bot.btwRunning.add(conv);
@@ -53,11 +61,11 @@ export async function cmdBtw(bot: Bot, conv: ConvKey, state: ChatState, arg: str
     if (state.agent) await bot.oc.setAgent(sid, state.agent).catch(() => {});
     const res = await bot.oc.promptAndWait(sid, q, { signal: ac.signal });
     if (ac.signal.aborted || res.interrupted) {
-      await bot.sendHtml(conv, "⏱️ /btw quá 3 phút — đã huỷ phiên tạm. Câu hỏi có lẽ cần một task thật sự (🔥 hoặc /spawn).");
+      await bot.sendHtml(conv, tr(lang, "⏱️ /btw quá 3 phút — đã huỷ phiên tạm. Câu hỏi có lẽ cần một task thật sự (🔥 hoặc /spawn).", "⏱️ /btw took over 3 minutes — the temp session was cancelled. The question probably needs a real task (🔥 or /spawn)."));
     } else if (res.error) {
-      await bot.sendHtml(conv, `❌ /btw lỗi: ${esc(trunc(res.error.message ?? res.error.type ?? "unknown", 300))}`);
+      await bot.sendHtml(conv, tr(lang, "❌ /btw lỗi: ", "❌ /btw error: ") + esc(trunc(res.error.message ?? res.error.type ?? "unknown", 300)));
     } else if (!res.reply) {
-      await bot.sendHtml(conv, "❓ /btw kết thúc mà không có trả lời (có thể phiên tạm bị từ chối quyền chạy tool).");
+      await bot.sendHtml(conv, tr(lang, "❓ /btw kết thúc mà không có trả lời (có thể phiên tạm bị từ chối quyền chạy tool).", "❓ /btw finished without an answer (the temp session may have been denied tool permissions)."));
     } else {
       // Render like any other model reply (rich GFM when enabled, hand-rendered
       // HTML otherwise) — the reply keeps its formatting instead of a flat esc'd wall.
@@ -76,7 +84,7 @@ export async function cmdBtw(bot: Bot, conv: ConvKey, state: ChatState, arg: str
     }
   } catch (e) {
     // Never drop the turn silently — see the /schedule rule (project memory #105).
-    await bot.sendHtml(conv, `❌ /btw lỗi: ${esc(trunc(String((e as Error)?.message ?? e), 300))}`).catch(() => {});
+    await bot.sendHtml(conv, tr(lang, "❌ /btw lỗi: ", "❌ /btw error: ") + esc(trunc(String((e as Error)?.message ?? e), 300))).catch(() => {});
   } finally {
     clearTimeout(timer);
     bot.btwRunning.delete(conv);

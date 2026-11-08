@@ -1,4 +1,5 @@
-import type { WorkerStatus } from "./state.js";
+import type { WorkerStatus, Lang } from "./state.js";
+import { tr } from "./i18n.js";
 
 export const ICON: Record<WorkerStatus, string> = {
   idle: "💤",
@@ -72,6 +73,7 @@ export function isOverflowError(text: string): boolean {
 export function formatTurnFailure(
   error: { type?: string; message?: string } | undefined,
   elapsedMs: number,
+  lang: Lang = "vi",
 ): string {
   const secs = (elapsedMs / 1000).toFixed(1);
   const raw = (error?.message ?? "").trim();
@@ -80,20 +82,31 @@ export function formatTurnFailure(
   // A rate/usage cap is not a full context — tell the user to wait, not /clear.
   switch (classifyFailure(text)) {
     case "rate-limit":
-      return `⏳ Provider đang giới hạn tốc độ (rate limit) — không phải lỗi context, chờ vài giây rồi thử lại.${detail}`;
+      return tr(
+        lang,
+        `⏳ Provider đang giới hạn tốc độ (rate limit) — không phải lỗi context, chờ vài giây rồi thử lại.${detail}`,
+        `⏳ The provider is rate limiting — not a context error; wait a few seconds and try again.${detail}`,
+      );
     case "overflow":
-      return (
+      return tr(
+        lang,
         "⚠️ <b>Session đã đầy context</b> — vượt giới hạn token của model nên không chạy tiếp được.\n" +
-        "Gõ <code>/clear</code> để bắt đầu phiên mới."
+          "Gõ <code>/clear</code> để bắt đầu phiên mới.",
+        "⚠️ <b>Session out of context</b> — the model's token limit was reached, so it can't continue.\n" +
+          "Send <code>/clear</code> to start a fresh session.",
       );
     case "usage-cap":
-      return `🚫 Đã hết hạn mức sử dụng của provider/model — chờ đến khi hạn mức được reset hoặc đổi model bằng /model.${detail}`;
+      return tr(
+        lang,
+        `🚫 Đã hết hạn mức sử dụng của provider/model — chờ đến khi hạn mức được reset hoặc đổi model bằng /model.${detail}`,
+        `🚫 The provider/model usage quota is exhausted — wait for the quota to reset or switch models with /model.${detail}`,
+      );
   }
   if (raw) {
     const type = error?.type ? ` <code>${esc(error.type)}</code>` : "";
-    return `❌ <b>Turn lỗi</b>${type}: ${esc(trunc(raw, 400))}\n<i>${secs}s</i>`;
+    return tr(lang, `❌ <b>Turn lỗi</b>${type}: ${esc(trunc(raw, 400))}\n<i>${secs}s</i>`, `❌ <b>Turn error</b>${type}: ${esc(trunc(raw, 400))}\n<i>${secs}s</i>`);
   }
-  return `❌ <b>Turn bị lỗi</b> (${secs}s) — không có thông tin chi tiết. Nếu lặp lại, thử <code>/clear</code>.`;
+  return tr(lang, "❌ <b>Turn bị lỗi</b> (${secs}s) — không có thông tin chi tiết. Nếu lặp lại, thử <code>/clear</code>.", "❌ <b>Turn failed</b> (${secs}s) — no details available. If it repeats, try <code>/clear</code>.");
 }
 
 /** Compact number for display: "1.2K" / "3.4M" (plain if < 1000). */

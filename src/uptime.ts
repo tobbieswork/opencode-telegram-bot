@@ -83,10 +83,18 @@ export function shouldRemindAboutReboot(p: {
   return p.now - p.lastReminderMs >= p.remindIntervalMs;
 }
 
-/** Human-readable uptime, Vietnamese (the bot's language): "43 ngày 2 giờ" / "7 giờ" / "12 phút". */
-export function formatUptimeHuman(sec: number): string {
+import { tr } from "./i18n.js";
+import type { Lang } from "./state.js";
+
+/** Human-readable uptime: "43 ngày 2 giờ" / "7 giờ" / "12 phút" (EN: "43d 2h" …). */
+export function formatUptimeHuman(sec: number, lang: Lang = "vi"): string {
   const days = Math.floor(sec / 86_400);
   const hours = Math.floor((sec % 86_400) / 3_600);
+  if (lang === "en") {
+    if (days > 0) return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
+    if (hours > 0) return `${hours}h`;
+    return `${Math.max(1, Math.floor(sec / 60))}m`;
+  }
   if (days > 0) return hours > 0 ? `${days} ngày ${hours} giờ` : `${days} ngày`;
   if (hours > 0) return `${hours} giờ`;
   return `${Math.max(1, Math.floor(sec / 60))} phút`;

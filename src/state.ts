@@ -279,6 +279,16 @@ export class UserPrefsStore {
     return this.data[String(userId)]?.language ?? "vi";
   }
 
+  /**
+   * The language of the first user who set one explicitly (insertion order),
+   * or undefined when no user has a preference yet. Used to render the
+   * bot-global /autocomplete menu in a sensible language at startup.
+   */
+  anyExplicitLang(): Lang | undefined {
+    for (const u of Object.values(this.data)) if (u.language) return u.language;
+    return undefined;
+  }
+
   /** Set the user's language preference and persist. */
   setLang(userId: string | number, lang: Lang): void {
     const key = String(userId);

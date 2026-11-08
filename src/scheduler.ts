@@ -24,6 +24,8 @@ import type { ConvKey } from "./conv.js";
 import { nextRunAfter, decideRun, formatSchedule } from "./schedule.js";
 import type { Schedule } from "./schedule.js";
 import { warn } from "./logger.js";
+import { tr } from "./i18n.js";
+import type { Lang } from "./state.js";
 
 /** On-disk shape of `data/schedules.json` (versioned so we can migrate later). */
 export interface ScheduleStoreFile {
@@ -80,12 +82,12 @@ export class ScheduleStore {
   }
 
   /** Append a schedule. Throws when the store is at `maxSchedules` or the id collides. */
-  add(sch: Schedule): Schedule {
+  add(sch: Schedule, lang: Lang = "vi"): Schedule {
     const list = this.load();
     if (list.length >= this.maxSchedules) {
-      throw new Error(`Đã đủ ${this.maxSchedules} lịch (giới hạn). Xoá bớt trước khi thêm.`);
+      throw new Error(tr(lang, `Đã đủ ${this.maxSchedules} lịch (giới hạn). Xoá bớt trước khi thêm.`, `Schedule limit (${this.maxSchedules}) reached. Delete some first.`));
     }
-    if (list.some((s) => s.id === sch.id)) throw new Error(`Lịch #${sch.id} đã tồn tại.`);
+    if (list.some((s) => s.id === sch.id)) throw new Error(tr(lang, `Lịch #${sch.id} đã tồn tại.`, `Schedule #${sch.id} already exists.`));
     list.push(sch);
     this.save(list);
     return sch;
@@ -140,6 +142,8 @@ export interface SchedulerDeps {
   isBusy: (sch: Schedule) => boolean;
   isAllowed: (userId: number) => boolean;
   notify: (conv: ConvKey, text: string) => Promise<void>;
+  /** The user language for a schedule's conv (localizes the tick notifications). */
+  langOf?: (conv: ConvKey) => Lang;
   tickMs?: number;
   graceMs?: number;
 }
@@ -223,7 +227,8 @@ export class Scheduler {
 
           if (this.deps.isBusy(sch)) {
             this.mark(sch.id, { lastStatus: "skipped-busy" });
-            await this.safeNotify(sch.conv, `⏭ ${formatSchedule(sch)} — bỏ lượt (worker đang bận).`);
+            const lang = this.deps.langOf?.(sch.conv) ?? "vi";
+            await this.safeNotify(sch.conv, tr(lang, `⏭ ${formatSchedule(sch)} — bỏ lượt (worker đang bận).`, `⏭ ${formatSchedule(sch)} — skipped (worker busy).`));
           } else if (!this.deps.isAllowed(sch.createdBy)) {
             // Creator was removed from the allowlist since creation.
             warn(`scheduler: #${sch.id} creator ${sch.createdBy} no longer allowed — skipped`);
@@ -234,7 +239,8 @@ export class Scheduler {
         } catch (e) {
           this.mark(sch.id, { lastStatus: "error" });
           warn(`scheduler: #${sch.id} error: ${errText(e)}`);
-          await this.safeNotify(sch.conv, `⚠️ ${formatSchedule(sch)} — lỗi khi chạy.`);
+          const lang = this.deps.langOf?.(sch.conv) ?? "vi";
+          await this.safeNotify(sch.conv, tr(lang, `⚠️ ${formatSchedule(sch)} — lỗi khi chạy.`, `⚠️ ${formatSchedule(sch)} — error while running.`));
         }
       }
     } finally {

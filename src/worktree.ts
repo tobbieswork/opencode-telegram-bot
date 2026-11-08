@@ -2,6 +2,8 @@ import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { basename, dirname, join, relative } from "node:path";
 import { existsSync } from "node:fs";
+import { tr } from "./i18n.js";
+import type { Lang } from "./state.js";
 
 /** Run git with an argument vector (never a shell string) and return trimmed stdout. */
 function git(cwd: string, args: string[], timeoutMs = 30_000): Promise<string> {
@@ -124,25 +126,36 @@ export async function mergeWorktree(
   repoRoot: string,
   wt: { root: string; branch: string; base: string },
   label: string,
+  lang: Lang = "vi",
 ): Promise<string> {
   const dirty = await git(repoRoot, ["status", "--porcelain"]);
-  if (dirty) throw new Error("Thư mục repo chính đang có thay đổi chưa commit — hãy commit/stash trước khi merge.");
+  if (dirty) {
+    throw new Error(
+      tr(
+        lang,
+        "Thư mục repo chính đang có thay đổi chưa commit — hãy commit/stash trước khi merge.",
+        "The main repo checkout has uncommitted changes — commit or stash before merging.",
+      ),
+    );
+  }
   const head = await git(repoRoot, ["rev-parse", "--abbrev-ref", "HEAD"]);
-  if (head !== wt.base) throw new Error(`Repo chính đang ở nhánh "${head}", không phải "${wt.base}".`);
+  if (head !== wt.base) {
+    throw new Error(tr(lang, `Repo chính đang ở nhánh "${head}", không phải "${wt.base}".`, `The main repo is on branch "${head}", not "${wt.base}".`));
+  }
 
   if (await git(wt.root, ["status", "--porcelain"])) {
     await git(wt.root, ["add", "-A"]);
     await git(wt.root, ["commit", "-m", `tg worker ${label}: uncommitted changes`]);
   }
   const ahead = await git(repoRoot, ["rev-list", "--count", `${wt.base}..${wt.branch}`]);
-  if (ahead === "0") return "Không có gì để merge (nhánh worker không có commit mới).";
+  if (ahead === "0") return tr(lang, "Không có gì để merge (nhánh worker không có commit mới).", "Nothing to merge (the worker branch has no new commits).");
   try {
     await git(repoRoot, ["merge", "--no-ff", "--no-edit", wt.branch], 120_000);
   } catch (e) {
     await git(repoRoot, ["merge", "--abort"]).catch(() => {});
-    throw new Error(`Merge bị conflict — đã huỷ merge, repo giữ nguyên. (${(e as Error).message.split("\n")[0]})`);
+    throw new Error(tr(lang, `Merge bị conflict — đã huỷ merge, repo giữ nguyên. (${(e as Error).message.split("\n")[0]})`, `Merge conflict — the merge was aborted, the repo is unchanged. (${(e as Error).message.split("\n")[0]})`));
   }
-  return `Đã merge ${wt.branch} → ${wt.base} (${ahead} commit).`;
+  return tr(lang, `Đã merge ${wt.branch} → ${wt.base} (${ahead} commit).`, `Merged ${wt.branch} → ${wt.base} (${ahead} commit).`);
 }
 
 /**
@@ -160,7 +173,7 @@ export async function mergeWorktree(
  * user). Note: `add -A` also stages UNTRACKED files (as in mergeWorktree) —
  * intended, so nothing in the worktree is lost whatever its git status.
  */
-export async function removeWorktree(repoRoot: string, wt: { root: string; branch: string }): Promise<string> {
+export async function removeWorktree(repoRoot: string, wt: { root: string; branch: string }, lang: Lang = "vi"): Promise<string> {
   if (await git(wt.root, ["status", "--porcelain"])) {
     await git(wt.root, ["add", "-A"]);
     await git(wt.root, [
@@ -174,5 +187,7 @@ export async function removeWorktree(repoRoot: string, wt: { root: string; branc
     () => false,
     () => true,
   );
-  return kept ? `Đã xoá worktree. Nhánh ${wt.branch} chưa merge nên được giữ lại.` : "Đã xoá worktree và nhánh.";
+  return kept
+    ? tr(lang, `Đã xoá worktree. Nhánh ${wt.branch} chưa merge nên được giữ lại.`, `Worktree deleted. Branch ${wt.branch} is unmerged, so it was kept.`)
+    : tr(lang, "Đã xoá worktree và nhánh.", "Worktree and branch deleted.");
 }

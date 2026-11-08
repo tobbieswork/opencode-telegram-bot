@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Telegram, CallbackQuery, TOPIC_COLORS } from "./telegram.js";
 import { OpenCodeCtl, userText } from "./opencode.js";
 import { StateManager, ChatState, WorkerInfo, WorkerStatus, UserPrefsStore, Lang } from "./state.js";
+import { tr } from "./i18n.js";
 import { Config } from "./config.js";
 import { ConvKey, chatOf, convKey, parseConv } from "./conv.js";
 import { McpBridge, BridgeTool, makeRunScriptTool } from "./mcp-bridge.js";
@@ -145,6 +146,8 @@ interface SpawnSpec {
   agent?: string;
   writes?: boolean;
   spawnedBy: "user" | "manager" | "schedule";
+  /** Language for user-facing validation errors (default "vi"). */
+  lang?: Lang;
   /**
    * When `false`, skip git worktree isolation entirely and run the worker in the
    * given directory as-is. Used for overflow respawns, which must stay in the
@@ -320,7 +323,7 @@ export class Orchestrator {
       await new Promise((r) => setTimeout(r, 300));
       st = await this.h.oc.mcpStatus(dir, BRIDGE_NAME);
     }
-    if (st.status !== "connected") throw new Error(`Bridge tool chưa kết nối được (${st.status}${st.error ? `: ${st.error}` : ""}).`);
+    if (st.status !== "connected") throw new Error(`Bridge tool not connected (${st.status}${st.error ? `: ${st.error}` : ""}).`);
     return dir;
   }
 
@@ -376,17 +379,23 @@ export class Orchestrator {
   private async cmdSpawn(conv: ConvKey, arg: string): Promise<void> {
     const [name, ...rest] = arg.split(/\s+/).filter(Boolean);
     if (!name) {
+      const lang = this.langOf(conv);
       await this.h.sendHtml(
         conv,
-        "Usage: <code>/spawn &lt;tên&gt; [thư mục]</code>\nTạo một topic mới với session riêng. Ví dụ: <code>/spawn api-fix ~/Code/app</code>",
+        tr(
+          lang,
+          "Usage: <code>/spawn &lt;tên&gt; [thư mục]</code>\nTạo một topic mới với session riêng. Ví dụ: <code>/spawn api-fix ~/Code/app</code>",
+          "Usage: <code>/spawn <name> [dir]</code>\nCreates a new topic with its own session. E.g.: <code>/spawn api-fix ~/Code/app</code>",
+        ),
       );
       return;
     }
+    const lang = this.langOf(conv);
     const top = this.h.st.get(chatOf(conv));
     const dir = rest.join(" ") || this.h.st.get(conv).directory || top.directory || this.h.cfg.opencodeDirectory;
     try {
       const r = await this.spawn(chatOf(conv), { name, directory: dir, spawnedBy: "user", writes: true });
-      await this.h.sendHtml(conv, `🧩 Đã tạo worker <b>${esc(name)}</b> — mở topic “${esc(this.topicName(r.worker))}” để làm việc.`);
+      await this.h.sendHtml(conv, tr(lang, `🧩 Đã tạo worker <b>${esc(name)}</b> — mở topic “${esc(this.topicName(r.worker))}” để làm việc.`, `🧩 Worker <b>${esc(name)}</b> created — open topic “${esc(this.topicName(r.worker))}” to work.`));
     } catch (e) {
       await this.h.sendHtml(conv, `❌ ${esc((e as Error).message)}`);
     }
@@ -397,7 +406,8 @@ export class Orchestrator {
     const workers = this.workersOf(conv);
     const head = `📋 <b>Workers (${workers.length})</b> · manager: ${top.manager ? "on" : "off"} · auto: ${top.auto ? "on" : "off"}`;
     if (!workers.length) {
-      await this.h.sendHtml(conv, `${head}\n\nChưa có worker. Tạo bằng <code>/spawn &lt;tên&gt; [thư mục]</code> hoặc bật /manager.`);
+      const lang = this.h.userPrefs?.getLang(top.createdBy ?? "") ?? "vi";
+      await this.h.sendHtml(conv, `${head}\n\n${tr(lang, "Chưa có worker. Tạo bằng <code>/spawn &lt;tên&gt; [thư mục]</code> hoặc bật /manager.", "No workers yet. Create one with <code>/spawn <name> [dir]</code> or turn on /manager.")}`);
       return;
     }
     const lines = workers
@@ -407,7 +417,8 @@ export class Orchestrator {
         const where = w.worktree ? `🌿 <code>${esc(w.worktree.branch)}</code>` : `<code>${esc(trunc(s.directory ?? "", 40))}</code>`;
         return `${ICON[w.status]} <b>${esc(w.name)}</b> · ${esc(s.agent ?? "build")} · ${timeAgo(w.updatedAt)}\n    ${where}`;
       });
-    await this.h.sendHtml(conv, `${head}\n\n${lines.join("\n")}\n\n<i>/kill &lt;tên&gt; để dừng · /stopall dừng tất cả</i>`);
+    const lang = this.h.userPrefs?.getLang(top.createdBy ?? "") ?? "vi";
+    await this.h.sendHtml(conv, `${head}\n\n${lines.join("\n")}\n\n<i>${tr(lang, "/kill &lt;tên&gt; để dừng · /stopall dừng tất cả", "/kill <name> to stop · /stopall stops all")}</i>`);
   }
 
   /**
@@ -422,21 +433,22 @@ export class Orchestrator {
       await this.h.sendHtml(conv, msg);
       return;
     }
-    await this.showKillPicker(conv, name ? `❌ Không có worker <code>${esc(name)}</code>` : undefined);
+    await this.showKillPicker(conv, name ? tr(this.langOf(conv), `❌ Không có worker <code>${esc(name)}</code>`, `❌ No worker <code>${esc(name)}</code>`) : undefined);
   }
 
   /** The /kill picker card: one stop-button per worker + a hint line. */
   private async showKillPicker(conv: ConvKey, errorNote?: string): Promise<void> {
+    const lang = this.langOf(conv);
     const workers = this.workersOf(conv).map(([, s]) => s.worker!);
     if (!workers.length) {
-      await this.h.sendHtml(conv, "Không có worker nào — /spawn để tạo.");
+      await this.h.sendHtml(conv, tr(lang, "Không có worker nào — /spawn để tạo.", "No workers — /spawn to create one."));
       return;
     }
     const rows: Btn[][] = workers.map((w) => [{ text: `${ICON[w.status]} ${w.name}`, callback_data: `kill:${w.name}` }]);
-    rows.push([{ text: "❌ Đóng", callback_data: "kill:close" }]);
+    rows.push([{ text: tr(lang, "❌ Đóng", "❌ Close"), callback_data: "kill:close" }]);
     await this.h.sendHtml(
       conv,
-      [errorNote ?? "❓ <b>/kill</b> cần tên worker", "Bấm để dừng worker:", "Hoặc gửi: <code>/kill &lt;tên&gt;</code>"].join("\n"),
+      [errorNote ?? tr(lang, "❓ <b>/kill</b> cần tên worker", "❓ <b>/kill</b> needs a worker name"), tr(lang, "Bấm để dừng worker:", "Tap to stop a worker:"), tr(lang, "Hoặc gửi: <code>/kill &lt;tên&gt;</code>", "Or send: <code>/kill <name></code>")].join("\n"),
       { reply_markup: { inline_keyboard: rows } },
     );
   }
@@ -446,6 +458,7 @@ export class Orchestrator {
    * it is dispatched from Bot.handleCallback, like the other orchestrator callbacks.
    */
   async handleKillCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+    const lang = this.h.userPrefs?.getLang(cb.from?.id ?? "") ?? "vi";
     const name = (cb.data ?? "").slice("kill:".length);
     if (name === "close") {
       await this.h.tg.answerCallbackQuery(cb.id);
@@ -454,11 +467,11 @@ export class Orchestrator {
     }
     const found = this.h.st.findWorker(chatOf(conv), name);
     if (!found) {
-      await this.h.tg.answerCallbackQuery(cb.id, "Worker không còn tồn tại.");
-      if (messageId) await this.h.tg.editMessageText(conv, messageId, "⌛ Worker không còn tồn tại — /board để xem lại.").catch(() => {});
+      await this.h.tg.answerCallbackQuery(cb.id, tr(lang, "Worker không còn tồn tại.", "The worker no longer exists."));
+      if (messageId) await this.h.tg.editMessageText(conv, messageId, tr(lang, "⌛ Worker không còn tồn tại — /board để xem lại.", "⌛ The worker no longer exists — /board to refresh."), { reply_markup: { inline_keyboard: [] } }).catch(() => {});
       return;
     }
-    await this.h.tg.answerCallbackQuery(cb.id, `Dừng ${name}`);
+    await this.h.tg.answerCallbackQuery(cb.id, tr(lang, `Dừng ${name}`, `Stopping ${name}`));
     const msg = await this.stopWorker(found[0], true);
     if (messageId) await this.h.tg.editMessageText(conv, messageId, msg).catch(() => {});
   }
@@ -466,24 +479,26 @@ export class Orchestrator {
   private async cmdStopAll(conv: ConvKey): Promise<void> {
     const busy = this.workersOf(conv).filter(([, s]) => BUSY.includes(s.worker!.status));
     for (const [k] of busy) await this.stopWorker(k, false);
-    await this.h.sendHtml(conv, busy.length ? `⏹ Đã dừng ${busy.length} worker.` : "Không có worker nào đang chạy.");
+    const lang = this.langOf(conv);
+    await this.h.sendHtml(conv, busy.length ? tr(lang, `⏹ Đã dừng ${busy.length} worker.`, `⏹ Stopped ${busy.length} worker(s).`) : tr(lang, "Không có worker nào đang chạy.", "No workers running."));
   }
 
   private async cmdManager(conv: ConvKey, arg: string): Promise<void> {
     const chat = chatOf(conv);
+    const lang = this.h.userPrefs?.getLang(this.h.st.peek(chat)?.createdBy ?? "") ?? "vi";
     if (conv !== chat) {
-      await this.h.sendHtml(conv, "ℹ️ Bật Manager ở khung chat chính (General), không phải trong topic.");
+      await this.h.sendHtml(conv, tr(lang, "ℹ️ Bật Manager ở khung chat chính (General), không phải trong topic.", "ℹ️ Turn the Manager on in the main chat (General), not in a topic."));
       return;
     }
     const want = arg.trim().toLowerCase();
     const top = this.h.st.get(chat);
     if (want === "off") {
-      if (!top.manager) return void (await this.h.sendHtml(conv, "Manager đang tắt."));
+      if (!top.manager) return void (await this.h.sendHtml(conv, tr(lang, "Manager đang tắt.", "The Manager is already off.")));
       if (top.sessionID) await this.h.oc.interrupt(top.sessionID).catch(() => {});
       this.dropManagerTurn(conv); // the manager's session is being dropped — a late terminal event can't clear the flag
       this.bridgeChats.delete(chat);
       this.h.st.set(chat, { manager: false, sessionID: undefined, agent: undefined, directory: undefined, guided: false });
-      await this.h.sendHtml(conv, "🧭 Đã tắt Manager. Chat chính quay lại làm việc như một session bình thường; các worker vẫn giữ nguyên.");
+      await this.h.sendHtml(conv, tr(lang, "🧭 Đã tắt Manager. Chat chính quay lại làm việc như một session bình thường; các worker vẫn giữ nguyên.", "🧭 Manager off. The main chat works as a normal session again; the workers are kept as-is."));
       return;
     }
     if (want !== "on" && want !== "") {
@@ -493,7 +508,7 @@ export class Orchestrator {
     if (top.manager && top.sessionID) {
       await this.h.sendHtml(
         conv,
-        `🧭 Manager đang bật (session <code>${esc(top.sessionID)}</code>). Cứ nhắn yêu cầu ở đây. <code>/manager off</code> để tắt.`,
+        tr(lang, `🧭 Manager đang bật (session <code>${esc(top.sessionID)}</code>). Cứ nhắn yêu cầu ở đây. <code>/manager off</code> để tắt.`, `🧭 Manager is on (session <code>${esc(top.sessionID)}</code>). Just ask here. <code>/manager off</code> to turn it off.`),
       );
       return;
     }
@@ -505,37 +520,39 @@ export class Orchestrator {
       await this.h.sendHtml(
         conv,
         [
-          "🧭 <b>Manager đã bật.</b>",
-          "Nhắn yêu cầu ở đây — Manager sẽ chia việc và giao cho các worker, mỗi worker một topic riêng.",
-          `Chế độ duyệt: <b>${top.auto ? "auto (tự giao việc)" : "hỏi trước khi giao việc"}</b> — đổi bằng /auto on|off.`,
-          "Xin quyền / câu hỏi của worker sẽ hiện ở kênh chính (nơi này) — bạn bấm nút trả lời ngay tại đây.",
+          tr(lang, "🧭 <b>Manager đã bật.</b>", "🧭 <b>Manager is on.</b>"),
+          tr(lang, "Nhắn yêu cầu ở đây — Manager sẽ chia việc và giao cho các worker, mỗi worker một topic riêng.", "Ask here — the Manager splits the work and assigns it to workers, each with its own topic."),
+          tr(lang, `Chế độ duyệt: <b>${top.auto ? "auto (tự giao việc)" : "hỏi trước khi giao việc"}</b> — đổi bằng /auto on|off.`, `Approval mode: <b>${top.auto ? "auto (assigns on its own)" : "asks before assigning"}</b> — change with /auto on|off.`),
+          tr(lang, "Xin quyền / câu hỏi của worker sẽ hiện ở kênh chính (nơi này) — bạn bấm nút trả lời ngay tại đây.", "Worker permission requests / questions show up in the main channel (here) — tap a button to answer."),
         ].join("\n"),
       );
     } catch (e) {
-      await this.h.sendHtml(conv, `❌ Không bật được Manager: ${esc((e as Error).message)}`);
+      await this.h.sendHtml(conv, tr(lang, `❌ Không bật được Manager: ${esc((e as Error).message)}`, `❌ Can't turn on the Manager: ${esc((e as Error).message)}`));
     }
   }
 
   private async cmdAuto(conv: ConvKey, arg: string): Promise<void> {
     const chat = chatOf(conv);
+    const lang = this.langOf(conv);
     const want = arg.trim().toLowerCase();
     if (want === "on" || want === "off") this.h.st.set(chat, { auto: want === "on" });
     const on = !!this.h.st.get(chat).auto;
     await this.h.sendHtml(
       conv,
       on
-        ? "⚡ Auto: <b>on</b> — Manager tự tạo worker và giao việc, chỉ báo lại kết quả. Xin quyền của worker vẫn hỏi bạn."
-        : "🛂 Auto: <b>off</b> — Manager phải chờ bạn bấm ✅ trước khi tạo worker hoặc giao việc.",
+        ? tr(lang, "⚡ Auto: <b>on</b> — Manager tự tạo worker và giao việc, chỉ báo lại kết quả. Xin quyền của worker vẫn hỏi bạn.", "⚡ Auto: <b>on</b> — the Manager spawns workers and assigns tasks on its own, reporting only results. Worker permission requests still ask you.")
+        : tr(lang, "🛂 Auto: <b>off</b> — Manager phải chờ bạn bấm ✅ trước khi tạo worker hoặc giao việc.", "🛂 Auto: <b>off</b> — the Manager waits for your ✅ tap before spawning workers or assigning tasks."),
     );
   }
 
   private async cmdWorktree(conv: ConvKey): Promise<void> {
     const w = this.h.st.peek(conv)?.worker;
+    const lang = this.langOf(conv);
     if (!w?.worktree) {
-      await this.h.sendHtml(conv, "ℹ️ Topic này không chạy trong git worktree riêng.");
+      await this.h.sendHtml(conv, tr(lang, "ℹ️ Topic này không chạy trong git worktree riêng.", "ℹ️ This topic is not running in a dedicated git worktree."));
       return;
     }
-    await this.h.sendHtml(conv, this.worktreeText(w), { reply_markup: this.worktreeKeyboard(w) });
+    await this.h.sendHtml(conv, this.worktreeText(w, lang), { reply_markup: this.worktreeKeyboard(w, lang) });
   }
 
   // ── workers ───────────────────────────────────────────────────────────────
@@ -548,7 +565,7 @@ export class Orchestrator {
   }
 
   /** Resolve and vet a directory a worker may run in: real path, existing dir, under the browse roots, not the Manager's. */
-  private vetDirectory(dir: string): string {
+  private vetDirectory(dir: string, lang: Lang = "vi"): string {
     const expanded = dir.startsWith("~") ? join(process.env.HOME ?? "", dir.slice(1)) : dir;
     const abs = isAbsolute(expanded) ? expanded : resolve(this.h.cfg.opencodeDirectory, expanded);
     let real: string;
@@ -556,7 +573,7 @@ export class Orchestrator {
       real = realpathSync(abs);
       if (!statSync(real).isDirectory()) throw new Error();
     } catch {
-      throw new Error(`Không tìm thấy thư mục: ${abs}`);
+      throw new Error(tr(lang, `Không tìm thấy thư mục: ${abs}`, `Directory not found: ${abs}`));
     }
     const under = (root: string) => {
       let r: string;
@@ -569,20 +586,21 @@ export class Orchestrator {
     };
     // Symlinks are resolved first, so a link inside a root can't lead outside it.
     if (!this.h.cfg.browseRoots.some(under)) {
-      throw new Error(`Thư mục nằm ngoài vùng cho phép (OPENCODE_TG_BROWSE_ROOTS): ${real}`);
+      throw new Error(tr(lang, `Thư mục nằm ngoài vùng cho phép (OPENCODE_TG_BROWSE_ROOTS): ${real}`, `Directory is outside the allowed roots (OPENCODE_TG_BROWSE_ROOTS): ${real}`));
     }
-    if (under(this.h.cfg.managerDir)) throw new Error("Không thể chạy worker trong thư mục của Manager.");
+    if (under(this.h.cfg.managerDir)) throw new Error("Cannot run a worker inside the Manager directory.");
     return real;
   }
 
   /** Create a worker: vet inputs, isolate if needed, open its topic and session, and start its task. */
   async spawn(chat: ConvKey, spec: SpawnSpec): Promise<{ conv: ConvKey; worker: WorkerInfo }> {
+    const lang: Lang = spec.lang ?? "vi";
     const name = spec.name.trim().toLowerCase();
-    if (!NAME_RE.test(name)) throw new Error(`Tên worker không hợp lệ "${spec.name}" — dùng a-z, 0-9, dấu gạch ngang, tối đa 24 ký tự.`);
+    if (!NAME_RE.test(name)) throw new Error(tr(lang, `Tên worker không hợp lệ "${spec.name}" — dùng a-z, 0-9, dấu gạch ngang, tối đa 24 ký tự.`, `Invalid worker name "${spec.name}" — use a-z, 0-9, hyphens, max 24 chars.`));
     const pending = this.reserved.get(chat) ?? new Set<string>();
-    if (this.h.st.findWorker(chat, name) || pending.has(name)) throw new Error(`Đã có worker tên "${name}". Hãy chọn tên khác.`);
+    if (this.h.st.findWorker(chat, name) || pending.has(name)) throw new Error(tr(lang, `Đã có worker tên "${name}". Hãy chọn tên khác.`, `A worker named "${name}" already exists. Pick another name.`));
     // Only spawns that will start working (have a task) take a busy slot.
-    if (spec.task) this.assertCapacity(chat);
+    if (spec.task) this.assertCapacity(chat, undefined, lang);
     pending.add(name);
     this.reserved.set(chat, pending);
     try {
@@ -599,15 +617,15 @@ export class Orchestrator {
     return busy + (this.reserved.get(chatOf(chat))?.size ?? 0);
   }
 
-  private assertCapacity(chat: ConvKey, except?: ConvKey): void {
+  private assertCapacity(chat: ConvKey, except?: ConvKey, lang: Lang = "vi"): void {
     const busy = this.busyCount(chat, except);
     if (busy >= this.h.cfg.maxWorkers) {
-      throw new Error(`Đã có ${busy} worker đang chạy (tối đa ${this.h.cfg.maxWorkers}). Chờ bớt hoặc /kill bớt.`);
+      throw new Error(tr(lang, `Đã có ${busy} worker đang chạy (tối đa ${this.h.cfg.maxWorkers}). Chờ bớt hoặc /kill bớt.`, `${busy} worker(s) already running (max ${this.h.cfg.maxWorkers}). Wait for some to finish or /kill one.`));
     }
   }
 
   private async spawnReserved(chat: ConvKey, name: string, spec: SpawnSpec): Promise<{ conv: ConvKey; worker: WorkerInfo }> {
-    let directory = this.vetDirectory(spec.directory);
+    let directory = this.vetDirectory(spec.directory, spec.lang ?? "vi");
     const agent = spec.agent && ["build", "plan", "explore", "general"].includes(spec.agent) ? spec.agent : "build";
     const writes = spec.writes ?? agent === "build";
 
@@ -649,8 +667,13 @@ export class Orchestrator {
     } catch (e) {
       if (worktree && repoRoot) await removeWorktree(repoRoot, worktree).catch(() => {});
       throw new Error(
-        `Không tạo được topic (${(e as Error).message}). Cần bật chế độ topic: chat riêng với bot có topic mode, ` +
-          "hoặc supergroup bật Topics và bot là admin có quyền “Manage topics”.",
+        tr(
+          this.langOf(chat),
+          `Không tạo được topic (${(e as Error).message}). Cần bật chế độ topic: chat riêng với bot có topic mode, ` +
+            "hoặc supergroup bật Topics và bot là admin có quyền “Manage topics”.",
+          `Could not create a topic (${(e as Error).message}). Topic mode is required: a private chat with the bot that has topic mode, ` +
+            "or a supergroup with Topics enabled where the bot is an admin with “Manage topics” permission.",
+        ),
       );
     }
     const conv = convKey(chatId, threadId);
@@ -705,8 +728,8 @@ export class Orchestrator {
       await this.h
         .sendHtml(
           convKey(chatId),
-          `🧩 <b>Worker ${esc(name)}</b> — bấm để mở topic`,
-          { reply_markup: { inline_keyboard: [[{ text: "🔎 Mở topic", url: topicLink }]] } },
+          tr(this.langOf(chat), `🧩 <b>Worker ${esc(name)}</b> — bấm để mở topic`, `🧩 <b>Worker ${esc(name)}</b> — tap to open the topic`),
+          { reply_markup: { inline_keyboard: [[{ text: tr(this.langOf(chat), "🔎 Mở topic", "🔎 Open topic"), url: topicLink }]] } },
         )
         .catch(() => {});
     }
@@ -720,13 +743,14 @@ export class Orchestrator {
 
   /** Follow-up instruction to an existing worker (non-blocking). */
   private async sendToWorker(conv: ConvKey, message: string): Promise<void> {
+    const lang = this.langOf(conv);
     const s = this.h.st.get(conv);
-    if (!s.sessionID || !s.worker) throw new Error("Worker không còn session.");
-    if (s.worker.status === "stopped") throw new Error(`Worker "${s.worker.name}" đã bị dừng.`);
+    if (!s.sessionID || !s.worker) throw new Error(tr(lang, "Worker không còn session.", "The worker has no session."));
+    if (s.worker.status === "stopped") throw new Error(tr(lang, `Worker "${s.worker.name}" đã bị dừng.`, `Worker "${s.worker.name}" was stopped.`));
     // Checked here, not only in the tool, so an approval tapped later can't
     // start a second turn on a busy worker or exceed the busy limit.
-    if (BUSY.includes(s.worker.status)) throw new Error(`Worker "${s.worker.name}" đang ${s.worker.status}; chờ nó xong đã.`);
-    this.assertCapacity(chatOf(conv), conv);
+    if (BUSY.includes(s.worker.status)) throw new Error(tr(lang, `Worker "${s.worker.name}" đang ${s.worker.status}; chờ nó xong đã.`, `Worker "${s.worker.name}" is ${s.worker.status}; wait for it to finish.`));
+    this.assertCapacity(chatOf(conv), conv, lang);
     // Show the instruction in the topic as rendered Telegram HTML (bold/headers/code
     // actually render), mirroring how manager replies are converted (stripTags +
     // mdToHtmlChunks). The worker's OpenCode session below still gets the original
@@ -749,7 +773,8 @@ export class Orchestrator {
     this.setStatus(conv, "stopped");
     if (s.sessionID) await this.h.oc.interrupt(s.sessionID).catch(() => {});
     if (close) await this.h.tg.closeForumTopic(conv);
-    return `⏹ Đã dừng worker <b>${esc(w.name)}</b>.${w.worktree ? " Worktree vẫn giữ — dùng /wt trong topic để xem diff / merge / xoá." : ""}`;
+    const lang = this.langOf(conv);
+    return `${tr(lang, "⏹ Đã dừng worker", "⏹ Stopped worker")} <b>${esc(w.name)}</b>.${w.worktree ? tr(lang, " Worktree vẫn giữ — dùng /wt trong topic để xem diff / merge / xoá.", " Worktree kept — use /wt in the topic to view diff / merge / delete.") : ""}`;
   }
 
   /** Is a worker of this name under the chat currently running/waiting? (scheduler's busy/skip check) */
@@ -826,7 +851,7 @@ export class Orchestrator {
         const cur = this.h.st.peek(conv);
         if (cur?.worker && BUSY.includes(cur.worker.status)) {
           await this.stopWorker(conv, false).catch(() => {});
-          await this.h.tg.sendMessage(conv, "⏱ Quá hạn — đã dừng lịch " + name).catch(() => {});
+          await this.h.tg.sendMessage(conv, tr(this.langOf(conv), `⏱ Quá hạn — đã dừng lịch ${name}`, `⏱ Timed out — stopped schedule ${name}`)).catch(() => {});
         }
       })();
     }, this.h.cfg.scheduleTimeoutMs);
@@ -1072,7 +1097,7 @@ export class Orchestrator {
         isolate: false, // reuse the dead worker's directory/worktree as-is
       });
     } catch (e) {
-      await this.h.sendHtml(conv, `⚠️ Không tự tạo worker thay thế được: ${esc((e as Error).message)}`).catch(() => {});
+      await this.h.sendHtml(conv, tr(this.langOf(conv), `⚠️ Không tự tạo worker thay thế được: ${esc((e as Error).message)}`, `⚠️ Couldn't auto-create a replacement worker: ${esc((e as Error).message)}`)).catch(() => {});
       return undefined;
     }
     // Attach lineage + carry the worktree/repoRoot so /wt (diff/merge/remove)
@@ -1233,18 +1258,19 @@ export class Orchestrator {
   async reapPendingTopicDeletes(): Promise<void> { return reapPendingTopicDeletes(this); }
 
   private async handleApprovalCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+    const lang = this.h.userPrefs?.getLang(cb.from?.id ?? "") ?? "vi";
     const [, id, op] = (cb.data ?? "").split(":");
     const a = this.approvals.get(id);
     if (!a || a.chat !== chatOf(conv)) {
-      await this.h.tg.answerCallbackQuery(cb.id, "Yêu cầu này đã hết hạn.");
-      if (messageId) await this.h.tg.editMessageText(conv, messageId, "⌛ Yêu cầu này đã hết hạn (bot đã khởi động lại hoặc đã xử lý).").catch(() => {});
+      await this.h.tg.answerCallbackQuery(cb.id, tr(lang, "Yêu cầu này đã hết hạn.", "This request has expired."));
+      if (messageId) await this.h.tg.editMessageText(conv, messageId, tr(lang, "⌛ Yêu cầu này đã hết hạn (bot đã khởi động lại hoặc đã xử lý).", "⌛ This request has expired (the bot restarted or already handled it)."), { reply_markup: { inline_keyboard: [] } }).catch(() => {});
       return;
     }
     this.approvals.delete(id);
     await this.h.tg.answerCallbackQuery(cb.id);
-    const what = a.kind === "spawn" ? `tạo worker ${a.spawn?.name}` : `gửi việc cho ${a.send?.name}`;
+    const what = a.kind === "spawn" ? tr(lang, `tạo worker ${a.spawn?.name}`, `create worker ${a.spawn?.name}`) : tr(lang, `gửi việc cho ${a.send?.name}`, `assign work to ${a.send?.name}`);
     if (op === "no") {
-      if (messageId) await this.h.tg.editMessageText(conv, messageId, `❌ Đã huỷ: ${esc(what)}.`).catch(() => {});
+      if (messageId) await this.h.tg.editMessageText(conv, messageId, tr(lang, `❌ Đã huỷ: ${esc(what)}.`, `❌ Cancelled: ${esc(what)}.`)).catch(() => {});
       queueReport(this, a.chat, `[approval #${id}] REJECTED by the user: ${what}. Do not retry it; ask the user what to do instead if needed.`);
       return;
     }
@@ -1253,73 +1279,74 @@ export class Orchestrator {
       const result = await this.execApproved(a);
       if (messageId) {
         await this.h.tg
-          .editMessageText(conv, messageId, `✅ Đã duyệt: ${esc(what)}.${op === "auto" ? "\n⚡ Auto đã bật — các lần sau không hỏi nữa (/auto off để tắt)." : ""}`)
+          .editMessageText(conv, messageId, tr(lang, `✅ Đã duyệt: ${esc(what)}.${op === "auto" ? "\n⚡ Auto đã bật — các lần sau không hỏi nữa (/auto off để tắt)." : ""}`, `✅ Approved: ${esc(what)}.${op === "auto" ? "\n⚡ Auto mode on — no more prompts (/auto off to disable)." : ""}`))
           .catch(() => {});
       }
       queueReport(this, a.chat, `[approval #${id}] APPROVED by the user: ${result}.${op === "auto" ? " Auto mode is now on." : ""}`);
     } catch (e) {
       const msg = (e as Error).message;
-      if (messageId) await this.h.tg.editMessageText(conv, messageId, `⚠️ Duyệt nhưng thất bại: ${esc(msg)}`).catch(() => {});
+      if (messageId) await this.h.tg.editMessageText(conv, messageId, tr(lang, `⚠️ Duyệt nhưng thất bại: ${esc(msg)}`, `⚠️ Approved but failed: ${esc(msg)}`)).catch(() => {});
       queueReport(this, a.chat, `[approval #${id}] approved but FAILED: ${msg}`);
     }
   }
 
   // ── worktree actions ──────────────────────────────────────────────────────
-  private worktreeText(w: WorkerInfo): string {
+  private worktreeText(w: WorkerInfo, lang: Lang = "vi"): string {
     return [
-      `🌿 <b>Worktree của ${esc(w.name)}</b>`,
-      `nhánh <code>${esc(w.worktree?.branch ?? "")}</code> → base <code>${esc(w.worktree?.base ?? "")}</code>`,
-      "Xem diff, merge về nhánh gốc, hoặc xoá worktree.",
+      tr(lang, `🌿 <b>Worktree của ${esc(w.name)}</b>`, `🌿 <b>Worktree of ${esc(w.name)}</b>`),
+      tr(lang, `nhánh <code>${esc(w.worktree?.branch ?? "")}</code> → base <code>${esc(w.worktree?.base ?? "")}</code>`, `branch <code>${esc(w.worktree?.branch ?? "")}</code> → base <code>${esc(w.worktree?.base ?? "")}</code>`),
+      tr(lang, "Xem diff, merge về nhánh gốc, hoặc xoá worktree.", "View the diff, merge back to the base branch, or delete the worktree."),
     ].join("\n");
   }
 
-  private worktreeKeyboard(w: WorkerInfo): Keyboard {
+  private worktreeKeyboard(w: WorkerInfo, lang: Lang = "vi"): Keyboard {
     return {
       inline_keyboard: [
         [
           { text: "📄 Diff", callback_data: `wt:${w.name}:diff` },
           { text: "🔀 Merge", callback_data: `wt:${w.name}:merge` },
         ],
-        [{ text: "🗑 Xoá worktree", callback_data: `wt:${w.name}:rm` }],
+        [{ text: tr(lang, "🗑 Xoá worktree", "🗑 Delete worktree"), callback_data: `wt:${w.name}:rm` }],
       ],
     };
   }
 
   private async handleWorktreeCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+    const lang = this.h.userPrefs?.getLang(cb.from?.id ?? "") ?? "vi";
     const [, name, op] = (cb.data ?? "").split(":");
     const found = this.h.st.findWorker(conv, name);
     const w = found?.[1].worker;
     if (!found || !w?.worktree || !w.repoRoot) {
-      await this.h.tg.answerCallbackQuery(cb.id, "Worktree không còn.");
+      await this.h.tg.answerCallbackQuery(cb.id, tr(lang, "Worktree không còn.", "The worktree no longer exists."));
       return;
     }
     const wt = w.worktree;
     if (BUSY.includes(w.status) && op !== "diff") {
-      await this.h.tg.answerCallbackQuery(cb.id, "Worker đang chạy — /kill hoặc chờ xong rồi thử lại.");
+      await this.h.tg.answerCallbackQuery(cb.id, tr(lang, "Worker đang chạy — /kill hoặc chờ xong rồi thử lại.", "The worker is running — /kill or wait for it to finish and try again."));
       return;
     }
     await this.h.tg.answerCallbackQuery(cb.id);
     try {
       if (op === "diff") {
-        await this.h.sendHtml(conv, `📄 <b>Diff ${esc(wt.branch)}</b> so với <code>${esc(wt.base)}</code>\n<pre>${esc(await diffSummary(wt))}</pre>`);
+        await this.h.sendHtml(conv, `${tr(lang, `📄 <b>Diff ${esc(wt.branch)}</b> so với`, `📄 <b>Diff ${esc(wt.branch)}</b> vs`)} <code>${esc(wt.base)}</code>\n<pre>${esc(await diffSummary(wt))}</pre>`);
       } else if (op === "merge") {
-        await this.h.sendHtml(conv, `🔀 ${esc(await mergeWorktree(w.repoRoot, wt, w.name))}`);
+        await this.h.sendHtml(conv, `🔀 ${esc(await mergeWorktree(w.repoRoot, wt, w.name, lang))}`);
       } else if (op === "rm") {
         // Uncommitted work is COMMITTED to the worker branch first (not lost) —
         // only the worktree directory is removed; an unmerged branch is kept.
         // So the user loses nothing here, which the warning must say correctly.
-        await this.h.sendHtml(conv, "⚠️ Xoá worktree sẽ <b>commit các thay đổi chưa commit vào nhánh</b> của worker rồi xoá thư mục worktree (nhánh chưa merge vẫn được giữ — không mất gì). Chắc chắn?", {
-          reply_markup: { inline_keyboard: [[{ text: "🗑 Xoá thật", callback_data: `wt:${w.name}:rmok` }, { text: "Thôi", callback_data: `wt:${w.name}:keep` }]] },
+        await this.h.sendHtml(conv, tr(lang, "⚠️ Xoá worktree sẽ <b>commit các thay đổi chưa commit vào nhánh</b> của worker rồi xoá thư mục worktree (nhánh chưa merge vẫn được giữ — không mất gì). Chắc chắn?", "⚠️ Deleting the worktree will <b>commit uncommitted changes to the worker branch</b>, then remove the worktree directory (the unmerged branch is kept — nothing lost). Sure?"), {
+          reply_markup: { inline_keyboard: [[{ text: tr(lang, "🗑 Xoá thật", "🗑 Delete for real"), callback_data: `wt:${w.name}:rmok` }, { text: tr(lang, "Thôi", "No, keep"), callback_data: `wt:${w.name}:keep` }]] },
         });
       } else if (op === "rmok") {
         let msg: string;
         try {
-          msg = await removeWorktree(w.repoRoot, wt);
+          msg = await removeWorktree(w.repoRoot, wt, lang);
         } catch (e) {
           // The preservation commit or the worktree removal failed. This path had
           // no commit step before, so a failure here is new — surface it clearly.
           // (The generic catch below shows it as ❌.)
-          throw new Error(`Xoá worktree thất bại: ${(e as Error).message.split("\n")[0]}`);
+          throw new Error(`${tr(lang, "Xoá worktree thất bại:", "Deleting the worktree failed:")} ${(e as Error).message.split("\n")[0]}`);
         }
         // The session lives in the deleted folder: retire it, and point the
         // topic back at the same subfolder of the main checkout so a new
@@ -1470,7 +1497,7 @@ export class Orchestrator {
         run: async (a) => {
           const conv = workerConv(a.name);
           await this.stopWorker(conv, false);
-          await this.h.sendHtml(conv, "⏹ Manager đã dừng worker này.").catch(() => {});
+          await this.h.sendHtml(conv, "⏹ " + tr(this.langOf(conv), "Manager đã dừng worker này.", "The Manager stopped this worker.")).catch(() => {});
           return `Stopped "${this.h.st.get(conv).worker!.name}".`;
         },
       },

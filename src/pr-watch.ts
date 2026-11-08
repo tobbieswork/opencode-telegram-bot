@@ -17,6 +17,8 @@
  *                  identity; a new head sha is a fresh run.
  *   - opened:      a PR number with no prev entry and state=open.
  */
+import { tr } from "./i18n.js";
+import type { Lang } from "./state.js";
 
 /** One PR's point-in-time view, as built by a watcher tick. */
 export interface PrSnapshot {
@@ -131,12 +133,12 @@ export function diffSnapshots(
  * Render one event as a single notification line (the bot sends events
  * sequentially; one Telegram message per event keeps the chat scannable).
  */
-export function renderEvent(ev: PrEvent, repo: string): string {
+export function renderEvent(ev: PrEvent, repo: string, lang: Lang = "vi"): string {
   switch (ev.kind) {
     case "merged":
       return `✅ ${repo} PR #${ev.number} merged · ${ev.title}`;
     case "opened":
-      return `📌 ${repo} PR #${ev.number} mới · ${ev.title}`;
+      return `📌 ${repo} PR #${ev.number} ${tr(lang, "mới", "new")} · ${ev.title}`;
     case "ci": {
       const icon = ev.conclusion === "success" ? "🟢" : ev.conclusion === "failure" ? "🔴" : "⚪";
       const label =
@@ -146,21 +148,21 @@ export function renderEvent(ev: PrEvent, repo: string): string {
     case "review": {
       const icon = ev.state === "APPROVED" ? "👍" : ev.state === "CHANGES_REQUESTED" ? "🔁" : "💬";
       const label =
-        ev.state === "APPROVED" ? "approved" : ev.state === "CHANGES_REQUESTED" ? "mô tả cần sửa" : "review mới";
+        ev.state === "APPROVED" ? "approved" : ev.state === "CHANGES_REQUESTED" ? tr(lang, "mô tả cần sửa", "changes requested") : tr(lang, "review mới", "new review");
       return `${icon} PR #${ev.number}: @${ev.user} ${label}`;
     }
     case "comment": {
       const first = ev.comments[0];
       const head =
         ev.comments.length > 1
-          ? `💬 PR #${ev.number}: ${ev.comments.length} comment mới (từ @${first.user})`
+          ? `💬 PR #${ev.number}: ${ev.comments.length} ${tr(lang, "comment mới", "new comments")} (@${first.user}…)`
           : `💬 PR #${ev.number} @${first.user}: “${first.body}”`;
       if (ev.comments.length === 1) return head;
       const rest = ev.comments
         .slice(1, MAX_COMMENTS_PER_EVENT)
         .map((c) => `  @${c.user}: “${c.body}”`)
         .join("\n");
-      const more = ev.comments.length > MAX_COMMENTS_PER_EVENT ? `\n  (+${ev.comments.length - MAX_COMMENTS_PER_EVENT} khác)` : "";
+      const more = ev.comments.length > MAX_COMMENTS_PER_EVENT ? `\n  (+${ev.comments.length - MAX_COMMENTS_PER_EVENT} ${tr(lang, "khác", "more")})` : "";
       return head + "\n" + rest + more;
     }
   }
