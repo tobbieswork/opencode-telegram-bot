@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.16.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.16.0...opencode-telegram-bot-v1.16.1) (2026-11-08)
+
+
+### Bug Fixes
+
+* **security:** redact secrets in sendContentSmart temp file body ([#121](https://github.com/tobbieswork/opencode-telegram-bot/issues/121)) ([b925719](https://github.com/tobbieswork/opencode-telegram-bot/commit/b925719a6311518feebf7185f44c22dec155829b))
+
 ## [1.16.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.15.0...opencode-telegram-bot-v1.16.0) (2026-11-07)
 
 
