@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.16.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.16.1...opencode-telegram-bot-v1.16.2) (2026-11-08)
+
+
+### Bug Fixes
+
+* **sandbox:** block newline injection in exec + remove process.cwd() fallback ([#123](https://github.com/tobbieswork/opencode-telegram-bot/issues/123)) ([ed8b76b](https://github.com/tobbieswork/opencode-telegram-bot/commit/ed8b76b36bde9711072681eae2ac007440b40a48))
+
 ## [1.16.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.16.0...opencode-telegram-bot-v1.16.1) (2026-11-08)
 
 
