@@ -2116,9 +2116,14 @@ export class Bot {
   // rendered from the shared catalog (src/commands.ts) so they cannot drift
   // apart (drift cost us two follow-up fixes: /agents, /reboot).
 
-  /** Register the Telegram /command menu (autocomplete) — cosmetic, best-effort. */
+  /**
+   * Register the Telegram /command menu (autocomplete) — cosmetic, best-effort.
+   * The menu is bot-global (no per-user variant), so it renders in the first
+   * explicitly-set user language; /lang re-registers it on change.
+   */
   private registerCommands(): void {
-    void this.tg.setMyCommands(myCommands()).catch((e) => warn("setMyCommands:", e?.message));
+    const lang = this.userPrefs.anyExplicitLang() ?? "vi";
+    void this.tg.setMyCommands(myCommands(lang)).catch((e) => warn("setMyCommands:", e?.message));
   }
 
   private async cmdNew(conv: ConvKey): Promise<void> {

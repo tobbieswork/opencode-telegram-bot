@@ -6,7 +6,7 @@ import { MACHINE_STATE_KEY } from "../state.js";
 import type { ChatState } from "../state.js";
 import type { ConvKey } from "../conv.js";
 import { esc, trunc, stripTags, fmtNum, timeAgo } from "../format.js";
-import { helpText, commandGrid } from "../commands.js";
+import { helpText, commandGrid, myCommands } from "../commands.js";
 import type { UsageRow, RotationInfo } from "../usage.js";
 import { formatUsageReport, compactionCeiling } from "../usage.js";
 import { appendNote, noteEntryText, showNotes, BUSY_REPLY_TEXT, parseNoteCallback } from "../notes.js";
@@ -323,4 +323,7 @@ export async function cmdLang(bot: Bot, conv: ConvKey, arg: string, uid?: number
     conv,
     lang === "en" ? STRINGS.lang_set_en.en : STRINGS.lang_set_vi.vi,
   );
+  // The /autocomplete menu is bot-global: re-register it in the new language
+  // so it doesn't stay in the old one until the next bot restart.
+  void bot.tg.setMyCommands(myCommands(lang as Lang)).catch((e) => warn("setMyCommands:", (e as Error).message));
 }
