@@ -194,8 +194,10 @@ export function makeRunScriptTool(opts: RunScriptToolOptions = {}): BridgeTool {
       if (typeof code !== "string" || code.length === 0) throw new Error("code must be a non-empty string");
       // Resolve the worktree. The bridge has no per-session working directory
       // (MCP requests carry no session id), so an omitted worktree falls back
-      // to the configured default or the process cwd.
-      const worktree = args.worktree === undefined ? (opts.defaultWorktree ?? process.cwd()) : String(args.worktree);
+      // to the configured default. We do NOT default to process.cwd() (the
+      // bot's own repo) — that would let a script write to bot source.
+      const worktree = args.worktree === undefined ? opts.defaultWorktree : String(args.worktree);
+      if (!worktree) throw new Error("worktree is required (no default configured)");
       if (!path.isAbsolute(worktree)) throw new Error(`worktree must be an absolute path (got: ${worktree})`);
       let isDir = false;
       try {

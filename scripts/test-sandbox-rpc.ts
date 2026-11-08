@@ -65,6 +65,8 @@ fs.symlinkSync(path.join(outside, "secret.txt"), path.join(wt, "escape-link")); 
   check("'ls && who' → false", validateExec("ls && who") === false);
   check("'ls || who' → false", validateExec("ls || who") === false);
   check("'echo hi > f' → false", validateExec("echo hi > f") === false);
+  check("'ls\nrm -rf /' → false (newline injection)", validateExec("ls\nrm -rf /") === false);
+  check("'ls\rrm -rf /' → false (carriage return)", validateExec("ls\rrm -rf /") === false);
   check("'cat < f' → false", validateExec("cat < f") === false);
   check("backtick command → false", validateExec("ls `whoami`") === false);
   check("'ls & sleep 1' → false", validateExec("ls & sleep 1") === false);
