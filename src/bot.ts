@@ -44,13 +44,13 @@ import {
   REACTION_CELEBRATE,
   REACTION_FAIL,
 } from "./reactions.js";
-import { CONTINUE_PROMPT, CONTINUE_BUTTON_LABEL, shouldOfferContinue, continueCallbackData, parseContinueData, alreadyOfferedContinue } from "./continue.js";
+import { continuePrompt, continueButtonLabel, shouldOfferContinue, continueCallbackData, parseContinueData, alreadyOfferedContinue } from "./continue.js";
 import { PrSnapshot, PrState, diffSnapshots, renderEvent } from "./pr-watch.js";
 import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, SAFE_REBOOT_BIN, rebootTokenFile, buildTokenLine, rebootGoData, isRebootConfirmFresh } from "./uptime.js";
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
 import { DraftState, DraftAction, onTextDelta, onToolStart, isDmConv, EDIT_BUDGET } from "./stream.js";
 import { myCommands } from "./commands.js";
-import { dropNotes, prepareNotes, BUSY_REPLY_TEXT, NOTE_BUTTON_LABEL, NOTE_CB_PREFIX, noteCallbackData, BusyNoteStore } from "./notes.js";
+import { dropNotes, prepareNotes, BUSY_REPLY_TEXT, noteButtonLabel, NOTE_CB_PREFIX, noteCallbackData, BusyNoteStore } from "./notes.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
 import { log, warn, error } from "./logger.js";
 import { QUESTIONS_PREAMBLE, NOTES_KEY } from "./shared.js";
@@ -61,7 +61,7 @@ import { Advisor } from "./advisor/advisor.js";
 import { cmdHelp, cmdStatus, cmdContext, cmdUsage, cmdHistory, cmdNote, cmdRotation, handleNoteCallback, cmdLang } from "./commands/meta.js";
 import { cmdBtw } from "./btw.js";
 import { cmdAsk } from "./ask.js";
-import { reviewPrompt, REVIEW_USAGE } from "./review.js";
+import { reviewPrompt, reviewUsage } from "./review.js";
 import { managerFloorFromMessages, runRotationHandoff, rotationGate } from "./rotation.js";
 import {
   rotationHealthPath,
@@ -96,11 +96,11 @@ function hasNonTextContent(m: Message): boolean {
  * between most: planning vs building. The current mode is derived from the
  * session's agent, so /agent and /mode can never disagree.
  */
-const MODES: Record<string, { agent: string; hint: string }> = {
-  build: { agent: "build", hint: "mặc định — viết & sửa code theo permission" },
-  plan: { agent: "plan", hint: "chỉ phân tích & lên kế hoạch — không sửa code" },
-  general: { agent: "general", hint: "đa dụng: research, multi-step, chạy song song" },
-  explore: { agent: "explore", hint: "duyệt codebase nhanh (tìm file/keyword)" },
+const MODES: Record<string, { agent: string; hint: string; hintEn: string }> = {
+  build: { agent: "build", hint: "mặc định — viết & sửa code theo permission", hintEn: "default — writes & edits code per permissions" },
+  plan: { agent: "plan", hint: "chỉ phân tích & lên kế hoạch — không sửa code", hintEn: "analysis & planning only — no code edits" },
+  general: { agent: "general", hint: "đa dụng: research, multi-step, chạy song song", hintEn: "general purpose: research, multi-step, parallel" },
+  explore: { agent: "explore", hint: "duyệt codebase nhanh (tìm file/keyword)", hintEn: "fast codebase scan (find files/keywords)" },
 };
 
 /** Directory buttons shown per page in the folder browser. */
@@ -137,6 +137,8 @@ interface BrowseState {
   items: DirItem[];
   page: number;
   view: "list" | "choose" | "done";
+  /** Language for the rendered labels (captured when the browser opened). */
+  lang: Lang;
   /** One-off message shown above the listing (e.g. a clamped path). */
   note?: string;
   /** Set when the directory could not be read. */
@@ -388,7 +390,7 @@ export class Bot {
     this.userPrefs = new UserPrefsStore(join(dirname(this.cfg.stateFile), "users.json"));
     if (this.cfg.advisor) {
       this.advisor = new Advisor(
-        { tg, st, cfg, sendHtml: (c, h) => this.sendHtml(c, h), startTyping: (c) => this.startTyping(c) },
+        { tg, st, cfg, userPrefs: this.userPrefs, sendHtml: (c, h) => this.sendHtml(c, h), startTyping: (c) => this.startTyping(c) },
         { url: this.cfg.advisorUrl, token: this.cfg.advisorToken },
       );
     }
@@ -456,6 +458,7 @@ export class Bot {
         isBusy: (sch) => this.orch.workerBusyByName(sch.conv, "sch-" + sch.id),
         isAllowed: (uid) => isUserAllowed(this.cfg, uid),
         notify: (conv, text) => this.tg.sendMessage(conv, text),
+        langOf: (conv) => this.userPrefs.getLang(this.st.peek(chatOf(conv))?.createdBy ?? ""),
         tickMs: 30_000,
         graceMs: this.cfg.scheduleGraceMs,
       });
@@ -509,7 +512,11 @@ export class Bot {
     const edits: Promise<unknown>[] = [];
     for (const [conv, w] of this.drafts) {
       if (w.previewMsgId && w.previewMsgId !== 0) {
-        edits.push(this.tg.editMessageText(conv, w.previewMsgId, DRAIN_PREVIEW_TEXT, { parse_mode: undefined }).catch(() => {}));
+        edits.push(
+          this.tg
+            .editMessageText(conv, w.previewMsgId, tr(this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? ""), DRAIN_PREVIEW_TEXT, "⏳ Restarting… the result will be sent after."), { parse_mode: undefined })
+            .catch(() => {}),
+        );
       }
     }
     if (edits.length) {
@@ -564,36 +571,38 @@ export class Bot {
     this.st.set(MACHINE_STATE_KEY, { lastRebootReminderMs: now });
     const chat = this.cfg.allowedUserIds[0];
     if (!chat) return;
+    const lang = this.userPrefs.getLang(chat);
     const kb: Keyboard = {
       inline_keyboard: [
         [
-          { text: "🔄 Reboot máy ngay", callback_data: "reboot:ask" },
-          { text: "🔕 Nhắc lại sau", callback_data: "reboot:snooze" },
+          { text: tr(lang, "🔄 Reboot máy ngay", "🔄 Reboot now"), callback_data: "reboot:ask" },
+          { text: tr(lang, "🔕 Nhắc lại sau", "🔕 Remind me later"), callback_data: "reboot:snooze" },
         ],
       ],
     };
     const text =
-      `⏳ Máy đã chạy liên tục <b>${formatUptimeHuman(uptimeSec)}</b>. ` +
-      `Kernel security updates chỉ áp dụng sau reboot — nên reboot định kỳ ~${this.cfg.uptimeThresholdDays} ngày. ` +
-      `Bấm nút để reboot (xác nhận 2 bước) hoặc chọn nhắc lại sau.`;
+      tr(lang, `⏳ Máy đã chạy liên tục <b>${formatUptimeHuman(uptimeSec, lang)}</b>. `, `⏳ The box has been up for <b>${formatUptimeHuman(uptimeSec, lang)}</b>. `) +
+      tr(lang, `Kernel security updates chỉ áp dụng sau reboot — nên reboot định kỳ ~${this.cfg.uptimeThresholdDays} ngày. `, `Kernel security updates only apply after a reboot — reboot regularly, ~${this.cfg.uptimeThresholdDays} days. `) +
+      tr(lang, "Bấm nút để reboot (xác nhận 2 bước) hoặc chọn nhắc lại sau.", "Tap a button to reboot (2-step confirm) or choose to be reminded later.");
     await this.tg.sendMessage(chat, text, { reply_markup: kb }).catch((e) => warn("uptime reminder:", e?.message ?? e));
   }
 
   /** The two-step confirmation message + keyboard for an actual reboot. */
   private async sendRebootConfirm(conv: ConvKey): Promise<void> {
+    const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
     const kb: Keyboard = {
       inline_keyboard: [
         [
-          { text: "✅ Xác nhận reboot", callback_data: rebootGoData(Date.now()) },
-          { text: "❌ Huỷ", callback_data: "reboot:cancel" },
+          { text: tr(lang, "✅ Xác nhận reboot", "✅ Confirm reboot"), callback_data: rebootGoData(Date.now()) },
+          { text: tr(lang, "❌ Huỷ", "❌ Cancel"), callback_data: "reboot:cancel" },
         ],
       ],
     };
     const secs = Math.round(this.cfg.rebootDelayMs / 1000);
     const text =
-      `⚠️ <b>Chắc reboot máy không?</b>\n` +
-      `Máy sẽ khởi động lại trong ~${secs} giây; bot + OpenCode sẽ tắt và tự chạy lại sau (linger). ` +
-      `Bấm <b>Xác nhận</b> nếu bạn chắc chắn, hoặc <b>Huỷ</b>.`;
+      tr(lang, `⚠️ <b>Chắc reboot máy không?</b>\n`, `⚠️ <b>Reboot the box?</b>\n`) +
+      tr(lang, `Máy sẽ khởi động lại trong ~${secs} giây; bot + OpenCode sẽ tắt và tự chạy lại sau (linger). `, `The box reboots in ~${secs}s; the bot + OpenCode stop and self-resume after (linger). `) +
+      tr(lang, "Bấm <b>Xác nhận</b> nếu bạn chắc chắn, hoặc <b>Huỷ</b>.", "Tap <b>Confirm</b> if you're sure, or <b>Cancel</b>.");
     await this.tg.sendMessage(conv, text, { reply_markup: kb });
   }
 
@@ -610,10 +619,11 @@ export class Bot {
    *   reboot:snooze  (from the uptime reminder)→ re-arm the snooze interval
    */
   private async handleRebootCallback(cb: CallbackQuery, conv: ConvKey, messageId: number | undefined): Promise<void> {
+    const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     const action = (cb.data ?? "").slice("reboot:".length).split(":")[0];
     if (action === "snooze") {
       this.st.set(MACHINE_STATE_KEY, { lastRebootReminderMs: Date.now() });
-      await this.tg.answerCallbackQuery(cb.id, "OK, sẽ nhắc lại sau.");
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, "OK, sẽ nhắc lại sau.", "OK, will remind you later."));
       if (messageId !== undefined) await this.tg.editMessageReplyMarkup(conv, messageId, {}).catch(() => {});
       return;
     }
@@ -624,7 +634,7 @@ export class Bot {
       return;
     }
     if (action === "cancel") {
-      await this.tg.answerCallbackQuery(cb.id, "Đã huỷ.");
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Đã huỷ.", "Cancelled."));
       if (messageId !== undefined) await this.tg.editMessageReplyMarkup(conv, messageId, {}).catch(() => {});
       return;
     }
@@ -632,17 +642,17 @@ export class Bot {
       await this.tg.answerCallbackQuery(cb.id);
       if (messageId !== undefined) await this.tg.editMessageReplyMarkup(conv, messageId, {}).catch(() => {});
       if (!isRebootConfirmFresh(cb.data, Date.now())) {
-        await this.tg.sendMessage(conv, "⌛ Xác nhận reboot đã hết hạn — gửi /reboot để xác nhận lại.").catch(() => {});
+        await this.tg.sendMessage(conv, tr(lang, "⌛ Xác nhận reboot đã hết hạn — gửi /reboot để xác nhận lại.", "⌛ The reboot confirmation expired — send /reboot to confirm again.")).catch(() => {});
         return;
       }
       if (this.rebootArmed) return; // double-tap: one reboot is already pending
       if (!existsSync(SAFE_REBOOT_BIN)) {
-        await this.tg.sendMessage(conv, "⚠️ Wrapper <b>safe-reboot</b> chưa được cài trên máy. Chạy khối sudo trong PR #11 trước.").catch(() => {});
+        await this.tg.sendMessage(conv, tr(lang, "⚠️ Wrapper <b>safe-reboot</b> chưa được cài trên máy. Chạy khối sudo trong PR #11 trước.", "⚠️ The <b>safe-reboot</b> wrapper isn't installed on this box. Apply the sudo block from PR #11 first.")).catch(() => {});
         return;
       }
       this.rebootArmed = true;
       const secs = Math.round(this.cfg.rebootDelayMs / 1000);
-      await this.tg.sendMessage(conv, `🔄 <b>Đang reboot máy trong ~${secs} giây…</b>\nBot sẽ tự chạy lại sau khi máy lên (linger).`).catch(() => {});
+      await this.tg.sendMessage(conv, tr(lang, `🔄 <b>Đang reboot máy trong ~${secs} giây…</b>\nBot sẽ tự chạy lại sau khi máy lên (linger).`, `🔄 <b>Rebooting the box in ~${secs}s…</b>\nThe bot self-resumes after the box is back (linger).`)).catch(() => {});
       // Fire after the delay so the message above gets delivered. The token is
       // minted INSIDE the timer, right before the wrapper runs: the wrapper
       // rejects tokens older than REBOOT_TOKEN_TTL_MS, and rebootDelayMs
@@ -657,7 +667,7 @@ export class Bot {
         } catch (e) {
           this.rebootArmed = false;
           error("reboot arm failed:", (e as Error)?.message ?? e);
-          void this.tg.sendMessage(conv, "⚠️ Không tạo được token reboot — xem log bot.").catch(() => {});
+          void this.tg.sendMessage(conv, tr(this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? ""), "⚠️ Không tạo được token reboot — xem log bot.", "⚠️ Could not create the reboot token — check the bot log.")).catch(() => {});
           return;
         }
         execFile("sudo", ["-n", SAFE_REBOOT_BIN, token], (err) => {
@@ -959,7 +969,10 @@ export class Bot {
       const events = firstRun ? [] : diffSnapshots(prev, next, details);
       if (!firstRun) log(`pr-watch: ${events.length} event(s) in tick`);
       const conv = this.lastActiveConv ?? (this.cfg.allowedUserIds[0] ? String(this.cfg.allowedUserIds[0]) : undefined);
-      if (conv) for (const ev of events) await this.tg.sendMessage(conv, renderEvent(ev, repo)).catch(() => {});
+      if (conv) {
+        const lang = this.userPrefs.getLang(this.st.peek(chatOf(conv))?.createdBy ?? "");
+        for (const ev of events) await this.tg.sendMessage(conv, renderEvent(ev, repo, lang)).catch(() => {});
+      }
       this.st.set(MACHINE_STATE_KEY, { prWatchSnapshot: next });
     } catch (e) {
       warn("pr-watch tick:", (e as Error).message);
@@ -1247,8 +1260,9 @@ export class Bot {
    */
   private async reactSpawn(entry: { conv: string; purpose: MsgPurpose; text: string }): Promise<void> {
     if (decideSpawn(entry.purpose) === "already-processed") {
+      const lang = this.userPrefs.getLang(this.st.peek(chatOf(entry.conv))?.createdBy ?? "");
       await this.tg
-        .sendMessage(entry.conv, "👌 Tôi đã nhận rồi — không spawn worker trùng. Muốn tách worker: 🔥 vào tin của tôi.")
+        .sendMessage(entry.conv, tr(lang, "👌 Tôi đã nhận rồi — không spawn worker trùng. Muốn tách worker: 🔥 vào tin của tôi.", "👌 Already got it — no duplicate worker. To split off a worker: 🔥 my message."))
         .catch(() => {});
       return;
     }
@@ -1256,10 +1270,12 @@ export class Bot {
     if (text.length < 8) return; // too short to be a task
     const chat = chatOf(entry.conv);
     if (!this.orch.isManagerConv(chat)) {
-      await this.tg.sendMessage(chat, "⚠️ 🔥 cần Manager đang bật (/manager on) để soạn task cho worker.").catch(() => {});
+      const lang = this.userPrefs.getLang(this.st.peek(chat)?.createdBy ?? "");
+      await this.tg.sendMessage(chat, tr(lang, "⚠️ 🔥 cần Manager đang bật (/manager on) để soạn task cho worker.", "⚠️ 🔥 needs the Manager on (/manager on) to draft the worker task.")).catch(() => {});
       return;
     }
-    await this.tg.sendMessage(chat, "📝 Đã nhận — Manager sẽ soạn task và spawn worker trong giây lát…").catch(() => {});
+    const lang2 = this.userPrefs.getLang(this.st.peek(chat)?.createdBy ?? "");
+    await this.tg.sendMessage(chat, tr(lang2, "📝 Đã nhận — Manager sẽ soạn task và spawn worker trong giây lát…", "📝 Got it — the Manager will draft the task and spawn a worker in a moment…")).catch(() => {});
     this.orch.relaySpawnRequest(entry.conv, text);
   }
 
@@ -1274,21 +1290,22 @@ export class Bot {
     const w = this.st.peek(workerConv)?.worker;
     const decision = decideApprove(entry.purpose, w ? w.status === "running" || w.status === "waiting" : false);
     const chat = chatOf(workerConv);
+    const lang = this.userPrefs.getLang(this.st.peek(chat)?.createdBy ?? "");
     if (decision === "busy") {
-      await this.tg.sendMessage(chat, "⏳ worker vẫn đang chạy").catch(() => {});
+      await this.tg.sendMessage(chat, tr(lang, "⏳ worker vẫn đang chạy", "⏳ the worker is still running")).catch(() => {});
       return;
     }
     if (decision === "invalid") return;
     const res = await this.orch.approveWorkerReport(workerConv);
     if (res.busy) {
-      await this.tg.sendMessage(chat, "⏳ worker vẫn đang chạy").catch(() => {});
+      await this.tg.sendMessage(chat, tr(lang, "⏳ worker vẫn đang chạy", "⏳ the worker is still running")).catch(() => {});
       return;
     }
     if (!res.ok) {
-      await this.tg.sendMessage(chat, "⚠️ Chưa dọn xong worker (worktree chưa xoá được — thử /prune sau).").catch(() => {});
+      await this.tg.sendMessage(chat, tr(lang, "⚠️ Chưa dọn xong worker (worktree chưa xoá được — thử /prune sau).", "⚠️ Worker not fully cleaned up (worktree couldn't be deleted — try /prune later.")).catch(() => {});
       return;
     }
-    await this.tg.sendMessage(chat, `✅ ${esc(res.name ?? "worker")} approved — dọn xong.`).catch(() => {});
+    await this.tg.sendMessage(chat, tr(lang, `✅ ${esc(res.name ?? "worker")} approved — dọn xong.`, `✅ ${esc(res.name ?? "worker")} approved — cleaned up.`)).catch(() => {});
   }
 
   /**
@@ -1360,10 +1377,10 @@ export class Bot {
           if (oldest !== undefined) this.uploadedFiles.delete(oldest);
         }
         this.uploadedFiles.set(media.fileId, saved);
-        await this.tg.sendMessage(conv, `📎 Đã lưu ${esc(name)} (${humanBytes(bytes)}).`).catch(() => {});
+        await this.tg.sendMessage(conv, tr(this.userPrefs.getLang(uid ?? ""), `📎 Đã lưu ${esc(name)} (${humanBytes(bytes)}).`, `📎 Saved ${esc(name)} (${humanBytes(bytes)}).`)).catch(() => {});
       } catch (e) {
         warn(`upload from uid=${uid} chat=${conv} failed: ${(e as Error)?.message ?? e}`);
-        await this.tg.sendMessage(conv, "⚠️ Không tải được file — thử lại sau.").catch(() => {});
+        await this.tg.sendMessage(conv, tr(this.userPrefs.getLang(uid ?? ""), "⚠️ Không tải được file — thử lại sau.", "⚠️ Couldn't download the file — try again later.")).catch(() => {});
         return;
       }
     }
@@ -1380,13 +1397,14 @@ export class Bot {
 
   /** A media message with no text/caption — acknowledge it; the bot reads text only. */
   private async noteNonText(conv: ConvKey, msg: Message): Promise<void> {
+    const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
     const note = msg.sticker
-      ? "🫣 Tôi chỉ đọc được văn bản — hãy gõ nội dung, hoặc gửi ảnh kèm caption."
+      ? tr(lang, "🫣 Tôi chỉ đọc được văn bản — hãy gõ nội dung, hoặc gửi ảnh kèm caption.", "🫣 I can only read text — type the content, or send a photo with a caption.")
       : msg.voice
-        ? "🎤 Tôi chưa nghe được voice — xin gửi nội dung dạng văn bản."
+        ? tr(lang, "🎤 Tôi chưa nghe được voice — xin gửi nội dung dạng văn bản.", "🎤 I can't listen to voice yet — please send it as text.")
         : msg.photo
-          ? "📷 Tôi chưa xem được ảnh — hãy gửi kèm caption để tôi xử lý."
-          : "📎 Tôi mới chỉ xử lý được tin nhắn văn bản (và caption của media).";
+          ? tr(lang, "📷 Tôi chưa xem được ảnh — hãy gửi kèm caption để tôi xử lý.", "📷 I can't view images yet — please add a caption so I can process it.")
+          : tr(lang, "📎 Tôi mới chỉ xử lý được tin nhắn văn bản (và caption của media).", "📎 I can only handle text messages (and media captions) for now.");
     await this.tg.sendMessage(conv, note).catch(() => {});
   }
 
@@ -1400,7 +1418,8 @@ export class Bot {
     const conv = this.lastActiveConv ?? (this.cfg.allowedUserIds[0] ? String(this.cfg.allowedUserIds[0]) : undefined);
     if (!conv) return;
     log(`DNS heal: notifying user in ${conv}`);
-    void this.tg.sendMessage(conv, "🔧 Bot tự sửa DNS (VPN) — polling có thể gián đoạn vài giây.").catch(() => {});
+    const lang = this.userPrefs.getLang(this.st.peek(chatOf(conv))?.createdBy ?? "");
+    void this.tg.sendMessage(conv, tr(lang, "🔧 Bot tự sửa DNS (VPN) — polling có thể gián đoạn vài giây.", "🔧 Bot self-healed DNS (VPN) — polling may be interrupted for a few seconds.")).catch(() => {});
   }
 
   // ── typing indicator ─────────────────────────────────────────────────────────
@@ -1498,7 +1517,8 @@ export class Bot {
     const cur = this.activity.get(conv);
     if (!cur) return;
     const secs = (Date.now() - cur.toolStart) / 1000;
-    await this.tg.editMessageText(conv, cur.msgId, activityDoneLine(cur.label, ok, secs)).catch(() => {});
+    const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
+    await this.tg.editMessageText(conv, cur.msgId, activityDoneLine(cur.label, ok, secs, lang)).catch(() => {});
   }
 
   /** Remove the activity line when the turn ends (idempotent). */
@@ -1526,7 +1546,8 @@ export class Bot {
     const name = id ? names?.get(id) : undefined;
     if (name === "question") return; // the question card already shows this
     if (t === "session.tool.called") {
-      void this.showActivity(conv, toolActivityLabel(name ?? "tool", d?.input));
+      const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
+      void this.showActivity(conv, toolActivityLabel(name ?? "tool", d?.input, lang));
     } else {
       void this.finishActivity(conv, t === "session.tool.success");
       if (id) names?.delete(id);
@@ -1604,7 +1625,7 @@ export class Bot {
   ): Promise<void> {
     const w = this.drafts.get(conv);
     if (!w || this.draining || w.gen !== this.turnGen.get(conv) || w.previewMsgId === 0 || Date.now() < w.nextEditAt) return;
-    const text = action.text || "✍️ Đang xử lý…";
+    const text = action.text || tr(this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? ""), "✍️ Đang xử lý…", "✍️ Working…");
     try {
       if (isDmConv(conv)) {
         // 1:1: ephemeral draft ("" renders the client's "Thinking…" placeholder).
@@ -1743,10 +1764,11 @@ export class Bot {
     const target = pp.relayConv ?? conv;
     const max = this.cfg.remindMax;
     const sent = pp.remindersSent + 1;
+    const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
     // Nudge by EDITING the original card in place (⏰ count line on top) — one
     // prompt = one message, never a duplicate per nudge. Falls back to a fresh
     // message only when the original is gone (deleted by the user, too old).
-    const text = `⏰ <i>Nhắc (${sent}/${max}): câu hỏi/quyền này vẫn đang chờ bạn trả lời — hoặc gõ /stop để bỏ.</i>\n\n${pp.text}`;
+    const text = tr(lang, `⏰ <i>Nhắc (${sent}/${max}): câu hỏi/quyền này vẫn đang chờ bạn trả lời — hoặc gõ /stop để bỏ.</i>`, `⏰ <i>Reminder (${sent}/${max}): this question/permission is still waiting for you — or type /stop to dismiss.</i>`) + "\n\n" + pp.text;
     const edited = pp.messageId
       ? await this.editCardInPlace(target, pp.messageId, text, pp.keyboard as Keyboard | undefined)
       : -1;
@@ -1844,10 +1866,11 @@ export class Bot {
         return;
       case "/review": {
         // The Manager's folder is not a project: a review needs a worker topic / plain session.
-        if (state.manager) return this.tg.sendMessage(conv, "🔍 Manager không có repo để review — dùng /review trong topic worker, hoặc /manager off.");
-        const prompt = reviewPrompt(arg);
-        if (prompt === null) return this.sendHtml(conv, REVIEW_USAGE);
-        return this.runPrompt(conv, prompt, state);
+        const lang = this.userPrefs.getLang(uid ?? "");
+        if (state.manager) return this.tg.sendMessage(conv, tr(lang, "🔍 Manager không có repo để review — dùng /review trong topic worker, hoặc /manager off.", "🔍 The Manager has no repo to review — use /review in a worker topic, or /manager off."));
+        const prompt = reviewPrompt(arg, lang);
+        if (prompt === null) return this.sendHtml(conv, reviewUsage(lang));
+        return this.runPrompt(conv, prompt, state, undefined, lang);
       }
       case "/schedule":
         return cmdSchedule(this, conv, arg, state, uid);
@@ -1868,7 +1891,7 @@ export class Bot {
         // Offer a one-tap "save as note" for this dropped message: the button's
         // callback data carries the user message's id and its text is retained,
         // so the tap can append it to /note (see handleNoteCallback).
-        const kb: Keyboard = { inline_keyboard: [[{ text: NOTE_BUTTON_LABEL, callback_data: noteCallbackData(userMsgId) }]] };
+        const kb: Keyboard = { inline_keyboard: [[{ text: noteButtonLabel(lang ?? "vi"), callback_data: noteCallbackData(userMsgId) }]] };
         await this.tg.sendMessage(conv, BUSY_REPLY_TEXT, { reply_markup: kb });
         this.busyNotes.push(conv, userMsgId, text);
       } else {
@@ -1919,7 +1942,7 @@ export class Bot {
         if (state.guidedLanguageSession === sid) this.st.set(conv, { guidedLanguageSession: undefined });
       }
       // Scratchpad notes (/note): retire last turn's notes or surface pending ones.
-      await this.prepareNotesTurn(conv, sid);
+      await this.prepareNotesTurn(conv, sid, lang ?? "vi");
       // Inject the "ask via question tool" preamble once per session so the agent
       // knows it is headless and should surface decisions as answerable questions.
       let promptText = text;
@@ -1931,14 +1954,15 @@ export class Bot {
       this.inflight.set(conv, ac);
       log(`[chat ${conv}] prompt on ${sid} (${text.length} chars)`);
       // Fire-and-forget: don't block the polling loop; /stop aborts `ac`.
-      void this.runPromptTask(conv, sid, promptText, ac, userMsgId).catch((e) => error("prompt task:", e?.message));
+      void this.runPromptTask(conv, sid, promptText, ac, userMsgId, lang).catch((e) => error("prompt task:", e?.message));
     } catch (e) {
       this.stopTyping(conv); // don't leave "typing…" running if the prompt never started
       throw e;
     }
   }
 
-  private async runPromptTask(conv: ConvKey, sid: string, text: string, ac: AbortController, userMsgId?: number): Promise<void> {
+  private async runPromptTask(conv: ConvKey, sid: string, text: string, ac: AbortController, userMsgId?: number, lang?: Lang): Promise<void> {
+    const langEff: Lang = lang ?? this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
     // One id for this user message, reused by the reconnect retry below: the
     // server dedupes on it, so the retry waits on the same turn instead of
     // running the instruction a second time.
@@ -1978,8 +2002,8 @@ export class Bot {
         }
         // A genuine failure (not a user /stop): attach a one-tap "⏯ Chạy tiếp"
         // button to the failure message so the user can resume the same session.
-        const kb = this.offerContinueKeyboard(conv, sid, messageID, res.outcome, res.interrupted);
-        await this.sendHtml(conv, formatTurnFailure(res.error, res.elapsedMs), kb ? { reply_markup: kb } : {});
+        const kb = this.offerContinueKeyboard(conv, sid, messageID, res.outcome, res.interrupted, langEff);
+        await this.sendHtml(conv, formatTurnFailure(res.error, res.elapsedMs, langEff), kb ? { reply_markup: kb } : {});
         // Body language (feature C): the bot dislikes the turn that failed.
         this.bodyReact(conv, userMsgId, REACTION_FAIL);
         return;
@@ -1998,8 +2022,9 @@ export class Bot {
       this.stopTyping(conv);
       await this.dropPreview(conv);
       error("prompt error:", (e as Error)?.message);
+      const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
       const msg = isTransportError(e)
-        ? "⚠️ Không thể nối tới OpenCode (service có thể đang restart / chưa chạy). Hẵng thử lại sau, hoặc kiểm tra `opencode service status`."
+        ? tr(lang, "⚠️ Không thể nối tới OpenCode (service có thể đang restart / chưa chạy). Hẵng thử lại sau, hoặc kiểm tra `opencode service status`.", "⚠️ Can't reach OpenCode (the service may be restarting / not running). Try again later, or check `opencode service status`.")
         : `❌ Error: ${esc((e as Error).message)}`;
       await this.tg.sendMessage(conv, msg).catch(() => {});
       // Body language (feature C): the bot dislikes the turn that failed.
@@ -2026,11 +2051,12 @@ export class Bot {
     const st = this.st.get(conv);
     if (st.agent !== "plan") return;
     if ([...this.questionForms.values()].some((q) => q.conv === conv)) return;
+    const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
     const kb: Keyboard = {
-      inline_keyboard: [[{ text: "🔨 Sang build & thực thi", callback_data: "pb:go" }]],
+      inline_keyboard: [[{ text: tr(lang, "🔨 Sang build & thực thi", "🔨 Switch to build & execute"), callback_data: "pb:go" }]],
     };
     await this.tg
-      .sendMessage(conv, "📐 <b>Kế hoạch đã sẵn sàng</b> — bấm để chuyển sang build và thực thi.", { reply_markup: kb })
+      .sendMessage(conv, tr(lang, "📐 <b>Kế hoạch đã sẵn sàng</b> — bấm để chuyển sang build và thực thi.", "📐 <b>Plan is ready</b> — tap to switch to build and execute."), { reply_markup: kb })
       .catch(() => {});
   }
 
@@ -2047,13 +2073,14 @@ export class Bot {
     turnId: string,
     outcome: string | undefined,
     interrupted: boolean,
+    lang: Lang = "vi",
   ): Keyboard | undefined {
     if (!shouldOfferContinue({ outcome, interrupted })) return undefined;
     const data = continueCallbackData(sessionID);
     if (!data) return undefined; // too long to ship — omit the button
     if (alreadyOfferedContinue(this.st.peek(conv)?.continueOfferedTurn, turnId)) return undefined;
     this.st.set(conv, { continueOfferedTurn: turnId });
-    return { inline_keyboard: [[{ text: CONTINUE_BUTTON_LABEL, callback_data: data }]] };
+    return { inline_keyboard: [[{ text: continueButtonLabel(lang), callback_data: data }]] };
   }
 
   /**
@@ -2131,16 +2158,17 @@ export class Bot {
     // the session. Three choices: clear (drop context), clear + keep the recent
     // context, or cancel. (The old /new --keep flag was removed; "keep" is now
     // a button.)
+    const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
     const kb: Keyboard = {
       inline_keyboard: [
         [{ text: "🗑️ Clear", callback_data: "nw:clear" }],
-        [{ text: "💾 Clear + giữ ngữ cảnh", callback_data: "nw:keep" }],
-        [{ text: "↩️ Huỷ", callback_data: "nw:cancel" }],
+        [{ text: tr(lang, "💾 Clear + giữ ngữ cảnh", "💾 Clear + keep context"), callback_data: "nw:keep" }],
+        [{ text: tr(lang, "↩️ Huỷ", "↩️ Cancel"), callback_data: "nw:cancel" }],
       ],
     };
     await this.tg.sendMessage(
       conv,
-      "⚠️ <b>/new</b> — chọn cách tạo phiên mới:",
+      tr(lang, "⚠️ <b>/new</b> — chọn cách tạo phiên mới:", "⚠️ <b>/new</b> — choose how to create a new session:"),
       { reply_markup: kb },
     );
   }
@@ -2268,8 +2296,9 @@ export class Bot {
     const oldSID = state.sessionID;
     if (!oldSID) return;
     const dir = state.directory || this.cfg.opencodeDirectory;
-    const how = mode === "auto" ? "tự động (nền đã cao)" : "theo yêu cầu của bạn";
-    await this.tg.sendMessage(conv, `🔄 Đang xoay phiên Manager (nền ~${Math.round(floorK)}K, ${how}) — tóm tắt + tạo phiên mới…`);
+    const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
+    const how = tr(lang, mode === "auto" ? "tự động (nền đã cao)" : "theo yêu cầu của bạn", mode === "auto" ? "auto (floor is high)" : "at your request");
+    await this.tg.sendMessage(conv, tr(lang, `🔄 Đang xoay phiên Manager (nền ~${Math.round(floorK)}K, ${how}) — tóm tắt + tạo phiên mới…`, `🔄 Rotating the Manager session (floor ~${Math.round(floorK)}K, ${how}) — summarizing + creating a new one…`));
     try {
       const brief = await this.rotateHandoff(oldSID, dir);
       await this.stopCurrent(conv, true);
@@ -2282,7 +2311,11 @@ export class Bot {
           .setInstruction(
             sessionID,
             CARRYOVER_KEY,
-            `Bạn đang tiếp tục từ một phiên Manager đã bị xoay (nền cũ ~${Math.round(floorK)}K). Brief bàn giao từ phiên cũ:\n${brief}\nTiếp tục từ đây — memory + notes đã giữ các thực tế quan trọng.`,
+            tr(
+              lang,
+              `Bạn đang tiếp tục từ một phiên Manager đã bị xoay (nền cũ ~${Math.round(floorK)}K). Brief bàn giao từ phiên cũ:\n${brief}\nTiếp tục từ đây — memory + notes đã giữ các thực tế quan trọng.`,
+              `You are continuing from a rotated Manager session (old floor ~${Math.round(floorK)}K). Handover brief from the previous session:\n${brief}\nContinue from here — memory + notes hold the key facts.`,
+            ),
           )
           .catch((e) => warn("rotation brief:", (e as Error).message));
       }
@@ -2304,7 +2337,7 @@ export class Bot {
       });
       await this.tg.sendMessage(
         conv,
-        `✅ Đã xoay Manager → session mới <code>${esc(sessionID)}</code>\nDir: <code>${esc(dir)}</code>\n${brief ? `📝 Brief: ${brief.split(/\s+/).length} từ` : "📝 (phiên cũ trống)"}`,
+        tr(lang, `✅ Đã xoay Manager → session mới <code>${esc(sessionID)}</code>\nDir: <code>${esc(dir)}</code>\n${brief ? `📝 Brief: ${brief.split(/\s+/).length} từ` : "📝 (phiên cũ trống)"}`, `✅ Manager rotated → new session <code>${esc(sessionID)}</code>\nDir: <code>${esc(dir)}</code>\n${brief ? `📝 Brief: ${brief.split(/\s+/).length} words` : "📝 (old session empty)"}`),
       );
       log(`manager rotation (${mode}) conv=${conv} ${oldSID} → ${sessionID} floor=${Math.round(floorK)}K brief=${brief ? brief.length : 0}ch`);
       // Refresh the snapshot so it reflects the rotation just performed (the
@@ -2322,7 +2355,7 @@ export class Bot {
       } catch (e2) {
         warn("rotation tracking (fail):", (e2 as Error)?.message);
       }
-      await this.tg.sendMessage(conv, `⚠️ Xoay phiên Manager thất bại — phiên cũ vẫn giữ nguyên.`).catch(() => {});
+      await this.tg.sendMessage(conv, tr(lang, "⚠️ Xoay phiên Manager thất bại — phiên cũ vẫn giữ nguyên.", "⚠️ Manager rotation failed — the old session is kept as-is.")).catch(() => {});
     }
   }
 
@@ -2378,12 +2411,13 @@ export class Bot {
 
   /** M3 — the one-time confirm (two-tier, L1): offer rotate / keep-old buttons. */
   private async sendRotationConfirm(conv: ConvKey, floorK: number): Promise<void> {
+    const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
     await this.tg.sendMessage(
       conv,
-      `🧹 Session Manager đang gần hết chỗ trống — nền (sau summarization) đã lên ~${Math.round(floorK)}K.\n\nĐề xuất: xoay sang phiên mới, giữ lại <b>memory + notes</b> cộng thêm một brief ngắn. Muốn xoay ngay?`,
+      tr(lang, `🧹 Session Manager đang gần hết chỗ trống — nền (sau summarization) đã lên ~${Math.round(floorK)}K.\n\nĐề xuất: xoay sang phiên mới, giữ lại <b>memory + notes</b> cộng thêm một brief ngắn. Muốn xoay ngay?`, `🧹 The Manager session is running low on room — the floor (after summarization) is now ~${Math.round(floorK)}K.\n\nSuggestion: rotate to a fresh session, keeping <b>memory + notes</b> plus a short brief. Rotate now?`),
       {
         reply_markup: {
-          inline_keyboard: [[{ text: "🔄 Xoay ngay", callback_data: "rot:cf" }, { text: "↩️ Giữ phiên cũ", callback_data: "rot:cx" }]],
+          inline_keyboard: [[{ text: tr(lang, "🔄 Xoay ngay", "🔄 Rotate now"), callback_data: "rot:cf" }, { text: tr(lang, "↩️ Giữ phiên cũ", "↩️ Keep old session"), callback_data: "rot:cx" }]],
         },
       },
     );
@@ -2391,12 +2425,13 @@ export class Bot {
 
   /** M3 — rot:cf / rot:cx — confirm or cancel a manager rotation offer. */
   private async handleRotationCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+    const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     const op = (cb.data ?? "").split(":")[1];
     if (op === "cx") {
-      await this.tg.answerCallbackQuery(cb.id, "↩️ Đã huỷ");
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, "↩️ Đã huỷ", "↩️ Cancelled"));
       if (messageId) {
         await this.tg
-          .editMessageText(conv, messageId, "↩️ Đã huỷ — phiên Manager giữ nguyên.", { reply_markup: { inline_keyboard: [] } })
+          .editMessageText(conv, messageId, tr(lang, "↩️ Đã huỷ — phiên Manager giữ nguyên.", "↩️ Cancelled — the Manager session is kept as-is."), { reply_markup: { inline_keyboard: [] } })
           .catch(() => {});
       }
       return;
@@ -2404,10 +2439,10 @@ export class Bot {
     if (op !== "cf") return;
     const sid = this.st.peek(conv)?.sessionID;
     if (!sid) {
-      await this.tg.answerCallbackQuery(cb.id, "Không có session để xoay");
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Không có session để xoay", "No session to rotate"));
       return;
     }
-    await this.tg.answerCallbackQuery(cb.id, "🔄 Đang xoay…");
+    await this.tg.answerCallbackQuery(cb.id, tr(lang, "🔄 Đang xoay…", "🔄 Rotating…"));
     const floor = (await this.managerFloor(sid)) ?? 0;
     await this.doManagerRotation(conv, "confirm", floor / 1000);
   }
@@ -2422,7 +2457,8 @@ export class Bot {
     const oldSID = state.sessionID;
     let carryover = "";
     if (keep && oldSID) {
-      await this.tg.sendMessage(conv, "🔁 Đang tóm tắt session cũ để giữ mạch…");
+      const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
+      await this.tg.sendMessage(conv, tr(lang, "🔁 Đang tóm tắt session cũ để giữ mạch…", "🔁 Summarizing the old session to keep the thread…"));
       carryover = await this.summarizeForHandoff(oldSID);
     }
     await this.stopCurrent(conv, true);
@@ -2445,7 +2481,7 @@ export class Bot {
     this.st.set(conv, { sessionID, directory: dir, ...dropNotes() }); // a fresh session must not inherit pending notes
     await this.tg.sendMessage(
       conv,
-      `🆕 New session <code>${sessionID}</code>\ndir: <code>${esc(dir)}</code>${keep ? `\n🔁 carry-over: ${carryover ? "✓" : "(session cũ trống)"}` : ""}`,
+      tr(this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? ""), `🆕 New session <code>${sessionID}</code>\ndir: <code>${esc(dir)}</code>${keep ? `\n🔁 carry-over: ${carryover ? "✓" : "(session cũ trống)"}` : ""}`, `🆕 New session <code>${sessionID}</code>\ndir: <code>${esc(dir)}</code>${keep ? `\n🔁 carry-over: ${carryover ? "✓" : "(old session empty)"}` : ""}`),
     );
   }
 
@@ -2453,26 +2489,27 @@ export class Bot {
    *  settles the card in place: removes its buttons (empty inline_keyboard) and
    *  updates the message, so it can't be tapped twice. */
   private async handleNewConfirmCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+    const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     const op = (cb.data ?? "").split(":")[1];
     const settle = (text: string) =>
       messageId
         ? this.tg.editMessageText(conv, messageId, text, { reply_markup: { inline_keyboard: [] } }).catch(() => {})
         : Promise.resolve();
     if (op === "clear") {
-      await this.tg.answerCallbackQuery(cb.id, "🗑️ Đang tạo phiên mới…");
-      await settle("🗑️ Đã chọn: Clear");
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, "🗑️ Đang tạo phiên mới…", "🗑️ Creating a new session…"));
+      await settle("🗑️ " + tr(lang, "Đã chọn: Clear", "Chosen: Clear"));
       await this.doNewSession(conv, this.st.get(conv), false); // fresh state at confirm time
       return;
     }
     if (op === "keep") {
-      await this.tg.answerCallbackQuery(cb.id, "💾 Đang tạo phiên mới…");
-      await settle("💾 Đã chọn: Clear + giữ ngữ cảnh");
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, "💾 Đang tạo phiên mới…", "💾 Creating a new session…"));
+      await settle("💾 " + tr(lang, "Đã chọn: Clear + giữ ngữ cảnh", "Chosen: Clear + keep context"));
       await this.doNewSession(conv, this.st.get(conv), true);
       return;
     }
     // nw:cancel (or any unknown op) — keep the current session, just settle the card.
-    await this.tg.answerCallbackQuery(cb.id, "↩️ Đã huỷ");
-    await settle("↩️ Đã huỷ — phiên cũ vẫn nguyên vẹn.");
+    await this.tg.answerCallbackQuery(cb.id, tr(lang, "↩️ Đã huỷ", "↩️ Cancelled"));
+    await settle(tr(lang, "↩️ Đã huỷ — phiên cũ vẫn nguyên vẹn.", "↩️ Cancelled — the old session is intact."));
   }
 
   /**
@@ -2499,9 +2536,9 @@ export class Bot {
    * pending notes visible in this turn's system context. Never throws — a notes
    * failure must not break the turn.
    */
-  private async prepareNotesTurn(conv: ConvKey, sid: string): Promise<void> {
+  private async prepareNotesTurn(conv: ConvKey, sid: string, lang: Lang = "vi"): Promise<void> {
     try {
-      const prep = prepareNotes(this.st.get(conv));
+      const prep = prepareNotes(this.st.get(conv), lang);
       if (prep.put || prep.remove) this.st.set(conv, prep.state);
       if (prep.put) await this.oc.setInstruction(sid, NOTES_KEY, prep.put);
       else if (prep.remove) await this.oc.removeInstruction(sid, NOTES_KEY);
@@ -2511,13 +2548,14 @@ export class Bot {
   }
 
   private async cmdList(conv: ConvKey): Promise<void> {
+    const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
     const sessions = await this.oc.listSessions();
-    if (!sessions.length) return this.tg.sendMessage(conv, "No sessions yet. Send /new.");
+    if (!sessions.length) return this.tg.sendMessage(conv, tr(lang, "Chưa có session — gửi /new để tạo.", "No sessions yet. Send /new."));
     const cur = this.st.get(conv).sessionID;
     const lines = sessions
       .slice(0, 15)
       .map((s) => `${s.id === cur ? "▶️ " : ""}<code>${s.id}</code>${s.title ? " — " + esc(s.title) : ""}`);
-    const active = cur ? `\n\nCurrent: <code>${cur}</code>` : "\n\nNo current session — send /new";
+    const active = cur ? `\n\n${tr(lang, "Hiện tại", "Current")}: <code>${cur}</code>` : tr(lang, "\n\nChưa có session — gửi /new", "\n\nNo current session — send /new");
     await this.sendHtml(conv, `<b>Sessions (${sessions.length})</b>\n${lines.join("\n")}${active}`);
   }
 
@@ -2527,6 +2565,7 @@ export class Bot {
    */
   private async cmdUse(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
     void state;
+    const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
     let sessions: SessionBrief[] | undefined;
     try {
       sessions = await this.oc.listSessions();
@@ -2534,17 +2573,17 @@ export class Bot {
       warn("listSessions:", (e as Error).message);
     }
     if (!arg) {
-      if (!sessions) return this.tg.sendMessage(conv, "⚠️ Không liệt kê được session — kiểm tra OpenCode rồi thử lại.");
-      if (!sessions.length) return this.tg.sendMessage(conv, "Chưa có session — gửi /new để tạo.");
-      return this.sendUsePicker(conv, sessions, undefined);
+      if (!sessions) return this.tg.sendMessage(conv, tr(lang, "⚠️ Không liệt kê được session — kiểm tra OpenCode rồi thử lại.", "⚠️ Couldn't list sessions — check OpenCode and try again."));
+      if (!sessions.length) return this.tg.sendMessage(conv, tr(lang, "Chưa có session — gửi /new để tạo.", "No sessions yet. Send /new."));
+      return this.sendUsePicker(conv, sessions, undefined, lang);
     }
     // Unknown id (and the listing succeeded) → show the picker too; a failed
     // listing keeps the old behaviour of trusting the typed id.
     if (sessions && !sessions.some((s) => s.id === arg)) {
-      return this.sendUsePicker(conv, sessions, `❌ Không có session <code>${esc(arg)}</code>`);
+      return this.sendUsePicker(conv, sessions, tr(lang, `❌ Không có session <code>${esc(arg)}</code>`, `❌ No session <code>${esc(arg)}</code>`), lang);
     }
     this.applyUseState(conv, arg);
-    await this.tg.sendMessage(conv, `✅ Now using session <code>${esc(arg)}</code>`);
+    await this.tg.sendMessage(conv, tr(lang, `✅ Đang dùng session <code>${esc(arg)}</code>`, `✅ Now using session <code>${esc(arg)}</code>`));
   }
 
   /** Apply the /use switch: remember the session and drop its predecessor's pending prompts. */
@@ -2554,25 +2593,26 @@ export class Bot {
   }
 
   /** The /use picker card: newest 10 sessions as buttons + a "type it instead" hint. */
-  private sendUsePicker(conv: ConvKey, sessions: SessionBrief[], errorNote?: string): Promise<void> {
+  private sendUsePicker(conv: ConvKey, sessions: SessionBrief[], errorNote?: string, lang: Lang = "vi"): Promise<void> {
     const cur = this.st.get(conv).sessionID;
     const newest = [...sessions].sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0)).slice(0, 10);
     const rows: Btn[][] = newest.map((s) => [
       { text: `${s.id === cur ? "▶️ " : ""}${s.title ? trunc(s.title, 40) : trunc(s.id, 14)}`, callback_data: `use:${s.id}` },
     ]);
     rows.push([
-      { text: "📄 Xem tất cả", callback_data: "use:ls" },
-      { text: "❌ Đóng", callback_data: "use:close" },
+      { text: tr(lang, "📄 Xem tất cả", "📄 View all"), callback_data: "use:ls" },
+      { text: tr(lang, "❌ Đóng", "❌ Close"), callback_data: "use:close" },
     ]);
     return this.tg.sendMessage(
       conv,
-      [errorNote ?? "❓ <b>/use</b> cần session-id", "Bấm để chọn session (mới nhất trước):", "Hoặc gửi: <code>/use &lt;session-id&gt;</code>"].join("\n"),
+      [errorNote ?? tr(lang, "❓ <b>/use</b> cần session-id", "❓ <b>/use</b> needs a session-id"), tr(lang, "Bấm để chọn session (mới nhất trước):", "Tap to pick a session (newest first):"), "Hoặc gửi: <code>/use &lt;session-id&gt;</code>"].join("\n"),
       { reply_markup: { inline_keyboard: rows } },
     );
   }
 
   /** Handle a tap on the /use picker (data = `use:<id|ls|close>`). */
   private async handleUseCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+    const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     const id = (cb.data ?? "").slice("use:".length);
     if (id === "close" || id === "ls") {
       await this.tg.answerCallbackQuery(cb.id);
@@ -2581,8 +2621,8 @@ export class Bot {
       return;
     }
     this.applyUseState(conv, id);
-    await this.tg.answerCallbackQuery(cb.id, `Dùng ${trunc(id, 30)}`);
-    if (messageId) await this.tg.editMessageText(conv, messageId, `✅ Đang dùng session <code>${esc(id)}</code>`).catch(() => {});
+    await this.tg.answerCallbackQuery(cb.id, tr(lang, `Dùng ${trunc(id, 30)}`, `Using ${trunc(id, 30)}`));
+    if (messageId) await this.tg.editMessageText(conv, messageId, tr(lang, `✅ Đang dùng session <code>${esc(id)}</code>`, `✅ Now using session <code>${esc(id)}</code>`)).catch(() => {});
   }
 
   private async cmdDir(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
@@ -2605,8 +2645,9 @@ export class Bot {
    * instead of posting new ones, so the chat stays readable.
    */
   private async cmdBrowse(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
+    const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
     const roots = this.cfg.browseRoots;
-    if (!roots.length) return this.tg.sendMessage(conv, "❌ Không có thư mục nào được phép duyệt.");
+    if (!roots.length) return this.tg.sendMessage(conv, tr(lang, "❌ Không có thư mục nào được phép duyệt.", "❌ No directories are allowed to browse."));
     const requested = arg
       ? resolve(this.cfg.opencodeDirectory, arg)
       : state.directory || this.cfg.opencodeDirectory;
@@ -2615,7 +2656,7 @@ export class Bot {
     if (!isUnderRoot(path, roots)) {
       const owner = roots.find((r) => isUnderRoot(path, [r]));
       path = owner ?? roots[0];
-      note = `⚠️ <code>${esc(requested)}</code> nằm ngoài vùng được duyệt — đã mở tại <code>${esc(path)}</code>.`;
+      note = tr(lang, `⚠️ <code>${esc(requested)}</code> nằm ngoài vùng được duyệt — đã mở tại <code>${esc(path)}</code>.`, `⚠️ <code>${esc(requested)}</code> is outside the allowed roots — opened at <code>${esc(path)}</code> instead.`);
     }
     let isDir = false;
     try {
@@ -2623,9 +2664,9 @@ export class Bot {
     } catch {
       isDir = false;
     }
-    if (!isDir) return this.tg.sendMessage(conv, `❌ Không phải thư mục: <code>${esc(path)}</code>`);
+    if (!isDir) return this.tg.sendMessage(conv, tr(lang, `❌ Không phải thư mục: <code>${esc(path)}</code>`, `❌ Not a directory: <code>${esc(path)}</code>`));
 
-    const b: BrowseState = { path, showHidden: false, items: [], page: 0, view: "list", opened: false, note };
+    const b: BrowseState = { path, showHidden: false, items: [], page: 0, view: "list", opened: false, note, lang };
     await this.reloadBrowse(b);
     this.browsers.set(conv, b);
     const v = this.renderBrowse(b);
@@ -2639,7 +2680,7 @@ export class Bot {
       b.error = undefined;
     } catch (e) {
       b.items = [];
-      b.error = `⚠️ Không đọc được thư mục: ${esc((e as Error).message)}`;
+      b.error = tr(b.lang, `⚠️ Không đọc được thư mục: ${esc((e as Error).message)}`, `⚠️ Couldn't read the directory: ${esc((e as Error).message)}`);
     }
     const maxPage = Math.max(0, Math.ceil(b.items.length / BROWSE_PAGE_SIZE) - 1);
     if (b.page > maxPage) b.page = maxPage;
@@ -2649,14 +2690,14 @@ export class Bot {
   private renderBrowse(b: BrowseState): { text: string; keyboard: Keyboard } {
     if (b.view === "choose") {
       return {
-        text: [`<b>📂 ${esc(shortPath(b.path, 70))}</b>`, "", "<b>Chọn cách mở thư mục này:</b>"].join("\n"),
+        text: [`<b>📂 ${esc(shortPath(b.path, 70))}</b>`, "", tr(b.lang, "<b>Chọn cách mở thư mục này:</b>", "<b>Choose how to open this folder:</b>")].join("\n"),
         keyboard: {
           inline_keyboard: [
-            [{ text: "📁 Chỉ đặt thư mục", callback_data: "bs:setdir" }],
-            [{ text: "🚀 Đặt + mở session mới", callback_data: "bs:setsess" }],
+            [{ text: tr(b.lang, "📁 Chỉ đặt thư mục", "📁 Set directory only"), callback_data: "bs:setdir" }],
+            [{ text: tr(b.lang, "🚀 Đặt + mở session mới", "🚀 Set + open new session"), callback_data: "bs:setsess" }],
             [
-              { text: "↩️ Quay lại", callback_data: "bs:list" },
-              { text: "❌ Đóng", callback_data: "bs:close" },
+              { text: tr(b.lang, "↩️ Quay lại", "↩️ Back"), callback_data: "bs:list" },
+              { text: tr(b.lang, "❌ Đóng", "❌ Close"), callback_data: "bs:close" },
             ],
           ],
         },
@@ -2665,10 +2706,10 @@ export class Bot {
 
     if (b.view === "done") {
       const rows: Btn[][] = [];
-      if (!b.opened) rows.push([{ text: "🚀 Mở session mới tại đây", callback_data: "bs:setsess" }]);
-      rows.push([{ text: "📂 Duyệt tiếp", callback_data: "bs:list" }]);
-      rows.push([{ text: "❌ Đóng", callback_data: "bs:close" }]);
-      return { text: b.result ?? "✅ Xong", keyboard: { inline_keyboard: rows } };
+      if (!b.opened) rows.push([{ text: tr(b.lang, "🚀 Mở session mới tại đây", "🚀 Open a new session here"), callback_data: "bs:setsess" }]);
+      rows.push([{ text: tr(b.lang, "📂 Duyệt tiếp", "📂 Keep browsing"), callback_data: "bs:list" }]);
+      rows.push([{ text: tr(b.lang, "❌ Đóng", "❌ Close"), callback_data: "bs:close" }]);
+      return { text: b.result ?? tr(b.lang, "✅ Xong", "✅ Done"), keyboard: { inline_keyboard: rows } };
     }
 
     // list view
@@ -2687,10 +2728,10 @@ export class Bot {
 
     const nav: Btn[] = [];
     if (parentWithin(b.path, this.cfg.browseRoots)) {
-      nav.push({ text: "⬆️ Lên", callback_data: "bs:up" });
+      nav.push({ text: tr(b.lang, "⬆️ Lên", "⬆️ Up"), callback_data: "bs:up" });
     }
-    nav.push({ text: b.showHidden ? "🙈 Ẩn file ẩn" : "👁 Hiện file ẩn", callback_data: "bs:hid" });
-    nav.push({ text: "✅ Mở tại đây", callback_data: "bs:open" });
+    nav.push({ text: b.showHidden ? tr(b.lang, "🙈 Ẩn file ẩn", "🙈 Hide hidden files") : tr(b.lang, "👁 Hiện file ẩn", "👁 Show hidden files"), callback_data: "bs:hid" });
+    nav.push({ text: tr(b.lang, "✅ Mở tại đây", "✅ Open here"), callback_data: "bs:open" });
     rows.push(nav);
 
     if (pageCount > 1) {
@@ -2700,15 +2741,15 @@ export class Bot {
         { text: "▶️", callback_data: `bs:pg:${b.page + 1}` },
       ]);
     }
-    rows.push([{ text: "❌ Đóng", callback_data: "bs:close" }]);
+    rows.push([{ text: tr(b.lang, "❌ Đóng", "❌ Close"), callback_data: "bs:close" }]);
 
     const meta: string[] = [];
     if (b.note) meta.push(b.note);
     if (b.error) meta.push(b.error);
     meta.push(
-      `<i>${b.items.length} thư mục con${pageCount > 1 ? ` · trang ${b.page + 1}/${pageCount}` : ""}</i>`,
+      `<i>${b.items.length} ${tr(b.lang, "thư mục con", "subdirectories")}${pageCount > 1 ? ` · ${tr(b.lang, "trang", "page")} ${b.page + 1}/${pageCount}` : ""}</i>`,
     );
-    meta.push("Chạm một thư mục để vào · ✅ để mở OpenCode tại đây");
+    meta.push(tr(b.lang, "Chạm một thư mục để vào · ✅ để mở OpenCode tại đây", "Tap a folder to enter · ✅ to open OpenCode here"));
     return {
       text: [`<b>📂 ${esc(shortPath(b.path, 70))}</b>`, ...meta].join("\n"),
       keyboard: { inline_keyboard: rows },
@@ -2718,7 +2759,7 @@ export class Bot {
   /** Handle a button tap on the browser message. */
   private async handleCallback(cb: CallbackQuery): Promise<void> {
     if (!this.allowed(cb.from?.id)) {
-      await this.tg.answerCallbackQuery(cb.id, "⛔ Không được phép");
+      await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "⛔ Không được phép", "⛔ Not allowed"));
       return;
     }
     const conv = cb.message ? this.convOf(cb.message) : undefined;
@@ -2800,7 +2841,7 @@ export class Bot {
     }
     const b = this.browsers.get(conv);
     if (!b) {
-      await this.tg.answerCallbackQuery(cb.id, "Phiên duyệt đã đóng — gửi /browse");
+      await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Phiên duyệt đã đóng — gửi /browse", "The browser was closed — send /browse"));
       return;
     }
 
@@ -2810,7 +2851,7 @@ export class Bot {
       switch (action) {
         case "nav": {
           const item = b.items[Number(arg)];
-          if (!item) throw new Error("Mục không còn tồn tại — gửi /browse để tải lại.");
+          if (!item) throw new Error(tr(b.lang, "Mục không còn tồn tại — gửi /browse để tải lại.", "The entry no longer exists — send /browse to reload."));
           b.path = item.path;
           b.page = 0;
           b.view = "list";
@@ -2851,9 +2892,9 @@ export class Bot {
           b.view = "done";
           b.opened = false;
           b.result = [
-            `✅ Đã đặt thư mục làm việc:\n<code>${esc(b.path)}</code>`,
+            tr(b.lang, `✅ Đã đặt thư mục làm việc:`, `✅ Working directory set:`) + `\n<code>${esc(b.path)}</code>`,
             "",
-            "Session mới sẽ chạy ở đây. Gõ /new hoặc bấm “🚀 Mở session mới tại đây”.",
+            tr(b.lang, "Session mới sẽ chạy ở đây. Gõ /new hoặc bấm “🚀 Mở session mới tại đây”.", "New sessions will run here. Send /new or tap “🚀 Open a new session here”."),
           ].join("\n");
           break;
         }
@@ -2869,10 +2910,10 @@ export class Bot {
           b.view = "done";
           b.opened = true;
           b.result = [
-            `🚀 Đã mở session <code>${esc(sessionID)}</code>`,
+            tr(b.lang, `🚀 Đã mở session <code>${esc(sessionID)}</code>`, `🚀 Opened session <code>${esc(sessionID)}</code>`),
             `📁 <code>${esc(b.path)}</code>`,
             "",
-            "Gửi tin nhắn để bắt đầu làm việc.",
+            tr(b.lang, "Gửi tin nhắn để bắt đầu làm việc.", "Send a message to start working."),
           ].join("\n");
           break;
         }
@@ -2959,7 +3000,7 @@ export class Bot {
           await cmdHelp(this, conv, this.userPrefs.getLang(cb.from?.id ?? ""));
           break;
         default:
-          await this.tg.sendMessage(conv, "❓ Lệnh không rõ.");
+          await this.tg.sendMessage(conv, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "❓ Lệnh không rõ.", "❓ Unknown command."));
       }
     } finally {
       // Answer last so the tap spinner shows while the command runs.
@@ -3001,17 +3042,18 @@ export class Bot {
    */
   private async cmdModel(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
     void state;
+    const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
     let models: ModelInfo[];
     try {
       models = await this.oc.listModels();
     } catch (e) {
-      return this.tg.sendMessage(conv, `⚠️ Không liệt kê được model: ${(e as Error).message}`);
+      return this.tg.sendMessage(conv, tr(lang, `⚠️ Không liệt kê được model: ${(e as Error).message}`, `⚠️ Couldn't list models: ${(e as Error).message}`));
     }
-    if (!arg) return this.showModelPicker(conv, models, 0, undefined);
+    if (!arg) return this.showModelPicker(conv, models, 0, undefined, lang);
     const m = models.find((x) => x.id === arg || `${x.providerID}/${x.id}` === arg);
-    if (!m) return this.showModelPicker(conv, models, 0, `❌ Unknown model: <code>${esc(arg)}</code>`);
+    if (!m) return this.showModelPicker(conv, models, 0, tr(lang, `❌ Unknown model: <code>${esc(arg)}</code>`, `❌ Unknown model: <code>${esc(arg)}</code>`), lang);
     await this.applyModelPick(conv, m);
-    await this.tg.sendMessage(conv, `✅ Model → <code>${esc(m.id)}</code> (${this.st.get(conv).sessionID ? "applied to current session" : "applies on /new"})`);
+    await this.tg.sendMessage(conv, tr(lang, `✅ Model → <code>${esc(m.id)}</code> (${this.st.get(conv).sessionID ? "đã áp dụng cho session hiện tại" : "áp dụng khi /new"})`, `✅ Model → <code>${esc(m.id)}</code> (${this.st.get(conv).sessionID ? "applied to current session" : "applies on /new"})`));
   }
 
   /** Apply the model choice (shared by the typed command and the picker buttons). */
@@ -3022,7 +3064,7 @@ export class Bot {
   }
 
   /** The text + keyboard for one page of the /model picker. */
-  private renderModelPage(models: ModelInfo[], page: number, errorNote?: string, curId?: string): { text: string; keyboard: Keyboard } {
+  private renderModelPage(models: ModelInfo[], page: number, errorNote?: string, curId?: string, lang: Lang = "vi"): { text: string; keyboard: Keyboard } {
     const pageCount = Math.max(1, Math.ceil(models.length / MODEL_PAGE_SIZE));
     const p = Math.max(0, Math.min(page, pageCount - 1));
     const slice = models.slice(p * MODEL_PAGE_SIZE, (p + 1) * MODEL_PAGE_SIZE);
@@ -3042,24 +3084,25 @@ export class Bot {
       if (p < pageCount - 1) nav.push({ text: "➡️", callback_data: `mdl:pg:${p + 1}` });
       rows.push(nav);
     }
-    rows.push([{ text: "❌ Đóng", callback_data: "mdl:close" }]);
+    rows.push([{ text: tr(lang, "❌ Đóng", "❌ Close"), callback_data: "mdl:close" }]);
     return {
-      text: [errorNote ?? "❓ <b>/model</b> cần tên model", `<i>trang ${p + 1}/${pageCount} · Hoặc gửi: <code>/model &lt;id&gt;</code></i>`].join("\n"),
+      text: [errorNote ?? tr(lang, "❓ <b>/model</b> cần tên model", "❓ <b>/model</b> needs a model name"), `<i>${tr(lang, "trang", "page")} ${p + 1}/${pageCount} · Hoặc gửi: <code>/model &lt;id&gt;</code></i>`].join("\n"),
       keyboard: { inline_keyboard: rows },
     };
   }
 
   /** Open the model picker (or re-show it after a bad argument) and remember the model list. */
-  private async showModelPicker(conv: ConvKey, models: ModelInfo[], page: number, errorNote?: string): Promise<void> {
+  private async showModelPicker(conv: ConvKey, models: ModelInfo[], page: number, errorNote?: string, lang: Lang = "vi"): Promise<void> {
     const pageCount = Math.max(1, Math.ceil(models.length / MODEL_PAGE_SIZE));
     const p = Math.max(0, Math.min(page, pageCount - 1));
     this.modelPickers.set(conv, { models, page: p });
-    const v = this.renderModelPage(models, p, errorNote, this.st.get(conv).model?.id);
+    const v = this.renderModelPage(models, p, errorNote, this.st.get(conv).model?.id, lang);
     await this.tg.sendMessage(conv, v.text, { reply_markup: v.keyboard });
   }
 
   /** Handle a tap on the /model picker (data = `mdl:sel:<i>` / `mdl:pg:<n>` / `mdl:close` / `mdl:noop`). */
   private async handleModelCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+    const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     const [, op, arg] = (cb.data ?? "").split(":");
     if (op === "close") {
       this.modelPickers.delete(conv);
@@ -3069,23 +3112,23 @@ export class Bot {
     }
     const mp = this.modelPickers.get(conv);
     if (!mp) {
-      await this.tg.answerCallbackQuery(cb.id, "Danh sách model đã đóng — gửi /model để mở lại.");
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Danh sách model đã đóng — gửi /model để mở lại.", "The model list was closed — send /model to open it again."));
       return;
     }
     try {
       if (op === "sel") {
         const m = mp.models[Number(arg)];
-        if (!m) throw new Error("Model không còn trong danh sách — gửi /model để mở lại.");
+        if (!m) throw new Error(tr(lang, "Model không còn trong danh sách — gửi /model để mở lại.", "The model is no longer in the list — send /model to open it again."));
         await this.applyModelPick(conv, m);
         this.modelPickers.delete(conv);
         await this.tg.answerCallbackQuery(cb.id, `Model → ${trunc(m.id, 40)}`);
-        if (messageId) await this.tg.editMessageText(conv, messageId, `✅ Model → <code>${esc(m.id)}</code> (${this.st.get(conv).sessionID ? "applied" : "applies on /new"})`).catch(() => {});
+        if (messageId) await this.tg.editMessageText(conv, messageId, tr(lang, `✅ Model → <code>${esc(m.id)}</code> (${this.st.get(conv).sessionID ? "đã áp dụng" : "áp dụng khi /new"})`, `✅ Model → <code>${esc(m.id)}</code> (${this.st.get(conv).sessionID ? "applied" : "applies on /new"})`)).catch(() => {});
         return;
       }
       if (op === "pg") {
         await this.tg.answerCallbackQuery(cb.id);
         if (!messageId) return;
-        const v = this.renderModelPage(mp.models, Number(arg) || 0, undefined, this.st.get(conv).model?.id);
+        const v = this.renderModelPage(mp.models, Number(arg) || 0, undefined, this.st.get(conv).model?.id, lang);
         this.modelPickers.set(conv, { ...mp, page: Math.max(0, Math.min(Number(arg) || 0, Math.ceil(mp.models.length / MODEL_PAGE_SIZE) - 1)) });
         await this.tg.editMessageText(conv, messageId, v.text, { reply_markup: v.keyboard }).catch(() => {});
         return;
@@ -3111,7 +3154,7 @@ export class Bot {
   }
 
   /** Build the inline "pick a mode" message: a short header + one button per mode. */
-  private renderModePicker(state: ChatState): { text: string; keyboard: Keyboard } {
+  private renderModePicker(state: ChatState, lang: Lang = "vi"): { text: string; keyboard: Keyboard } {
     const cur = this.currentMode(state);
     const entries = Object.entries(MODES);
     const rows: Btn[][] = [];
@@ -3124,12 +3167,12 @@ export class Bot {
       rows.push(row);
     }
     rows.push([
-      { text: "❓ Vai trò", callback_data: "mode:info" },
-      { text: "❌ Đóng", callback_data: "mode:close" },
+      { text: tr(lang, "❓ Vai trò", "❓ Roles"), callback_data: "mode:info" },
+      { text: tr(lang, "❌ Đóng", "❌ Close"), callback_data: "mode:close" },
     ]);
-    const curLabel = cur ? `<b>${esc(cur)}</b>` : "<i>chưa chọn</i>";
+    const curLabel = cur ? `<b>${esc(cur)}</b>` : tr(lang, "<i>chưa chọn</i>", "<i>not set</i>");
     return {
-      text: `<b>Chọn mode</b> — ${curLabel}\n<i>bấm để đổi · mode hiện tại đánh dấu ▶️</i>\nHoặc gửi: <code>/mode &lt;id&gt;</code>`,
+      text: [tr(lang, `<b>Chọn mode</b> — ${curLabel}`, `<b>Choose a mode</b> — ${curLabel}`), tr(lang, "<i>bấm để đổi · mode hiện tại đánh dấu ▶️</i>", "<i>tap to switch · current mode is marked ▶️</i>"), "Hoặc gửi: <code>/mode &lt;id&gt;</code>"].join("\n"),
       keyboard: { inline_keyboard: rows },
     };
   }
@@ -3140,26 +3183,29 @@ export class Bot {
    * from the session's agent, so /agent and /mode can never disagree.
    */
   private async cmdMode(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
+    const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
     const want = arg.trim().toLowerCase();
     if (!want) {
-      const v = this.renderModePicker(state);
+      const v = this.renderModePicker(state, lang);
       await this.tg.sendMessage(conv, v.text, { reply_markup: v.keyboard });
       return;
     }
     const m = MODES[want];
     if (!m) {
-      const v = this.renderModePicker(state);
+      const v = this.renderModePicker(state, lang);
       await this.tg.sendMessage(conv, `❌ Unknown mode: <code>${esc(want)}</code>`, { reply_markup: v.keyboard });
       return;
     }
     await this.applyMode(conv, state, m.agent);
-    const applied = state.sessionID ? "applied" : "applies on /new";
-    const v = this.renderModePicker(state);
-    await this.tg.sendMessage(conv, `✅ Mode → <b>${esc(want)}</b> (${applied})`, { reply_markup: v.keyboard });
+    const applied = tr(lang, "đã áp dụng", "applied");
+    const appliedOnNew = tr(lang, "áp dụng khi /new", "applies on /new");
+    const v = this.renderModePicker(state, lang);
+    await this.tg.sendMessage(conv, `✅ Mode → <b>${esc(want)}</b> (${state.sessionID ? applied : appliedOnNew})`, { reply_markup: v.keyboard });
   }
 
   /** Handle a tap on the mode picker (switch in place, or close the picker). */
   private async handleModeCallback(cb: CallbackQuery, conv: ConvKey, messageId: number | undefined): Promise<void> {
+    const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     const id = (cb.data ?? "").split(":")[1];
     if (id === "close") {
       await this.tg.answerCallbackQuery(cb.id);
@@ -3168,8 +3214,8 @@ export class Bot {
     }
     if (id === "info") {
       await this.tg.answerCallbackQuery(cb.id);
-      const lines = Object.entries(MODES).map(([mid, m]) => `• <code>${esc(mid)}</code> — ${esc(m.hint)}`);
-      await this.tg.sendMessage(conv, `📖 <b>Vai trò các mode</b>\n${lines.join("\n")}`);
+      const lines = Object.entries(MODES).map(([mid, m]) => `• <code>${esc(mid)}</code> — ${esc(m.hintEn === undefined ? m.hint : tr(lang, m.hint, m.hintEn))}`);
+      await this.tg.sendMessage(conv, tr(lang, "📖 <b>Vai trò các mode</b>", "📖 <b>What each mode does</b>") + "\n" + lines.join("\n"));
       return;
     }
     const m = MODES[id];
@@ -3187,27 +3233,30 @@ export class Bot {
     }
     await this.tg.answerCallbackQuery(cb.id, `Mode → ${id}`);
     if (messageId && !wasCurrent) {
-      const v = this.renderModePicker(state);
+      const v = this.renderModePicker(state, lang);
       await this.tg.editMessageText(conv, messageId, v.text, { reply_markup: v.keyboard });
     }
   }
 
   /** Handle a tap on the plan-to-build button (data = `pb:go`). */
   private async handlePlanToBuildCallback(cb: CallbackQuery, conv: ConvKey): Promise<void> {
+    const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     const state = this.st.get(conv);
     if (this.inflight.has(conv)) {
-      await this.tg.answerCallbackQuery(cb.id, "Đang chạy task — hẵng thử lại sau.");
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Đang chạy task — hẵng thử lại sau.", "A task is running — try again later."));
       return;
     }
     if (!state.sessionID) {
-      await this.tg.answerCallbackQuery(cb.id, "Chưa có session — hãy gửi một tin nhắn trước.");
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Chưa có session — hãy gửi một tin nhắn trước.", "No session yet — send a message first."));
       return;
     }
     await this.applyMode(conv, state, "build");
     await this.tg.answerCallbackQuery(cb.id, "Mode → build");
-    await this.tg.sendMessage(conv, "Đã chuyển sang <b>build</b> — bắt đầu thực thi kế hoạch.").catch(() => {});
-    const prompt =
-      "Đã chuyển sang chế độ build. Hãy thực thi kế hoạch vừa được lập trong cuộc hội thoại này: bắt đầu từ bước 1, làm tuần tự, và dừng lại để hỏi nếu thiếu thông tin quan trọng. Nếu không có kế hoạch nào chưa thực thi, chỉ cần xác nhận đã sẵn sàng.";
+    await this.tg.sendMessage(conv, tr(lang, "Đã chuyển sang <b>build</b> — bắt đầu thực thi kế hoạch.", "Switched to <b>build</b> — starting to execute the plan.")).catch(() => {});
+    const prompt = tr(lang,
+      "Đã chuyển sang chế độ build. Hãy thực thi kế hoạch vừa được lập trong cuộc hội thoại này: bắt đầu từ bước 1, làm tuần tự, và dừng lại để hỏi nếu thiếu thông tin quan trọng. Nếu không có kế hoạch nào chưa thực thi, chỉ cần xác nhận đã sẵn sàng.",
+      "Switched to build mode. Execute the plan just made in this conversation: start at step 1, work sequentially, and stop to ask if important information is missing. If there is no unexecuted plan, just confirm you are ready.",
+    );
     const ac = new AbortController();
     this.inflight.set(conv, ac);
     void this.runPromptTask(conv, state.sessionID, prompt, ac).catch((e) => error("prompt task:", e?.message));
@@ -3227,18 +3276,18 @@ export class Bot {
     // Reject malformed data, or a conv whose session is no longer the one that
     // failed (a /new or /use replaced it) — continuing would hit the wrong session.
     if (!target || !state?.sessionID || state.sessionID !== target) {
-      await this.tg.answerCallbackQuery(cb.id, "Nút này không còn áp dụng cho phiên hiện tại.");
+      await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Nút này không còn áp dụng cho phiên hiện tại.", "This button no longer applies to the current session."));
       return;
     }
     if (this.inflight.has(conv)) {
-      await this.tg.answerCallbackQuery(cb.id, "Đang chạy task — hẵng thử lại sau.");
+      await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Đang chạy task — hẵng thử lại sau.", "A task is running — try again in a moment."));
       return;
     }
-    await this.tg.answerCallbackQuery(cb.id, "⏯ Đang chạy tiếp…");
+    await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "⏯ Đang chạy tiếp…", "⏯ Continuing…"));
     this.startTyping(conv);
     const ac = new AbortController();
     this.inflight.set(conv, ac);
-    void this.runPromptTask(conv, target, CONTINUE_PROMPT, ac).catch((e) => error("prompt task:", e?.message));
+    void this.runPromptTask(conv, target, continuePrompt(this.userPrefs.getLang(cb.from?.id ?? "")), ac).catch((e) => error("prompt task:", e?.message));
   }
 
   /**
@@ -3267,7 +3316,7 @@ export class Bot {
     // (a /new / /use replaced it) — tapping would hit the wrong session.
     if (!rec || !rec.sessionID || choice === undefined || (state?.sessionID && state.sessionID !== rec.sessionID)) {
       if (id) registry.delete(id);
-      await this.tg.answerCallbackQuery(cb.id, "Nút này không còn áp dụng.");
+      await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Nút này không còn áp dụng.", "This button is no longer applicable."));
       return;
     }
     await this.tg.answerCallbackQuery(cb.id);
@@ -3276,7 +3325,7 @@ export class Bot {
     // failure here (session busy/gone) is non-fatal — the user can just retype.
     await this.oc.prompt(rec.sessionID, choice).catch(async (e) => {
       warn("choice prompt:", (e as Error)?.message);
-      await this.tg.answerCallbackQuery(cb.id, "❌ Không thể xử lý — thử nhập lại.").catch(() => {});
+      await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "❌ Không thể xử lý — thử nhập lại.", "❌ Couldn't process that — try typing it again.")).catch(() => {});
     });
   }
 
@@ -3332,8 +3381,8 @@ export class Bot {
     // No model, or the model reports no variants: keep the existing text output.
     if (!model || !variants.length) return this.cmdVariants(conv, arg, state);
     const cur = state.variant ?? this.cfg.defaultVariant;
-    if (!want) return this.sendVariantPicker(conv, variants, cur, undefined);
-    if (!variants.includes(want)) return this.sendVariantPicker(conv, variants, cur, `❌ Unknown variant <code>${esc(want)}</code>`);
+    if (!want) return this.sendVariantPicker(conv, variants, cur, undefined, this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? ""));
+    if (!variants.includes(want)) return this.sendVariantPicker(conv, variants, cur, `❌ Unknown variant <code>${esc(want)}</code>`, this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? ""));
     const how = await this.applyVariant(conv, want);
     await this.tg.sendMessage(conv, `✅ Variant → <code>${esc(want)}</code> (${how})`);
   }
@@ -3350,17 +3399,17 @@ export class Bot {
   }
 
   /** The /variant picker card: one button per variant + a hint line. */
-  private sendVariantPicker(conv: ConvKey, variants: string[], cur: string, errorNote?: string): Promise<void> {
+  private sendVariantPicker(conv: ConvKey, variants: string[], cur: string, errorNote?: string, lang: Lang = "vi"): Promise<void> {
     const rows: Btn[][] = [];
     for (let i = 0; i < variants.length; i += 2) {
       rows.push(
         variants.slice(i, i + 2).map((v) => ({ text: `${v === cur ? "▶️ " : ""}${v}`, callback_data: `variant:${v}` })),
       );
     }
-    rows.push([{ text: "❌ Đóng", callback_data: "variant:close" }]);
+    rows.push([{ text: tr(lang, "❌ Đóng", "❌ Close"), callback_data: "variant:close" }]);
     return this.tg.sendMessage(
       conv,
-      [errorNote ?? "❓ <b>/variant</b> cần tên variant", "Hoặc gửi: <code>/variant &lt;id&gt;</code>"].join("\n"),
+      [errorNote ?? tr(lang, "❓ <b>/variant</b> cần tên variant", "❓ <b>/variant</b> needs a variant name"), "Hoặc gửi: <code>/variant &lt;id&gt;</code>"].join("\n"),
       { reply_markup: { inline_keyboard: rows } },
     );
   }
@@ -3434,7 +3483,7 @@ export class Bot {
       if (this.cfg.stream) this.onDraftTextDelta(ev?.data);
     } else if (t === "session.shell.started" || t === "session.shell.ended") {
       const conv = ev?.data?.sessionID ? this.st.findChatBySession(ev.data.sessionID) : undefined;
-      if (conv) void (t === "session.shell.started" ? this.showActivity(conv, "▶ Đang chạy shell…") : this.finishActivity(conv, true));
+      if (conv) void (t === "session.shell.started" ? this.showActivity(conv, tr(this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? ""), "▶ Đang chạy shell…", "▶ Running shell…")) : this.finishActivity(conv, true));
     } else if (
       t === "session.execution.started" ||
       t === "session.execution.succeeded" ||
@@ -3503,8 +3552,9 @@ export class Bot {
         required: f.required,
       }));
     if (!fields.length) {
+      const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
       await this.tg
-        .sendMessage(relayConv, "❓ OpenCode đang hỏi (không có lựa chọn) — xem /history để biết chi tiết.")
+        .sendMessage(relayConv, tr(lang, "❓ OpenCode đang hỏi (không có lựa chọn) — xem /history để biết chi tiết.", "❓ OpenCode is asking (no options) — see /history for details."))
         .catch(() => {});
       return;
     }
@@ -3537,45 +3587,47 @@ export class Bot {
     this.questionForms.delete(formID);
     this.cancelReminder(qf.conv, formID);
     if (qf.messageId) {
+      const lang = this.userPrefs.getLang(this.st.peek(qf.conv)?.createdBy ?? "");
       const msg =
         type === "form.cancelled"
-          ? "ℹ️ Câu hỏi đã được huỷ bởi OpenCode."
-          : "ℹ️ Câu hỏi đã được trả lời (nơi khác).";
+          ? tr(lang, "ℹ️ Câu hỏi đã được huỷ bởi OpenCode.", "ℹ️ The question was cancelled by OpenCode.")
+          : tr(lang, "ℹ️ Câu hỏi đã được trả lời (nơi khác).", "ℹ️ The question was answered elsewhere.");
       await this.tg.editMessageText(qf.relayConv, qf.messageId, msg).catch(() => {});
     }
   }
 
   /** Build the text + inline keyboard for the current field of a question form. */
   private renderQuestion(qf: QuestionFormState): { text: string; keyboard: Keyboard } {
+    const lang = this.userPrefs.getLang(this.st.peek(qf.conv)?.createdBy ?? "");
     const f = qf.fields[qf.index];
     const total = qf.fields.length;
     const n = qf.index + 1;
     const lines: string[] = [];
-    lines.push(`❓ <b>Câu ${n}/${total}</b>${f.title ? " · " + esc(f.title) : ""}`);
+    lines.push(tr(lang, `❓ <b>Câu ${n}/${total}</b>${f.title ? " · " + esc(f.title) : ""}`, `❓ <b>Question ${n}/${total}</b>${f.title ? " · " + esc(f.title) : ""}`));
     // The card lives in the shared main channel — name the worker that asks.
     const workerName = this.st.peek(qf.conv)?.worker?.name;
-    if (workerName) lines.push(`<b>Worker: ${esc(workerName)}</b>`);
+    if (workerName) lines.push(`<b>${tr(lang, "Worker", "Worker")}: ${esc(workerName)}</b>`);
     if (f.description) lines.push(esc(f.description));
     if (qf.waitingCustom !== undefined) {
-      lines.push("", "✍️ <i>Gõ câu trả lời của bạn trong tin nhắn kế tiếp (bấm Huỷ để bỏ qua).</i>");
+      lines.push("", tr(lang, "✍️ <i>Gõ câu trả lời của bạn trong tin nhắn kế tiếp (bấm Huỷ để bỏ qua).</i>", "✍️ <i>Type your answer in the next message (tap Cancel to skip).</i>"));
     } else if (f.options?.length) {
-      lines.push("", "Chạm một đáp án, hoặc tự gõ đáp án của bạn:");
+      lines.push("", tr(lang, "Chạm một đáp án, hoặc tự gõ đáp án của bạn:", "Tap an option, or type your own answer:"));
     } else {
-      lines.push("", "Gõ câu trả lời của bạn:");
+      lines.push("", tr(lang, "Gõ câu trả lời của bạn:", "Type your answer:"));
     }
 
     const rows: Btn[][] = [];
     const fd = qf.formId;
     if (qf.waitingCustom !== undefined) {
-      rows.push([{ text: "❌ Huỷ", callback_data: `fq:${fd}:x` }]);
+      rows.push([{ text: tr(lang, "❌ Huỷ", "❌ Cancel"), callback_data: `fq:${fd}:x` }]);
     } else {
       (f.options ?? []).forEach((opt, i) => {
         rows.push([{ text: `▪️ ${trunc(opt.label, 60)}`, callback_data: `fq:${fd}:o${i}` }]);
       });
       if (f.custom || !f.options?.length || f.type === "string") {
-        rows.push([{ text: "✍️ Gõ tự do…", callback_data: `fq:${fd}:c` }]);
+        rows.push([{ text: tr(lang, "✍️ Gõ tự do…", "✍️ Type freely…"), callback_data: `fq:${fd}:c` }]);
       }
-      rows.push([{ text: "❌ Huỷ", callback_data: `fq:${fd}:x` }]);
+      rows.push([{ text: tr(lang, "❌ Huỷ", "❌ Cancel"), callback_data: `fq:${fd}:x` }]);
     }
     return { text: lines.join("\n"), keyboard: { inline_keyboard: rows } };
   }
@@ -3588,7 +3640,7 @@ export class Bot {
     const op = parts[2] ?? "";
     const qf = this.questionForms.get(formID);
     if (!qf) {
-      await this.tg.answerCallbackQuery(cb.id, "Phiên hỏi đã kết thúc.");
+      await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Phiên hỏi đã kết thúc.", "The question session has ended."));
       return;
     }
     try {
@@ -3597,7 +3649,7 @@ export class Bot {
         this.questionForms.delete(formID);
         this.cancelReminder(qf.conv, formID); // the form is really cancelled → stop nudging (schedule lives under the worker conv)
         await this.tg.answerCallbackQuery(cb.id);
-        if (messageId) await this.tg.editMessageText(conv, messageId, "❌ Đã huỷ câu hỏi.").catch(() => {});
+        if (messageId) await this.tg.editMessageText(conv, messageId, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "❌ Đã huỷ câu hỏi.", "❌ Question cancelled.")).catch(() => {});
         return;
       }
       if (op === "c") {
@@ -3613,7 +3665,7 @@ export class Bot {
         const idx = Number(op.slice(1));
         const f = qf.fields[qf.index];
         const opt = f.options?.[idx];
-        if (!opt) throw new Error("Đáp án không hợp lệ — vui lòng thử lại.");
+        if (!opt) throw new Error(tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Đáp án không hợp lệ — vui lòng thử lại.", "Invalid option — please try again."));
         qf.answers[f.key] = opt.value;
         await this.tg.answerCallbackQuery(cb.id);
         await this.advanceOrSubmit(qf, messageId);
@@ -3650,11 +3702,12 @@ export class Bot {
     this.questionForms.delete(qf.formId);
     this.cancelReminder(qf.conv, qf.formId); // form really submitted → stop nudging
     if (messageId) {
+      const lang = this.userPrefs.getLang(this.st.peek(qf.conv)?.createdBy ?? "");
       const summary = Object.entries(qf.answers)
         .map(([k, v]) => `• ${esc(trunc(String(v), 80))}`)
         .join("\n");
       await this.tg
-        .editMessageText(cardConv, messageId, `✅ Đã gửi câu trả lời cho OpenCode.${summary ? "\n" + summary : ""}`)
+        .editMessageText(cardConv, messageId, tr(lang, "✅ Đã gửi câu trả lời cho OpenCode.", "✅ Answer sent to OpenCode.") + (summary ? "\n" + summary : ""))
         .catch(() => {});
     }
   }
@@ -3698,23 +3751,24 @@ export class Bot {
     // the manager chat; the worker's conv stays the prompt's owner (status +
     // reminder schedule).
     const relayConv = chatOf(conv);
-    const lines: string[] = ["🔐 <b>OpenCode xin quyền</b>"];
+    const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
+    const lines: string[] = [tr(lang, "🔐 <b>OpenCode xin quyền</b>", "🔐 <b>OpenCode requests permission</b>")];
     // The card lives in the shared main channel — name the worker that asks.
     const workerName = this.st.peek(conv)?.worker?.name;
-    if (workerName) lines.push(`<b>Worker: ${esc(workerName)}</b>`);
+    if (workerName) lines.push(`<b>${tr(lang, "Worker", "Worker")}: ${esc(workerName)}</b>`);
     lines.push(`action: <code>${esc(d.action ?? "?")}</code>`);
     for (const r of (d.resources ?? []) as string[]) {
       lines.push(`resource: <code>${esc(trunc(r, 150))}</code>`);
     }
     if (d.message) lines.push(esc(trunc(String(d.message), 300)));
-    lines.push("", "<i>Bấm để trả lời — hoặc xử lý trong terminal TUI (bot tự cập nhật).</i>");
+    lines.push("", tr(lang, "<i>Bấm để trả lời — hoặc xử lý trong terminal TUI (bot tự cập nhật).</i>", "<i>Tap to answer — or handle it in the terminal TUI (the bot updates itself).</i>"));
     const kb: Keyboard = {
       inline_keyboard: [
         [
-          { text: "✅ Duyệt 1 lần", callback_data: `perm:${requestID}:once` },
-          { text: "♾️ Duyệt luôn", callback_data: `perm:${requestID}:always` },
+          { text: tr(lang, "✅ Duyệt 1 lần", "✅ Allow once"), callback_data: `perm:${requestID}:once` },
+          { text: tr(lang, "♾️ Duyệt luôn", "♾️ Always allow"), callback_data: `perm:${requestID}:always` },
         ],
-        [{ text: "❌ Từ chối", callback_data: `perm:${requestID}:reject` }],
+        [{ text: tr(lang, "❌ Từ chối", "❌ Deny"), callback_data: `perm:${requestID}:reject` }],
       ],
     };
     // Re-registration after a restart (reconcile): refresh the original card in
@@ -3743,10 +3797,11 @@ export class Bot {
     }
     this.permissionPrompts.delete(requestID);
     this.cancelReminder(p.conv, requestID);
-    const label = reply === "reject" ? "từ chối" : reply === "always" ? "duyệt luôn" : "duyệt";
+    const lang = this.userPrefs.getLang(this.st.peek(p.conv)?.createdBy ?? "");
+    const label = reply === "reject" ? tr(lang, "từ chối", "denied") : reply === "always" ? tr(lang, "duyệt luôn", "always allowed") : tr(lang, "duyệt", "allowed");
     if (p.messageId) {
       await this.tg
-        .editMessageText(p.relayConv, p.messageId, `ℹ️ Quyền đã được ${label} ở nơi khác.`)
+        .editMessageText(p.relayConv, p.messageId, tr(lang, `ℹ️ Quyền đã được ${label} ở nơi khác.`, `ℹ️ Permission was ${label} elsewhere.`))
         .catch(() => {});
     }
   }
@@ -3758,16 +3813,17 @@ export class Bot {
     const decision = parts[2];
     const p = this.permissionPrompts.get(requestID);
     if (!p) {
-      await this.tg.answerCallbackQuery(cb.id, "Yêu cầu quyền này đã hết hạn.");
+      await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Yêu cầu quyền này đã hết hạn.", "This permission request has expired."));
       return;
     }
+    const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     const labels: Record<string, string> = {
-      once: "✅ Đã duyệt (1 lần).",
-      always: "♾️ Đã duyệt luôn — quyền này được lưu, không hỏi lại.",
-      reject: "❌ Đã từ chối.",
+      once: tr(lang, "✅ Đã duyệt (1 lần).", "✅ Allowed (once)."),
+      always: tr(lang, "♾️ Đã duyệt luôn — quyền này được lưu, không hỏi lại.", "♾️ Always allowed — this permission is saved and won't be asked again."),
+      reject: tr(lang, "❌ Đã từ chối.", "❌ Denied."),
     };
     try {
-      if (!labels[decision]) throw new Error("Lựa chọn không hợp lệ.");
+      if (!labels[decision]) throw new Error(tr(lang, "Lựa chọn không hợp lệ.", "Invalid choice."));
       await this.oc.replyPermission(p.sessionID, p.requestID, decision as "once" | "always" | "reject");
       this.permissionPrompts.delete(requestID);
       this.cancelReminder(p.conv, requestID); // answered → stop nudging (schedule lives under the worker conv)
@@ -3778,9 +3834,9 @@ export class Bot {
         if (/not found|permission/i.test(msg)) {
           this.permissionPrompts.delete(requestID);
           this.cancelReminder(p.conv, requestID); // answered elsewhere → stop nudging (schedule lives under the worker conv)
-        await this.tg.answerCallbackQuery(cb.id, "Yêu cầu này đã được xử lý ở nơi khác.");
+        await this.tg.answerCallbackQuery(cb.id, tr(lang, "Yêu cầu này đã được xử lý ở nơi khác.", "This request was handled elsewhere."));
         if (messageId) {
-          await this.tg.editMessageText(conv, messageId, "ℹ️ Quyền đã được xử lý ở nơi khác.").catch(() => {});
+          await this.tg.editMessageText(conv, messageId, tr(lang, "ℹ️ Quyền đã được xử lý ở nơi khác.", "ℹ️ Permission was handled elsewhere.")).catch(() => {});
         }
         return;
       }

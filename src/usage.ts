@@ -13,6 +13,9 @@
  * time-to-rotation estimate) as an ADDITIVE footer — see RotationInfo.
  */
 
+import { tr } from "./i18n.js";
+import type { Lang } from "./state.js";
+
 export interface UsageRow {
   /** Display label: "manager", a worker name, or the short session id. */
   label: string;
@@ -106,6 +109,8 @@ export interface UsageOpts {
   maxRows?: number;
   /** A session without an update within this many hours is "dead" (default 24). */
   activeHours?: number;
+  /** Language for the report labels (default "vi"). */
+  lang?: Lang;
   /**
    * `true` = list every session (no maxRows cap, dead sessions listed with a
    * 💤 prefix instead of collapsed into one line). `/usage --all`.
@@ -233,11 +238,12 @@ export function formatUsageReport(
   const warnPct = opts.warnPct ?? DEFAULT_WARN_PCT;
   const maxRows = opts.maxRows ?? DEFAULT_MAX_ROWS;
   const activeHours = opts.activeHours ?? DEFAULT_ACTIVE_HOURS;
+  const lang: Lang = opts.lang ?? "vi";
   const all = opts.all === true;
   const now = opts.now ?? Date.now();
 
   if (rows.length === 0) {
-    return ["📊 <b>Usage theo session</b>", "Chưa có session nào được theo dõi."];
+    return ["📊 <b>Usage theo session</b>", tr(lang, "Chưa có session nào được theo dõi.", "No sessions tracked yet.")];
   }
 
   const active = rows.filter((r) => isActive(r.updated, now, activeHours));
@@ -265,14 +271,18 @@ export function formatUsageReport(
     const shown = sortUsage(active).slice(0, Math.max(1, maxRows));
     for (const r of shown) lines.push(ctxOf(r, ""));
     const hiddenActive = Math.max(0, active.length - shown.length);
-    if (hiddenActive > 0) lines.push(`… +${hiddenActive} active khác (ít áp lực hơn)`);
+    if (hiddenActive > 0) lines.push(tr(lang, `… +${hiddenActive} active khác (ít áp lực hơn)`, `… +${hiddenActive} more active (lower pressure)`));
     // Dead sessions: one line, with the largest context among them (the one
     // that would matter most if it ever wakes up).
     if (dead.length > 0) {
       const biggest = sortUsage(dead)[0];
       const bp = pctOf(biggest.current, biggest.limit);
       lines.push(
-        `💤 ${dead.length} session ${activeHours}h+ · lớn nhất ${biggest.current !== undefined ? fmtTok(biggest.current) : "—"}/${biggest.limit !== undefined ? fmtTok(biggest.limit) : "—"}${bp !== undefined ? ` (${bp}%)` : ""} — /usage --all để xem hết`,
+        tr(
+          lang,
+          `💤 ${dead.length} session ${activeHours}h+ · lớn nhất ${biggest.current !== undefined ? fmtTok(biggest.current) : "—"}/${biggest.limit !== undefined ? fmtTok(biggest.limit) : "—"}${bp !== undefined ? ` (${bp}%)` : ""} — /usage --all để xem hết`,
+          `💤 ${dead.length} session(s) ${activeHours}h+ · largest ${biggest.current !== undefined ? fmtTok(biggest.current) : "—"}/${biggest.limit !== undefined ? fmtTok(biggest.limit) : "—"}${bp !== undefined ? ` (${bp}%)` : ""} — /usage --all to see all`,
+        ),
       );
     }
   }
@@ -280,27 +290,31 @@ export function formatUsageReport(
   const totalIn = rows.reduce((s, r) => s + r.cumInput, 0);
   const totalOut = rows.reduce((s, r) => s + r.cumOutput, 0);
   lines.push("");
-  lines.push(`Tổng cumulative: ${fmtTok(totalIn)} in / ${fmtTok(totalOut)} out`);
+  lines.push(tr(lang, `Tổng cumulative: ${fmtTok(totalIn)} in / ${fmtTok(totalOut)} out`, `Cumulative total: ${fmtTok(totalIn)} in / ${fmtTok(totalOut)} out`));
 
   // Rotation footer (display-only, additive): where the manager floor sits
   // relative to the confirm/auto thresholds + the compaction ceiling, and —
   // when the trend gives a positive drift — roughly when auto-rotation lands.
   if (opts.rotation) {
     const r = opts.rotation;
-    const floor = r.floorK != null && r.floorK > 0 ? `~${Math.round(r.floorK)}K` : "chưa đo";
+    const floor = r.floorK != null && r.floorK > 0 ? `~${Math.round(r.floorK)}K` : tr(lang, "chưa đo", "not measured");
     const comp = r.compaction !== undefined && r.compaction > 0 ? ` · compaction ~${fmtTok(r.compaction)}` : "";
     lines.push(
-      `🧹 <b>Rotation manager</b> — nền ${floor} · confirm &gt;${r.confirmK}K · auto &gt;${r.autoK}K${comp}`,
+      tr(lang, `🧹 <b>Rotation manager</b> — nền ${floor} · confirm &gt;${r.confirmK}K · auto &gt;${r.autoK}K${comp}`, `🧹 <b>Rotation manager</b> — floor ${floor} · confirm &gt;${r.confirmK}K · auto &gt;${r.autoK}K${comp}`),
     );
     const rate = floorDriftRateK(r.trend);
     const days = daysToAutoRotation(r.floorK, r.autoK, rate);
     if (rate !== null && days !== null) {
       lines.push(
-        `📈 xu hướng ${rate >= 0 ? "+" : ""}${Math.round(rate)}K/ngày${days === 0 ? " — đã đạt ngưỡng auto" : ` → auto trong ~${Math.max(1, Math.round(days))} ngày`}`,
+        tr(
+          lang,
+          `📈 xu hướng ${rate >= 0 ? "+" : ""}${Math.round(rate)}K/ngày${days === 0 ? " — đã đạt ngưỡng auto" : ` → auto trong ~${Math.max(1, Math.round(days))} ngày`}`,
+          `📈 drift ${rate >= 0 ? "+" : ""}${Math.round(rate)}K/day${days === 0 ? " — auto threshold reached" : ` → auto in ~${Math.max(1, Math.round(days))} day(s)`}`,
+        ),
       );
     }
   }
 
-  lines.push(`<i>ctx = context hiện tại / cửa sổ của model · cum = tổng tokens cả phiên · 💤 = ${activeHours}h+ không hoạt động</i>`);
+  lines.push(tr(lang, `<i>ctx = context hiện tại / cửa sổ của model · cum = tổng tokens cả phiên · 💤 = ${activeHours}h+ không hoạt động</i>`, `<i>ctx = current context / model window · cum = total tokens over the session · 💤 = ${activeHours}h+ inactive</i>`));
   return lines;
 }

@@ -6,6 +6,8 @@ import { ICON, esc, timeAgo } from "../format.js";
 import { warn } from "../logger.js";
 import { selectPruneable } from "../prune.js";
 import { removeWorktree } from "../worktree.js";
+import { tr } from "../i18n.js";
+import type { Lang } from "../state.js";
 import type { Orchestrator } from "../orchestrator.js";
 
 /**
@@ -69,8 +71,9 @@ export async function purgeConv(o: Orchestrator, conv: ConvKey): Promise<boolean
  */
 export async function cmdPrune(o: Orchestrator, conv: ConvKey, arg: string): Promise<void> {
   const chat = chatOf(conv);
+  const lang: Lang = o.h.userPrefs?.getLang(o.h.st.peek(chat)?.createdBy ?? "") ?? "vi";
   if (conv !== chat) {
-    await o.h.sendHtml(conv, "ℹ️ Dùng /prune ở khung chat chính (General), không phải trong topic.");
+    await o.h.sendHtml(conv, tr(lang, "ℹ️ Dùng /prune ở khung chat chính (General), không phải trong topic.", "ℹ️ Use /prune in the main chat (General), not in a topic."));
     return;
   }
   const n = parseInt(arg, 10);
@@ -79,20 +82,20 @@ export async function cmdPrune(o: Orchestrator, conv: ConvKey, arg: string): Pro
   const items = o.workersOf(chat).map(([k, s]) => ({ conv: k, status: s.worker!.status, updatedAt: s.worker!.updatedAt }));
   const convs = selectPruneable(items, now, days * 86_400_000);
   if (!convs.length) {
-    await o.h.sendHtml(conv, "Không có topic worker cũ nào để dọn.");
+    await o.h.sendHtml(conv, tr(lang, "Không có topic worker cũ nào để dọn.", "No old worker topics to clean up."));
     return;
   }
   const id = randomBytes(5).toString("hex");
   o.prunePending.set(id, { chat, convs });
-  const lines = [`🧹 <b>Dọn ${convs.length} topic</b> cũ hơn ${days} ngày:`];
+  const lines = [tr(lang, `🧹 <b>Dọn ${convs.length} topic</b> cũ hơn ${days} ngày:`, `🧹 <b>Clean ${convs.length} topic(s)</b> older than ${days} days:`)];
   for (const k of convs) {
     const w = o.h.st.peek(k)?.worker;
     if (!w) continue;
     lines.push(`${ICON[w.status]} <b>${esc(w.name)}</b> · ${w.status} · ${timeAgo(w.updatedAt)}`);
   }
-  lines.push("", "<i>Bấm Xoá để xoá topic + state + session (không ảnh hưởng worker đang chạy).</i>");
+  lines.push("", tr(lang, "<i>Bấm Xoá để xoá topic + state + session (không ảnh hưởng worker đang chạy).</i>", "<i>Tap Delete to remove the topics + state + sessions (running workers are not affected).</i>"));
   await o.h.sendHtml(conv, lines.join("\n"), {
-    reply_markup: { inline_keyboard: [[{ text: "🗑 Xoá", callback_data: `prune:${id}` }]] },
+    reply_markup: { inline_keyboard: [[{ text: tr(lang, "🗑 Xoá", "🗑 Delete"), callback_data: `prune:${id}` }]] },
   });
 }
 
@@ -103,11 +106,12 @@ export async function cmdPrune(o: Orchestrator, conv: ConvKey, arg: string): Pro
  * shown is skipped; a conv whose worktree couldn't be removed is kept for retry.
  */
 export async function handlePruneCallback(o: Orchestrator, cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+  const lang: Lang = o.h.userPrefs?.getLang(cb.from?.id ?? "") ?? "vi";
   const id = (cb.data ?? "").split(":")[1];
   const p = o.prunePending.get(id);
   if (!p || p.chat !== chatOf(conv)) {
-    await o.h.tg.answerCallbackQuery(cb.id, "Yêu cầu này đã hết hạn.");
-    if (messageId) await o.h.tg.editMessageText(conv, messageId, "⌛ Yêu cầu này đã hết hạn (bot đã khởi động lại hoặc đã xử lý).").catch(() => {});
+    await o.h.tg.answerCallbackQuery(cb.id, tr(lang, "Yêu cầu này đã hết hạn.", "This request has expired."));
+    if (messageId) await o.h.tg.editMessageText(conv, messageId, tr(lang, "⌛ Yêu cầu này đã hết hạn (bot đã khởi động lại hoặc đã xử lý).", "⌛ This request has expired (the bot restarted or already handled it)."), { reply_markup: { inline_keyboard: [] } }).catch(() => {});
     return;
   }
   o.prunePending.delete(id);
@@ -130,7 +134,7 @@ export async function handlePruneCallback(o: Orchestrator, cb: CallbackQuery, co
     else skipped++;
   }
   await o.h.tg.answerCallbackQuery(cb.id);
-  const msg = `🧹 Đã xoá ${ok}/${p.convs.length} topic${skipped ? ` · bỏ qua ${skipped} (đang chạy hoặc chưa xoá được worktree)` : ""}.`;
-  if (messageId) await o.h.tg.editMessageText(conv, messageId, msg).catch(() => {});
+  const msg = tr(lang, `🧹 Đã xoá ${ok}/${p.convs.length} topic${skipped ? ` · bỏ qua ${skipped} (đang chạy hoặc chưa xoá được worktree)` : ""}.`, `🧹 Deleted ${ok}/${p.convs.length} topic(s)${skipped ? ` · skipped ${skipped} (running or worktree couldn't be removed)` : ""}.`);
+  if (messageId) await o.h.tg.editMessageText(conv, messageId, msg, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
   else await o.h.sendHtml(conv, msg).catch(() => {});
 }

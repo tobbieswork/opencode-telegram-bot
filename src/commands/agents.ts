@@ -1,9 +1,10 @@
 import type { Bot } from "../bot.js";
 import type { CallbackQuery } from "../telegram.js";
-import type { ChatState } from "../state.js";
+import type { ChatState, Lang } from "../state.js";
 import type { ConvKey } from "../conv.js";
 import { esc, trunc } from "../format.js";
 import { warn, error } from "../logger.js";
+import { tr } from "../i18n.js";
 import { AGENT_WHITELIST } from "../shared.js";
 import type { Btn } from "../shared.js";
 
@@ -28,10 +29,10 @@ export async function cmdAgent(bot: Bot, conv: ConvKey, arg: string, state: Chat
   } catch (e) {
     warn("listAgents:", (e as Error).message);
   }
-  if (!arg) return sendAgentPicker(bot, conv, undefined);
+  if (!arg) return sendAgentPicker(bot, conv, undefined, bot.userPrefs.getLang(bot.st.peek(conv)?.createdBy ?? ""));
   // Unknown id (and the listing succeeded) → show the picker too; a failed
   // listing keeps the old behaviour of trusting the typed id.
-  if (agents && !agents.some((a) => a.id === arg)) return sendAgentPicker(bot, conv, `❌ Unknown agent: <code>${esc(arg)}</code>`);
+  if (agents && !agents.some((a) => a.id === arg)) return sendAgentPicker(bot, conv, `❌ Unknown agent: <code>${esc(arg)}</code>`, bot.userPrefs.getLang(bot.st.peek(conv)?.createdBy ?? ""));
   const how = await applyAgent(bot, conv, arg);
   await bot.tg.sendMessage(conv, `✅ Agent → <code>${esc(arg)}</code> (${how === "applied" ? "applied to current session" : "applies on /new"})`);
 }
@@ -48,7 +49,7 @@ async function applyAgent(bot: Bot, conv: ConvKey, agent: string): Promise<"appl
 }
 
 /** The /agent picker card: one button per whitelisted agent + a hint line. */
-function sendAgentPicker(bot: Bot, conv: ConvKey, errorNote?: string): Promise<void> {
+function sendAgentPicker(bot: Bot, conv: ConvKey, errorNote?: string, lang: Lang = "vi"): Promise<void> {
   const cur = bot.st.get(conv).agent;
   const rows: Btn[][] = [];
   for (let i = 0; i < AGENT_WHITELIST.length; i += 2) {
@@ -56,10 +57,10 @@ function sendAgentPicker(bot: Bot, conv: ConvKey, errorNote?: string): Promise<v
       AGENT_WHITELIST.slice(i, i + 2).map((id) => ({ text: `${cur === id ? "▶️ " : ""}${id}`, callback_data: `agent:${id}` })),
     );
   }
-  rows.push([{ text: "❌ Đóng", callback_data: "agent:close" }]);
+  rows.push([{ text: tr(lang, "❌ Đóng", "❌ Close"), callback_data: "agent:close" }]);
   return bot.tg.sendMessage(
     conv,
-    [errorNote ?? "❓ <b>/agent</b> cần tên agent", "Hoặc gửi: <code>/agent &lt;id&gt;</code>"].join("\n"),
+    [errorNote ?? tr(lang, "❓ <b>/agent</b> cần tên agent", "❓ <b>/agent</b> needs an agent name"), tr(lang, "Hoặc gửi: <code>/agent &lt;id&gt;</code>", "Or send: <code>/agent <id></code>")].join("\n"),
     { reply_markup: { inline_keyboard: rows } },
   );
 }

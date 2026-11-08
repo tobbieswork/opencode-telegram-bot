@@ -64,10 +64,17 @@ export function respawnName(oldName: string): string {
   return `${base}-2`;
 }
 
+import { tr } from "./i18n.js";
+import type { Lang } from "./state.js";
+
 /** The one-line notice posted to the DEAD worker's topic before the respawn. */
-export function respawnNotice(oldName: string, newName: string): string {
+export function respawnNotice(oldName: string, newName: string, lang: Lang = "vi"): string {
   // Names are constrained to [a-z0-9-] (NAME_RE), so they are HTML-safe as-is.
-  return `⚠️ Worker <b>${oldName}</b> đầy context — đã tạo <b>${newName}</b> tiếp tục trong cùng thư mục.`;
+  return tr(
+    lang,
+    `⚠️ Worker <b>${oldName}</b> đầy context — đã tạo <b>${newName}</b> tiếp tục trong cùng thư mục.`,
+    `⚠️ Worker <b>${oldName}</b> ran out of context — <b>${newName}</b> was created to continue in the same directory.`,
+  );
 }
 
 /** Per-piece size caps for the handoff prompt (see design §2.1 budget). */

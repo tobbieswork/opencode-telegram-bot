@@ -7,11 +7,23 @@
  * unit-testable in isolation (see scripts/test-continue.ts).
  */
 
+import type { Lang } from "./state.js";
+
 /** The one-line prompt sent to the model when the user taps the button. */
 export const CONTINUE_PROMPT = "Tiếp tục phần còn lại, không hỏi lại.";
 
+/** Localized continue prompt (model-facing one-liner). */
+export function continuePrompt(lang: Lang = "vi"): string {
+  return lang === "en" ? "Continue with the rest, don't ask again." : CONTINUE_PROMPT;
+}
+
 /** Button label (Vietnamese, per repo convention). */
 export const CONTINUE_BUTTON_LABEL = "⏯ Chạy tiếp";
+
+/** Localized continue-button label. */
+export function continueButtonLabel(lang: Lang = "vi"): string {
+  return lang === "en" ? "⏯ Continue" : CONTINUE_BUTTON_LABEL;
+}
 
 /** Prefix that marks a continue-button callback (distinct from fq:/mode:/pb:/…). */
 export const CONTINUE_CB_PREFIX = "cont:";
