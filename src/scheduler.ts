@@ -157,6 +157,13 @@ export class Scheduler {
   private timer?: ReturnType<typeof setInterval>;
   /** Re-entrancy guard: a slow dispatch must never let two ticks overlap. */
   private ticking = false;
+  /** Epoch ms when the latest tick pass began (0 = none yet). Read by /health. */
+  lastTickAt = 0;
+
+  /** Interval between ticks, ms. Read by /health to judge staleness. */
+  get intervalMs(): number {
+    return this.tickMs;
+  }
 
   constructor(private readonly deps: SchedulerDeps) {
     this.tickMs = deps.tickMs ?? DEFAULT_TICK_MS;
@@ -195,6 +202,7 @@ export class Scheduler {
     this.ticking = true;
     try {
       const now = this.deps.now();
+      this.lastTickAt = now;
       const { store } = this.deps;
       // The pass awaits dispatches that take seconds, during which /schedule
       // add|pause|rm may edit the file. So never write back a list loaded at the

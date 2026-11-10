@@ -7,7 +7,7 @@
  * Run:  npx tsx scripts/test-multi.ts
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { convKey, parseConv, chatOf } from "../src/conv.js";
@@ -17,6 +17,7 @@ import { McpBridge } from "../src/mcp-bridge.js";
 import { addWorktree, diffSummary, gitRoot, mergeWorktree, removeWorktree } from "../src/worktree.js";
 import { Orchestrator, Host } from "../src/orchestrator.js";
 import { BusyNoteStore } from "../src/notes.js";
+import { configureAudit } from "../src/audit.js";
 import { loadConfig, type Config } from "../src/config.js";
 
 let failures = 0;
@@ -237,6 +238,30 @@ const repo = join(tmp, "repo");
   check("approved plan worker is read-only", st.findWorker("42", "docs")?.[1].worker?.writes === false);
   check("stale approval tap is refused", (await orch.handleCallback({ id: "c2", data: okBtn![0] } as any, "42", 9)) && sessions === before + 1);
   check("an old card's id (pre-restart counter) matches nothing", (await orch.handleCallback({ id: "c3", data: "ap:1:ok" } as any, "42", 9)) && /hết hạn/.test(sent.join("\n") + ""));
+
+  // Audit trail: spawn, approve and reject each leave one JSONL entry (and nothing leaks).
+  {
+    const auditPath = join(tmp, "audit.log");
+    configureAudit({ path: auditPath });
+    const SECRET = `ghp_${"a1B2c3D4".repeat(4)}xyZw`;
+    await tool("spawn_worker").run({ name: "audit-ok", directory: root, task: `use ${SECRET}`, agent: "plan" });
+    const okId = JSON.stringify(lastKb).match(/ap:([0-9a-f]+):ok/)![1];
+    await orch.handleCallback({ id: "a1", data: `ap:${okId}:ok`, from: { id: 7 } } as any, "42", 9);
+    await tool("spawn_worker").run({ name: "audit-no", directory: root, task: "nope", agent: "plan" });
+    const noId = JSON.stringify(lastKb).match(/ap:([0-9a-f]+):no/)![1];
+    await orch.handleCallback({ id: "a2", data: `ap:${noId}:no`, from: { id: 7 } } as any, "42", 9);
+    const rows = readFileSync(auditPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const by = (action: string) => rows.filter((r) => r.action === action);
+    check("audit: approved dispatch is logged with the approver", by("dispatch_approve").some((r) => r.userId === 7 && r.outcome === "ok" && /audit-ok/.test(r.text)));
+    check("audit: the resulting spawn is logged with session + dir", by("spawn").some((r) => /audit-ok/.test(r.text) && r.outcome === "ok" && !!r.session && !!r.dir));
+    check("audit: rejected dispatch is logged", by("dispatch_reject").some((r) => r.userId === 7 && r.outcome === "rejected" && /audit-no/.test(r.text)));
+    check("audit: a rejected dispatch spawns nothing", !by("spawn").some((r) => /audit-no/.test(r.text)));
+    check("audit: secrets in task text are redacted", !readFileSync(auditPath, "utf8").includes(SECRET));
+    configureAudit({ path: join(tmp, "audit-unused.log") }); // detach from the shared file for later sections
+    // Free the busy slot the audit worker took, so later sections see the same capacity as before.
+    orch.onExecution(st.findWorker("42", "audit-ok")![0], "session.execution.succeeded");
+    await new Promise((res) => setTimeout(res, 50));
+  }
 
   // Advisor tools: present only when the host has an advisor; start vs resume; agent choice.
   {

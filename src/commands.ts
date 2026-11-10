@@ -91,6 +91,7 @@ export const COMMANDS: BotCommand[] = [
   { cmd: "rotation", desc: "Sức khoẻ xoay phiên Manager (nền + lịch sử)", descEn: "Manager session rotation health (floor + history)", button: "♻️ Rotation", group: "control" },
   { cmd: "history", desc: "Xem tin nhắn gần đây", descEn: "View recent messages", button: "📜 Lịch sử", buttonEn: "📜 History", group: "control" },
   { cmd: "status", desc: "Trạng thái kết nối", descEn: "Connection status", button: "🔌 Trạng thái", buttonEn: "🔌 Status", group: "control" },
+  { cmd: "health", desc: "Sức khoẻ các hệ thống nền (OK / cảnh báo / lỗi)", descEn: "Health of the background subsystems (OK / warn / fail)", group: "control" },
   { cmd: "reboot", desc: "Reboot máy (2 bước xác nhận)", descEn: "Reboot the machine (2-step confirm)", button: "🔄 Reboot", group: "control" },
   { cmd: "clear", desc: "Xoá state của chat này", descEn: "Clear this chat's state", button: "🧹 Xoá state", buttonEn: "🧹 Clear state", group: "control" },
   { cmd: "schedule", arg: "<spec> <prompt>", desc: "Đặt lịch chạy prompt tự động", descEn: "Schedule an automated prompt run", button: "⏰ Lịch", buttonEn: "⏰ Schedule", group: "control" },

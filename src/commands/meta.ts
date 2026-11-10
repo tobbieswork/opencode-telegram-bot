@@ -13,6 +13,8 @@ import { appendNote, noteEntryText, showNotes, BUSY_REPLY_TEXT, parseNoteCallbac
 import { warn } from "../logger.js";
 import { QUESTIONS_PREAMBLE, NOTES_KEY } from "../shared.js";
 import { renderRotationReport } from "../rotation-health.js";
+import { collectHealth, formatHealth } from "../health.js";
+import { buildProbes } from "../health-probes.js";
 import { tr, STRINGS } from "../i18n.js";
 import type { Lang } from "../state.js";
 
@@ -106,6 +108,18 @@ function deployedVersion(): Promise<string> {
       res(e ? "" : out.trim())
     )
   );
+}
+
+/**
+ * /health — one line per background subsystem (OpenCode, bridge, scheduler,
+ * PR-watch, advisor, uptime, DNS heal). Read-only: it only reads the signals
+ * the subsystems already keep, plus two cheap liveness pings.
+ */
+export async function cmdHealth(bot: Bot, conv: ConvKey, uid: number | string | undefined): Promise<void> {
+  const lang = bot.userPrefs.getLang(uid ?? "");
+  const now = Date.now();
+  const lines = await collectHealth(buildProbes(bot.healthSources(), () => now), now);
+  await bot.sendHtml(conv, formatHealth(lines, lang, now));
 }
 
 export async function cmdStatus(bot: Bot, conv: ConvKey, state: ChatState): Promise<void> {

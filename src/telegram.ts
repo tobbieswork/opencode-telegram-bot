@@ -160,6 +160,17 @@ export class Telegram {
   private abort = new AbortController();
   private healState: HealState | null = null;
   private onDnsHeal?: PollOptions["onDnsHeal"];
+  /** Epoch ms of the last successful getUpdates round-trip (0 = none yet). Read by /health. */
+  private lastPollOkAt = 0;
+
+  /** Snapshot of the DNS-heal counters + last good poll, for /health (read-only). */
+  dnsHealStatus(): { consecutiveFailures: number; healCount: number; lastPollOkAt?: number } {
+    return {
+      consecutiveFailures: this.healState?.consecutiveFailures ?? 0,
+      healCount: this.healState?.healCount ?? 0,
+      lastPollOkAt: this.lastPollOkAt || undefined,
+    };
+  }
 
   /**
    * A forum topic the user deleted in the Telegram UI. Telegram has NO event
@@ -591,6 +602,7 @@ export class Telegram {
             timeout: 30,
             allowed_updates: ["message", "callback_query", "stopped_message_generation", "message_reaction"],
           }, this.abort.signal)) ?? [];
+        this.lastPollOkAt = Date.now();
         if (this.healState) recordSuccess(this.healState);
       } catch (e) {
         if (this.stopped) break;
