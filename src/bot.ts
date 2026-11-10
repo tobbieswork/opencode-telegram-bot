@@ -53,6 +53,7 @@ import { myCommands } from "./commands.js";
 import { dropNotes, prepareNotes, BUSY_REPLY_TEXT, noteButtonLabel, NOTE_CB_PREFIX, noteCallbackData, BusyNoteStore } from "./notes.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
 import { log, warn, error } from "./logger.js";
+import { audit } from "./audit.js";
 import { QUESTIONS_PREAMBLE, NOTES_KEY } from "./shared.js";
 import type { Btn, Keyboard } from "./shared.js";
 import { cmdAgents, cmdAgent, handleAgentCallback } from "./commands/agents.js";
@@ -1953,6 +1954,7 @@ export class Bot {
       const ac = new AbortController();
       this.inflight.set(conv, ac);
       log(`[chat ${conv}] prompt on ${sid} (${text.length} chars)`);
+      audit({ action: "prompt", userId: this.st.peek(conv)?.createdBy, chatId: conv, session: sid, dir: state.directory || this.cfg.opencodeDirectory, outcome: "accepted", text });
       // Fire-and-forget: don't block the polling loop; /stop aborts `ac`.
       void this.runPromptTask(conv, sid, promptText, ac, userMsgId, lang).catch((e) => error("prompt task:", e?.message));
     } catch (e) {

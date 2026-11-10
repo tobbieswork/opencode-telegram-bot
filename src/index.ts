@@ -7,6 +7,7 @@ import { Telegram } from "./telegram.js";
 import { StateManager } from "./state.js";
 import { Bot } from "./bot.js";
 import { log, warn, error } from "./logger.js";
+import { configureAudit } from "./audit.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -38,6 +39,10 @@ async function main(): Promise<void> {
   log(`State file: ${cfg.stateFile}`);
 
   const st = new StateManager(cfg.stateFile);
+  // Append-only trail of prompts / spawns / dispatch decisions, next to the state file.
+  const auditFile = join(dirname(cfg.stateFile), "audit.log");
+  configureAudit({ path: auditFile });
+  log(`Audit log: ${auditFile}`);
   // Sweep stale uploads (TTL + 500 MB cap) — data/uploads is bot-owned, never
   // part of a user repo (see src/uploads.ts). One log line per startup.
   const sweep = sweepUploads(join(dirname(cfg.stateFile), "uploads"), Date.now(), {

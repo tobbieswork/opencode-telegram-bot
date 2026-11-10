@@ -15,6 +15,7 @@ import { buildHandoffPrompt, followUpsFromMessages, respawnName, respawnNotice, 
 import { scriptInstruction } from "./sandbox/scriptPreamble.js";
 import { ICON, esc, trunc, timeAgo, stripTags, mdToHtmlChunks } from "./format.js";
 import { log, warn } from "./logger.js";
+import { audit } from "./audit.js";
 import { BUSY_REPLY_TEXT, NOTE_BUTTON_LABEL, noteCallbackData, BusyNoteStore } from "./notes.js";
 import { queueReport } from "./orchestrator/report.js";
 import { purgeConv, cmdPrune, handlePruneCallback } from "./orchestrator/purge.js";
@@ -604,7 +605,13 @@ export class Orchestrator {
     pending.add(name);
     this.reserved.set(chat, pending);
     try {
-      return await this.spawnReserved(chat, name, spec);
+      const res = await this.spawnReserved(chat, name, spec);
+      const ws = this.h.st.get(res.conv);
+      audit({ action: "spawn", userId: this.h.st.peek(chat)?.createdBy, chatId: chat, session: ws.sessionID, dir: ws.directory, outcome: "ok", text: `${name}${spec.spawnedBy ? ` (by ${spec.spawnedBy})` : ""}: ${spec.task ?? ""}` });
+      return res;
+    } catch (e) {
+      audit({ action: "spawn", userId: this.h.st.peek(chat)?.createdBy, chatId: chat, dir: spec.directory, outcome: `error: ${(e as Error).message}`, text: `${name}: ${spec.task ?? ""}` });
+      throw e;
     } finally {
       pending.delete(name);
       if (!pending.size) this.reserved.delete(chat);
@@ -1143,6 +1150,8 @@ export class Orchestrator {
       this.dropManagerTurn(conv); // the prompt was never accepted — don't stay busy forever
       throw e;
     }
+    const ms = this.h.st.get(conv);
+    audit({ action: "prompt_manager", userId: ms.createdBy, chatId: conv, session: ms.sessionID, dir: ms.directory, outcome: "accepted", text });
     this.h.startTyping(conv);
     this.h.startWorking(conv, lang); // "⏳ Đang xử lý…" for the manager turn (event-stream-driven, not runPrompt)
   }
@@ -1269,7 +1278,9 @@ export class Orchestrator {
     this.approvals.delete(id);
     await this.h.tg.answerCallbackQuery(cb.id);
     const what = a.kind === "spawn" ? tr(lang, `tạo worker ${a.spawn?.name}`, `create worker ${a.spawn?.name}`) : tr(lang, `gửi việc cho ${a.send?.name}`, `assign work to ${a.send?.name}`);
+    const auditText = a.kind === "spawn" ? `spawn ${a.spawn?.name}: ${a.spawn?.task ?? ""}` : `send ${a.send?.name}: ${a.send?.message ?? ""}`;
     if (op === "no") {
+      audit({ action: "dispatch_reject", userId: cb.from?.id, chatId: a.chat, outcome: "rejected", text: auditText });
       if (messageId) await this.h.tg.editMessageText(conv, messageId, tr(lang, `❌ Đã huỷ: ${esc(what)}.`, `❌ Cancelled: ${esc(what)}.`)).catch(() => {});
       queueReport(this, a.chat, `[approval #${id}] REJECTED by the user: ${what}. Do not retry it; ask the user what to do instead if needed.`);
       return;
@@ -1277,6 +1288,7 @@ export class Orchestrator {
     if (op === "auto") this.h.st.set(a.chat, { auto: true });
     try {
       const result = await this.execApproved(a);
+      audit({ action: "dispatch_approve", userId: cb.from?.id, chatId: a.chat, outcome: op === "auto" ? "ok+auto_on" : "ok", text: auditText });
       if (messageId) {
         await this.h.tg
           .editMessageText(conv, messageId, tr(lang, `✅ Đã duyệt: ${esc(what)}.${op === "auto" ? "\n⚡ Auto đã bật — các lần sau không hỏi nữa (/auto off để tắt)." : ""}`, `✅ Approved: ${esc(what)}.${op === "auto" ? "\n⚡ Auto mode on — no more prompts (/auto off to disable)." : ""}`))
@@ -1285,6 +1297,7 @@ export class Orchestrator {
       queueReport(this, a.chat, `[approval #${id}] APPROVED by the user: ${result}.${op === "auto" ? " Auto mode is now on." : ""}`);
     } catch (e) {
       const msg = (e as Error).message;
+      audit({ action: "dispatch_approve", userId: cb.from?.id, chatId: a.chat, outcome: `error: ${msg}`, text: auditText });
       if (messageId) await this.h.tg.editMessageText(conv, messageId, tr(lang, `⚠️ Duyệt nhưng thất bại: ${esc(msg)}`, `⚠️ Approved but failed: ${esc(msg)}`)).catch(() => {});
       queueReport(this, a.chat, `[approval #${id}] approved but FAILED: ${msg}`);
     }
