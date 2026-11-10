@@ -44,6 +44,7 @@ export interface AdvisorHost {
   userPrefs?: UserPrefsStore;
   sendHtml(conv: ConvKey, html: string): Promise<void>;
   startTyping?(conv: ConvKey): void;
+  stopTyping?(conv: ConvKey): void;
 }
 
 export interface ThreadSummary {
@@ -144,6 +145,8 @@ export class Advisor {
       await this.h.tg.deleteForumTopic(conv).catch(() => {});
       this.h.st.clear(conv);
       throw e;
+    } finally {
+      this.h.stopTyping?.(conv);
     }
   }
 
@@ -212,6 +215,7 @@ export class Advisor {
       throw e;
     } finally {
       this.busy.delete(conv);
+      this.h.stopTyping?.(conv);
     }
     const next = {
       ...adv,

@@ -390,7 +390,7 @@ export class Bot {
     this.userPrefs = new UserPrefsStore(join(dirname(this.cfg.stateFile), "users.json"));
     if (this.cfg.advisor) {
       this.advisor = new Advisor(
-        { tg, st, cfg, userPrefs: this.userPrefs, sendHtml: (c, h) => this.sendHtml(c, h), startTyping: (c) => this.startTyping(c) },
+        { tg, st, cfg, userPrefs: this.userPrefs, sendHtml: (c, h) => this.sendHtml(c, h), startTyping: (c) => this.startTyping(c), stopTyping: (c) => this.stopTyping(c) },
         { url: this.cfg.advisorUrl, token: this.cfg.advisorToken },
       );
     }
