@@ -54,12 +54,14 @@ import { dropNotes, prepareNotes, BUSY_REPLY_TEXT, noteButtonLabel, NOTE_CB_PREF
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
 import { log, warn, error } from "./logger.js";
 import { audit } from "./audit.js";
+import { advisorHealth } from "./advisor/advisor-client.js";
+import type { HealthSources } from "./health-probes.js";
 import { QUESTIONS_PREAMBLE, NOTES_KEY } from "./shared.js";
 import type { Btn, Keyboard } from "./shared.js";
 import { cmdAgents, cmdAgent, handleAgentCallback } from "./commands/agents.js";
 import { cmdSchedule, handleScheduleCallback } from "./commands/schedule.js";
 import { Advisor } from "./advisor/advisor.js";
-import { cmdHelp, cmdStatus, cmdContext, cmdUsage, cmdHistory, cmdNote, cmdRotation, handleNoteCallback, cmdLang } from "./commands/meta.js";
+import { cmdHelp, cmdStatus, cmdHealth, cmdContext, cmdUsage, cmdHistory, cmdNote, cmdRotation, handleNoteCallback, cmdLang } from "./commands/meta.js";
 import { cmdBtw } from "./btw.js";
 import { cmdAsk } from "./ask.js";
 import { reviewPrompt, reviewUsage } from "./review.js";
@@ -300,6 +302,10 @@ export class Bot {
   private reminders = new Map<string, ReturnType<typeof setTimeout>>();
   private uptimeTimer?: ReturnType<typeof setInterval>;
   private prWatchTimer?: ReturnType<typeof setInterval>;
+  /** Health signals (read by /health): last good pr-watch tick, its latest error, last good uptime check. */
+  private prWatchLastOkAt?: number;
+  private prWatchLastError?: string;
+  private uptimeLastOkAt?: number;
   private rotationTimer?: ReturnType<typeof setInterval>;
   /** True while a PR-watch tick is running, so a slow tick can't overlap the next. */
   private prWatchBusy = false;
@@ -487,6 +493,32 @@ export class Bot {
     this.scheduler?.stop();
   }
 
+  /**
+   * Plain facts about each background subsystem, for /health. Reads state the
+   * subsystems already keep; nothing here starts work or changes anything.
+   */
+  healthSources(): HealthSources {
+    const dns = this.tg.dnsHealStatus();
+    return {
+      opencode: async () => {
+        const info = await this.oc.serverInfo();
+        return { version: info?.version };
+      },
+      bridge: { enabled: this.orch.hasManager(), check: () => this.orch.bridgeHealth() },
+      scheduler: { enabled: !!this.scheduler, lastTickAt: this.scheduler?.lastTickAt ?? 0, tickMs: this.scheduler?.intervalMs ?? 30_000 },
+      prWatch: { enabled: this.cfg.prWatch && !!this.cfg.prWatchRepo, intervalMs: this.cfg.prWatchIntervalMs, lastOkAt: this.prWatchLastOkAt, lastError: this.prWatchLastError },
+      advisor: { enabled: !!this.advisor, ping: () => advisorHealth({ url: this.cfg.advisorUrl, token: this.cfg.advisorToken }) },
+      uptime: { enabled: this.cfg.uptimeMonitor, lastOkAt: this.uptimeLastOkAt },
+      dnsHeal: {
+        enabled: this.cfg.dnsHeal && this.cfg.dnsStaleIp !== "",
+        consecutiveFailures: dns.consecutiveFailures,
+        minFailures: this.cfg.dnsHealMinFailures,
+        healCount: dns.healCount,
+        lastPollOkAt: dns.lastPollOkAt,
+      },
+    };
+  }
+
   /** Register fire-and-forget reply work so a shutdown drain waits for it. */
   private trackPending(p: Promise<void>): void {
     this.pendingSends.add(p);
@@ -557,6 +589,7 @@ export class Bot {
       return; // non-Linux / unreadable — silently skip (not fatal to the bot)
     }
     if (uptimeSec === undefined) return;
+    this.uptimeLastOkAt = Date.now();
     const machine = this.st.peek(MACHINE_STATE_KEY) ?? {};
     const now = Date.now();
     const should = shouldRemindAboutReboot({
@@ -975,8 +1008,11 @@ export class Bot {
         for (const ev of events) await this.tg.sendMessage(conv, renderEvent(ev, repo, lang)).catch(() => {});
       }
       this.st.set(MACHINE_STATE_KEY, { prWatchSnapshot: next });
+      this.prWatchLastOkAt = Date.now();
+      this.prWatchLastError = undefined;
     } catch (e) {
       warn("pr-watch tick:", (e as Error).message);
+      this.prWatchLastError = (e as Error).message;
     } finally {
       this.prWatchBusy = false;
     }
@@ -1845,6 +1881,8 @@ export class Bot {
         return this.cmdReboot(conv);
       case "/status":
         return cmdStatus(this, conv, state);
+      case "/health":
+        return cmdHealth(this, conv, uid);
       case "/context":
       case "/ctx":
         return cmdContext(this, conv, state);

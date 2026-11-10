@@ -151,6 +151,7 @@ bot:   The last commit adds retry logic but…
 | `/prune [days]` | Clean up finished worker topics (default: older than 7 days) |
 | `/usage` | Context usage per session, with a near-overflow warning |
 | `/rotation` | Manager session rotation health (context floor + history) |
+| `/health` | One line per background subsystem (OpenCode, bridge, scheduler, PR-watch, advisor, uptime, DNS heal): OK / warn / fail / off, with time of last success |
 | `/schedule <spec> <prompt>` | Schedule a prompt to run automatically |
 | `/lang vi\|en` | Set the language: `vi` (Tiếng Việt) or `en` (English) |
 | `/reboot` | Reboot the machine (2-step confirmation) |

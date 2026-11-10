@@ -281,6 +281,25 @@ export class Orchestrator {
     }
   }
 
+  /** True when at least one chat has the Manager on (the bridge only matters then). Read by /health. */
+  hasManager(): boolean {
+    return Object.values(this.h.st.all()).some((s) => s.manager);
+  }
+
+  /**
+   * Read-only twin of healBridge for /health: report whether each Manager
+   * chat's tg-bridge is connected, without re-registering anything.
+   */
+  async bridgeHealth(): Promise<{ ok: boolean; detail?: string }> {
+    const bad: string[] = [];
+    for (const [conv, s] of Object.entries(this.h.st.all())) {
+      if (!s.manager) continue;
+      const st = await this.h.oc.mcpStatus(this.managerDir(chatOf(conv)), BRIDGE_NAME).catch((e) => ({ status: `unreachable (${(e as Error).message})` }));
+      if (st.status !== "connected") bad.push(`${chatOf(conv)}: ${st.status}`);
+    }
+    return bad.length ? { ok: false, detail: `tg-bridge ${bad.join(", ")}` } : { ok: true };
+  }
+
   /**
    * Worker status only moves on live events, so after a restart or a dropped
    * stream a worker can look busy long after its turn ended. Ask the server
