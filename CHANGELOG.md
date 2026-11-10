@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.18.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.17.1...opencode-telegram-bot-v1.18.0) (2026-11-10)
+
+
+### Features
+
+* add /health command for background subsystem status ([7667cb4](https://github.com/tobbieswork/opencode-telegram-bot/commit/7667cb41ea9824f47b292777145c0be7066bce9d))
+* add append-only audit log for prompts, spawns and dispatches ([a572833](https://github.com/tobbieswork/opencode-telegram-bot/commit/a5728331d302a0727bae383a077d3efc1929789d))
+* Phase 1 foundations (doc-sync, audit log, /health) ([e5e0735](https://github.com/tobbieswork/opencode-telegram-bot/commit/e5e073590e29702d766d7c49cfe0f36966c08286))
+
 ## [1.17.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.17.0...opencode-telegram-bot-v1.17.1) (2026-11-10)
 
 
