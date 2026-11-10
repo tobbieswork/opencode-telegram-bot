@@ -58,7 +58,7 @@
     "smoke:multi": "tsx scripts/smoke-multi.ts"
   },
   "dependencies": {
-    "@opencode/client": "^2.1.2"
+    "@opencode/client": "^2.2.6"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
