@@ -129,6 +129,7 @@ bot:   The last commit adds retry logic but…
 | `/models` | List available models |
 | `/model <id>` | Set the model (also accepts `provider/id`) |
 | `/variants [id]` | List/set the model's reasoning variant (default `xhigh`) |
+| `/variant <name>` | Set the reasoning variant directly |
 | `/agents` | List user-facing agents |
 | `/agent <id>` | Set the agent (`build`, `general`, `explore`, `plan`) |
 | `/mode` | Pick an operating mode via buttons — `build` / `plan` / `general` / `explore` |
@@ -144,6 +145,15 @@ bot:   The last commit adds retry logic but…
 | `/auto on\|off` | Manager dispatches on its own, or waits for your ✅ |
 | `/wt` | In a worker topic: diff / merge / remove its git worktree |
 | `/ask [claude\|gemini] <question>` | Second opinion from another model, in its own topic (see below) |
+| `/note [text]` | Jot a note while the agent is busy (empty = view notes) |
+| `/btw <question>` | Quick question on a temporary session, without touching the Manager's context |
+| `/review [PR\|branch\|commit]` | Read-only code review using the `review-code` skill |
+| `/prune [days]` | Clean up finished worker topics (default: older than 7 days) |
+| `/usage` | Context usage per session, with a near-overflow warning |
+| `/rotation` | Manager session rotation health (context floor + history) |
+| `/schedule <spec> <prompt>` | Schedule a prompt to run automatically |
+| `/lang vi\|en` | Set the language: `vi` (Tiếng Việt) or `en` (English) |
+| `/reboot` | Reboot the machine (2-step confirmation) |
 
 ### When OpenCode asks a question
 
@@ -261,6 +271,38 @@ All settings are environment variables (see `.env.example`).
 | `OPENCODE_TG_WORKTREE` | | `auto` | Worktree isolation for writing workers: `auto` / `always` / `off` |
 | `OPENCODE_TG_MANAGER_DIR` | | `./data/manager` | Where each chat's Manager session and agent file live |
 | `OPENCODE_TG_BRIDGE_PORT` | | random | Port of the Manager's local MCP bridge |
+| `OPENCODE_TG_WORKING` | | on | `0` = hide the "working…" line shown in the main chat while the Manager works |
+| `OPENCODE_TG_AUTO_CLOSE` | | on | `0` = keep a worker's topic open when the worker finishes |
+| `OPENCODE_TG_RECOVER_OVERFLOW` | | off | `1` = respawn a worker once (same directory, with the original task and git evidence) when it overflows. Spends tokens and runs a write agent unattended |
+| `OPENCODE_TG_RICH` | | off | `1` = send rich (server-side GFM) replies |
+| `OPENCODE_TG_STREAM` | | off | `1` = stream live drafts while the agent answers |
+| `OPENCODE_TG_REACT` | | off | `1` = reaction UX: react to a worker's report to act on it, and the bot reacts to prompts and results (needs `message_reaction` updates) |
+| `OPENCODE_TG_UPLOADS` | | off | `1` = accept document/photo uploads and attach their path to the prompt |
+| `OPENCODE_TG_UPLOAD_MAX_MB` | | `20` | Per-file upload cap in MB (Telegram Bot API ceiling is 20) |
+| `OPENCODE_TG_UPLOAD_TTL_DAYS` | | `7` | Days before saved uploads are cleaned up |
+| `OPENCODE_TG_USAGE_WARN_PCT` | | `80` | `/usage` warns when a session's context passes this percent |
+| `OPENCODE_TG_USAGE_MAX_ROWS` | | `10` | Max sessions listed by `/usage` |
+| `OPENCODE_TG_USAGE_ACTIVE_HOURS` | | `24` | Only sessions active within this many hours appear in `/usage` |
+| `OPENCODE_TG_SCHEDULE` | | on | `0` = turn `/schedule` off |
+| `OPENCODE_TG_TIMEZONE` | | system | IANA timezone used to read schedule times (invalid values fall back to the default with a warning) |
+| `OPENCODE_TG_MAX_SCHEDULES` | | `10` | Max schedules per chat |
+| `OPENCODE_TG_SCHEDULE_GRACE_MIN` | | `60` | Minutes after a missed run during which it may still fire |
+| `OPENCODE_TG_SCHEDULE_TIMEOUT_MIN` | | `30` | Minutes before a scheduled run is treated as timed out |
+| `OPENCODE_TG_ROTATION_AUTO_FLOOR_K` | | `110` | Auto-rotate the Manager's session when its context floor passes this many thousand tokens |
+| `OPENCODE_TG_ROTATION_CONFIRM_FLOOR_K` | | `90` | Between this and the auto threshold, offer a confirm button when the Manager is idle |
+| `OPENCODE_TG_ROTATION_MIN_INTERVAL_H` | | `24` | Minimum hours between two rotations |
+| `OPENCODE_TG_ROTATION_CONFIRM_REPROMPT_H` | | `12` | Minimum hours before the rotation confirm is offered again |
+| `OPENCODE_TG_PR_WATCH` | | off | `1` = poll GitHub for pull-request changes |
+| `OPENCODE_TG_PR_WATCH_REPO` | | — | Repository to watch, `owner/repo` (empty keeps the watcher off even when enabled) |
+| `OPENCODE_TG_PR_WATCH_INTERVAL_MS` | | `300000` | Poll interval in ms (min 60000) |
+| `OPENCODE_TG_UPTIME_MONITOR` | | on | `0` = don't nudge about rebooting after long uptime |
+| `OPENCODE_TG_UPTIME_THRESHOLD_DAYS` | | `30` | Uptime in days before the reboot nudge |
+| `OPENCODE_TG_UPTIME_REMIND_INTERVAL_DAYS` | | `3` | Days before the nudge repeats after a snooze |
+| `OPENCODE_TG_REBOOT_DELAY_MS` | | `15000` | Delay between confirming `/reboot` and the reboot, so the reply gets delivered (min 1000) |
+| `OPENCODE_TG_DNS_HEAL` | | on | `0` = turn off the stale-VPN-DNS self-heal (restarts `systemd-resolved` after repeated fetch failures) |
+| `OPENCODE_TG_DNS_STALE_IP` | | — | The VPN DNS server IP that lingers after an unclean VPN stop (empty keeps the heal off) |
+| `OPENCODE_TG_DNS_HEAL_MIN_FAILURES` | | `3` | Consecutive network failures before a heal may run |
+| `OPENCODE_TG_DNS_HEAL_COOLDOWN_MS` | | `600000` | Minimum gap between two heals, in ms |
 | `ADVISOR_URL` + `ADVISOR_TOKEN` | | off | Advisor daemon URL + shared token — both set turns `/ask` on (old names `MAC_ADVISOR_*` still work) |
 | `ADVISOR_DEFAULT_AGENT` | | `claude` | Agent for `/ask` / `consult` when none is named: `claude` or `gemini` |
 
