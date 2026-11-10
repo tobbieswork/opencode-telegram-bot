@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.17.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.17.0...opencode-telegram-bot-v1.17.1) (2026-11-10)
+
+
+### Bug Fixes
+
+* stop leaked typing indicator on advisor thread/followup ([8a4e2c8](https://github.com/tobbieswork/opencode-telegram-bot/commit/8a4e2c89f20bb4da4465b2d24e720b17c8bc32c4))
+* stop leaked typing indicator on advisor thread/followup ([c60f88e](https://github.com/tobbieswork/opencode-telegram-bot/commit/c60f88e5ac3a7433fc6a953589cc214cf2cdb94d))
+
 ## [1.17.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.16.2...opencode-telegram-bot-v1.17.0) (2026-11-08)
 
 
