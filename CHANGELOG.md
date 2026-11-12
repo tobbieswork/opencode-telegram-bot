@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.21.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.21.0...opencode-telegram-bot-v1.21.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* **quick-replies:** tuned instruction — explicit triggers + worked example ([a79b4f3](https://github.com/tobbieswork/opencode-telegram-bot/commit/a79b4f3396f64d49ca5737e4359de17464d0e6f9))
+* **quick-replies:** tuned instruction — explicit triggers + worked example ([4315889](https://github.com/tobbieswork/opencode-telegram-bot/commit/4315889de54938793368b473c291035303d0b081))
+
 ## [1.21.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.20.1...opencode-telegram-bot-v1.21.0) (2026-11-12)
 
 
