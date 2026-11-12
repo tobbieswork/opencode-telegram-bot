@@ -187,6 +187,11 @@ function check(name: string, cond: boolean, detail?: string): void {
   // More than 8 options → only first 8 rendered.
   const many = choiceKeyboard("abcd", Array.from({ length: 12 }, (_, i) => `opt${i}`));
   check(">8 options → 8 rows", many.inline_keyboard.length === 8, `got ${many.inline_keyboard.length}`);
+
+  // noTruncate (quick replies, R1.3): the label equals the sent text (cap 56).
+  const nt56 = "y".repeat(56);
+  check("noTruncate keeps a 56-char label in full", choiceKeyboard("abcd", [nt56], true).inline_keyboard[0][0].text === nt56);
+  check("default (lettered list) still truncates long labels", choiceKeyboard("abcd", [nt56]).inline_keyboard[0][0].text.length <= 41);
 }
 
 // ── registry ───────────────────────────────────────────────────────────────────

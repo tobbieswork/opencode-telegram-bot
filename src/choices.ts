@@ -218,9 +218,11 @@ export function extractOptionsMarker(markdown: string): OptionsMarker | null {
  * short registry key, i the option index) — well under Telegram's 64-byte cap,
  * and carrying no option text.
  */
-export function choiceKeyboard(id: string, options: string[]): Keyboard {
+export function choiceKeyboard(id: string, options: string[], noTruncate = false): Keyboard {
+  // noTruncate (quick replies, R1.3): the label must equal the text that will be
+  // sent, so it is never cut — R1.3 already caps each option at 56 chars.
   const rows: Btn[][] = options.slice(0, 8).map((t, i) => [
-    { text: t.length > 40 ? t.slice(0, 40) + "…" : t, callback_data: `ch:${id}:${i}` },
+    { text: noTruncate ? t : t.length > 40 ? t.slice(0, 40) + "…" : t, callback_data: `ch:${id}:${i}` },
   ]);
   return { inline_keyboard: rows };
 }
