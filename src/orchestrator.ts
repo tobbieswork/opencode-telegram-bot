@@ -24,7 +24,7 @@ import { queueReport } from "./orchestrator/report.js";
 import { purgeConv, cmdPrune, handlePruneCallback } from "./orchestrator/purge.js";
 import { onTopicDeleted, reapPendingTopicDeletes } from "./orchestrator/topics.js";
 import { workerIntroHtml, approvalLines } from "./orchestrator/templates.js";
-import { applyLanguagePin } from "./language.js";
+import { applyLanguagePin, detectTaskLang } from "./language.js";
 import { applySuggestPin } from "./suggest.js";
 import type { Schedule } from "./schedule.js";
 import type { Advisor } from "./advisor/advisor.js";
@@ -777,6 +777,10 @@ export class Orchestrator {
       worker,
     });
     await this.h.applyModelAndVariant(sessionID, this.h.st.get(conv));
+    // Workers mirror the task language: an English task pins the session to
+    // English (the model otherwise drifts to Vietnamese here); a Vietnamese
+    // task needs no pin — it is the model's natural default.
+    await applyLanguagePin(this.h.oc, this.h.st, conv, sessionID, detectTaskLang(spec.task ?? ""));
     log(`[chat ${chat}] spawned worker ${name} (${agent}) in ${directory}`);
 
     // Deep-link button so the user can jump from the main topic into the worker's topic.

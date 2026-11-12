@@ -6,12 +6,13 @@
  *   - languageInstructionFor: "en" → the pin, "vi"/unset → null.
  *   - applyLanguagePin: sets the pin for "en", is idempotent per session,
  *     clears it on "vi"/unset, and is best-effort (never throws).
+ *   - detectTaskLang: EN/VN heuristic on the raw task text (VN diacritics).
  *   - workerIntroHtml: en reproduces the original wording, vi localizes.
  *   - approvalLines: en is fully English, vi fully Vietnamese.
  *
  * Run:  npx tsx scripts/test-language.ts
  */
-import { languageInstructionFor, applyLanguagePin, LANGUAGE_EN_INSTRUCTION, type InstructionCtl } from "../src/language.js";
+import { languageInstructionFor, applyLanguagePin, detectTaskLang, LANGUAGE_EN_INSTRUCTION, type InstructionCtl } from "../src/language.js";
 import { workerIntroHtml, approvalLines } from "../src/orchestrator/templates.js";
 import type { ConvKey } from "../src/conv.js";
 
@@ -31,6 +32,16 @@ const conv = "100:5" as ConvKey;
   check("en → the English pin", languageInstructionFor("en") === LANGUAGE_EN_INSTRUCTION);
   check("vi → null (no injection)", languageInstructionFor("vi") === null);
   check("unset → null (no injection)", languageInstructionFor(undefined) === null);
+}
+
+// ── detectTaskLang ───────────────────────────────────────────────
+{
+  check("pure English sentence → en", detectTaskLang("Fix the retry logic in the queue module and add unit tests.") === "en");
+  check("normal Vietnamese sentence → vn", detectTaskLang("Viết thử nghiệm cho module queue") === "vn");
+  check("EN task with 1-2 quoted VN words → en", detectTaskLang("Fix the bug in the queue module (xem thử lại)") === "en");
+  check("empty string → en", detectTaskLang("") === "en");
+  check("file paths + code identifiers → en", detectTaskLang("src/queue/retry.ts: export function backoff(attempt: number): number { return attempt * 100; }") === "en");
+  check("uppercase Đ sentence → vn", detectTaskLang("Định nghửa lại hàm này trong file src/queue.ts") === "vn");
 }
 
 // ── fakes ──────────────────────────────────────────────────────────────────────────

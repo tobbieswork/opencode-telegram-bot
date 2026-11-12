@@ -26,7 +26,7 @@ export const LANGUAGE_EN_INSTRUCTION = "Respond in English to all user messages.
  * The instruction text to inject for a language preference.
  * "en" → the English pin; "vi"/unset → null (no injection, behavioral mirror).
  */
-export function languageInstructionFor(lang: Lang | undefined): string | null {
+export function languageInstructionFor(lang: Lang | "vn" | undefined): string | null {
   return lang === "en" ? LANGUAGE_EN_INSTRUCTION : null;
 }
 
@@ -48,7 +48,7 @@ export async function applyLanguagePin(
   st: StateManager,
   conv: ConvKey,
   sessionID: string,
-  lang: Lang | undefined,
+  lang: Lang | "vn" | undefined,
 ): Promise<void> {
   const state = st.peek(conv);
   if (!state) return;
@@ -70,4 +70,14 @@ export async function applyLanguagePin(
     }
     st.set(conv, { languageEnSession: undefined });
   }
+}
+
+/** Every Vietnamese diacritical Latin letter (lowercase); the uppercase set is derived. */
+const VN_DIACRITICS_LOWER =
+  "áàảãạắằẳẵặấầẩẫậéèẻẽẹếềểễệíìỉïịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵđ";
+const VN_DIACRITICS_RE = new RegExp(`[${VN_DIACRITICS_LOWER}${VN_DIACRITICS_LOWER.toUpperCase()}]`, "g");
+
+/** Heuristic: VN diacritics are absent from English and code; a 3-char threshold tolerates a few quoted VN words in an EN task. */
+export function detectTaskLang(text: string): "en" | "vn" {
+  return (text.match(VN_DIACRITICS_RE)?.length ?? 0) >= 3 ? "vn" : "en";
 }
