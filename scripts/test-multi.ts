@@ -143,6 +143,7 @@ const repo = join(tmp, "repo");
   const prompts: { sid: string; text: string }[] = [];
   const replyOpts: any[] = [];
   let sessions = 0;
+  const instrCalls: { sid: string; key: string }[] = [];
   const tg: any = {
     createForumTopic: async (_chat: number, name: string) => (topics.push(name), 100 + topics.length),
     editForumTopic: async (_conv: string, name: string) => void topics.push(name),
@@ -162,6 +163,8 @@ const repo = join(tmp, "repo");
   };
   const oc: any = {
     createSession: async () => `ses_${++sessions}`,
+    setInstruction: async (sid: string, key: string) => void instrCalls.push({ sid, key }),
+    removeInstruction: async (sid: string, key: string) => void instrCalls.push({ sid, key: `rm:${key}` }),
     prompt: async (sid: string, text: string) => (prompts.push({ sid, text }), "msg_x"),
     interrupt: async () => {},
     removeSession: async (sid: string) => void removedSessions.push(sid),
@@ -205,6 +208,13 @@ const repo = join(tmp, "repo");
   check("spawn opens a topic named with status", topics[0] === "🟢 api-fix" && r.conv === "42:101");
   check("spawn binds a session to the topic", st.get("42:101").sessionID === "ses_1" && st.findChatBySession("ses_1") === "42:101");
   check("task is prompted with the worker preamble", prompts[0]?.sid === "ses_1" && /worker "api-fix"/.test(prompts[0].text) && /do X$/.test(prompts[0].text));
+  // Language mirror: an English task pins the fresh worker session to English.
+  check("English task pins the worker session to English", instrCalls.some((c) => c.sid === "ses_1" && c.key === "tgbot.language_en"));
+  // A Vietnamese task gets no pin (the model's natural default).
+  const vi = await spawn("vi-task", join(root, "proj"), { task: "Viết thử nghiệm cho module queue" });
+  check("Vietnamese task leaves the worker session unpinned", !instrCalls.some((c) => c.sid === st.get(vi.conv).sessionID && c.key === "tgbot.language_en"));
+  orch.onExecution(vi.conv, "session.execution.succeeded");
+  await new Promise((res) => setTimeout(res, 50));
   check("rejects a bad name", await throws(() => spawn("Bad Name!", root), /không hợp lệ/));
   check("rejects a duplicate name", await throws(() => spawn("api-fix", root), /Đã có worker/));
   check("rejects a dir outside the roots", await throws(() => spawn("w2", join(tmp, "outside")), /ngoài vùng/));
