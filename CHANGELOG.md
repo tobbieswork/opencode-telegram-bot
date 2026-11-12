@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.22.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.22.1...opencode-telegram-bot-v1.22.2) (2026-11-12)
+
+
+### Bug Fixes
+
+* worker Review button uses git fingerprints like the plain-session row ([04836d3](https://github.com/tobbieswork/opencode-telegram-bot/commit/04836d3dce027583aaa49fea9828424b5b289e3b))
+* worker Review button uses git fingerprints like the plain-session row ([559d22b](https://github.com/tobbieswork/opencode-telegram-bot/commit/559d22be222b5e76d36a32c1d45c0359c2b978cd))
+
 ## [1.22.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.22.0...opencode-telegram-bot-v1.22.1) (2026-11-12)
 
 
