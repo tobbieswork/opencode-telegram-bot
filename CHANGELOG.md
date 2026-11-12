@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.21.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.20.1...opencode-telegram-bot-v1.21.0) (2026-11-12)
+
+
+### Features
+
+* quick replies — model-written next-step buttons ([a3a8431](https://github.com/tobbieswork/opencode-telegram-bot/commit/a3a8431440e83ad0f247e938d7f4af4c5b865c0a))
+* **quick-replies:** R1 extractOptionsMarker parser ([00cc030](https://github.com/tobbieswork/opencode-telegram-bot/commit/00cc0309bfea876920efdcd5c329448287c8406d))
+* **quick-replies:** R2 config + [OPTIONS] instruction pin ([5d8a950](https://github.com/tobbieswork/opencode-telegram-bot/commit/5d8a950fcb94f3c9cf6ce02f130295bda9003364))
+* **quick-replies:** R3 tap routing, rendering, precedence, audit ([b71524c](https://github.com/tobbieswork/opencode-telegram-bot/commit/b71524c8f2533f92ce93b1ddfc86433d98d7f67f))
+
 ## [1.20.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.20.0...opencode-telegram-bot-v1.20.1) (2026-11-12)
 
 
