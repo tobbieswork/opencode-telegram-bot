@@ -85,7 +85,8 @@ export interface Host {
 export const MANAGER_AGENT = "tg-manager";
 const BRIDGE_NAME = "tg-bridge";
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,23}$/;
-const BUSY: WorkerStatus[] = ["running", "waiting"];
+/** Worker statuses that count as "busy" (running or waiting on the user). Exported for the S5 board rule (src/bot.ts). */
+export const BUSY: WorkerStatus[] = ["running", "waiting"];
 /** Manager-initiated dispatches allowed between two user messages (loop/cost guard). */
 const DISPATCH_BUDGET = 12;
 
@@ -442,7 +443,8 @@ export class Orchestrator {
     }
   }
 
-  private async cmdBoard(conv: ConvKey): Promise<void> {
+  /** Public (S5): the /board render is reused by the next-step "board" button tap (read-only, no agent turn). */
+  async cmdBoard(conv: ConvKey): Promise<void> {
     const top = this.h.st.get(chatOf(conv));
     const workers = this.workersOf(conv);
     const head = `📋 <b>Workers (${workers.length})</b> · manager: ${top.manager ? "on" : "off"} · auto: ${top.auto ? "on" : "off"}`;
