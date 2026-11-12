@@ -61,30 +61,34 @@ We borrow the behaviour, not any implementation.
 
 ## 3. Design
 
+**Key mechanism (from Q0, OpenCode 2.2.6):** `oc.prompt` gains a `delivery?: "steer" | "queue"` param, forwarded to `client.session.prompt`. OpenCode natively holds a `queue` prompt (runs after the current turn) and delivers a `steer` prompt at the running turn's next safe point (step boundary), auto-degrading to a queued turn when it cannot fold. `steer` is the server default. The bot delegates these to the server and keeps only a thin policy/UI/audit layer.
+
 | Item | Approach |
 |---|---|
-| Queue store | New `src/queue.ts`: pure `QueueStore` keyed by conv. `push` -> `{ok, position}` or `{full}`; `shift`; `clear`; `expire(now)`; `list`. Time is injected for tests. In memory only (see risks). |
-| Busy UI | New `src/busy.ts` builds the busy reply and handles callbacks `q:add:<msgId>` and `q:steer:<msgId>`. It reads the text from `BusyNoteStore` (extended to retain it until the turn ends). Replaces the two inline busy replies in `runPrompt` and `promptManager`. |
-| Drain, plain sessions and worker topics | In `runPromptTask`'s `finally` (after `inflight.delete`), if the turn succeeded and not `draining`, call `drainQueue(conv)`, which calls `runPrompt` for the head item so the normal `inflight` guard still applies. Worker-topic user messages already take this path. |
-| Drain, Manager | `dropManagerTurn` is where the busy flag is cleared on succeeded / failed / interrupted. Pass the outcome there; only `succeeded` drains. |
-| Stop / clear | `stopCurrent` clears the queue (`/stop` means stop). |
-| Steer, S-native | Used only if the spike shows OpenCode folds a prompt sent to a busy session into the running turn. |
-| Steer, S-pivot | Fallback: abort the in-flight controller and call `oc.interrupt(sid)` (what `stopCurrent(conv, true)` does, minus clearing the queue and the "Interrupted" message), wait for `inflight` to clear, then `runPrompt` with preamble + text. The partial reply of the interrupted turn is still shown. |
-| Shutdown | `drainInflight` sets `draining`; queue drain checks it; shutdown notifies queued chats. |
-| Config | `OPENCODE_TG_BUSY_MODE` in `src/config.ts`, documented in the README config table (the doc-sync test enforces this) and `.env.example`. |
+| Prompt delivery | `opencode.ts` `oc.prompt(sessionID, text, { messageID?, delivery? })` forwards `delivery` to `client.session.prompt`. `queue` = server holds + runs after the current turn; `steer` = server delivers at the running turn's next safe point. |
+| Queue store | New `src/queue.ts`: pure `QueueStore` keyed by conv — the bot-side policy/UI/audit layer. `push` -> `{ok, position}` or `{full}`; `shift`; `clear`; `expire(now)`; `list`. Time injected for tests. In memory only (see risks). It holds the message until the turn ends and is the source for the `/queue` list, the "you are #N" position, and expiry; the actual send happens in drain. |
+| Busy UI | New `src/busy.ts` builds the busy reply and handles callbacks `q:add:<msgId>` and `q:steer:<msgId>`. Reads the text from `BusyNoteStore` (extended to retain until the turn ends). Replaces the two inline busy replies in `runPrompt` (`bot.ts`) and `promptManager` (`orchestrator.ts`). In `off` mode the reply is byte-identical to today. |
+| Queue send (drain) | **Queue is a bot-side hold.** The message sits in `QueueStore`; on turn-end it is sent. Plain sessions / worker topics: in `runPromptTask`'s `finally` (after `inflight.delete`), if the turn succeeded and not `draining`, `drainQueue(conv)` calls `runPrompt` for the head item (the normal `inflight` guard still applies). Manager: `dropManagerTurn` gains an `outcome` param; only `succeeded` drains. (Native `delivery:"queue"` is *not* used here — the bot owns the hold for cap/expiry//queue/shutdown control; running-after-the-turn is equivalent either way.) |
+| Steer (S-native, primary) | `q:steer` callback -> immediate `oc.prompt(sid, text, { delivery: "steer" })`. The server delivers at the next safe point (step boundary) and auto-degrades to a queued turn when it cannot (the spec's Q2.3 fallback, built-in) — no bot-side abort. Because it waits for a safe point, the button says "applies at the next safe point" (it does not freeze the current stream). Further steers while one is in flight are queued. |
+| Steer (S-pivot, fallback) | Version-gated to OpenCode < 2.2.5 (no native `delivery`): abort the in-flight controller + `oc.interrupt(sid)` (what `stopCurrent(conv, true)` does, minus clearing the queue and the "Interrupted" message), wait for `inflight` to clear, then `runPrompt` with a mid-turn-correction preamble + text. The interrupted turn's partial reply is still shown (Q0 test D: interrupt keeps the partial). |
+| Stop / clear | `stopCurrent` clears the queue (`/stop` means stop); `/new`, `/clear` and a session switch also clear it (Q1.5). |
+| Shutdown | `drainInflight` sets `draining`; drain checks it; shutdown notifies queued chats that their messages were not run. |
+| Config | `OPENCODE_TG_BUSY_MODE` in `src/config.ts` (`ask` default / `queue` / `off`), documented in the README config table (the doc-sync test enforces) and `.env.example`. |
 | Command | `/queue` added to `src/commands.ts`, the README command table, and the golden set in `scripts/test-commands.ts`. |
 
-### Decisions I made (change any of them)
-- Default mode is `ask`, so nothing happens without a tap and the old note button stays.
-- Queue cap 3, expiry 30 minutes: enough for a phone, small enough that a forgotten queue cannot run something stale hours later.
-- A failed turn **holds** the queue instead of running it: the next message may assume the earlier one worked.
-- Queue is in memory only: a prompt that replays itself after a restart is a worse surprise than a lost one for a bot that runs code.
+### Decisions (change any of them)
+- Default mode `ask`: nothing happens without a tap; the old note button stays.
+- Queue cap 3, expiry 30 minutes.
+- A failed turn **holds** the queue (does not run it): the next message may assume the earlier one worked.
+- Queue is in memory only: a prompt that replays after a restart is a worse surprise than a lost one for a bot that runs code.
+- **Queue = bot-side hold + drain** (not native `delivery:"queue"`): the bot owns cap/expiry//queue/shutdown. **Steer = native** (`delivery:"steer"`) because it must be sent while the turn runs.
 
 ### Risks and open questions
-- **Unknown:** what OpenCode does with a prompt sent to a busy session (error, queue it, or fold it into the turn). Task Q0 answers this before any steer code is written.
-- **Interrupt mid-edit:** S-pivot can stop between a tool call and the next step, leaving a half-finished change. The session history keeps what was done and the correction says so, but a worktree may need a look afterwards. Steer is therefore opt-in per message, never automatic.
-- **Race at turn end:** a user message arriving exactly as a queued one starts. Draining goes through `runPrompt`, so the existing `inflight` guard decides; a loser goes back to the head of the queue.
-- **Manager bot events:** a worker report starts a Manager turn that the user did not start. A user message arriving then is queued behind it, like any other turn.
+- ~~Unknown: what OpenCode does with a prompt sent to a busy session.~~ **Resolved by Q0** (see Findings): a busy prompt is accepted + queued; native `delivery:"steer"|"queue"` exists; interrupt keeps the partial reply.
+- **Steer preemption (Q5 to confirm):** Q0 observed safe-point delivery + auto-degrade, but the steer landed after the turn's parallel tool steps had finished, so *preemption of still-pending steps* was not directly observed. Q5 should re-test with sequential steps to confirm a steer cuts off pending work.
+- **Steer is not instant:** the correction waits for the next safe point; the UI says so (it does not freeze the current token stream).
+- **Race at turn end:** a user message arriving exactly as a queued one starts. Draining goes through `runPrompt`, so the `inflight` guard decides; a loser goes back to the head of the queue.
+- **Manager bot events:** a worker report starts a Manager turn the user did not start; a user message arriving then is queued behind it.
 - **Cost:** queued messages are real prompts and spend tokens; the audit log makes them visible.
 
 ## 4. Tasks (each ends with a human checkpoint)
@@ -104,4 +108,33 @@ Verification order for every task: `npm run typecheck` and `npm run test:unit` f
 Persisting the queue across restarts, editing or reordering queued messages, priorities, steering advisor (`/ask`) threads, and overlap between scheduled runs and queued messages.
 
 ## 6. Findings (filled in by task Q0)
-_Not run yet._
+
+_Ran 2026-11-12 against the live OpenCode service **v2.2.6** (throwaway sessions; script `scripts/spike-busy-prompt.ts`, report `/tmp/opencode/q0-spike-report.json`)._
+
+**Key discovery: OpenCode 2.2.6 has a NATIVE prompt `delivery` mode — `"steer" | "queue"` — on a per-session inbox.**
+- API: `client.session.prompt({ sessionID, id, text, delivery?: "steer" | "queue" })` → returns `{ id: inboxID, delivery }`.
+- **`steer` is the DEFAULT** when no `delivery` is passed (Exp A, no field → response `delivery=steer`).
+- Server events: `session.inbox.enqueued` / `session.inbox.delivered` / `session.inbox.cancelled`, each carrying `delivery` (`@opencode/schema/dist/event-manifest.d.ts`: `delivery: ["steer","queue"]`).
+- So the bot's **current** `oc.prompt()` (no delivery) already sends `steer`; it just never does so while busy because `runPrompt`/`promptManager` intercept with "Still working" before the prompt is sent.
+
+**Q1 (busy prompt) — a prompt sent to a busy session:**
+- **No error.** The prompt is **accepted and queued** as a separate assistant turn (runs after the current one). Exp A (no delivery) and Exp B (`delivery:"steer"`) both → "two separate assistant turns (users=2, assistants=2), session outcome succeeded". (Event level: the delivered prompt ran as the next step of the **same execution** — one `execution.started`/`succeeded` pair covering both prompts; the two assistant messages are two steps, not two executions.)
+- The native **`queue`** mode is the explicit version of this behaviour.
+
+**Q2 (interrupt mid-turn) — does interrupt keep the partial reply:**
+- `interrupt` returns `{ interrupted: boolean }`. In Exp C the turn finished (~+27.8s) *before* the interrupt landed (~+28.4s) → `interrupted:false`, and the (complete) reply is preserved in message history. The clean "interrupt while actively generating" case was not captured (timing — the slow turn completed first); that path needs the correction sent while the turn is still emitting deltas.
+
+**Recommendation for Q5 (steer mechanism): use S-native.**
+- Steer = `session.prompt({ delivery: "steer" })`; Queue = `session.prompt({ delivery: "queue" })`. Both native — the bot delegates the hold / run-after / current-turn semantics to OpenCode's inbox instead of building its own queue store + abort-and-resend.
+- **Design improvement for the spec:** this simplifies Q1/Q3/Q5 substantially. The bot's queue store shrinks to a UI/audit/policy layer (cap 3, expiry 30 min, position display, per-conv tracking) sitting on top of the native delivery; "drain" becomes "send with the right delivery" rather than "runPrompt the head item". **S-pivot** (abort + `oc.interrupt` + resend with preamble) remains a fallback, version-gated to < 2.2.5.
+- **Part 2 (2026-11-12, `scripts/spike-interrupt.ts`, report `/tmp/opencode/q0-spike2-report.json`) — resolved both open items:**
+- **D: interrupt mid-streaming** (interrupt 1.5s after `session.text.started`) → `{"interrupted": true}` (this time it actually interrupted), session outcome `interrupted`, and the **partial reply is preserved** (17 lines kept, the assistant message carries `ERROR=Step interrupted`). → **Q2 confirmed: interrupt keeps the partial reply** — the S-pivot fallback's key requirement holds.
+- **E: steer between tool steps** (turn doing 3 separate file reads; steer "stop reading" sent after the first `tool.success`) → steer **delivered mid-execution at a step boundary** (`inbox.delivered` at `step.ended`, before `execution.succeeded`) and **answered as the next step of the SAME execution** (one execution.started/succeeded pair) — not a new execution. Note: the model batched all 3 reads into one parallel step, so *all reads and the original summary had already finished* by the time the steer landed — preemption of still-pending steps was therefore **not directly observed** in this run (flag for Q5: re-test with sequential steps). So steer is **safe-point delivery** — the correction joins the running turn at the next yield point — **not** a literal token-level fold into the in-flight generation. That matches Kiro's own definition ("deliver to the running turn at the next safe point").
+
+**Revised recommendation for Q5: S-native, confirmed.**
+- Steer = `session.prompt({ delivery: "steer" })` → delivered at the next safe point (step boundary) of the running turn. Queue = `delivery: "queue"`.
+- The "fold" caveat is **resolved**: there is no token-level fold, but there *is* safe-point delivery (the correction joins the turn at the next step boundary), which is the intended steer behaviour. The bot shows the partial/running output until the safe point, then the correction takes over.
+- S-pivot (abort + `oc.interrupt` + resend) remains a version-gated fallback for < 2.2.5; its interrupt keeps the partial reply (test D).
+- **UI note for Q2/Q5:** because steer is not instant (it waits for a safe point), the "Steer now" button should tell the user the correction applies at the next safe point — it does not freeze the current token stream.
+
+*Checkpoint (choose S-native or S-pivot):* **S-native** (`delivery:"steer"`), S-pivot as version-gated fallback. **Decision: S-native.**
