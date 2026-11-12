@@ -386,6 +386,14 @@ export class Bot {
    */
   private nextStepReviewFiles = new Map<ConvKey, Set<string>>();
   /**
+   * S4 next-step buttons (workers with a worktree): when the Review row is
+   * appended to the worktree card, this is the card's own keyboard
+   * (Diff/Merge/Delete) the message reverts to when the next-step row is
+   * removed (N3.1 tap / N3.7 dismiss), so the pre-existing buttons survive.
+   * In-memory.
+   */
+  private nextStepResiduals = new Map<ConvKey, Keyboard>();
+  /**
    * How long a report's temp `.md` file stays on disk after it is sent, before
    * it is unlinked — long enough for Telegram to finish uploading it. 60s
    * default; tests shorten it. (A per-file setTimeout, unref'd.)
@@ -446,6 +454,7 @@ export class Bot {
       advisor: this.advisor,
       userPrefs: this.userPrefs,
       sendHtml: (conv, html, opts) => this.sendHtml(conv, html, opts),
+      noteNextStepMessage: (conv, id, residual) => this.noteNextStepMessage(conv, id, residual),
       applyModelAndVariant: (sid, state) => this.applyModelAndVariant(sid, state),
       prepareNotes: (conv, sid) => this.prepareNotesTurn(conv, sid),
       startTyping: (conv) => this.startTyping(conv),
@@ -3717,11 +3726,15 @@ export class Bot {
       await this.tg.answerCallbackQuery(cb.id, tr(lang, "🔍 Manager không có repo để review.", "🔍 The Manager has no repo to review."));
       return;
     }
-    // N3.1: one-shot — drop the keyboard and consume the record BEFORE the
-    // action so a re-tap can never fire a second review turn.
+    // N3.1: one-shot — drop the next-step row and consume the record BEFORE
+    // the action so a re-tap can never fire a second review turn. A row
+    // appended to the worktree card (S4) reverts the card to its own buttons;
+    // everything else reverts to no buttons.
     if (messageId) {
-      await this.tg.editMessageReplyMarkup(conv, messageId, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+      const residual = this.nextStepResiduals.get(conv) ?? { inline_keyboard: [] };
+      await this.tg.editMessageReplyMarkup(conv, messageId, { reply_markup: residual }).catch(() => {});
       this.nextStepFooters.delete(conv);
+      this.nextStepResiduals.delete(conv);
     }
     nsRegistry.delete(parsed.id);
     const prompt = reviewPrompt("", lang);
@@ -3733,12 +3746,27 @@ export class Bot {
     await this.runPrompt(conv, prompt, state, undefined, lang);
   }
 
+  /**
+   * S4 (next-step buttons, workers): a message in this conv now carries the
+   * conv's next-step row — the Review button appended to the worktree card,
+   * or one short line. Remember its id so N3.7 can dismiss it, and (for a
+   * card) the keyboard it reverts to: the card's own Diff/Merge/Delete rows.
+   */
+  private noteNextStepMessage(conv: ConvKey, messageId: number, residual?: Keyboard): void {
+    if (messageId <= 0) return;
+    this.nextStepFooters.set(conv, messageId);
+    if (residual) this.nextStepResiduals.set(conv, residual);
+  }
+
   /** N3.7: drop the previous turn's next-step keyboard when the user speaks again (best effort). */
   private dismissNextStepKeyboard(conv: ConvKey): void {
     const id = this.nextStepFooters.get(conv);
     if (!id) return;
     this.nextStepFooters.delete(conv);
-    void this.tg.editMessageReplyMarkup(conv, id, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+    // A worktree card keeps its own buttons (S4); a footer/line reverts to none.
+    const residual = this.nextStepResiduals.get(conv) ?? { inline_keyboard: [] };
+    this.nextStepResiduals.delete(conv);
+    void this.tg.editMessageReplyMarkup(conv, id, { reply_markup: residual }).catch(() => {});
   }
 
   /**

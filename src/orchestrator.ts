@@ -28,6 +28,8 @@ import { applyLanguagePin } from "./language.js";
 import type { Schedule } from "./schedule.js";
 import type { Advisor } from "./advisor/advisor.js";
 import { AGENTS, agentLabel, resolveAgent } from "./advisor/agents.js";
+import { decide, callbackFor, registry as nsRegistry } from "./nextsteps.js";
+import type { NextStepFacts } from "./nextsteps.js";
 
 type Btn = { text: string; callback_data?: string; url?: string };
 type Keyboard = { inline_keyboard: Btn[][] };
@@ -47,6 +49,13 @@ export interface Host {
   /** Per-user preferences (language). Optional so legacy test-mock Hosts still type-check; the real Bot always sets it. */
   userPrefs?: UserPrefsStore;
   sendHtml(conv: ConvKey, html: string, opts?: { reply_markup?: Keyboard }): Promise<void>;
+  /**
+   * S4 (next-step buttons): a message in this conv now carries the conv's
+   * next-step row — the Review button appended to the worktree card, or one
+   * short line. The Bot remembers its id (N3.7 dismiss) and, for a card, the
+   * keyboard it reverts to when the row is removed (the card's own buttons).
+   */
+  noteNextStepMessage?: (conv: ConvKey, messageId: number, residual?: Keyboard) => void;
   applyModelAndVariant(sessionID: string, state: ChatState): Promise<void>;
   startTyping(conv: ConvKey): void;
   /** Show the "⏳ Đang xử lý…" line for a manager turn (the manager uses promptManager, not runPrompt). */
@@ -198,6 +207,13 @@ export class Orchestrator {
   private schedStarting = new Set<string>();
   /** Worker convs whose turn-end we are already processing. */
   private finishing = new Set<ConvKey>();
+  /**
+   * S4 (next-step buttons, N2.3): the session modified-files set at the moment
+   * "review" was last OFFERED in each worker topic; a path that appears in a
+   * later report is "new" and can re-fire the rule. Same pattern as the Bot's
+   * plain-conversation map. In-memory: a restart resets it.
+   */
+  private workerReviewFiles = new Map<ConvKey, Set<string>>();
   /**
    * Convs whose Telegram topic was deleted while a worker was still
    * running/waiting: the work is left alone, but the conv must be purged the
@@ -1051,8 +1067,30 @@ export class Orchestrator {
       ) {
         respawnedAs = await this.respawnOverflow(conv, w, tail, error);
       }
-      if (w.worktree && status === "done") {
-        await this.h.sendHtml(conv, this.worktreeText(w), { reply_markup: this.worktreeKeyboard(w) }).catch(() => {});
+      if (status === "done") {
+        // S4 (next-step buttons): a writing worker that finished done with new
+        // changes gets a Review row — appended to the worktree card (no extra
+        // message) or on one short line when there is no worktree.
+        const lang = this.langOf(chatOf(conv));
+        const reviewRow = await this.workerReviewRow(conv, s, w, lang);
+        if (w.worktree) {
+          const kb = this.worktreeKeyboard(w, lang);
+          if (reviewRow) kb.inline_keyboard.push(reviewRow);
+          // The card is short (no chunking): send via sendMessageId so the id
+          // can be remembered for the N3.7 dismiss.
+          const cardId = await this.h.tg.sendMessageId(conv, this.worktreeText(w, lang), { reply_markup: kb }).catch(() => -1);
+          // Removing the row (tap/dismiss) must keep the card's own buttons.
+          if (reviewRow) this.h.noteNextStepMessage?.(conv, cardId, this.worktreeKeyboard(w, lang));
+        } else if (reviewRow) {
+          const lineId = await this.h
+            .tg.sendMessageId(
+              conv,
+              tr(lang, "✅ Xong — xem lại thay đổi của worker:", "✅ Done — review the worker's changes:"),
+              { reply_markup: { inline_keyboard: [reviewRow] } },
+            )
+            .catch(() => -1);
+          this.h.noteNextStepMessage?.(conv, lineId);
+        }
       }
       if (this.h.st.peek(chatOf(conv))?.manager) {
         queueReport(
@@ -1362,6 +1400,51 @@ export class Orchestrator {
       tr(lang, `nhánh <code>${esc(w.worktree?.branch ?? "")}</code> → base <code>${esc(w.worktree?.base ?? "")}</code>`, `branch <code>${esc(w.worktree?.branch ?? "")}</code> → base <code>${esc(w.worktree?.base ?? "")}</code>`),
       tr(lang, "Xem diff, merge về nhánh gốc, hoặc xoá worktree.", "View the diff, merge back to the base branch, or delete the worktree."),
     ].join("\n");
+  }
+
+  /**
+   * S4 (docs/sdd/next-step-buttons.md, N2): the Review row for a worker that
+   * just finished done — or undefined when no rule fires. Fires only for a
+   * WRITING worker (N2.2) whose session modified a file not offered in this
+   * topic before (N2.3); the engine (decide) applies the rest. The one
+   * getSessionReport call happens only after those cheap gates.
+   */
+  private async workerReviewRow(conv: ConvKey, s: ChatState, w: WorkerInfo, lang: Lang): Promise<Btn[] | undefined> {
+    // N4.1: off → identical to today (no decide, no getSessionReport call).
+    if (!this.h.cfg.nextSteps) return undefined;
+    // N2.2: read-only workers (plan/explore/general, writes=false) never get a Review.
+    if (w.writes !== true || !s.sessionID) return undefined;
+    let files: string[];
+    try {
+      files = (await this.h.oc.getSessionReport(s.sessionID)).modifiedFiles;
+    } catch {
+      return undefined; // report unavailable → no offer (never block the worker-done relay)
+    }
+    const seen = this.workerReviewFiles.get(conv);
+    const filesNew = files.some((p) => !seen?.has(p));
+    if (!filesNew) return undefined;
+    const now = Date.now();
+    const facts: NextStepFacts = {
+      kind: "worker",
+      outcome: "succeeded",
+      interrupted: false,
+      agent: s.agent ?? "build",
+      elapsedMs: 0, // the worker review row has no minimum-length gate (that's the plain row's)
+      worker: { writes: true, hasWorktree: !!w.worktree },
+      busyWorkers: 0,
+      filesNew,
+      overflow: false,
+      hasChoices: false,
+      // The worktree card is NOT a next-step keyboard: the Review row is
+      // appended to it (worker with a worktree) or sent as a short line (without).
+      hasOtherKeyboard: false,
+    };
+    const suggestion = decide(facts, { nextSteps: this.h.cfg.nextSteps, minSecs: this.h.cfg.nextMinSecs }, now).find((x) => x.rule === "review");
+    if (!suggestion) return undefined;
+    const id = nsRegistry.set({ conv, sessionID: s.sessionID, rule: "review", now });
+    // N2.3: this offer now defines the last-offered set for this worker topic.
+    this.workerReviewFiles.set(conv, new Set(files));
+    return [{ text: suggestion.label(lang), callback_data: callbackFor(id, 0) }];
   }
 
   private worktreeKeyboard(w: WorkerInfo, lang: Lang = "vi"): Keyboard {
