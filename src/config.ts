@@ -154,6 +154,13 @@ export interface Config {
    */
   nextSteps: boolean;
   /**
+   * Master switch for quick replies (model-written `[OPTIONS: …]` buttons).
+   * Default OFF; "1"/"true"/"on" enables it (behaviour is then identical to
+   * today when off — no instruction, no buttons). Invalid values fall back to
+   * off with a warning. (R5.1)
+   */
+  suggest: boolean;
+  /**
    * Minimum turn length (seconds) before the Review button is offered on a
    * plain session (default 90).
    */
@@ -282,6 +289,9 @@ export function loadConfig(root: string): Config {
     // --- Rule-based next-step buttons (engine: src/nextsteps.ts) ---
     // Default ON; "0"/"false"/"off" disables it (behaves exactly as before).
     nextSteps: parseNextSteps(process.env.OPENCODE_TG_NEXT_STEPS),
+    // --- Quick replies (engine: src/suggest.ts) ---
+    // Default OFF; only an explicit "1"/"true"/"on" enables (R5.1).
+    suggest: parseSuggest(process.env.OPENCODE_TG_SUGGEST),
     // 0 is allowed (disables the length gate); anything else must be an integer >= 0.
     nextMinSecs: parseIntSetting("OPENCODE_TG_NEXT_MIN_SECS", 90, 0),
     // --- /schedule (slice 2 engine; slice 3 wires the command + dispatch) ---
@@ -393,6 +403,15 @@ function parseNextSteps(raw?: string): boolean {
   if (!v || v === "1" || v === "true") return true;
   warn(`OPENCODE_TG_NEXT_STEPS=${raw} is not a valid value (1/true/0/false/off) — using on`);
   return true;
+}
+
+/** OPENCODE_TG_SUGGEST: off (default) / "1" / "true" / "on"; anything else → off (with a warning). */
+function parseSuggest(raw?: string): boolean {
+  const v = raw?.trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "on") return true;
+  if (!v || v === "0" || v === "false" || v === "off") return false;
+  warn(`OPENCODE_TG_SUGGEST=${raw} is not a valid value (1/true/on/0/false/off) — using off`);
+  return false;
 }
 
 /** The system IANA timezone, with a hard fallback when Intl reports nothing. */

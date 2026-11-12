@@ -25,6 +25,7 @@ import { purgeConv, cmdPrune, handlePruneCallback } from "./orchestrator/purge.j
 import { onTopicDeleted, reapPendingTopicDeletes } from "./orchestrator/topics.js";
 import { workerIntroHtml, approvalLines } from "./orchestrator/templates.js";
 import { applyLanguagePin } from "./language.js";
+import { applySuggestPin } from "./suggest.js";
 import type { Schedule } from "./schedule.js";
 import type { Advisor } from "./advisor/advisor.js";
 import { AGENTS, agentLabel, resolveAgent } from "./advisor/agents.js";
@@ -1217,6 +1218,8 @@ export class Orchestrator {
     // Per-user language preference: pin the Manager session to English when the
     // user chose "en" ("vi"/unset clears it). Idempotent, self-tracked per session.
     await applyLanguagePin(this.h.oc, this.h.st, conv, this.h.st.get(conv).sessionID!, lang);
+    // Quick replies (R2): pin the [OPTIONS] instruction on the Manager session when enabled.
+    await applySuggestPin(this.h.oc, this.h.st, conv, this.h.st.get(conv).sessionID!, this.h.cfg.suggest);
     await this.h.prepareNotes?.(conv, this.h.st.get(conv).sessionID!); // /note: surface pending notes this turn
     try {
       await this.h.oc.prompt(this.h.st.get(conv).sessionID!, text);
