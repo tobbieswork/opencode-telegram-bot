@@ -747,6 +747,24 @@ export class Orchestrator {
       if (worktree && repoRoot) await removeWorktree(repoRoot, worktree).catch(() => {});
       throw e;
     }
+    // Worker topic welcome, localized to the conv owner's language. Sent before
+    // the record is persisted so its message id can ride on the worker (anchor
+    // for the manager board's switch_to_topic jump buttons).
+    const introId = await this.h
+      .tg.sendMessageId(
+        conv,
+        workerIntroHtml(this.langOf(chat), {
+          name,
+          agent,
+          directory,
+          spawnedBy: spec.spawnedBy,
+          task: spec.task,
+          worktree: worktree ? { branch: worktree.branch, base: worktree.base } : undefined,
+        }),
+      )
+      .catch(() => -1);
+    if (introId > 0) worker.introMessageId = introId;
+
     // Workers inherit the chat's model/variant choice (the Manager's own agent aside).
     this.h.st.set(conv, {
       sessionID,
@@ -760,21 +778,6 @@ export class Orchestrator {
     });
     await this.h.applyModelAndVariant(sessionID, this.h.st.get(conv));
     log(`[chat ${chat}] spawned worker ${name} (${agent}) in ${directory}`);
-
-    // Worker topic welcome, localized to the conv owner's language.
-    await this.h
-      .sendHtml(
-        conv,
-        workerIntroHtml(this.langOf(chat), {
-          name,
-          agent,
-          directory,
-          spawnedBy: spec.spawnedBy,
-          task: spec.task,
-          worktree: worktree ? { branch: worktree.branch, base: worktree.base } : undefined,
-        }),
-      )
-      .catch(() => {});
 
     // Deep-link button so the user can jump from the main topic into the worker's topic.
     // `t.me/c/` links only resolve for supergroups (negative -100… ids) — skip otherwise.
