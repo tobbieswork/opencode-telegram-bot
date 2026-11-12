@@ -427,7 +427,7 @@ export class Orchestrator {
         tr(
           lang,
           "Usage: <code>/spawn &lt;tên&gt; [thư mục]</code>\nTạo một topic mới với session riêng. Ví dụ: <code>/spawn api-fix ~/Code/app</code>",
-          "Usage: <code>/spawn <name> [dir]</code>\nCreates a new topic with its own session. E.g.: <code>/spawn api-fix ~/Code/app</code>",
+          "Usage: <code>/spawn &lt;name&gt; [dir]</code>\nCreates a new topic with its own session. E.g.: <code>/spawn api-fix ~/Code/app</code>",
         ),
       );
       return;
@@ -450,7 +450,7 @@ export class Orchestrator {
     const head = `📋 <b>Workers (${workers.length})</b> · manager: ${top.manager ? "on" : "off"} · auto: ${top.auto ? "on" : "off"}`;
     if (!workers.length) {
       const lang = this.h.userPrefs?.getLang(top.createdBy ?? "") ?? "vi";
-      await this.h.sendHtml(conv, `${head}\n\n${tr(lang, "Chưa có worker. Tạo bằng <code>/spawn &lt;tên&gt; [thư mục]</code> hoặc bật /manager.", "No workers yet. Create one with <code>/spawn <name> [dir]</code> or turn on /manager.")}`);
+      await this.h.sendHtml(conv, `${head}\n\n${tr(lang, "Chưa có worker. Tạo bằng <code>/spawn &lt;tên&gt; [thư mục]</code> hoặc bật /manager.", "No workers yet. Create one with <code>/spawn &lt;name&gt; [dir]</code> or turn on /manager.")}`);
       return;
     }
     const lines = workers
@@ -461,7 +461,7 @@ export class Orchestrator {
         return `${ICON[w.status]} <b>${esc(w.name)}</b> · ${esc(s.agent ?? "build")} · ${timeAgo(w.updatedAt)}\n    ${where}`;
       });
     const lang = this.h.userPrefs?.getLang(top.createdBy ?? "") ?? "vi";
-    await this.h.sendHtml(conv, `${head}\n\n${lines.join("\n")}\n\n<i>${tr(lang, "/kill &lt;tên&gt; để dừng · /stopall dừng tất cả", "/kill <name> to stop · /stopall stops all")}</i>`);
+    await this.h.sendHtml(conv, `${head}\n\n${lines.join("\n")}\n\n<i>${tr(lang, "/kill &lt;tên&gt; để dừng · /stopall dừng tất cả", "/kill &lt;name&gt; to stop · /stopall stops all")}</i>`);
   }
 
   /**
@@ -491,7 +491,7 @@ export class Orchestrator {
     rows.push([{ text: tr(lang, "❌ Đóng", "❌ Close"), callback_data: "kill:close" }]);
     await this.h.sendHtml(
       conv,
-      [errorNote ?? tr(lang, "❓ <b>/kill</b> cần tên worker", "❓ <b>/kill</b> needs a worker name"), tr(lang, "Bấm để dừng worker:", "Tap to stop a worker:"), tr(lang, "Hoặc gửi: <code>/kill &lt;tên&gt;</code>", "Or send: <code>/kill <name></code>")].join("\n"),
+      [errorNote ?? tr(lang, "❓ <b>/kill</b> cần tên worker", "❓ <b>/kill</b> needs a worker name"), tr(lang, "Bấm để dừng worker:", "Tap to stop a worker:"), tr(lang, "Hoặc gửi: <code>/kill &lt;tên&gt;</code>", "Or send: <code>/kill &lt;name&gt;</code>")].join("\n"),
       { reply_markup: { inline_keyboard: rows } },
     );
   }
