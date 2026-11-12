@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.21.4](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.21.3...opencode-telegram-bot-v1.21.4) (2026-11-12)
+
+
+### Bug Fixes
+
+* stop claiming an overflowed session can't continue ([e44355b](https://github.com/tobbieswork/opencode-telegram-bot/commit/e44355bcb8d2f0c5edd1d71c87e443f15cd8fb8b))
+* stop claiming an overflowed session can't continue ([e4e6e8f](https://github.com/tobbieswork/opencode-telegram-bot/commit/e4e6e8f8b37949461a8aaac2122539b6680651c2))
+
 ## [1.21.3](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.21.2...opencode-telegram-bot-v1.21.3) (2026-11-12)
 
 
