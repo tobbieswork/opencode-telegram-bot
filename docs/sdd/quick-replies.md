@@ -114,4 +114,35 @@ Verification order for every task: `npm run typecheck` and `npm run test:unit` f
 A separate model call for suggestions, worker topics and `/ask` threads, per-user settings, learning from taps, and changing the rule table.
 
 ## 7. Findings (filled in by task R0)
-_Not run yet._
+
+Spike: `scripts/spike-suggest.ts`, run 2026-11-12 against the live service
+(OpenCode 2.2.6, model `qwen/qwen3.8-27b`), exact production instruction
+(`SUGGEST_INSTRUCTION`), one fresh session, 6 representative prompts.
+
+| # | prompt | kind | marker | valid | note |
+|---|--------|------|--------|-------|------|
+| 1 | storage direction for a todo API | substantive | absent | – | answered 3 options as a numbered list, ended "Which one are you going with?" |
+| 2 | create a file | substantive | absent | – | one-line confirmation |
+| 3 | capital of France | trivial | absent | – | one sentence (correct) |
+| 4 | greeting | trivial | absent | – | short reply (correct) |
+| 5 | explain a TypeError | trivial | absent | – | explanation only (correct) |
+| 6 | split/sequence two small jobs | substantive | absent | – | 3-line plan |
+
+**Result: 0/6 markers. Substantive 0/3 (bar: ≥80%), trivial 0/3 (bar: ~0).**
+
+- The model answered every prompt naturally and never emitted the
+  `[OPTIONS: …]` line, even when the prompt was a pure decision
+  ("I will pick"). Prompt 1 shows the model *does* offer options — as a
+  numbered in-body list, which the existing lettered-list detector
+  (Pattern B) already turns into buttons.
+- Session instructions apply to Manager sessions too: the spike uses the
+  same `setInstruction` mechanism as the language pin (proven in production
+  on Manager sessions), applied via the identical `applySuggestPin` call
+  site in `promptManager`.
+
+**Decision: default stays OFF.** The feature is dormant on the current
+model. The infrastructure (parser, rendering, tap routing, audit, report,
+smoke) is complete and tested; flip `OPENCODE_TG_SUGGEST=1` to measure a
+future model with `scripts/suggest-tap-rate.ts`. Tuning the instruction
+text (a spec change) is only worth revisiting if a model shows partial
+compliance.
