@@ -103,6 +103,46 @@ systemctl --user enable --now opencode-bot
 - After changing the Node version in nvm, update the pinned paths in the
   unit and `systemctl --user restart opencode-bot`.
 
+### Keeping the bot token out of `.env`
+
+The bot can run code on your machine, so its token is worth protecting. A
+`TELEGRAM_BOT_TOKEN` in `.env` is plaintext and is inherited by every process
+the bot starts, including the OpenCode service and the agents it runs. The bot
+looks for the token in this order and uses the first it finds:
+
+1. a **systemd credential** named `telegram-bot-token` (recommended)
+2. a file named by **`TELEGRAM_BOT_TOKEN_FILE`**
+3. **`TELEGRAM_BOT_TOKEN`** (the original behaviour, still works)
+
+On start-up the log says which one was used (`Telegram token source: …`). It
+also removes `TELEGRAM_BOT_TOKEN` from its own environment, so child processes
+no longer inherit it even if you stay on `.env`.
+
+Set up the systemd credential (user-level service; `systemctl --version` must
+show 256 or newer for the encrypted form, otherwise use the plain-file form):
+
+```sh
+mkdir -p -m 700 ~/.config/opencode-bot
+
+# Encrypted at rest (systemd >= 256). Paste the token when prompted:
+read -rs TOKEN; printf %s "$TOKEN" | systemd-creds --user encrypt \
+  --name=telegram-bot-token - ~/.config/opencode-bot/telegram-bot-token.cred; unset TOKEN
+
+# …or a plain 0600 file (any systemd):
+# read -rs TOKEN; (umask 077; printf %s "$TOKEN" > ~/.config/opencode-bot/telegram-bot-token); unset TOKEN
+
+mkdir -p ~/.config/systemd/user/opencode-bot.service.d
+cp deploy/opencode-bot.credential.conf ~/.config/systemd/user/opencode-bot.service.d/credential.conf
+# edit credential.conf if you used the plain file (switch to the LoadCredential= line)
+systemctl --user daemon-reload && systemctl --user restart opencode-bot
+journalctl --user -u opencode-bot -n 20 --no-pager | grep "token source"   # expect: systemd-credential
+```
+
+Then delete the `TELEGRAM_BOT_TOKEN=` line from `.env` and restart once more
+(the log warns while a plaintext copy is still there). If the `.env` file was
+ever copied, backed up or committed, rotate the token with @BotFather
+(`/revoke`). To go back, delete `credential.conf`, `daemon-reload`, restart.
+
 ## Usage
 
 > 🇻🇳 Vietnamese user guide: [docs/user-guide.md](docs/user-guide.md)
@@ -252,7 +292,8 @@ All settings are environment variables (see `.env.example`).
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
-| `TELEGRAM_BOT_TOKEN` | ✅ | — | Bot token from @BotFather |
+| `TELEGRAM_BOT_TOKEN` | ✅\* | — | Bot token from @BotFather. Plaintext in `.env`; see [Keeping the bot token out of `.env`](#keeping-the-bot-token-out-of-env) for safer options |
+| `TELEGRAM_BOT_TOKEN_FILE` | | — | Path to a file holding the token (chmod 600). Wins over `TELEGRAM_BOT_TOKEN`; a systemd credential wins over both |
 | `TELEGRAM_ALLOWED_USER_IDS` | ✅\* | — | Comma-separated numeric user IDs |
 | `OPENCODE_TG_ALLOW_ANY` | | off | `1` = allow any user (**not recommended**) |
 | `OPENCODE_DIRECTORY` | | `process.cwd()` | Working dir for new sessions |

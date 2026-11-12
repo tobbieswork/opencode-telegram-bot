@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { isUnderRoot } from "./fsbrowser.js";
 import { warn } from "./logger.js";
+import { resolveBotToken, type TokenSource } from "./secrets.js";
 import type { ModelRef } from "./state.js";
 import { AGENT_IDS, LEGACY_AGENT, resolveAgent, type AgentId } from "./advisor/agents.js";
 
@@ -28,6 +29,10 @@ export function loadDotEnv(file = ".env"): void {
 
 export interface Config {
   telegramToken: string;
+  /** Where the token came from (never the token itself). */
+  telegramTokenSource: TokenSource;
+  /** Advisories about how the token is stored; logged at startup. */
+  telegramTokenWarnings: string[];
   allowedUserIds: number[];
   allowAny: boolean;
   opencodeDirectory: string;
@@ -210,10 +215,7 @@ export interface Config {
 }
 
 export function loadConfig(root: string): Config {
-  const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
-  if (!token) {
-    throw new Error("TELEGRAM_BOT_TOKEN is required (create a bot with @BotFather and put the token in .env).");
-  }
+  const { token, source: tokenSource, warnings: tokenWarnings } = resolveBotToken(process.env);
 
   const rawIds = process.env.TELEGRAM_ALLOWED_USER_IDS?.trim();
   const allowedUserIds = rawIds
@@ -230,6 +232,8 @@ export function loadConfig(root: string): Config {
   const dir = resolve(process.env.OPENCODE_DIRECTORY?.trim() || process.cwd());
   const cfg: Config = {
     telegramToken: token,
+    telegramTokenSource: tokenSource,
+    telegramTokenWarnings: tokenWarnings,
     allowedUserIds,
     allowAny,
     opencodeDirectory: dir,
