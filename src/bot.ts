@@ -8,12 +8,12 @@ import { Telegram, Update, CallbackQuery, Message, MessageGenerationStopped, Mes
 import { OpenCodeCtl, newMessageID, assistantText, ModelInfo, SessionBrief } from "./opencode.js";
 import { StateManager, ChatState, MsgPurpose, MACHINE_STATE_KEY, UserPrefsStore, Lang } from "./state.js";
 import { ConvKey, convKey, chatOf, parseConv } from "./conv.js";
-import { Orchestrator } from "./orchestrator.js";
+import { Orchestrator, BUSY } from "./orchestrator.js";
 import { closeFinishedTopicsAtStartup } from "./orchestrator/topics.js";
 import { ScheduleStore, Scheduler } from "./scheduler.js";
 import { isUserAllowed } from "./schedule.js";
 import { Config } from "./config.js";
-import { esc, stripTags, chunk, trunc, mdToHtmlChunks, formatTurnFailure } from "./format.js";
+import { esc, stripTags, chunk, trunc, mdToHtmlChunks, formatTurnFailure, isOverflowError } from "./format.js";
 import { tr, STRINGS } from "./i18n.js";
 import { applyLanguagePin } from "./language.js";
 import {
@@ -68,6 +68,8 @@ import { cmdHelp, cmdStatus, cmdHealth, cmdContext, cmdUsage, cmdHistory, cmdNot
 import { cmdBtw } from "./btw.js";
 import { cmdAsk } from "./ask.js";
 import { reviewPrompt, reviewUsage } from "./review.js";
+import { decide, callbackFor, parseCallback, registry as nsRegistry } from "./nextsteps.js";
+import type { NextStepFacts } from "./nextsteps.js";
 import { managerFloorFromMessages, runRotationHandoff, rotationGate } from "./rotation.js";
 import {
   rotationHealthPath,
@@ -372,6 +374,26 @@ export class Bot {
    */
   public queue = new QueueStore();
   /**
+   * S3 next-step buttons (docs/sdd/next-step-buttons.md): the footer message
+   * id per conv that carries the turn's next-step keyboard. N3.1 drops it on
+   * tap; N3.7 drops it when the user sends their next message. In-memory.
+   */
+  private nextStepFooters = new Map<ConvKey, number>();
+  /**
+   * S3 next-step buttons (N2.3): the session modified-files set at the moment
+   * "review" was last OFFERED in this conv; a path that appears in a later
+   * report is "new" and can re-fire the rule. In-memory: a restart resets it.
+   */
+  private nextStepReviewFiles = new Map<ConvKey, Set<string>>();
+  /**
+   * S4 next-step buttons (workers with a worktree): when the Review row is
+   * appended to the worktree card, this is the card's own keyboard
+   * (Diff/Merge/Delete) the message reverts to when the next-step row is
+   * removed (N3.1 tap / N3.7 dismiss), so the pre-existing buttons survive.
+   * In-memory.
+   */
+  private nextStepResiduals = new Map<ConvKey, Keyboard>();
+  /**
    * How long a report's temp `.md` file stays on disk after it is sent, before
    * it is unlinked — long enough for Telegram to finish uploading it. 60s
    * default; tests shorten it. (A per-file setTimeout, unref'd.)
@@ -432,6 +454,7 @@ export class Bot {
       advisor: this.advisor,
       userPrefs: this.userPrefs,
       sendHtml: (conv, html, opts) => this.sendHtml(conv, html, opts),
+      noteNextStepMessage: (conv, id, residual) => this.noteNextStepMessage(conv, id, residual),
       applyModelAndVariant: (sid, state) => this.applyModelAndVariant(sid, state),
       prepareNotes: (conv, sid) => this.prepareNotesTurn(conv, sid),
       startTyping: (conv) => this.startTyping(conv),
@@ -834,7 +857,12 @@ export class Bot {
         this.st.set(conv, { lastRelayedTime: r.time });
       }
       log(`[chat ${conv}] relayed ${replies.length} unrelayed repl${replies.length > 1 ? "ies" : "y"} (${reason})`);
-      if (succeeded) await this.maybeOfferPlanToBuild(conv);
+      if (succeeded) {
+        await this.maybeOfferPlanToBuild(conv);
+        // S5 (next-step buttons): a Manager turn that just ended while workers
+        // are still busy gets the one-line "board" offer (engine rule board).
+        await this.maybeOfferManagerBoard(conv);
+      }
     } catch (e) {
       warn("sweepUnrelayedReplies:", (e as Error)?.message);
     } finally {
@@ -922,6 +950,9 @@ export class Bot {
     // Remember the user's top-level chat so proactive notices (e.g. DNS heal)
     // have a destination even mid-polling-failure.
     this.lastActiveConv = chatOf(conv);
+    // N3.7 (next-step buttons): the user's next message dismisses the
+    // previous turn's next-step keyboard (best effort, in-memory footer id).
+    this.dismissNextStepKeyboard(conv);
     // Reaction UX: index every user message so a reaction on it can be
     // resolved (the update carries no topic info) — and give the user a quick
     // "got it" 🤔 when a real prompt (not a command) starts a turn.
@@ -2107,7 +2138,23 @@ export class Bot {
         // A genuine failure (not a user /stop): attach a one-tap "⏯ Chạy tiếp"
         // button to the failure message so the user can resume the same session.
         const kb = this.offerContinueKeyboard(conv, sid, messageID, res.outcome, res.interrupted, langEff);
-        await this.sendHtml(conv, formatTurnFailure(res.error, res.elapsedMs, langEff), kb ? { reply_markup: kb } : {});
+        // S5 (next-step buttons): a context-overflow failure also earns the
+        // "new-keep" row (engine rule) — same message, under the Continue row.
+        const nsKb = await this.buildNextStepFailureKeyboard(conv, sid, {
+          outcome: "failed",
+          interrupted: false,
+          elapsedMs: res.elapsedMs,
+          error: res.error,
+          lang: langEff,
+        });
+        const rows = [...(kb?.inline_keyboard ?? []), ...(nsKb?.inline_keyboard ?? [])];
+        const failId = await this.tg
+          .sendMessageId(conv, formatTurnFailure(res.error, res.elapsedMs, langEff), rows.length ? { reply_markup: { inline_keyboard: rows } } : {})
+          .catch(() => -1);
+        // N3.1/N3.7: remember the message so the next-step row can be dropped
+        // on tap / next user message, reverting to the Continue row when there
+        // is one (the pre-existing button must survive).
+        if (failId > 0 && nsKb) this.noteNextStepMessage(conv, failId, kb);
         // Body language (feature C): the bot dislikes the turn that failed.
         this.bodyReact(conv, userMsgId, REACTION_FAIL);
         return;
@@ -2120,7 +2167,23 @@ export class Bot {
       // A quiet italic footer. The <i> tags are meant to render (HTML mode), so
       // we do NOT escape the whole string — only the server-supplied outcome text.
       const meta = `<i>${esc(res.outcome ?? "")} · ${(res.elapsedMs / 1000).toFixed(1)}s${res.interrupted ? " · stopped" : ""}</i>`;
-      await this.tg.sendMessage(conv, meta).catch(() => {});
+      // S3 (next-step buttons): the quiet footer carries the turn's keyboard —
+      // no extra message. decide() returns [] for everything it must not show
+      // (N1.3–N1.5: choices/other-keyboard, stopped turns, non-idle convs).
+      const kb = await this.buildNextStepKeyboard(conv, sid, {
+        outcome,
+        interrupted: res.interrupted,
+        reply: res.reply,
+        elapsedMs: res.elapsedMs,
+        error: res.error,
+        lang: langEff,
+      });
+      if (kb) {
+        const footerId = await this.tg.sendMessageId(conv, meta, { reply_markup: kb }).catch(() => -1);
+        if (footerId > 0) this.nextStepFooters.set(conv, footerId);
+      } else {
+        await this.tg.sendMessage(conv, meta).catch(() => {});
+      }
       if (!res.interrupted && res.reply) await this.maybeOfferPlanToBuild(conv);
     } catch (e) {
       // A throw (service down, unhandled) is a failed turn; a user /stop aborts
@@ -2199,6 +2262,193 @@ export class Bot {
     await this.tg
       .sendMessage(conv, tr(lang, "📐 <b>Kế hoạch đã sẵn sàng</b> — bấm để chuyển sang build và thực thi.", "📐 <b>Plan is ready</b> — tap to switch to build and execute."), { reply_markup: kb })
       .catch(() => {});
+  }
+
+  /**
+   * S3 — rule-based next-step buttons for PLAIN sessions (docs/sdd/
+   * next-step-buttons.md). Builds the facts the bot already holds, runs the
+   * engine, and returns the footer keyboard — or undefined when nothing
+   * applies (N1.2: nothing at all when no rule fires). Only the "review"
+   * rule is rendered in S3 (workers S4, manager/failures S5). The
+   * getSessionReport call (N2.3 filesNew) happens only after the cheap gates
+   * pass, never on every turn.
+   */
+  private async buildNextStepKeyboard(
+    conv: ConvKey,
+    sessionID: string,
+    info: {
+      outcome: "succeeded" | "failed" | "interrupted";
+      interrupted: boolean;
+      reply?: string;
+      elapsedMs: number;
+      error?: { type?: string; message?: string };
+      lang: Lang;
+    },
+  ): Promise<Keyboard | undefined> {
+    // N4.1: off → identical to today (no decide, no getSessionReport call).
+    if (!this.cfg.nextSteps) return undefined;
+    const state = this.st.peek(conv);
+    // S3 scope: plain conversations only (worker/manager/advisor land in S4/S5).
+    if (!state || state.worker || state.manager || state.advisor) return undefined;
+    // N1.5: never under a result a queued message is about to supersede.
+    if (this.queue.size(conv) > 0) return undefined;
+    // Effective agent: an explicit /mode|/agent choice, else the OpenCode
+    // service default, which is "build" (verified live: the agent list labels
+    // Build "The default agent") — a fresh plain conv therefore runs on build.
+    const agent = state.agent ?? "build";
+    const now = Date.now();
+    // Cheap gates (N2, plain "review" row) before the one getSessionReport call.
+    const reviewGate =
+      info.outcome === "succeeded" &&
+      !info.interrupted &&
+      agent === "build" &&
+      info.elapsedMs >= this.cfg.nextMinSecs * 1000;
+    let filesNew = false;
+    let reportFiles: string[] = [];
+    if (reviewGate) {
+      try {
+        reportFiles = (await this.oc.getSessionReport(sessionID)).modifiedFiles;
+        const seen = this.nextStepReviewFiles.get(conv);
+        // Empty modifiedFiles is common (the build agent creates files via shell,
+        // which the report does not track) → treat as "assume changed" so the
+        // button still shows; when the report DOES list files, require a new one.
+        filesNew = reportFiles.length === 0 || reportFiles.some((p) => !seen?.has(p));
+      } catch {
+        reportFiles = []; // report unavailable → no new files (never block the turn end)
+      }
+    }
+    const facts: NextStepFacts = {
+      kind: "plain",
+      outcome: info.outcome,
+      interrupted: info.interrupted,
+      agent,
+      elapsedMs: info.elapsedMs,
+      busyWorkers: 0, // S3: no worker accounting yet (the "board" rule is S5)
+      filesNew,
+      // Same error-string shape classifyFailure uses in formatTurnFailure.
+      overflow: isOverflowError(`${info.error?.type ?? ""}\n${info.error?.message ?? ""}`),
+      // N1.3: the reply ends in a choice list → sendReply already attached a ch: keyboard.
+      hasChoices: info.reply ? extractTrailingChoices(stripTags(info.reply)) !== null : false,
+      // N1.3: a plan turn ends with the "Switch to build" card (same gates as
+      // maybeOfferPlanToBuild, which sends it right after this footer).
+      hasOtherKeyboard:
+        agent === "plan" &&
+        !info.interrupted &&
+        !!info.reply &&
+        ![...this.questionForms.values()].some((q) => q.conv === conv),
+    };
+    const suggestions = decide(facts, { nextSteps: this.cfg.nextSteps, minSecs: this.cfg.nextMinSecs }, now);
+    if (suggestions.length === 0) return undefined;
+    const row: Btn[] = [];
+    for (const s of suggestions) {
+      if (s.rule !== "review") continue; // S4/S5 rules are not rendered yet
+      const id = nsRegistry.set({ conv, sessionID, rule: s.rule, now });
+      row.push({ text: s.label(info.lang), callback_data: callbackFor(id, row.length) });
+      // N4.3: every shown button is in the audit log with its rule id, so tap
+      // rates can be measured (scripts/nextstep-tap-rate.ts).
+      audit({ action: "nextstep_shown", chatId: conv, session: sessionID, userId: state.createdBy, meta: { rule: s.rule } });
+    }
+    if (row.length === 0) return undefined;
+    // N2.3: this offer now defines the "last-offered" file set for the conv.
+    if (reviewGate) this.nextStepReviewFiles.set(conv, new Set(reportFiles));
+    return { inline_keyboard: [row] };
+  }
+
+  /**
+   * S5 (next-step buttons, failures): the next-step keyboard for a GENUINE
+   * failure message — today only the "new-keep" rule can fire (a context
+   * overflow). N1.4/N1.5 are structural here: this path only runs for
+   * user-driven turns (runPromptTask), never advisor or scheduled runs
+   * (scheduled runs are WORKER runs that never go through runPromptTask),
+   * and a queued message still pending suppresses the offer (N1.5).
+   *
+   * The Continue button is NOT passed as hasOtherKeyboard: N2 wants new-keep
+   * on every overflow failure, and a genuine failure ALWAYS also earns
+   * Continue — treating it as a blocking keyboard would make the rule dead
+   * code. The two rows ride the same failure message.
+   */
+  private async buildNextStepFailureKeyboard(
+    conv: ConvKey,
+    sessionID: string,
+    info: { outcome: "failed"; interrupted: boolean; elapsedMs: number; error?: { type?: string; message?: string }; lang: Lang },
+  ): Promise<Keyboard | undefined> {
+    // N4.1: off → identical to today (no decide call).
+    if (!this.cfg.nextSteps) return undefined;
+    const state = this.st.peek(conv);
+    // Manager and advisor turns never run through runPromptTask; guard anyway.
+    if (!state || state.manager || state.advisor) return undefined;
+    // N1.5: never under a result a queued message is about to supersede.
+    if (this.queue.size(conv) > 0) return undefined;
+    const now = Date.now();
+    const facts: NextStepFacts = {
+      kind: state.worker ? "worker" : "plain",
+      outcome: info.outcome,
+      interrupted: info.interrupted,
+      agent: state.agent ?? "build",
+      elapsedMs: info.elapsedMs,
+      busyWorkers: 0,
+      filesNew: false,
+      // Same error-string shape classifyFailure uses in formatTurnFailure.
+      overflow: isOverflowError(`${info.error?.type ?? ""}\n${info.error?.message ?? ""}`),
+      hasChoices: false, // the failure message is fixed text (formatTurnFailure)
+      hasOtherKeyboard: false, // see the method doc: Continue does not suppress new-keep
+    };
+    const suggestions = decide(facts, { nextSteps: this.cfg.nextSteps, minSecs: this.cfg.nextMinSecs }, now);
+    const row: Btn[] = [];
+    for (const s of suggestions) {
+      if (s.rule !== "new-keep") continue;
+      const id = nsRegistry.set({ conv, sessionID, rule: s.rule, now });
+      row.push({ text: s.label(info.lang), callback_data: callbackFor(id, row.length) });
+      // N4.3: same shown event for the failure-path button.
+      audit({ action: "nextstep_shown", chatId: conv, session: sessionID, userId: state.createdBy, meta: { rule: s.rule } });
+    }
+    if (row.length === 0) return undefined;
+    return { inline_keyboard: [row] };
+  }
+
+  /**
+   * S5 (next-step buttons, manager): after a Manager turn ended, one short
+   * line with a "📋 Board" button when at least one of the chat's workers is
+   * still running or waiting (engine rule board; "Board only when workers are
+   * still busy"). N1.4 is structural: scheduled runs are WORKER runs
+   * (spawnedBy:"schedule"), never Manager turns, and advisor threads never
+   * run here (manager convs only). N1.5: a queued message about to start the
+   * next manager turn suppresses the offer.
+   */
+  private async maybeOfferManagerBoard(conv: ConvKey): Promise<void> {
+    // N4.1: off → identical to today (no decide call).
+    if (!this.cfg.nextSteps) return;
+    const st = this.st.peek(conv);
+    if (!st?.manager || st.worker || st.advisor) return;
+    // N1.5: never under a result a queued message is about to supersede.
+    if (this.queue.size(conv) > 0) return;
+    const busyWorkers = this.orch.workersOf(chatOf(conv)).filter(([, ws]) => BUSY.includes(ws.worker!.status)).length;
+    if (busyWorkers === 0 || !st.sessionID) return;
+    const lang = this.userPrefs.getLang(st.createdBy ?? "");
+    const now = Date.now();
+    const facts: NextStepFacts = {
+      kind: "manager",
+      outcome: "succeeded",
+      interrupted: false,
+      agent: st.agent ?? "manager",
+      elapsedMs: 0, // no minimum-length gate for the board rule
+      busyWorkers,
+      filesNew: false,
+      overflow: false,
+      hasChoices: false,
+      hasOtherKeyboard: false,
+    };
+    const suggestion = decide(facts, { nextSteps: this.cfg.nextSteps, minSecs: this.cfg.nextMinSecs }, now).find((x) => x.rule === "board");
+    if (!suggestion) return;
+    const id = nsRegistry.set({ conv, sessionID: st.sessionID, rule: "board", now });
+    const row: Btn[] = [{ text: suggestion.label(lang), callback_data: callbackFor(id, 0) }];
+    // N4.3: shown event for the board line.
+    audit({ action: "nextstep_shown", chatId: conv, session: st.sessionID, userId: st.createdBy, meta: { rule: "board" } });
+    const lineId = await this.tg
+      .sendMessageId(conv, tr(lang, `⚡ ${busyWorkers} worker đang chạy — xem board:`, `⚡ ${busyWorkers} worker(s) running — check the board:`), { reply_markup: { inline_keyboard: [row] } })
+      .catch(() => -1);
+    // N3.7: the line reverts to no buttons when the user speaks again.
+    if (lineId > 0) this.noteNextStepMessage(conv, lineId);
   }
 
   /**
@@ -2993,6 +3243,10 @@ export class Bot {
       await this.handleChoiceCallback(cb, conv, messageId);
       return;
     }
+    if (data.startsWith("ns:")) {
+      await this.handleNextStepCallback(cb, conv, messageId);
+      return;
+    }
     if (data.startsWith("fq:")) {
       await this.handleFormCallback(cb, conv, messageId);
       return;
@@ -3551,6 +3805,107 @@ export class Bot {
       warn("choice prompt:", (e as Error)?.message);
       await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "❌ Không thể xử lý — thử nhập lại.", "❌ Couldn't process that — try typing it again.")).catch(() => {});
     });
+  }
+
+  /**
+   * Handle a tap on a rule-based next-step button (data = "ns:<id>:<k>").
+   * The N3 checks run in order: parse → registry (N3.6: expired, not silent)
+   * → session binding (N3.2) → rule → busy (N3.3: refuse and KEEP the button)
+   * → one-shot (N3.1) → action. Actions: "review" — the same read-only prompt
+   * as /review; "board" — the read-only /board render (S5, no agent turn);
+   * "new-keep" — the /new confirm card (S5, asks before doing anything).
+   * N3.4: fixed text, the label says what happens. N3.5 is the shared
+   * allow-list gate at the top of handleCallback (this.allowed).
+   */
+  private async handleNextStepCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+    const lang = this.userPrefs.getLang(cb.from?.id ?? "");
+    const parsed = parseCallback(cb.data ?? "");
+    if (!parsed) {
+      await this.tg.answerCallbackQuery(cb.id);
+      return;
+    }
+    const rec = nsRegistry.get(parsed.id, Date.now());
+    if (!rec) {
+      // N3.6: unknown id — outlived a bot restart (the registry is in-memory) or expired.
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Nút này đã hết hạn.", "This button has expired."));
+      return;
+    }
+    // N3.2: the tap is bound to the session the button was created for.
+    const state = this.st.peek(conv);
+    if (!state?.sessionID || state.sessionID !== rec.sessionID) {
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Nút này không còn áp dụng cho phiên hiện tại.", "This button no longer applies to the current session."));
+      return;
+    }
+    // N3.3: a turn is running → refuse and KEEP the button (no markup edit).
+    // (Manager turns have no inflight entry — fire-and-forget — but the board
+    // action is read-only, so a busy Manager never blocks a /board tap.)
+    if (this.inflight.has(conv)) {
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Đang chạy task — hẵng thử lại sau.", "A task is running — try again later."));
+      return;
+    }
+    if (rec.rule === "review" && state.manager) {
+      // The /review guard: the Manager has no repo (stale button after /manager on).
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, "🔍 Manager không có repo để review.", "🔍 The Manager has no repo to review."));
+      return;
+    }
+    // N3.1: one-shot — drop the next-step row and consume the record BEFORE
+    // the action so a re-tap can never fire twice. A row appended to the
+    // worktree card (S4) reverts the card to its own buttons; a failure
+    // message (S5) reverts to its Continue row; everything else reverts to
+    // no buttons.
+    if (messageId) {
+      const residual = this.nextStepResiduals.get(conv) ?? { inline_keyboard: [] };
+      await this.tg.editMessageReplyMarkup(conv, messageId, { reply_markup: residual }).catch(() => {});
+      this.nextStepFooters.delete(conv);
+      this.nextStepResiduals.delete(conv);
+    }
+    nsRegistry.delete(parsed.id);
+    // N4.3: an accepted tap (all N3 checks passed, action about to run) is in
+    // the audit log with its rule id, so tap rates can be measured.
+    audit({ action: "nextstep_tap", chatId: conv, session: rec.sessionID, userId: cb.from?.id, outcome: "ok", meta: { rule: rec.rule } });
+    if (rec.rule === "review") {
+      const prompt = reviewPrompt("", lang);
+      if (!prompt) {
+        await this.tg.answerCallbackQuery(cb.id);
+        return;
+      }
+      await this.tg.answerCallbackQuery(cb.id);
+      await this.runPrompt(conv, prompt, state, undefined, lang);
+      return;
+    }
+    if (rec.rule === "board") {
+      // S5: /board is read-only (no agent turn) — safe even mid-manager-turn.
+      await this.tg.answerCallbackQuery(cb.id);
+      await this.orch.cmdBoard(conv).catch((e) => warn("nextstep board tap:", (e as Error)?.message));
+      return;
+    }
+    // "new-keep": open the /new confirm card (nw: flow) — it asks before
+    // doing anything (N3.4: the label says what happens).
+    await this.tg.answerCallbackQuery(cb.id);
+    await this.cmdNew(conv);
+  }
+
+  /**
+   * S4 (next-step buttons, workers): a message in this conv now carries the
+   * conv's next-step row — the Review button appended to the worktree card,
+   * or one short line. Remember its id so N3.7 can dismiss it, and (for a
+   * card) the keyboard it reverts to: the card's own Diff/Merge/Delete rows.
+   */
+  private noteNextStepMessage(conv: ConvKey, messageId: number, residual?: Keyboard): void {
+    if (messageId <= 0) return;
+    this.nextStepFooters.set(conv, messageId);
+    if (residual) this.nextStepResiduals.set(conv, residual);
+  }
+
+  /** N3.7: drop the previous turn's next-step keyboard when the user speaks again (best effort). */
+  private dismissNextStepKeyboard(conv: ConvKey): void {
+    const id = this.nextStepFooters.get(conv);
+    if (!id) return;
+    this.nextStepFooters.delete(conv);
+    // A worktree card keeps its own buttons (S4); a footer/line reverts to none.
+    const residual = this.nextStepResiduals.get(conv) ?? { inline_keyboard: [] };
+    this.nextStepResiduals.delete(conv);
+    void this.tg.editMessageReplyMarkup(conv, id, { reply_markup: residual }).catch(() => {});
   }
 
   /**

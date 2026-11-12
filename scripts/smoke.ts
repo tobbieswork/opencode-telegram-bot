@@ -28,6 +28,9 @@ class MockTelegram {
     this.out.push("[edit] " + text);
     if (opts?.reply_markup) this.keyboards.push(opts.reply_markup);
   }
+  // Next-step one-shot revert (N3.1) edits the footer's reply markup in place;
+  // the mock is a no-op (the smoke doesn't observe the row being dropped).
+  async editMessageReplyMarkup(_chatId: number, _messageId: number, _opts: Record<string, unknown> = {}): Promise<void> {}
   async answerCallbackQuery(_id: string, _text?: string): Promise<void> {}
   async deleteMessage(_chatId: number, _messageId: number): Promise<void> {}
   async setMyCommands(_commands: Array<{ command: string; description: string }>): Promise<void> {}
@@ -72,6 +75,12 @@ async function main(): Promise<void> {
   // Auto-queue mode for the queue scenario below: a message that arrives while
   // a turn is running is enqueued on arrival (busy reply "Đã thêm vào hàng chờ").
   process.env.OPENCODE_TG_BUSY_MODE = "queue";
+  // S7 (next-step buttons, end-to-end): the feature is on and the "review" rule
+  // has no minimum-turn gate, so the build turn that writes a file below offers
+  // the "🔍 Review changes" button and tapping it starts a review turn.
+  // Test scope only — the source default (90 s) is NOT changed.
+  process.env.OPENCODE_TG_NEXT_STEPS = "1";
+  process.env.OPENCODE_TG_NEXT_MIN_SECS = "0";
   const cfg = loadConfig(root);
 
   const oc = new OpenCodeCtl();
@@ -297,6 +306,65 @@ async function main(): Promise<void> {
     const rok = await waitFor((a) => a.slice(afterTap).some((m) => /· \d+(\.\d+)?s/.test(m)), mock.out, 90000);
     console.log("prompt completed:", rok);
     show("q: final");
+  }
+
+  // ── next-step: Review button → review turn (S7, end-to-end) ────────────────
+  // A plain build turn that WRITES a file must offer the "🔍 Review changes"
+  // next-step button (NEXT_STEPS on, NEXT_MIN_SECS=0 so any turn qualifies);
+  // tapping it must start a real review turn (the read-only review-code prompt).
+  // The session is idle here (the question turn above completed) and in build.
+  console.log("\n=== NEXT-STEP REVIEW (end-to-end) ===");
+  {
+    // Guard: force the build agent so the "review" rule's agent gate holds.
+    await bot.handle(upd("/mode build"));
+    const outBefore = mock.out.length;
+    const kbBefore = mock.keyboards.length;
+    // A build turn that actually creates a file → the session's modified-files
+    // set gains a path → the "review" rule's filesNew gate passes.
+    const nsProbe = "NSX-" + Date.now();
+    await bot.handle(
+      upd(
+        `Create a brand-new file named hello-nextstep-${nsProbe}.txt whose only line is: nextstep smoke ${nsProbe}. ` +
+          "Actually create the file now (use whatever file tool is available). Do not do anything else; " +
+          "end with a single short confirmation sentence.",
+      ),
+    );
+    // Turn completes → its quiet footer carries the "· Ns" marker + the keyboard.
+    const buildDone = await waitFor((a) => a.slice(outBefore).some((m) => /· \d+(\.\d+)?s/.test(m)), mock.out, 120000);
+    console.log("build turn (file write) completed:", buildDone);
+    // The "🔍 Review changes" button rides the footer keyboard (callback ns:<id>:<k>).
+    let nsBtn: string | undefined;
+    for (const kb of mock.keyboards.slice(kbBefore)) {
+      const m = JSON.stringify(kb).match(/ns:[0-9a-z]{4}:\d+/);
+      if (m) { nsBtn = m[0]; break; }
+    }
+    console.log("review next-step button shown:", nsBtn ?? "NOT FOUND");
+    show("ns: build turn result + review button");
+    if (!nsBtn) {
+      console.log("❌ NEXT-STEP: no Review button on a file-changing build turn — feature not working");
+      process.exitCode = 1;
+    } else {
+      // Let the build turn's end-of-turn cleanup settle (inflight cleared) so the
+      // tap is not refused by the N3.3 "task running" check.
+      await waitMs(500);
+      const afterTap = mock.out.length;
+      await bot.handle(tap(nsBtn));
+      // The tap starts a review turn: a NEW turn runs the read-only review and
+      // completes with its own footer (success "· Ns" or a failure "Ns</i>").
+      const reviewDone = await waitFor(
+        (a) => a.slice(afterTap).some((m) => /· \d+(\.\d+)?s/.test(m) || /\d+(\.\d+)?s<\/i>/.test(m)),
+        mock.out,
+        120000,
+      );
+      console.log("review turn started + completed after tap:", reviewDone);
+      show("ns: review turn after tap");
+      if (!reviewDone) {
+        console.log("❌ NEXT-STEP: review turn did not run after tapping Review — feature not working");
+        process.exitCode = 1;
+      } else {
+        console.log("✅ NEXT-STEP: file-write build turn → Review button → tap → review turn completed");
+      }
+    }
   }
 
   // ── queue: a message sent while a turn is running is queued, then runs after ─

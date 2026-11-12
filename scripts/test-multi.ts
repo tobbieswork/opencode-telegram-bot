@@ -150,6 +150,13 @@ const repo = join(tmp, "repo");
     openForumTopic: async () => {},
     answerCallbackQuery: async () => {},
     editMessageText: async (_c: unknown, _m: number, text: string) => void sent.push("[edit] " + text),
+    // The worktree-done card is sent via sendMessageId (S4 needs the id for
+    // the next-step dismiss) — record it exactly like sendHtml did.
+    sendMessageId: async (_conv: unknown, text: string, opts?: any) => {
+      sent.push(text);
+      if (opts?.reply_markup) lastKb = opts.reply_markup;
+      return 9000;
+    },
     deleteMessage: async () => {},
     deleteForumTopic: async (conv: string) => void deletedTopics.push(conv),
   };
