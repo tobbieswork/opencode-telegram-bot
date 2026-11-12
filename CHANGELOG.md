@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.21.3](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.21.2...opencode-telegram-bot-v1.21.3) (2026-11-12)
+
+
+### Bug Fixes
+
+* auto-reject permission prompts when the reminder budget is exhausted ([8a220f0](https://github.com/tobbieswork/opencode-telegram-bot/commit/8a220f09339c8e9e6d3e6e0dc91f0ce584d35117))
+* auto-reject permission prompts when the reminder budget is exhausted ([bcfdc6a](https://github.com/tobbieswork/opencode-telegram-bot/commit/bcfdc6aeb86b660f28c10080f94cc9b447984084))
+
 ## [1.21.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.21.1...opencode-telegram-bot-v1.21.2) (2026-11-12)
 
 
