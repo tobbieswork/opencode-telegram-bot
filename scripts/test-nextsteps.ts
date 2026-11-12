@@ -9,6 +9,7 @@ import {
   labelFor,
   RULES,
   registry,
+  computeFilesNew,
   callbackFor,
   parseCallback,
   type NextStepFacts,
@@ -138,12 +139,12 @@ function rulesOf(sugs: ReturnType<typeof decide>): string {
 {
   const sugs = decide(facts(), CFG, NOW);
   check("suggestion shape: rule === action", sugs.length === 1 && sugs[0].rule === sugs[0].action);
-  check("label: vi default", sugs[0].label("vi") === "🔍 Xem lại", sugs[0].label("vi"));
+  check("label: vi default", sugs[0].label("vi") === "🔍 Review thay đổi", sugs[0].label("vi"));
   check("label: en", sugs[0].label("en") === "🔍 Review changes", sugs[0].label("en"));
   check("labelFor: board vi/en identical", labelFor("board", "vi") === "📋 Board" && labelFor("board", "en") === "📋 Board");
   check("labelFor: new-keep vi", labelFor("new-keep", "vi") === "♻ Phiên mới, giữ context", labelFor("new-keep", "vi"));
   check("labelFor: new-keep en", labelFor("new-keep", "en") === "♻ New session, keep context", labelFor("new-keep", "en"));
-  check("labelFor: unknown lang falls back to vi", labelFor("review", "fr") === "🔍 Xem lại");
+  check("labelFor: unknown lang falls back to vi", labelFor("review", "fr") === "🔍 Review thay đổi");
 }
 
 // ── Callback encoding ─────────────────────────────────────────────────────────
@@ -201,6 +202,28 @@ function rulesOf(sugs: ReturnType<typeof decide>): string {
   check("prune: removes at least the stale record", pruned >= 1, String(pruned));
   check("prune: stale record gone", registry.get(stale, NOW + 1000) === null);
   check("prune: fresh record survives", registry.get(fresh, NOW + 1000) !== null);
+}
+
+// ── Opportunistic pruning: unclicked records must not pile up forever ─────────
+{
+  registry.clear();
+  const TTL = 24 * 60 * 60 * 1000;
+  for (let i = 0; i < 10; i++) registry.set({ conv: "u1:p", sessionID: `old_${i}`, rule: "review", now: NOW - (TTL + 60_000) });
+  for (let i = 0; i < 60; i++) registry.set({ conv: "u1:p", sessionID: `new_${i}`, rule: "review", now: NOW });
+  check("prune-on-set: expired records are dropped once the map grows", registry.size() <= 60, String(registry.size()));
+  check("prune-on-set: fresh records all survive", registry.size() === 60, String(registry.size()));
+  registry.clear();
+}
+
+// ── computeFilesNew (N2.3, amended): did the turn change the working tree? ────
+{
+  check("filesNew: fingerprints differ → changed", computeFilesNew({ before: "a", after: "b", reportFiles: [] }) === true);
+  check("filesNew: fingerprints equal → NOT changed, even if the report lists files", computeFilesNew({ before: "a", after: "a", reportFiles: ["x.ts"] }) === false);
+  check("filesNew: fingerprints win over a stale 'seen' set", computeFilesNew({ before: "a", after: "b", reportFiles: [], seen: new Set(["x.ts"]) }) === true);
+  check("filesNew: no fingerprint, empty report → NOT changed (no more 'assume changed')", computeFilesNew({ reportFiles: [] }) === false);
+  check("filesNew: no fingerprint, report lists a new file → changed", computeFilesNew({ reportFiles: ["x.ts"] }) === true);
+  check("filesNew: no fingerprint, only already-seen files → NOT changed", computeFilesNew({ reportFiles: ["x.ts"], seen: new Set(["x.ts"]) }) === false);
+  check("filesNew: only one fingerprint available → falls back to the report", computeFilesNew({ before: "a", reportFiles: ["y.ts"] }) === true && computeFilesNew({ after: "a", reportFiles: [] }) === false);
 }
 
 // ── Purity: module exports only what S1 promises ──────────────────────────────

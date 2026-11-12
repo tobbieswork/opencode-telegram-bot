@@ -68,7 +68,8 @@ import { cmdHelp, cmdStatus, cmdHealth, cmdContext, cmdUsage, cmdHistory, cmdNot
 import { cmdBtw } from "./btw.js";
 import { cmdAsk } from "./ask.js";
 import { reviewPrompt, reviewUsage } from "./review.js";
-import { decide, callbackFor, parseCallback, registry as nsRegistry } from "./nextsteps.js";
+import { decide, callbackFor, parseCallback, computeFilesNew, registry as nsRegistry } from "./nextsteps.js";
+import { gitFingerprint } from "./gitstate.js";
 import type { NextStepFacts } from "./nextsteps.js";
 import { managerFloorFromMessages, runRotationHandoff, rotationGate } from "./rotation.js";
 import {
@@ -2104,6 +2105,10 @@ export class Bot {
     // turn runs the next queued message; a failed or interrupted turn holds it).
     // Fail-safe default "failed" so an unexpected path never drains the queue.
     let outcome: "succeeded" | "failed" | "interrupted" = "failed";
+    // Next-step Review signal: the working-tree fingerprint BEFORE the turn
+    // (undefined when the feature is off, the conv is not a plain build session,
+    // or the folder is not a git repo). Compared with a second one afterwards.
+    const nsBefore = await this.nextStepSnapshot(conv);
     try {
       let res;
       try {
@@ -2147,14 +2152,18 @@ export class Bot {
           error: res.error,
           lang: langEff,
         });
-        const rows = [...(kb?.inline_keyboard ?? []), ...(nsKb?.inline_keyboard ?? [])];
-        const failId = await this.tg
-          .sendMessageId(conv, formatTurnFailure(res.error, res.elapsedMs, langEff), rows.length ? { reply_markup: { inline_keyboard: rows } } : {})
-          .catch(() => -1);
-        // N3.1/N3.7: remember the message so the next-step row can be dropped
-        // on tap / next user message, reverting to the Continue row when there
-        // is one (the pre-existing button must survive).
-        if (failId > 0 && nsKb) this.noteNextStepMessage(conv, failId, kb);
+        const failText = formatTurnFailure(res.error, res.elapsedMs, langEff);
+        if (nsKb) {
+          const rows = [...(kb?.inline_keyboard ?? []), ...nsKb.inline_keyboard];
+          const failId = await this.tg.sendMessageId(conv, failText, { reply_markup: { inline_keyboard: rows } }).catch(() => -1);
+          // N3.1/N3.7: remember the message so the next-step row can be dropped
+          // on tap / next user message, reverting to the Continue row when there
+          // is one (the pre-existing button must survive).
+          if (failId > 0) this.noteNextStepMessage(conv, failId, kb);
+        } else {
+          // No next-step row: exactly the pre-next-steps path (chunked by sendHtml).
+          await this.sendHtml(conv, failText, kb ? { reply_markup: kb } : {});
+        }
         // Body language (feature C): the bot dislikes the turn that failed.
         this.bodyReact(conv, userMsgId, REACTION_FAIL);
         return;
@@ -2177,6 +2186,7 @@ export class Bot {
         elapsedMs: res.elapsedMs,
         error: res.error,
         lang: langEff,
+        fpBefore: nsBefore,
       });
       if (kb) {
         const footerId = await this.tg.sendMessageId(conv, meta, { reply_markup: kb }).catch(() => -1);
@@ -2265,6 +2275,21 @@ export class Bot {
   }
 
   /**
+   * Working-tree fingerprint to take before a plain build-agent turn, for the
+   * next-step Review rule (computeFilesNew). Undefined when the feature is off,
+   * the conv is not a plain session on the build agent, the folder is not a git
+   * repo, or git is slow (capped at 1.5 s so it can never hold up the prompt).
+   */
+  private async nextStepSnapshot(conv: ConvKey): Promise<string | undefined> {
+    if (!this.cfg.nextSteps) return undefined;
+    const state = this.st.peek(conv);
+    if (!state || state.worker || state.manager || state.advisor) return undefined;
+    if ((state.agent ?? "build") !== "build") return undefined;
+    const cap = new Promise<undefined>((ok) => setTimeout(() => ok(undefined), 1500).unref?.());
+    return Promise.race([gitFingerprint(state.directory || this.cfg.opencodeDirectory), cap]);
+  }
+
+  /**
    * S3 — rule-based next-step buttons for PLAIN sessions (docs/sdd/
    * next-step-buttons.md). Builds the facts the bot already holds, runs the
    * engine, and returns the footer keyboard — or undefined when nothing
@@ -2283,6 +2308,8 @@ export class Bot {
       elapsedMs: number;
       error?: { type?: string; message?: string };
       lang: Lang;
+      /** Working-tree fingerprint taken before the turn (see nextStepSnapshot). */
+      fpBefore?: string;
     },
   ): Promise<Keyboard | undefined> {
     // N4.1: off → identical to today (no decide, no getSessionReport call).
@@ -2306,16 +2333,20 @@ export class Bot {
     let filesNew = false;
     let reportFiles: string[] = [];
     if (reviewGate) {
-      try {
-        reportFiles = (await this.oc.getSessionReport(sessionID)).modifiedFiles;
-        const seen = this.nextStepReviewFiles.get(conv);
-        // Empty modifiedFiles is common (the build agent creates files via shell,
-        // which the report does not track) → treat as "assume changed" so the
-        // button still shows; when the report DOES list files, require a new one.
-        filesNew = reportFiles.length === 0 || reportFiles.some((p) => !seen?.has(p));
-      } catch {
-        reportFiles = []; // report unavailable → no new files (never block the turn end)
+      // N2.3 (amended): did the turn change the working tree? Compare the git
+      // fingerprints from before and after; this sees files made through the
+      // shell, which the session report misses. Only when a fingerprint is
+      // missing (not a git repo, git failed) fall back to the report, and then
+      // only a file it lists that was not offered before counts.
+      const fpAfter = info.fpBefore !== undefined ? await gitFingerprint(state.directory || this.cfg.opencodeDirectory) : undefined;
+      if (info.fpBefore === undefined || fpAfter === undefined) {
+        try {
+          reportFiles = (await this.oc.getSessionReport(sessionID)).modifiedFiles;
+        } catch {
+          reportFiles = []; // report unavailable → no new files (never block the turn end)
+        }
       }
+      filesNew = computeFilesNew({ before: info.fpBefore, after: fpAfter, reportFiles, seen: this.nextStepReviewFiles.get(conv) });
     }
     const facts: NextStepFacts = {
       kind: "plain",
