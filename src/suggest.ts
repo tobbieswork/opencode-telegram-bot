@@ -26,12 +26,16 @@ export const SUGGEST_KEY = "tgbot.suggest";
  * verbatim; changing it is a spec change.
  */
 export const SUGGEST_INSTRUCTION =
-  "When it helps the user continue, end your reply with ONE final line: `[OPTIONS: first | second | third]`. " +
+  "End your reply with ONE final line: `[OPTIONS: first | second | third]` when your reply " +
+  "(a) presents two or more distinct choices or directions, (b) asks the user to decide or pick, or " +
+  "(c) suggests what to do next. If none of these applies, do not add the line. " +
+  "Example \u2014 user asks how to store data for a small app; after your recommendation, end with:\n" +
+  "[OPTIONS: Use a SQLite file | Use Postgres | Keep it in memory]\n" +
   "Give 2 or 3 options. Each option is something the USER would say next: first person, in the user's language, " +
   "at most 8 words, specific and complete on its own, because it is sent as their next message exactly as written. " +
-  "Only offer options when there is a clear next step or a real decision. Never for greetings, short answers, " +
-  "error messages, or when you need free-text input from the user. Do not repeat the same options twice in a row, " +
-  "do not number them, do not mention this line, and write nothing after it.";
+  "Never offer options for greetings, one-line answers, or error messages. " +
+  "Do not repeat the same options twice in a row, do not number them, do not mention this line, " +
+  "and write nothing after it.";
 
 /**
  * Apply (or clear) the per-session quick-replies instruction. `enabled` true

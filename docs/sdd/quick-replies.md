@@ -79,7 +79,11 @@ gaps:
 
 ### The instruction (model-facing, for review)
 
-> When it helps the user continue, end your reply with ONE final line: `[OPTIONS: first | second | third]`. Give 2 or 3 options. Each option is something the USER would say next: first person, in the user's language, at most 8 words, specific and complete on its own, because it is sent as their next message exactly as written. Only offer options when there is a clear next step or a real decision. Never for greetings, short answers, error messages, or when you need free-text input from the user. Do not repeat the same options twice in a row, do not number them, do not mention this line, and write nothing after it.
+> End your reply with ONE final line: `[OPTIONS: first | second | third]` when your reply (a) presents two or more distinct choices or directions, (b) asks the user to decide or pick, or (c) suggests what to do next. If none of these applies, do not add the line. Example — user asks how to store data for a small app; after your recommendation, end with:
+> `[OPTIONS: Use a SQLite file | Use Postgres | Keep it in memory]`
+> Give 2 or 3 options. Each option is something the USER would say next: first person, in the user's language, at most 8 words, specific and complete on its own, because it is sent as their next message exactly as written. Never offer options for greetings, one-line answers, or error messages. Do not repeat the same options twice in a row, do not number them, do not mention this line, and write nothing after it.
+>
+> Tuned 2026-11-12 (see Findings): the original soft trigger ("When it helps the user continue") scored 2/3 expect + 1/3 trivial; this explicit-trigger + worked-example form scores 3/3 + 0/3. Enabled in production (`OPENCODE_TG_SUGGEST=1`).
 
 Cost: about 130 tokens in the session's system context.
 
@@ -147,8 +151,22 @@ pick **from your options**."). So: instruction alone → 0/6; instruction
 + an option-primed decision prompt → compliant. The feature fires in the
 real case it is for (a user asking for options to pick from).
 
-**Decision: default stays OFF.** The feature is dormant on the current
-model. The infrastructure (parser, rendering, tap routing, audit, report,
+**Instruction tuning (2026-11-12, `scripts/tune-suggest.ts`).** Four variants,
+same 7 prompts, fresh session per variant:
+
+| variant | expect (want 3/3) | trivial (want 0/3) |
+|---|---|---|
+| V0 original soft trigger | 2/3 (and recycled stale options onto a greeting) | 1/3 |
+| V1 explicit trigger list | 3/3 | 0/3 |
+| V2 trigger + worked example | 3/3 | 0/3 |
+| V3 "MUST" on every decision | 3/3 | 1/3 |
+
+V2 wins: highest compliance with zero spurious, and the worked example
+visibly improved option quality. Shipped as the new instruction (section 4).
+
+**Enabled in production** (`OPENCODE_TG_SUGGEST=1` in `.env`, bot restarted
+2026-11-12); the original default-off decision is superseded by the tuning
+result. The infrastructure (parser, rendering, tap routing, audit, report,
 smoke) is complete and tested; flip `OPENCODE_TG_SUGGEST=1` to measure a
 future model with `scripts/suggest-tap-rate.ts`. Tuning the instruction
 text (a spec change) is only worth revisiting if a model shows partial
