@@ -192,6 +192,10 @@ export const registry = {
     }
     return rec;
   },
+  /** Consume a record (one-shot taps, N3.1). No-op when unknown. */
+  delete(id: string): void {
+    records.delete(id);
+  },
   /** Remove records older than maxAgeMs (default 24 h). Returns count pruned. */
   prune(now: number, maxAgeMs: number = NS_TTL_MS): number {
     let n = 0;
