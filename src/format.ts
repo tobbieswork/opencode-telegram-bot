@@ -34,7 +34,7 @@ const RATE_LIMIT_RE = /rate ?limit|per (minute|hour|day)|too many requests|reque
 /** A plan/quota/credit cap — does NOT clear in seconds, so "wait a moment" would be wrong advice. */
 const USAGE_CAP_RE = /usage limit|quota|limit reached|insufficient (credit|balance|fund)|out of credit|billing/i;
 
-/** The model's CONTEXT was exceeded — fixable by starting a fresh session. */
+/** The model's CONTEXT was exceeded — OpenCode auto-compacts (2.2.5+); a fresh session (/clear) is the last resort. */
 const CONTEXT_OVERFLOW_RE = /context (length|window|limit|size)|maximum context|prompt is too long|input length/i;
 /** Weaker overflow wording ("too many tokens"): also used by quota errors, so a cap word vetoes it. */
 const WEAK_OVERFLOW_RE = /too many tokens/i;
@@ -68,7 +68,7 @@ export function isOverflowError(text: string): boolean {
  * from the newest assistant / idle / compaction message's `.error` field (the
  * session object carries none). We distinguish a *rate limit* (wait and retry —
  * /clear is useless) from a *usage cap* (wait for a reset or switch model) and
- * from *context overflow* (start a fresh session), then fall back to the raw message.
+ * from *context overflow* (auto-compacted; /clear if unrecoverable), then fall back to the raw message.
  */
 export function formatTurnFailure(
   error: { type?: string; message?: string } | undefined,
@@ -88,11 +88,14 @@ export function formatTurnFailure(
         `⏳ The provider is rate limiting — not a context error; wait a few seconds and try again.${detail}`,
       );
     case "overflow":
+      // Since OpenCode 2.2.5 an overflow triggers auto-compaction (and a
+      // shrink-retry) before the turn can fail — so reaching this message
+      // means the session is still too large even after that.
       return tr(
         lang,
-        "⚠️ <b>Session đã đầy context</b> — vượt giới hạn token của model nên không chạy tiếp được.\n" +
+        "⚠️ <b>Session đã đầy context</b> — vượt giới hạn token của model; OpenCode đã tự nén context nhưng vẫn không chạy tiếp được.\n" +
           "Gõ <code>/clear</code> để bắt đầu phiên mới.",
-        "⚠️ <b>Session out of context</b> — the model's token limit was reached, so it can't continue.\n" +
+        "⚠️ <b>Session out of context</b> — the model's token limit was reached and auto-compaction couldn't bring it back down.\n" +
           "Send <code>/clear</code> to start a fresh session.",
       );
     case "usage-cap":

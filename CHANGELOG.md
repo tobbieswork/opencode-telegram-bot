@@ -1,5 +1,55 @@
 # Changelog
 
+## [1.21.4](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.21.3...opencode-telegram-bot-v1.21.4) (2026-11-12)
+
+
+### Bug Fixes
+
+* stop claiming an overflowed session can't continue ([e44355b](https://github.com/tobbieswork/opencode-telegram-bot/commit/e44355bcb8d2f0c5edd1d71c87e443f15cd8fb8b))
+* stop claiming an overflowed session can't continue ([e4e6e8f](https://github.com/tobbieswork/opencode-telegram-bot/commit/e4e6e8f8b37949461a8aaac2122539b6680651c2))
+
+## [1.21.3](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.21.2...opencode-telegram-bot-v1.21.3) (2026-11-12)
+
+
+### Bug Fixes
+
+* auto-reject permission prompts when the reminder budget is exhausted ([8a220f0](https://github.com/tobbieswork/opencode-telegram-bot/commit/8a220f09339c8e9e6d3e6e0dc91f0ce584d35117))
+* auto-reject permission prompts when the reminder budget is exhausted ([bcfdc6a](https://github.com/tobbieswork/opencode-telegram-bot/commit/bcfdc6aeb86b660f28c10080f94cc9b447984084))
+
+## [1.21.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.21.1...opencode-telegram-bot-v1.21.2) (2026-11-12)
+
+
+### Bug Fixes
+
+* **quick-replies:** re-pin sessions when the instruction text changes ([d5f7239](https://github.com/tobbieswork/opencode-telegram-bot/commit/d5f72399d0347d2a12471a16c80561d7a182490c))
+* **quick-replies:** re-pin sessions when the instruction text changes ([7fecf72](https://github.com/tobbieswork/opencode-telegram-bot/commit/7fecf7278755c97b0d31ab6385b463181de0ada3))
+
+## [1.21.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.21.0...opencode-telegram-bot-v1.21.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* **quick-replies:** tuned instruction — explicit triggers + worked example ([a79b4f3](https://github.com/tobbieswork/opencode-telegram-bot/commit/a79b4f3396f64d49ca5737e4359de17464d0e6f9))
+* **quick-replies:** tuned instruction — explicit triggers + worked example ([4315889](https://github.com/tobbieswork/opencode-telegram-bot/commit/4315889de54938793368b473c291035303d0b081))
+
+## [1.21.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.20.1...opencode-telegram-bot-v1.21.0) (2026-11-12)
+
+
+### Features
+
+* quick replies — model-written next-step buttons ([a3a8431](https://github.com/tobbieswork/opencode-telegram-bot/commit/a3a8431440e83ad0f247e938d7f4af4c5b865c0a))
+* **quick-replies:** R1 extractOptionsMarker parser ([00cc030](https://github.com/tobbieswork/opencode-telegram-bot/commit/00cc0309bfea876920efdcd5c329448287c8406d))
+* **quick-replies:** R2 config + [OPTIONS] instruction pin ([5d8a950](https://github.com/tobbieswork/opencode-telegram-bot/commit/5d8a950fcb94f3c9cf6ce02f130295bda9003364))
+* **quick-replies:** R3 tap routing, rendering, precedence, audit ([b71524c](https://github.com/tobbieswork/opencode-telegram-bot/commit/b71524c8f2533f92ce93b1ddfc86433d98d7f67f))
+
+## [1.20.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.20.0...opencode-telegram-bot-v1.20.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* escape English placeholders in /board, /spawn, /kill HTML messages ([b8da154](https://github.com/tobbieswork/opencode-telegram-bot/commit/b8da15410d8b4d7b345886b0db4cc3fb3deaecae))
+* escape English placeholders in /board, /spawn, /kill HTML messages ([5db3fb3](https://github.com/tobbieswork/opencode-telegram-bot/commit/5db3fb34334e49764a04eac0dffa285a5b611b70))
+
 ## [1.20.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.19.0...opencode-telegram-bot-v1.20.0) (2026-11-12)
 
 
