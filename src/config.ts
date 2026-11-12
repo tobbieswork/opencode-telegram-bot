@@ -142,6 +142,18 @@ export interface Config {
    */
   busyMode: "ask" | "queue" | "off";
   /**
+   * Master switch for the rule-based next-step buttons shown when a turn
+   * ends (Review / Board / New session, keep context). Default ON; "0",
+   * "false" or "off" disables it (behaviour is then exactly as before).
+   * Invalid values fall back to on with a warning.
+   */
+  nextSteps: boolean;
+  /**
+   * Minimum turn length (seconds) before the Review button is offered on a
+   * plain session (default 90).
+   */
+  nextMinSecs: number;
+  /**
    * Master switch for /schedule (automated prompts). Default ON; "0" disables.
    * The on/off is enforced by the caller (slice 3 starts the Scheduler only when
    * true) — the Scheduler itself is config-agnostic (deps-injected).
@@ -263,6 +275,11 @@ export function loadConfig(root: string): Config {
     // Default OFF: only an explicit "1"/"true" enables the reaction UX.
     react: process.env.OPENCODE_TG_REACT === "1" || process.env.OPENCODE_TG_REACT === "true",
     busyMode: parseBusyMode(process.env.OPENCODE_TG_BUSY_MODE),
+    // --- Rule-based next-step buttons (engine: src/nextsteps.ts) ---
+    // Default ON; "0"/"false"/"off" disables it (behaves exactly as before).
+    nextSteps: parseNextSteps(process.env.OPENCODE_TG_NEXT_STEPS),
+    // 0 is allowed (disables the length gate); anything else must be an integer >= 0.
+    nextMinSecs: parseIntSetting("OPENCODE_TG_NEXT_MIN_SECS", 90, 0),
     // --- /schedule (slice 2 engine; slice 3 wires the command + dispatch) ---
     // Default ON; only an explicit "0" disables (the tick loop is started by slice 3 only when true).
     schedule: process.env.OPENCODE_TG_SCHEDULE !== "0",
@@ -363,6 +380,15 @@ function parseBusyMode(raw?: string): Config["busyMode"] {
   if (!v || v === "ask") return "ask";
   warn(`OPENCODE_TG_BUSY_MODE=${raw} is not a valid mode (ask/queue/off) — using "ask"`);
   return "ask";
+}
+
+/** OPENCODE_TG_NEXT_STEPS: on (default) / "0" / "false" / "off"; anything else → on (with a warning). */
+function parseNextSteps(raw?: string): boolean {
+  const v = raw?.trim().toLowerCase();
+  if (v === "0" || v === "false" || v === "off") return false;
+  if (!v || v === "1" || v === "true") return true;
+  warn(`OPENCODE_TG_NEXT_STEPS=${raw} is not a valid value (1/true/0/false/off) — using on`);
+  return true;
 }
 
 /** The system IANA timezone, with a hard fallback when Intl reports nothing. */

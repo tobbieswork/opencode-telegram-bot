@@ -306,6 +306,8 @@ All settings are environment variables (see `.env.example`).
 | `OPENCODE_TG_DNS_STALE_IP` | | — | The VPN DNS server IP that lingers after an unclean VPN stop (empty keeps the heal off) |
 | `OPENCODE_TG_DNS_HEAL_MIN_FAILURES` | | `3` | Consecutive network failures before a heal may run |
 | `OPENCODE_TG_DNS_HEAL_COOLDOWN_MS` | | `600000` | Minimum gap between two heals, in ms |
+| `OPENCODE_TG_NEXT_STEPS` | | on | Rule-based next-step buttons when a turn ends (Review / Board / New session, keep context); `0` disables (behaves exactly as before) |
+| `OPENCODE_TG_NEXT_MIN_SECS` | | `90` | Min turn length (s) for the Review button on a plain session |
 | `ADVISOR_URL` + `ADVISOR_TOKEN` | | off | Advisor daemon URL + shared token — both set turns `/ask` on (old names `MAC_ADVISOR_*` still work) |
 | `ADVISOR_DEFAULT_AGENT` | | `claude` | Agent for `/ask` / `consult` when none is named: `claude` or `gemini` |
 
