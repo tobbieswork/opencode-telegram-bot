@@ -16,6 +16,7 @@ import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, formatTurnFailure, isOverflowError } from "./format.js";
 import { tr, STRINGS } from "./i18n.js";
 import { applyLanguagePin } from "./language.js";
+import { applySuggestPin } from "./suggest.js";
 import {
   extractMedia,
   buildPromptText,
@@ -2039,6 +2040,8 @@ export class Bot {
       // chose "en" ("vi"/unset clears it). Idempotent and self-tracked per session,
       // so a fresh session after /new, /use, or rotation re-applies on its prompt.
       await applyLanguagePin(this.oc, this.st, conv, sid, lang);
+      // Quick replies (R2): pin the [OPTIONS] instruction when enabled; idempotent + self-tracked.
+      await applySuggestPin(this.oc, this.st, conv, sid, this.cfg.suggest);
       // "Stay in the user's language" is a per-session INSTRUCTION (OpenCode
       // injects `api/*` entries into the system context), not prepended text —
       // cleaner and it doesn't grow the user-turn context. Tracked per SESSION
