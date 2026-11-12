@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.21.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.21.1...opencode-telegram-bot-v1.21.2) (2026-11-12)
+
+
+### Bug Fixes
+
+* **quick-replies:** re-pin sessions when the instruction text changes ([d5f7239](https://github.com/tobbieswork/opencode-telegram-bot/commit/d5f72399d0347d2a12471a16c80561d7a182490c))
+* **quick-replies:** re-pin sessions when the instruction text changes ([7fecf72](https://github.com/tobbieswork/opencode-telegram-bot/commit/7fecf7278755c97b0d31ab6385b463181de0ada3))
+
 ## [1.21.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.21.0...opencode-telegram-bot-v1.21.1) (2026-11-12)
 
 
