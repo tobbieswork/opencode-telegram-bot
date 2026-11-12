@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.23.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.23.0...opencode-telegram-bot-v1.23.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* workers mirror their task language (EN tasks pinned to English) ([e63bae1](https://github.com/tobbieswork/opencode-telegram-bot/commit/e63bae19173f3bcc362556a6e21bcc0b3aeb91b8))
+* workers mirror their task language (EN tasks pinned to English) ([f50c65d](https://github.com/tobbieswork/opencode-telegram-bot/commit/f50c65d9dc016414d616fa6da2dd64d5f3733ef2))
+
 ## [1.23.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.22.2...opencode-telegram-bot-v1.23.0) (2026-11-12)
 
 
