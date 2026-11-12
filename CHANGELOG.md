@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.22.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.21.4...opencode-telegram-bot-v1.22.0) (2026-11-12)
+
+
+### Features
+
+* load the bot token from a systemd credential or file ([7b06539](https://github.com/tobbieswork/opencode-telegram-bot/commit/7b06539270af78ed8edf60a18365960ada983376))
+
 ## [1.21.4](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.21.3...opencode-telegram-bot-v1.21.4) (2026-11-12)
 
 
