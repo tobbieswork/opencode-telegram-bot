@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.20.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.20.0...opencode-telegram-bot-v1.20.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* escape English placeholders in /board, /spawn, /kill HTML messages ([b8da154](https://github.com/tobbieswork/opencode-telegram-bot/commit/b8da15410d8b4d7b345886b0db4cc3fb3deaecae))
+* escape English placeholders in /board, /spawn, /kill HTML messages ([5db3fb3](https://github.com/tobbieswork/opencode-telegram-bot/commit/5db3fb34334e49764a04eac0dffa285a5b611b70))
+
 ## [1.20.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.19.0...opencode-telegram-bot-v1.20.0) (2026-11-12)
 
 
