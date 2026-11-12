@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.23.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.22.2...opencode-telegram-bot-v1.23.0) (2026-11-12)
+
+
+### Features
+
+* manager board offers per-worker topic-jump buttons ([7262e2e](https://github.com/tobbieswork/opencode-telegram-bot/commit/7262e2ea9d59d0427a3afd789d2e7318f9419831))
+* manager board offers per-worker topic-jump buttons ([e429aa6](https://github.com/tobbieswork/opencode-telegram-bot/commit/e429aa6143b2c1e2a2fd8704375a7fb285101829))
+
 ## [1.22.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.22.1...opencode-telegram-bot-v1.22.2) (2026-11-12)
 
 
