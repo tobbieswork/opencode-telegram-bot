@@ -48,6 +48,13 @@ export interface WorkerInfo {
   repoRoot?: string;
   /** Set when the worker runs in its own git worktree (root dir, branch, and the base it merges back to). */
   worktree?: { root: string; branch: string; base: string };
+  /**
+   * Git fingerprint baseline for the Review rule — captured at spawn, rolled
+   * forward after each Review offer, carried over on respawn. Undefined when
+   * the next-steps feature is off or the directory is not a git repo (the
+   * offer then falls back to the session-report heuristic).
+   */
+  fpBase?: string;
   createdAt: number;
   updatedAt: number;
   /** Short tail of the last reply, fed back to the Manager. */

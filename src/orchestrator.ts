@@ -29,8 +29,9 @@ import { applySuggestPin } from "./suggest.js";
 import type { Schedule } from "./schedule.js";
 import type { Advisor } from "./advisor/advisor.js";
 import { AGENTS, agentLabel, resolveAgent } from "./advisor/agents.js";
-import { decide, callbackFor, registry as nsRegistry } from "./nextsteps.js";
+import { decide, callbackFor, computeFilesNew, registry as nsRegistry } from "./nextsteps.js";
 import type { NextStepFacts } from "./nextsteps.js";
+import { gitFingerprint } from "./gitstate.js";
 
 type Btn = { text: string; callback_data?: string; url?: string };
 type Keyboard = { inline_keyboard: Btn[][] };
@@ -708,6 +709,10 @@ export class Orchestrator {
       writes,
       worktree,
       repoRoot,
+      // Review rule (S4): baseline working-tree fingerprint, taken now that
+      // the directory is final. Only for writing workers with the feature on —
+      // off mode makes no git call at all (byte-identical).
+      fpBase: this.h.cfg.nextSteps && writes ? await gitFingerprint(directory) : undefined,
       createdAt: now,
       updatedAt: now,
     };
@@ -1173,9 +1178,11 @@ export class Orchestrator {
       return undefined;
     }
     // Attach lineage + carry the worktree/repoRoot so /wt (diff/merge/remove)
-    // keeps operating on the correct branch in the new topic.
+    // keeps operating on the correct branch in the new topic — and the
+    // fingerprint baseline, so the predecessor's unreviewed changes stay
+    // reviewable by the replacement.
     this.h.st.set(r.conv, {
-      worker: { ...this.h.st.get(r.conv).worker!, worktree: w.worktree, repoRoot: w.repoRoot, respawnedFrom: w.name },
+      worker: { ...this.h.st.get(r.conv).worker!, worktree: w.worktree, repoRoot: w.repoRoot, respawnedFrom: w.name, fpBase: w.fpBase },
     });
     return name2;
   }
@@ -1410,9 +1417,17 @@ export class Orchestrator {
   /**
    * S4 (docs/sdd/next-step-buttons.md, N2): the Review row for a worker that
    * just finished done — or undefined when no rule fires. Fires only for a
-   * WRITING worker (N2.2) whose session modified a file not offered in this
-   * topic before (N2.3); the engine (decide) applies the rest. The one
+   * WRITING worker (N2.2); the engine (decide) applies the rest. The one
    * getSessionReport call happens only after those cheap gates.
+   *
+   * Fingerprint-first (same semantics as the plain-session row, PR #142): when
+   * both the spawn-time baseline (w.fpBase) and a fresh working-tree
+   * fingerprint are available, "new changes" means the two differ — which sees
+   * files created or rewritten through the shell, invisible to the session
+   * report. When either is missing (feature off at spawn, not a git repo, git
+   * failed, too many changed paths), fall back to the report and count only a
+   * file it lists that was not offered before. An empty report is never
+   * treated as "changed".
    */
   private async workerReviewRow(conv: ConvKey, s: ChatState, w: WorkerInfo, lang: Lang): Promise<Btn[] | undefined> {
     // N4.1: off → identical to today (no decide, no getSessionReport call).
@@ -1426,10 +1441,11 @@ export class Orchestrator {
       return undefined; // report unavailable → no offer (never block the worker-done relay)
     }
     const seen = this.workerReviewFiles.get(conv);
-    // Empty modifiedFiles (agent created files via shell, untracked by the
-    // report) → "assume changed" so the button still shows; when the report
-    // DOES list files, require a new one.
-    const filesNew = files.length === 0 || files.some((p) => !seen?.has(p));
+    // Fingerprint-first: compare the spawn-time baseline against the working
+    // tree now. The report above is the fallback when a fingerprint is missing,
+    // and it still defines the offered-file set.
+    const fpAfter = s.directory ? await gitFingerprint(s.directory) : undefined;
+    const filesNew = computeFilesNew({ before: w.fpBase, after: fpAfter, reportFiles: files, seen });
     if (!filesNew) return undefined;
     const now = Date.now();
     const facts: NextStepFacts = {
@@ -1452,6 +1468,13 @@ export class Orchestrator {
     const id = nsRegistry.set({ conv, sessionID: s.sessionID, rule: "review", now });
     // N2.3: this offer now defines the last-offered set for this worker topic.
     this.workerReviewFiles.set(conv, new Set(files));
+    // The baseline rolls forward with the offer: what was just offered is no
+    // longer "new" for the next turn. Read the CURRENT state first — setStatus
+    // already replaced `w` in the store (status/lastResult) before this row.
+    if (fpAfter !== undefined) {
+      const cur = this.h.st.peek(conv)?.worker;
+      this.h.st.set(conv, { worker: { ...(cur ?? w), fpBase: fpAfter } });
+    }
     // N4.3: shown event for the worker review button.
     audit({ action: "nextstep_shown", chatId: conv, session: s.sessionID, userId: s.createdBy, meta: { rule: "review" } });
     return [{ text: suggestion.label(lang), callback_data: callbackFor(id, 0) }];
