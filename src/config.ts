@@ -135,6 +135,13 @@ export interface Config {
    */
   react: boolean;
   /**
+   * What happens to a message that arrives while a turn is still running:
+   * "ask" (default: busy reply with Queue / Steer / note buttons), "queue"
+   * (auto-enqueue, no tap needed) or "off" (exactly today's behaviour).
+   * Invalid values fall back to "ask" with a warning.
+   */
+  busyMode: "ask" | "queue" | "off";
+  /**
    * Master switch for /schedule (automated prompts). Default ON; "0" disables.
    * The on/off is enforced by the caller (slice 3 starts the Scheduler only when
    * true) — the Scheduler itself is config-agnostic (deps-injected).
@@ -255,6 +262,7 @@ export function loadConfig(root: string): Config {
     prWatchIntervalMs: parseIntSetting("OPENCODE_TG_PR_WATCH_INTERVAL_MS", 5 * 60_000, 60_000),
     // Default OFF: only an explicit "1"/"true" enables the reaction UX.
     react: process.env.OPENCODE_TG_REACT === "1" || process.env.OPENCODE_TG_REACT === "true",
+    busyMode: parseBusyMode(process.env.OPENCODE_TG_BUSY_MODE),
     // --- /schedule (slice 2 engine; slice 3 wires the command + dispatch) ---
     // Default ON; only an explicit "0" disables (the tick loop is started by slice 3 only when true).
     schedule: process.env.OPENCODE_TG_SCHEDULE !== "0",
@@ -347,6 +355,14 @@ function parseFloatSetting(name: string, fallback: number, min: number): number 
 function parseWorktreeMode(raw?: string): Config["worktreeMode"] {
   const v = raw?.trim().toLowerCase();
   return v === "always" || v === "off" ? v : "auto";
+}
+/** OPENCODE_TG_BUSY_MODE: "ask" (default) / "queue" / "off"; anything else → "ask" (with a warning). */
+function parseBusyMode(raw?: string): Config["busyMode"] {
+  const v = raw?.trim().toLowerCase();
+  if (v === "queue" || v === "off") return v;
+  if (!v || v === "ask") return "ask";
+  warn(`OPENCODE_TG_BUSY_MODE=${raw} is not a valid mode (ask/queue/off) — using "ask"`);
+  return "ask";
 }
 
 /** The system IANA timezone, with a hard fallback when Intl reports nothing. */

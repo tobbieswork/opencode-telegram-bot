@@ -29,7 +29,7 @@ const GOLDEN = new Set([
   // manager
   "spawn", "board", "kill", "stopall", "manager", "auto", "wt", "prune",
   // control
-  "stop", "note", "btw", "ask", "review", "context", "usage", "rotation", "history", "status", "health", "reboot", "clear", "schedule", "lang", "help",
+  "stop", "note", "btw", "ask", "review", "context", "usage", "rotation", "history", "status", "health", "reboot", "clear", "queue", "schedule", "lang", "help",
 ]);
 const GOLDEN_ALIASES = new Set(["sessions", "b", "modes", "ctx", "workers"]);
 

@@ -94,6 +94,7 @@ export const COMMANDS: BotCommand[] = [
   { cmd: "health", desc: "Sức khoẻ các hệ thống nền (OK / cảnh báo / lỗi)", descEn: "Health of the background subsystems (OK / warn / fail)", group: "control" },
   { cmd: "reboot", desc: "Reboot máy (2 bước xác nhận)", descEn: "Reboot the machine (2-step confirm)", button: "🔄 Reboot", group: "control" },
   { cmd: "clear", desc: "Xoá state của chat này", descEn: "Clear this chat's state", button: "🧹 Xoá state", buttonEn: "🧹 Clear state", group: "control" },
+  { cmd: "queue", arg: "[clear]", desc: "Xem/xoá tin đang chờ trong hàng đợi", descEn: "View/clear messages in the queue", group: "control" },
   { cmd: "schedule", arg: "<spec> <prompt>", desc: "Đặt lịch chạy prompt tự động", descEn: "Schedule an automated prompt run", button: "⏰ Lịch", buttonEn: "⏰ Schedule", group: "control" },
   { cmd: "lang", arg: "vi|en", desc: "Đặt ngôn ngữ: vi (Tiếng Việt) / en (English)", descEn: "Set language: vi (Tiếng Việt) / en (English)", group: "control" },
   { cmd: "help", desc: "Danh sách lệnh + nút bấm", descEn: "Command list + buttons", button: "📖 Help", group: "control" },

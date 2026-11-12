@@ -17,6 +17,7 @@ import { McpBridge } from "../src/mcp-bridge.js";
 import { addWorktree, diffSummary, gitRoot, mergeWorktree, removeWorktree } from "../src/worktree.js";
 import { Orchestrator, Host } from "../src/orchestrator.js";
 import { BusyNoteStore } from "../src/notes.js";
+import { QueueStore } from "../src/queue.js";
 import { configureAudit } from "../src/audit.js";
 import { loadConfig, type Config } from "../src/config.js";
 
@@ -181,6 +182,7 @@ const repo = join(tmp, "repo");
     st,
     cfg,
     busyNotes: new BusyNoteStore(),
+    queue: new QueueStore(),
     sendHtml: async (_conv, html, opts) => {
       sent.push(html);
       if (opts?.reply_markup) lastKb = opts.reply_markup;
@@ -456,6 +458,7 @@ const repo = join(tmp, "repo");
     st,
     cfg: { scheduleTimeoutMs: 80, browseRoots: [repo], managerDir: join(tmp, "mgr"), maxWorkers: 2 } as any,
     busyNotes: new BusyNoteStore(),
+    queue: new QueueStore(),
     sendHtml: async () => {},
     applyModelAndVariant: async () => {},
     startTyping: () => {},
@@ -495,6 +498,7 @@ const repo = join(tmp, "repo");
     st,
     cfg: { browseRoots: [repo], managerDir: join(tmp, "mgr"), maxWorkers: 2, worktreeMode: "auto" } as any,
     busyNotes: new BusyNoteStore(),
+    queue: new QueueStore(),
     sendHtml: async (_c, html) => void sent.push(html),
     applyModelAndVariant: async () => {},
     startTyping: () => {},
@@ -543,6 +547,48 @@ const repo = join(tmp, "repo");
   check("a limit of 0 falls back too", loadConfig(tmp).maxWorkers === 5);
   process.env.OPENCODE_TG_MAX_WORKERS = "3";
   check("a valid value is kept", loadConfig(tmp).maxWorkers === 3);
+}
+
+// ── Q4: a manager turn-end drains its queue only on a SUCCEEDED outcome ──────
+// (mirrors the plain-session drain; uses promptManager, not runPrompt)
+{
+  const st = new StateManager(join(tmp, "mgr-drain-state.json"));
+  const host: Host = {
+    tg: {} as any,
+    oc: {} as any,
+    st,
+    cfg: {} as any,
+    busyNotes: new BusyNoteStore(),
+    queue: new QueueStore(),
+    sendHtml: async () => {},
+    applyModelAndVariant: async () => {},
+    startTyping: () => {},
+    startWorking: () => {},
+    stopWorking: () => {},
+  };
+  const orch = new Orchestrator(host);
+  const managerPrompts: string[] = [];
+  (orch as any).promptManager = async (_conv: string, text: string) => {
+    managerPrompts.push(text);
+  };
+  st.set("m1", { manager: true, sessionID: "ses_mgr" });
+  (orch as any).managerBusy.add("m1");
+
+  // A failed turn holds the queue (no drain).
+  host.queue.push("m1", { text: "kept-on-fail" });
+  (orch as any).dropManagerTurn("m1", "failed");
+  check("manager failed turn → queue held", host.queue.size("m1") === 1, String(host.queue.size("m1")));
+
+  // A succeeded turn runs the head as a fresh manager turn, and clears the flag.
+  (orch as any).dropManagerTurn("m1", "succeeded");
+  check("manager succeeded turn → queued msg runs via promptManager", managerPrompts.length === 1 && managerPrompts[0] === "kept-on-fail", JSON.stringify(managerPrompts));
+  check("…and the queue is empty", host.queue.size("m1") === 0, String(host.queue.size("m1")));
+  check("manager flag cleared after turn end", (orch as any).managerInflight === false, String((orch as any).managerInflight));
+
+  // default (no outcome arg) is treated as interrupted → no drain.
+  host.queue.push("m1", { text: "kept-by-default" });
+  (orch as any).dropManagerTurn("m1");
+  check("dropManagerTurn default outcome holds the queue", host.queue.size("m1") === 1, String(host.queue.size("m1")));
 }
 
 rmSync(tmp, { recursive: true, force: true });

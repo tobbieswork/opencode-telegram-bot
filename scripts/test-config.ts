@@ -202,5 +202,21 @@ delete process.env.OPENCODE_TG_TIMEZONE;
   for (const k of ["OPENCODE_TG_ROTATION_AUTO_FLOOR_K", "OPENCODE_TG_ROTATION_CONFIRM_FLOOR_K", "OPENCODE_TG_ROTATION_MIN_INTERVAL_H", "OPENCODE_TG_ROTATION_CONFIRM_REPROMPT_H"]) delete process.env[k];
 }
 
+// busy mode: OPENCODE_TG_BUSY_MODE (ask/queue/off; invalid → ask)
+{
+  delete process.env.OPENCODE_TG_BUSY_MODE;
+  const def = loadConfig(process.cwd());
+  check("busyMode default ask", def.busyMode === "ask", String(def.busyMode));
+  process.env.OPENCODE_TG_BUSY_MODE = "queue";
+  check("busyMode queue respected", loadConfig(process.cwd()).busyMode === "queue");
+  process.env.OPENCODE_TG_BUSY_MODE = "off";
+  check("busyMode off respected", loadConfig(process.cwd()).busyMode === "off");
+  process.env.OPENCODE_TG_BUSY_MODE = "ASK";
+  check("busyMode case-insensitive", loadConfig(process.cwd()).busyMode === "ask");
+  process.env.OPENCODE_TG_BUSY_MODE = "bogus";
+  check("busyMode invalid → ask", loadConfig(process.cwd()).busyMode === "ask");
+  delete process.env.OPENCODE_TG_BUSY_MODE;
+}
+
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
