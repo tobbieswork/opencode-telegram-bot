@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.19.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.18.0...opencode-telegram-bot-v1.19.0) (2026-11-12)
+
+
+### Features
+
+* queue and steer for messages sent while a turn is running ([#133](https://github.com/tobbieswork/opencode-telegram-bot/issues/133)) ([9d2baa2](https://github.com/tobbieswork/opencode-telegram-bot/commit/9d2baa28c5cd66b142ce35bc5abb4724fab13cf9))
+
 ## [1.18.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.17.1...opencode-telegram-bot-v1.18.0) (2026-11-10)
 
 
