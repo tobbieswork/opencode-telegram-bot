@@ -2530,12 +2530,25 @@ export class Bot {
     };
     const suggestion = decide(facts, { nextSteps: this.cfg.nextSteps, minSecs: this.cfg.nextMinSecs }, now).find((x) => x.rule === "board");
     if (!suggestion) return;
-    const id = nsRegistry.set({ conv, sessionID: st.sessionID, rule: "board", now });
-    const row: Btn[] = [{ text: suggestion.label(lang), callback_data: callbackFor(id, 0) }];
-    // N4.3: shown event for the board line.
-    audit({ action: "nextstep_shown", chatId: conv, session: st.sessionID, userId: st.createdBy, meta: { rule: "board" } });
+    // Per-worker topic-jump buttons (switch_to_topic): one row per BUSY worker
+    // that has an intro message to jump to. Workers spawned before the intro
+    // anchor existed are skipped; if none is anchored, send nothing at all.
+    const anchored = this.orch
+      .workersOf(chatOf(conv))
+      .filter(([, ws]) => BUSY.includes(ws.worker!.status) && (ws.worker!.introMessageId ?? 0) > 0)
+      .slice(0, this.cfg.maxWorkers)
+      .map(([, ws]) => ws.worker!);
+    if (anchored.length === 0) return;
+    const rows: Btn[][] = anchored.map((w) => {
+      const statusWord = w.status === "waiting" ? tr(lang, "chờ duyệt", "waiting") : tr(lang, "đang chạy", "running");
+      return [{ text: `📋 ${w.name} · ${statusWord}`, switch_to_topic: { message_id: w.introMessageId! } }];
+    });
+    // N4.3: shown event for the board line. No nsRegistry entry: the buttons
+    // carry switch_to_topic (no callback_data), so there is nothing to consume
+    // on tap.
+    audit({ action: "nextstep_shown", chatId: conv, session: st.sessionID, userId: st.createdBy, meta: { rule: "board", workers: anchored.length } });
     const lineId = await this.tg
-      .sendMessageId(conv, tr(lang, `⚡ ${busyWorkers} worker đang chạy — xem board:`, `⚡ ${busyWorkers} worker(s) running — check the board:`), { reply_markup: { inline_keyboard: [row] } })
+      .sendMessageId(conv, tr(lang, `⚡ ${anchored.length} worker đang chạy:`, `⚡ ${anchored.length} worker(s) running:`), { reply_markup: { inline_keyboard: rows } })
       .catch(() => -1);
     // N3.7: the line reverts to no buttons when the user speaks again.
     if (lineId > 0) this.noteNextStepMessage(conv, lineId);

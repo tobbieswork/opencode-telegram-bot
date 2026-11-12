@@ -65,6 +65,11 @@ export interface WorkerInfo {
    * the one-respawn-per-task budget is never exceeded, and shown for lineage.
    */
   respawnedFrom?: string;
+  /**
+   * Id of the topic intro message; anchor for switch_to_topic navigation (the
+   * manager board's per-worker jump buttons). Set at spawn.
+   */
+  introMessageId?: number;
 }
 
 /**
