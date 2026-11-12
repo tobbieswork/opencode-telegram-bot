@@ -139,6 +139,8 @@ export interface ChatState {
   languageEnSession?: string;
   /** Session the quick-replies instruction was applied to (R2; self-tracked like languageEnSession). */
   suggestSession?: string;
+  /** Fingerprint (SUGGEST_VERSION) of the instruction text applied to suggestSession; a text change re-pins. */
+  suggestVersion?: string;
   /**
    * The Telegram uid that last drove this conversation. Lets the orchestrator
    * (which has no message uid) resolve the conv owner's language preference for

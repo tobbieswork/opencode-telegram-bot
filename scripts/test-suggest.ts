@@ -12,7 +12,7 @@
  *
  * Run:  npx tsx scripts/test-suggest.ts
  */
-import { applySuggestPin, SUGGEST_KEY, SUGGEST_INSTRUCTION, type InstructionCtl } from "../src/suggest.js";
+import { applySuggestPin, SUGGEST_KEY, SUGGEST_INSTRUCTION, SUGGEST_VERSION, type InstructionCtl } from "../src/suggest.js";
 import type { ConvKey } from "../src/conv.js";
 
 let failures = 0;
@@ -69,10 +69,20 @@ function makeOc(): InstructionCtl & { calls: string[]; fail: boolean } {
   await applySuggestPin(oc, st, conv, "s2", true);
   check("new session re-applies the pin", oc.calls.filter((c) => c.startsWith("set:")).length === 2, oc.calls.join(","));
 
+  // An instruction-text change (version mismatch) re-pins the SAME session —
+  // the session-id tracker alone would keep serving a stale text after deploy.
+  st.set(conv, { suggestVersion: "stale-fingerprint" });
+  await applySuggestPin(oc, st, conv, "s2", true);
+  check("version mismatch re-pins the same session", oc.calls.filter((c) => c.startsWith("set:")).length === 3, oc.calls.join(","));
+  check("re-pin records the current version", st.peek(conv)?.suggestVersion === SUGGEST_VERSION);
+  await applySuggestPin(oc, st, conv, "s2", true);
+  check("version match stays idempotent", oc.calls.filter((c) => c.startsWith("set:")).length === 3, oc.calls.join(","));
+
   // Switching off clears the instruction.
   await applySuggestPin(oc, st, conv, "s2", false);
   check("disabled clears the instruction", oc.calls.includes(`rm:s2:${SUGGEST_KEY}`), oc.calls.join(","));
   check("disabled clears the applied marker", st.peek(conv)?.suggestSession === undefined);
+  check("disabled clears the version marker", st.peek(conv)?.suggestVersion === undefined);
 
   // "off" when nothing was set is a no-op.
   const oc2 = makeOc();
