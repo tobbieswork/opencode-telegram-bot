@@ -15,6 +15,12 @@ async function main(): Promise<void> {
   loadDotEnv();
   const cfg = loadConfig(root);
   log("Starting OpenCode Telegram bot…");
+  log(`Telegram token source: ${cfg.telegramTokenSource}`);
+  for (const w of cfg.telegramTokenWarnings) warn(w);
+  // The token now lives in cfg. Drop it from the environment so the OpenCode
+  // service this process may auto-start (and the agents it runs) cannot read it
+  // with `printenv`. Must stay AFTER loadConfig and BEFORE any child is spawned.
+  delete process.env.TELEGRAM_BOT_TOKEN;
 
   // Connect to OpenCode first — fail fast if the service is unreachable.
   const oc = new OpenCodeCtl();
