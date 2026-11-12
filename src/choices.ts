@@ -121,15 +121,108 @@ export function extractTrailingChoices(markdown: string): Choices | null {
   return { body, options };
 }
 
+/** A model-written options marker on the LAST non-blank line, outside a fence. */
+export interface OptionsMarker {
+  /** The reply with the marker line removed (trimmed, no trailing blank line). */
+  body: string;
+  /** The parsed options (trimmed, de-duplicated, non-empty), in order. */
+  options: string[];
+}
+
+/** A full-line options marker: `[OPTIONS: a | b | c]` (prefix is case-sensitive). */
+const MARKER_RE = /^\[OPTIONS:(.*)\]$/;
+
+/**
+ * Detect a model-written options marker on the LAST non-blank line of a reply
+ * (outside any code fence), of the form `[OPTIONS: first | second | third]`,
+ * and return the reply body (marker line removed) plus the parsed options.
+ * Returns null when the marker is absent, malformed, not the last line, or any
+ * option violates the limits — the caller then falls back to the plain reply.
+ *
+ * Rules (strict; the only failure mode is "no buttons", never a broken reply):
+ *  - R1.1 The marker is the last non-blank line, its own full line, outside a
+ *    ``` / ~~~ fence (same fence rule as extractTrailingChoices).
+ *  - R1.2 2-4 options; each trimmed, de-duplicated (case-insensitively), and
+ *    non-empty (empty ones dropped). The parser returns all of them (up to 4);
+ *    showing at most 3 is the renderer's job.
+ *  - R1.3 Any single option longer than 56 chars invalidates the buttons: the
+ *    marker line is still removed but no buttons are shown ({ options: [] }).
+ *    Nothing is ever truncated.
+ *  - R1.4 A malformed marker (bad prefix, missing `]`, not on its own) or a
+ *    marker that is not the last non-blank line -> null (reply sent as-is).
+ *  - R1.5 If a lettered/numbered list also ends the reply, the marker wins and
+ *    the list stays as text in the body (this parser never reads the list).
+ */
+export function extractOptionsMarker(markdown: string): OptionsMarker | null {
+  const text = (markdown ?? "").replace(/\r\n/g, "\n");
+  const lines = text.split("\n");
+
+  // Fence state per line — same rule as extractTrailingChoices: a delimiter
+  // line toggles the fence, content lines inherit it, and a delimiter line
+  // itself is marked "fence" so it can never be mistaken for a marker.
+  const inFence: boolean[] = new Array(lines.length).fill(false);
+  let fence = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (FENCE.test(lines[i])) {
+      fence = !fence;
+      inFence[i] = true;
+    } else {
+      inFence[i] = fence;
+    }
+  }
+
+  // The marker must be the LAST non-blank line, outside a code fence.
+  let end = lines.length - 1;
+  while (end >= 0 && lines[end].trim() === "") end--;
+  if (end < 0) return null;
+  if (inFence[end]) return null; // last line is a fence delimiter or inside one
+
+  // The whole (trimmed) line must match the marker form.
+  const m = MARKER_RE.exec(lines[end].trim());
+  if (!m) return null; // malformed: bad prefix, missing `]`, not on its own
+
+  // Parse the options: split on `|`, trim, drop empties, de-dupe (case-insensitively).
+  // R1.3: also track whether ANY non-empty option is over-long; that only decides
+  // the outcome once the option count is known (a valid 2-4 marker with an
+  // over-long option strips the line and shows no buttons).
+  const options: string[] = [];
+  const seen = new Set<string>();
+  let anyOverLong = false;
+  for (const part of m[1].split("|")) {
+    const opt = part.trim();
+    if (opt === "") continue; // drop empty options
+    if (opt.length > 56) anyOverLong = true; // too long to ever show as a full button
+    const key = opt.toLowerCase();
+    if (seen.has(key)) continue; // de-dupe case-insensitively
+    seen.add(key);
+    options.push(opt);
+  }
+
+  // R1.2: accept 2 to 4 options.
+  if (options.length < 2 || options.length > 4) return null;
+
+  // Body = everything before the marker line, with trailing blank lines trimmed.
+  const body = lines.slice(0, end).join("\n").replace(/\s+$/, "");
+  if (body.trim() === "") return null; // reply was only the marker — keep it as text
+
+  // R1.3: a valid 2-4 marker carrying an over-long option → strip the marker line,
+  // show NO buttons (the label must equal the sent text, so nothing is truncated).
+  if (anyOverLong) return { body, options: [] };
+
+  return { body, options };
+}
+
 /**
  * Build the inline keyboard mirroring a choice list: one button per row, label
  * truncated to ~40 chars, and a TINY `callback_data` = `ch:<id>:<i>` (id is a
  * short registry key, i the option index) — well under Telegram's 64-byte cap,
  * and carrying no option text.
  */
-export function choiceKeyboard(id: string, options: string[]): Keyboard {
+export function choiceKeyboard(id: string, options: string[], noTruncate = false): Keyboard {
+  // noTruncate (quick replies, R1.3): the label must equal the text that will be
+  // sent, so it is never cut — R1.3 already caps each option at 56 chars.
   const rows: Btn[][] = options.slice(0, 8).map((t, i) => [
-    { text: t.length > 40 ? t.slice(0, 40) + "…" : t, callback_data: `ch:${id}:${i}` },
+    { text: noTruncate ? t : t.length > 40 ? t.slice(0, 40) + "…" : t, callback_data: `ch:${id}:${i}` },
   ]);
   return { inline_keyboard: rows };
 }

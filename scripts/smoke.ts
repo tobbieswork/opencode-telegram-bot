@@ -8,6 +8,7 @@ import { OpenCodeCtl } from "../src/opencode.js";
 import { StateManager } from "../src/state.js";
 import { Bot } from "../src/bot.js";
 import { Telegram, Update } from "../src/telegram.js";
+import { extractOptionsMarker } from "../src/choices.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -86,6 +87,11 @@ async function main(): Promise<void> {
   // Test scope only — the source default (90 s) is NOT changed.
   process.env.OPENCODE_TG_NEXT_STEPS = "1";
   process.env.OPENCODE_TG_NEXT_MIN_SECS = "0";
+  // R5 (quick replies, end-to-end): the instruction is pinned on the session so
+  // the model may offer [OPTIONS: …] buttons. The model CANNOT be forced to
+  // comply, so the scenario is a soft check: it reports compliance and fails
+  // only if a valid marker was received but not rendered. Test scope only.
+  process.env.OPENCODE_TG_SUGGEST = "1";
   const cfg = loadConfig(root);
 
   const oc = new OpenCodeCtl();
@@ -369,6 +375,56 @@ async function main(): Promise<void> {
       } else {
         console.log("✅ NEXT-STEP: file-write build turn → Review button → tap → review turn completed");
       }
+    }
+  }
+
+  // ── quick replies: decision prompt → soft compliance check (R5) ───────────
+  // A decision-style prompt in a fresh session. The model may or may not end
+  // with a valid [OPTIONS: …] marker — it cannot be forced (R0 measures this).
+  // A VALID marker still visible in the relayed text means the render path
+  // failed to strip it (extractOptionsMarker on the relayed text returns
+  // non-null only for a valid, last-line marker with a non-empty body) — that
+  // is the one failure this soft check reports.
+  console.log("\n=== QUICK REPLIES (soft compliance check) ===");
+  {
+    await bot.handle(upd("/new"));
+    const outBefore = mock.out.length;
+    const kbBefore = mock.keyboards.length;
+    await bot.handle(
+      upd(
+        "I want to add a settings page to a small web app. Suggest 2-3 different directions I could take " +
+          "(e.g. where the settings live and how they are stored). Keep each direction to one line. " +
+          "Then stop — I will pick from your options.",
+      ),
+    );
+    const done = await waitFor((a) => a.slice(outBefore).some((m) => /· \d+(\.\d+)?s/.test(m)), mock.out, 120000);
+    console.log("decision turn completed:", done);
+    // A rendered quick-replies keyboard = one or more ch:<id>:<i> buttons on the reply.
+    let qrOptions = 0;
+    for (const kb of mock.keyboards.slice(kbBefore)) {
+      const hits = JSON.stringify(kb).match(/ch:[0-9a-z]{4}:\d+/g);
+      if (hits && hits.length > 0) {
+        qrOptions = hits.length;
+        break;
+      }
+    }
+    // The relayed reply (last chunk holds the tail, where the marker lives).
+    const fresh = mock.out.slice(outBefore);
+    const plain = (fresh[fresh.length - 1] ?? "").replace(/<[^>]+>/g, "");
+    const parsed = extractOptionsMarker(plain);
+    show("qr: decision turn + quick replies");
+    if (!done) {
+      console.log("❌ QUICK-REPLIES: decision turn did not complete");
+      process.exitCode = 1;
+    } else if (qrOptions > 0) {
+      console.log(`✅ QUICK-REPLIES: model offered ${qrOptions} option(s) as buttons (compliance 1/1 this turn)`);
+    } else if (parsed !== null) {
+      console.log("❌ QUICK-REPLIES: a valid [OPTIONS: …] marker was received but not rendered — feature not working");
+      process.exitCode = 1;
+    } else if (plain.includes("[OPTIONS:")) {
+      console.log("⚠️  QUICK-REPLIES: marker present but invalid (sent as text, no buttons — by design). Compliance 0/1 this turn.");
+    } else {
+      console.log("⚠️  QUICK-REPLIES: no marker in the reply — model did not comply this turn (soft check, not a failure).");
     }
   }
 
