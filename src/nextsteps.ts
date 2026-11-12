@@ -31,7 +31,9 @@ export interface NextStepFacts {
   worker?: { writes: boolean; hasWorktree: boolean };
   /** Workers still running or waiting (for the `board` rule). */
   busyWorkers: number;
-  /** N2.3: session modified-files set contains a path not in the last offer's set. */
+  /** N2.3: this turn modified >=1 file not reviewed before. Call sites compute it as
+   * (report lists no files) OR (>=1 listed file not reviewed before) — an empty report is
+   * treated as "assume changed", since the build agent often creates files via shell. */
   filesNew: boolean;
   /** The turn failed with a context-overflow error (isOverflowError). */
   overflow: boolean;

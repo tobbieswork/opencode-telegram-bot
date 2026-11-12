@@ -2309,7 +2309,10 @@ export class Bot {
       try {
         reportFiles = (await this.oc.getSessionReport(sessionID)).modifiedFiles;
         const seen = this.nextStepReviewFiles.get(conv);
-        filesNew = reportFiles.some((p) => !seen?.has(p));
+        // Empty modifiedFiles is common (the build agent creates files via shell,
+        // which the report does not track) → treat as "assume changed" so the
+        // button still shows; when the report DOES list files, require a new one.
+        filesNew = reportFiles.length === 0 || reportFiles.some((p) => !seen?.has(p));
       } catch {
         reportFiles = []; // report unavailable → no new files (never block the turn end)
       }

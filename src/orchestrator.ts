@@ -1423,7 +1423,10 @@ export class Orchestrator {
       return undefined; // report unavailable → no offer (never block the worker-done relay)
     }
     const seen = this.workerReviewFiles.get(conv);
-    const filesNew = files.some((p) => !seen?.has(p));
+    // Empty modifiedFiles (agent created files via shell, untracked by the
+    // report) → "assume changed" so the button still shows; when the report
+    // DOES list files, require a new one.
+    const filesNew = files.length === 0 || files.some((p) => !seen?.has(p));
     if (!filesNew) return undefined;
     const now = Date.now();
     const facts: NextStepFacts = {

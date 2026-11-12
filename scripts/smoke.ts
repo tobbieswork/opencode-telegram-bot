@@ -325,7 +325,7 @@ async function main(): Promise<void> {
     await bot.handle(
       upd(
         `Create a brand-new file named hello-nextstep-${nsProbe}.txt whose only line is: nextstep smoke ${nsProbe}. ` +
-          "Actually create the file with a write/edit tool call now. Do not do anything else; " +
+          "Actually create the file now (use whatever file tool is available). Do not do anything else; " +
           "end with a single short confirmation sentence.",
       ),
     );
