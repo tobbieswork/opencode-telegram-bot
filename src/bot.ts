@@ -1915,6 +1915,36 @@ export class Bot {
       }
     }
     if (reminderBudgetExhausted(sent, max)) {
+      // Permission ask: DENY instead of STALL. An unanswered permission on an
+      // unattended worker would hang the session forever — Claude Code shipped
+      // the same pattern in 2.1.319 (permissions.denyInsteadOfPrompting:
+      // "replaces a stalled prompt with a denial" for unattended runs).
+      // Question forms are NOT auto-answered: only a permission can be safely
+      // rejected on timeout.
+      if (pp.kind === "permission") {
+        const perm = this.permissionPrompts.get(promptId);
+        if (perm) {
+          // Delete BEFORE replying: the resulting permission.replied event must
+          // take onPermissionResolved's "already gone" path, not re-edit the card.
+          this.permissionPrompts.delete(promptId);
+          this.cancelReminder(conv, promptId); // also drops the persisted schedule
+          await this.oc.replyPermission(perm.sessionID, perm.requestID, "reject").catch((e) =>
+            warn(`auto-reject of permission ${promptId} failed: ${(e as Error)?.message}`),
+          );
+          if (perm.messageId) {
+            await this.tg
+              .editMessageText(
+                perm.relayConv,
+                perm.messageId,
+                tr(lang, `⏱️ Hết ${max} lượt nhắc — bot đã TỰ TỪ CHỐI quyền này để không treo session.`, `⏱️ After ${max} reminders — the bot AUTO-DENIED this permission so the session doesn't hang.`),
+              )
+              .catch(() => {});
+          }
+          return;
+        }
+        // Settled while the reminder was in flight (button tap / TUI) → fall
+        // through to the spent-bookkeeping below (a no-op if the entry is gone).
+      }
       // Budget exhausted: stop nudging (the prompt stays pending). Keep the entry
       // with the spent count so a restart doesn't hand it a fresh budget.
       const spent = this.st.get(conv).pendingPrompts?.[promptId];
