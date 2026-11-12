@@ -542,11 +542,26 @@ export class OpenCodeCtl {
    * Admit a prompt and return immediately; the turn runs on the server and its
    * end is observed through `session.execution.*` events. Used for worker and
    * Manager turns, which must never block the bot. Idempotent via `messageID`.
+   *
+   * `delivery` (OpenCode ≥ 2.2.5, native per-session inbox — see the Findings
+   * in docs/sdd/queue-and-steer.md): "steer" is delivered to the RUNNING turn
+   * at its next safe point (the server default when omitted); "queue" is held
+   * and runs as its own turn after the current one. The @opencode/client
+   * `SessionPromptInput` type already includes the field (SessionInbox.Delivery
+   * = "steer" | "queue"), so no cast is needed. The S-pivot fallback for
+   * <2.2.5 lives in a later phase.
    */
-  async prompt(sessionID: string, text: string, opts: { messageID?: string } = {}): Promise<string> {
+  async prompt(
+    sessionID: string,
+    text: string,
+    opts: { messageID?: string; delivery?: "steer" | "queue" } = {},
+  ): Promise<string> {
     this.ensureClient();
     const id = opts.messageID ?? newMessageID();
-    await retryTransient(() => this.client.session.prompt({ sessionID, id, text }), { attempts: 3, baseMs: 1000 });
+    await retryTransient(
+      () => this.client.session.prompt({ sessionID, id, text, ...(opts.delivery ? { delivery: opts.delivery } : {}) }),
+      { attempts: 3, baseMs: 1000 },
+    );
     return id;
   }
 

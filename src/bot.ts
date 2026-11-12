@@ -50,7 +50,10 @@ import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, 
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
 import { DraftState, DraftAction, onTextDelta, onToolStart, isDmConv, EDIT_BUDGET } from "./stream.js";
 import { myCommands } from "./commands.js";
-import { dropNotes, prepareNotes, BUSY_REPLY_TEXT, noteButtonLabel, NOTE_CB_PREFIX, noteCallbackData, BusyNoteStore } from "./notes.js";
+import { dropNotes, prepareNotes, NOTE_CB_PREFIX, BusyNoteStore } from "./notes.js";
+import { QueueStore } from "./queue.js";
+import { buildBusyReply, busyKeyboard, queueFullReply, parseBusyCallback } from "./busy.js";
+import type { BusyReply } from "./busy.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
 import { log, warn, error } from "./logger.js";
 import { audit } from "./audit.js";
@@ -275,6 +278,17 @@ export function formAcceptsTypedAnswer(
  * inflight/busyNotes/sendHtml/currentMode) exist only for the handler modules in
  * src/commands/*, which take the Bot as their first argument. Don't use them elsewhere.
  */
+/** Human age for the /queue list: "45s" / "2m" / "1h 3m" (spec Q3.2). */
+export function formatQueueAge(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + "m";
+  const h = Math.floor(m / 60);
+  const rem = m % 60;
+  return rem > 0 ? h + "h " + rem + "m" : h + "h";
+}
+
 export class Bot {
   public inflight = new Map<ConvKey, AbortController>();
   /** Convs with a /btw side question running (one at a time per conv). */
@@ -351,6 +365,13 @@ export class Bot {
    */
    public busyNotes = new BusyNoteStore();
   /**
+   * Per-conv queue of messages that arrived while a turn was running (docs/sdd/
+   * queue-and-steer.md, Q1): auto-enqueued when busy mode is "queue", or added
+   * by a tap on the busy reply's Queue button; drained at turn end (phase 3).
+   * Shared with the Orchestrator so the Manager's queue is the same store.
+   */
+  public queue = new QueueStore();
+  /**
    * How long a report's temp `.md` file stays on disk after it is sent, before
    * it is unlinked — long enough for Telegram to finish uploading it. 60s
    * default; tests shorten it. (A per-file setTimeout, unref'd.)
@@ -407,6 +428,7 @@ export class Bot {
       st,
       cfg,
       busyNotes: this.busyNotes,
+      queue: this.queue,
       advisor: this.advisor,
       userPrefs: this.userPrefs,
       sendHtml: (conv, html, opts) => this.sendHtml(conv, html, opts),
@@ -542,6 +564,7 @@ export class Bot {
    */
   async drainInflight(opts: { timeoutMs: number }): Promise<boolean> {
     this.draining = true; // pause preview pushes so the notice isn't overwritten
+    this.notifyQueuedNotRunning(); // Q1.8: queued turns won't start — tell the chats now
     const edits: Promise<unknown>[] = [];
     for (const [conv, w] of this.drafts) {
       if (w.previewMsgId && w.previewMsgId !== 0) {
@@ -560,6 +583,25 @@ export class Bot {
       timeoutMs: opts.timeoutMs,
       isBusy: () => this.inflight.size > 0 || this.orch.managerInflight || this.pendingSends.size > 0,
     });
+  }
+
+  /**
+   * Q1.8 — while the shutdown drain is running, queued turns must NOT start.
+   * Tell every chat that still holds queued messages that they will not run, so
+   * nothing is dropped silently. Fire-and-forget: Telegram is still reachable
+   * during the drain (the final sends only need Telegram), and the process exits
+   * right after drainInflightCore returns.
+   */
+  private notifyQueuedNotRunning(): void {
+    for (const [conv] of Object.entries(this.st.all())) {
+      const n = this.queue.size(conv);
+      if (n <= 0) continue;
+      audit({ action: "queue_drop", chatId: conv, meta: { count: n, reason: "shutdown" } });
+      const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
+      void this.tg
+        .sendMessage(conv, tr(lang, `⚠️ Bot đang tắt — ${n} tin trong hàng chờ sẽ không chạy.`, `⚠️ Bot is shutting down — ${n} queued message(s) will not run.`))
+        .catch(() => {});
+    }
   }
 
   // ── Uptime monitor + reboot ─────────────────────────────────────────────────
@@ -1894,6 +1936,8 @@ export class Bot {
         return cmdRotation(this, conv);
       case "/clear":
         return this.cmdClear(conv, state);
+      case "/queue":
+        return this.cmdQueue(conv, arg);
       case "/note":
         return cmdNote(this, conv, arg);
       case "/btw":
@@ -1909,7 +1953,8 @@ export class Bot {
         if (state.manager) return this.tg.sendMessage(conv, tr(lang, "🔍 Manager không có repo để review — dùng /review trong topic worker, hoặc /manager off.", "🔍 The Manager has no repo to review — use /review in a worker topic, or /manager off."));
         const prompt = reviewPrompt(arg, lang);
         if (prompt === null) return this.sendHtml(conv, reviewUsage(lang));
-        return this.runPrompt(conv, prompt, state, undefined, lang);
+        await this.runPrompt(conv, prompt, state, undefined, lang);
+        return;
       }
       case "/schedule":
         return cmdSchedule(this, conv, arg, state, uid);
@@ -1921,23 +1966,33 @@ export class Bot {
   }
 
   // ── the long-running prompt ──────────────────────────────────────────────
-  private async runPrompt(conv: ConvKey, text: string, state: ChatState, userMsgId?: number, lang?: Lang): Promise<void> {
+  private async runPrompt(conv: ConvKey, text: string, state: ChatState, userMsgId?: number, lang?: Lang): Promise<{ busy: boolean }> {
     // A closed worker topic reopens itself when the user speaks in it
     // (openForumTopic is a no-op on an already-open topic, so safe every time).
     if (state.worker) void this.tg.openForumTopic(conv).catch(() => {});
     if (this.inflight.has(conv)) {
-      if (userMsgId != null) {
-        // Offer a one-tap "save as note" for this dropped message: the button's
-        // callback data carries the user message's id and its text is retained,
-        // so the tap can append it to /note (see handleNoteCallback).
-        const kb: Keyboard = { inline_keyboard: [[{ text: noteButtonLabel(lang ?? "vi"), callback_data: noteCallbackData(userMsgId) }]] };
-        await this.tg.sendMessage(conv, BUSY_REPLY_TEXT, { reply_markup: kb });
-        this.busyNotes.push(conv, userMsgId, text);
+      // Busy reply per config.busyMode (ask / queue / off — see src/busy.ts).
+      // In "queue" mode the message is auto-enqueued on arrival (no tap); in
+      // "off" the reply is byte-identical to the pre-queue behaviour.
+      const busyLang = lang ?? "vi";
+      let reply: BusyReply;
+      if (this.cfg.busyMode === "queue" && userMsgId != null) {
+        const r = this.queue.push(conv, { text, senderId: state.createdBy != null ? String(state.createdBy) : undefined });
+        if (r.ok) audit({ action: "queue_add", chatId: conv, userId: state.createdBy != null ? String(state.createdBy) : undefined, meta: { messageId: userMsgId, textLen: text.length, queuedCount: r.position, auto: true } });
+        reply = r.ok
+          ? buildBusyReply({ lang: busyLang, mode: "queue", messageId: userMsgId, queuedCount: r.position })
+          : queueFullReply({ lang: busyLang, messageId: userMsgId });
       } else {
-        await this.tg.sendMessage(conv, BUSY_REPLY_TEXT);
+        reply = buildBusyReply({ lang: busyLang, mode: this.cfg.busyMode, messageId: userMsgId, canSteer: true });
       }
-      return;
+      const kb = busyKeyboard(reply.buttons);
+      await this.tg.sendMessage(conv, reply.text, kb ? { reply_markup: kb } : undefined);
+      // Retain the dropped message's text so a tap (Queue / Steer now / note)
+      // can fetch it from the busy-note store by the user message's id.
+      if (userMsgId != null) this.busyNotes.push(conv, userMsgId, text);
+      return { busy: true };
     }
+
     // Keep the "typing…" indicator alive for the whole turn (until the reply is sent).
     this.startTyping(conv);
     this.startWorking(conv, lang); // "⏳ Đang xử lý…" — General top-level only (native typing doesn't render there)
@@ -1999,6 +2054,7 @@ export class Bot {
       this.stopTyping(conv); // don't leave "typing…" running if the prompt never started
       throw e;
     }
+    return { busy: false };
   }
 
   private async runPromptTask(conv: ConvKey, sid: string, text: string, ac: AbortController, userMsgId?: number, lang?: Lang): Promise<void> {
@@ -2013,6 +2069,10 @@ export class Bot {
     this.turnGen.set(conv, (this.turnGen.get(conv) ?? 0) + 1);
     this.drafts.delete(conv);
     const run = () => this.oc.promptAndWait(sid, text, { signal: ac.signal, messageID });
+    // Turn outcome, for the drain decision in `finally` (Q3.2: only a SUCCEEDED
+    // turn runs the next queued message; a failed or interrupted turn holds it).
+    // Fail-safe default "failed" so an unexpected path never drains the queue.
+    let outcome: "succeeded" | "failed" | "interrupted" = "failed";
     try {
       let res;
       try {
@@ -2029,6 +2089,10 @@ export class Bot {
           throw e;
         }
       }
+      // Classify the turn now that `res` is final (after any reconnect retry).
+      if (res.interrupted) outcome = "interrupted";
+      else if (res.outcome === "failed") outcome = "failed";
+      else outcome = "succeeded";
       this.stopTyping(conv);
       // Drop the live preview before the final message lands (group transport
       // keeps a real, self-editing message that must not outlive the reply).
@@ -2059,6 +2123,9 @@ export class Bot {
       await this.tg.sendMessage(conv, meta).catch(() => {});
       if (!res.interrupted && res.reply) await this.maybeOfferPlanToBuild(conv);
     } catch (e) {
+      // A throw (service down, unhandled) is a failed turn; a user /stop aborts
+      // the signal (interrupted). Either way it is NOT "succeeded", so no drain.
+      outcome = ac.signal.aborted ? "interrupted" : "failed";
       this.stopTyping(conv);
       await this.dropPreview(conv);
       error("prompt error:", (e as Error)?.message);
@@ -2078,7 +2145,41 @@ export class Bot {
       // removes it (see the turnGen bump at the top of runPromptTask).
       this.inflight.delete(conv);
       this.busyNotes.clear(conv); // the turn ended: the note-button retention window is over
+      // Drain the queue ONLY after a SUCCEEDED turn (Q3.2): a failed or
+      // interrupted turn holds the queue. Placed after inflight.delete so the
+      // drained item passes runPrompt's inflight guard (race-safe, see drainQueue).
+      if (outcome === "succeeded") this.drainQueue(conv);
     }
+  }
+
+  /**
+   * Run the head of a conv's queue as a normal prompt — one item per call, only
+   * when not draining (Q1.8). Race-safe: it goes through runPrompt's `inflight`
+   * guard, so a user message that raced in and won the turn makes runPrompt
+   * report `busy`, and the item is put back (Q1.11). One item per turn-end, and
+   * the queue is finite + capped at 3, so this can never infinite-loop.
+   */
+  private drainQueue(conv: ConvKey): void {
+    if (this.draining) return; // shutdown in progress — queued turns must not start
+    const item = this.queue.shift(conv); // drops expired heads, returns the next live item or null
+    if (!item) return; // nothing queued
+    audit({ action: "queue_run", chatId: conv, userId: item.senderId, meta: { senderId: item.senderId, waitedMs: Date.now() - item.at } });
+    const state = this.st.get(conv);
+    void this.runPrompt(conv, item.text, state, undefined, undefined).then(
+      (res) => {
+        // Lost the turn-end race to a user message (inflight is theirs now): put
+        // the item back at the HEAD (FIFO preserved, Q1.11) so it runs on the
+        // next succeeded turn-end, ahead of anything enqueued behind it.
+        if (res.busy) this.queue.prepend(conv, item);
+      },
+      (e) => {
+        // A setup failure (service down) must not silently lose the message:
+        // put it back at the head. It can only re-fire on a later SUCCEEDED
+        // turn, so this can't infinite-loop.
+        warn("drainQueue: runPrompt failed, requeueing:", (e as Error)?.message);
+        this.queue.prepend(conv, item);
+      },
+    );
   }
 
   /**
@@ -2132,6 +2233,8 @@ export class Bot {
     this.stopTyping(conv);
     this.clearActivity(conv);
     this.busyNotes.clear(conv); // /stop (and /new, /clear) end the turn: drop the note-button retention
+    const droppedQueue = this.queue.clear(conv); // /stop (and /new, /clear, session switch) = stop EVERYTHING, including the queue (Q1.5)
+    if (droppedQueue > 0) audit({ action: "queue_drop", chatId: conv, meta: { count: droppedQueue, reason: "stop" } });
     await this.dropPreview(conv); // stopping a turn drops its live preview (and kills late deltas)
     this.orch.clearManagerBusy(conv); // /new, /clear, /stop all drop the manager's session — never let a late terminal event wedge the flag
     const ac = this.inflight.get(conv);
@@ -2463,8 +2566,83 @@ export class Bot {
     );
   }
 
+  /**
+   * The busy reply's "📥 Xếp hàng" / "🔀 Định tuyến ngay" buttons (docs/sdd/
+   * queue-and-steer.md, phase 2). Both fetch the dropped message's text from the
+   * busy-note store (retained while the turn runs) and CONSUME it before any
+   * await, so a double-tap can't act twice.
+   *   q:add   → enqueue (cap 3; a full queue says so and keeps the note button).
+   *   q:steer → immediate oc.prompt(sid, text, { delivery: "steer" }): the server
+   *             delivers it at the running turn's next safe point (S-native).
+   *             A failure (server error / the session already gone) falls back
+   *             to the queue (Q2.3: never drop). For a Manager chat sid is the
+   *             Manager's OWN session — workers are separate sessions, so a
+   *             Manager steer touches only the Manager's turn (Q2.5).
+   */
+  private async handleBusyCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+    const lang = this.userPrefs.getLang(cb.from?.id ?? "");
+    const parsed = parseBusyCallback(cb.data);
+    if (parsed === null) {
+      await this.tg.answerCallbackQuery(cb.id);
+      return;
+    }
+    // Consume the entry NOW (before any await) so a double-tap can't queue/steer twice.
+    const text = this.busyNotes.take(conv, parsed.messageId);
+    if (text == null) {
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Không tìm thấy nội dung tin nhắn đó.", "That message's content is no longer available."));
+      return;
+    }
+    const senderId = cb.from?.id != null ? String(cb.from.id) : undefined;
+    // Replace the tapped button's row with the outcome (best-effort).
+    const settleEdit = (finalText: string): void => {
+      if (messageId != null) void this.tg.editMessageText(conv, messageId, finalText, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+    };
+    if (parsed.kind === "add") {
+      const r = this.queue.push(conv, { text, senderId });
+      if (!r.ok) {
+        await this.tg.answerCallbackQuery(cb.id, tr(lang, "Hàng chờ đầy (3 tin).", "Queue is full (3 messages)."));
+        settleEdit(tr(lang, "⚠️ Hàng chờ đầy (3 tin) — bấm note để giữ.", "⚠️ Queue is full (3 messages) — use the note button to keep it."));
+        return;
+      }
+      const pos = r.position;
+      audit({ action: "queue_add", chatId: conv, userId: senderId, meta: { messageId: parsed.messageId, textLen: text.length, queuedCount: pos, senderId } });
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, `✅ Đã thêm vào hàng chờ (vị trí #${pos}).`, `✅ Added to the queue (position #${pos}).`));
+      settleEdit(tr(lang, `✅ Đã thêm vào hàng chờ (vị trí #${pos}). Sẽ chạy sau khi tin hiện tại xong.`, `✅ Added to the queue (position #${pos}). Will run after the current message finishes.`));
+      return;
+    }
+    // Steer (S-native): deliver to the running turn's session right away.
+    const steerFallback = async (reason: string): Promise<void> => {
+      warn("steer fallback:", reason, conv);
+      audit({ action: "queue_steer", chatId: conv, userId: senderId, meta: { messageId: parsed.messageId, ok: false, degraded: true, reason } });
+      const r = this.queue.push(conv, { text, senderId });
+      if (r.ok) audit({ action: "queue_add", chatId: conv, userId: senderId, meta: { messageId: parsed.messageId, textLen: text.length, queuedCount: r.position, via: "steer_fallback" } });
+      const msg = r.ok
+        ? tr(lang, `Không steer được — đã cho vào hàng chờ (vị trí #${r.position}).`, `Couldn't steer — added to the queue (position #${r.position}).`)
+        : tr(lang, "Không steer được và hàng chờ đã đầy (3 tin).", "Couldn't steer and the queue is full (3 messages).");
+      await this.tg.answerCallbackQuery(cb.id, msg);
+      settleEdit(msg);
+    };
+    const sid = this.st.peek(conv)?.sessionID;
+    if (sid === undefined) {
+      // Race: the turn already ended and the session id is gone — queue instead.
+      await steerFallback("no active session");
+      return;
+    }
+    try {
+      await this.oc.prompt(sid, text, { delivery: "steer" });
+      audit({ action: "queue_steer", chatId: conv, userId: senderId, meta: { messageId: parsed.messageId, ok: true, degraded: false } });
+    } catch (e) {
+      await steerFallback((e as Error)?.message ?? "prompt failed");
+      return;
+    }
+    const msg = tr(lang, "🔀 Đang định tuyến — áp dụng tại điểm an toàn tiếp theo.", "🔀 Steering — applies at the next safe point.");
+    await this.tg.answerCallbackQuery(cb.id, msg);
+    settleEdit(msg);
+  }
+
   /** M3 — rot:cf / rot:cx — confirm or cancel a manager rotation offer. */
   private async handleRotationCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+
     const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     const op = (cb.data ?? "").split(":")[1];
     if (op === "cx") {
@@ -2630,6 +2808,8 @@ export class Bot {
   private applyUseState(conv: ConvKey, sessionID: string): void {
     this.st.set(conv, { sessionID });
     this.cancelAllReminders(conv); // switching sessions abandons the old pending prompts
+    const droppedQueue = this.queue.clear(conv); // a session switch clears the queue (Q1.5)
+    if (droppedQueue > 0) audit({ action: "queue_drop", chatId: conv, meta: { count: droppedQueue, reason: "clear" } });
   }
 
   /** The /use picker card: newest 10 sessions as buttons + a "type it instead" hint. */
@@ -2835,6 +3015,10 @@ export class Bot {
     }
     if (data.startsWith(NOTE_CB_PREFIX)) {
       await handleNoteCallback(this, cb, conv, messageId);
+      return;
+    }
+    if (data.startsWith("q:add:") || data.startsWith("q:steer:")) {
+      await this.handleBusyCallback(cb, conv, messageId);
       return;
     }
     if (data.startsWith("reboot:")) {
@@ -3469,6 +3653,33 @@ export class Bot {
     } catch (e) {
       await this.tg.answerCallbackQuery(cb.id, `⚠️ ${(e as Error).message}`);
     }
+  }
+
+  /**
+   * /queue — list this conv's queued messages (position + truncated text + age)
+   * or clear the queue. Permission is the shared allowlist gate in onMessage
+   * (the same gate as /stop, /clear) — no per-command check here.
+   */
+  private async cmdQueue(conv: ConvKey, arg: string): Promise<void> {
+    const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
+    const sub = arg.trim().toLowerCase();
+    if (sub === "clear") {
+      const n = this.queue.clear(conv);
+      await this.tg.sendMessage(
+        conv,
+        n > 0
+          ? tr(lang, "🧹 Đã xoá " + n + " tin khỏi hàng chờ.", "🧹 Cleared " + n + " message(s) from the queue.")
+          : tr(lang, "Hàng chờ đã trống.", "The queue is already empty."),
+      );
+      return;
+    }
+    const items = this.queue.list(conv);
+    if (items.length === 0) {
+      await this.tg.sendMessage(conv, tr(lang, "Không có tin nào trong hàng chờ.", "No messages in the queue."));
+      return;
+    }
+    const lines = items.map((it, i) => "#" + (i + 1) + " · " + trunc(it.text, 40) + " · " + formatQueueAge(it.ageMs));
+    await this.tg.sendMessage(conv, tr(lang, "📥 Hàng chờ (" + items.length + "):", "📥 Queue (" + items.length + "):") + "\n" + lines.join("\n"));
   }
 
   private async cmdStop(conv: ConvKey, state: ChatState): Promise<void> {

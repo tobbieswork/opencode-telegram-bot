@@ -27,6 +27,8 @@ export interface AuditEvent {
   outcome?: string;
   /** Free text (prompt, task). Redacted and truncated before it is written. */
   text?: string;
+  /** Structured payload (written verbatim, not redacted). For machine fields. */
+  meta?: Record<string, unknown>;
 }
 
 export interface AuditOptions {

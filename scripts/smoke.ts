@@ -69,6 +69,9 @@ async function main(): Promise<void> {
   // smoke's prompt-completed heuristics. It has its own unit tests.
   process.env.OPENCODE_TG_ACTIVITY = "0";
   process.env.STATE_FILE = mkdtempSync(tmpdir() + "/ocbot-") + "/state.json";
+  // Auto-queue mode for the queue scenario below: a message that arrives while
+  // a turn is running is enqueued on arrival (busy reply "Đã thêm vào hàng chờ").
+  process.env.OPENCODE_TG_BUSY_MODE = "queue";
   const cfg = loadConfig(root);
 
   const oc = new OpenCodeCtl();
@@ -295,6 +298,39 @@ async function main(): Promise<void> {
     console.log("prompt completed:", rok);
     show("q: final");
   }
+
+  // ── queue: a message sent while a turn is running is queued, then runs after ─
+  console.log("\n=== QUEUE (auto-queue during a busy turn, then drains) ===");
+  await bot.handle(upd("/new"));
+  show("queue: new session");
+  // A long turn (count to 50, one number per line) keeps the session busy long
+  // enough that the next message lands while it is still running (inflight set).
+  await bot.handle(upd("Đếm từ 1 đến 50, viết TỪNG SỐ ra một dòng, rất cẩn thận, đừng tóm tắt."));
+  const qProbe = "QRUN-" + Date.now();
+  // The 2nd message arrives while the first turn is running → auto-queued
+  // (busyMode "queue"). It carries a message_id so the busy reply + note button
+  // target it (the auto-queue path does not require the id, but keep it realistic).
+  const qSecond: Update = {
+    update_id: Math.floor(Math.random() * 1e6),
+    message: { text: "Reply with exactly the single word: " + qProbe + ". Nothing else.", chat: { id: 42 }, from: { id: 1 }, message_id: 7777 },
+  };
+  await bot.handle(qSecond);
+  show("queue: 2nd message while busy (auto-queued)");
+  const queued = await waitFor((a) => a.some((m) => m.includes("Đã thêm vào hàng chờ")), mock.out, 20000);
+  console.log("2nd message was auto-queued (queue_add):", queued);
+  await bot.handle(upd("/queue"));
+  show("queue: /queue list");
+  const ql = mock.out[mock.out.length - 1];
+  console.log("/queue lists the queued message:", ql.includes("QRUN") ? "yes" : "NO — see /queue output above");
+  // Wait for the first (count) turn to finish → its drain runs the queued item.
+  const firstDone = await waitFor((a) => a.some((m) => /· \d+(\.\d+)?s/.test(m)), mock.out, 120000);
+  console.log("first (count) turn completed:", firstDone);
+  // The queued message now runs as its own turn; its relayed reply has the probe.
+  const ran = await waitFor((a) => a.some((m) => m.includes(qProbe)), mock.out, 120000);
+  console.log("queued message was RUN after the turn ended (queue_run):", ran);
+  show("queue: drained + ran");
+  await bot.handle(upd("/queue"));
+  show("queue: /queue after drain (should be empty)");
 
   await bot.handle(upd("/clear"));
   show("/clear");

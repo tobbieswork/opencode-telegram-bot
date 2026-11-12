@@ -16,7 +16,10 @@ import { scriptInstruction } from "./sandbox/scriptPreamble.js";
 import { ICON, esc, trunc, timeAgo, stripTags, mdToHtmlChunks } from "./format.js";
 import { log, warn } from "./logger.js";
 import { audit } from "./audit.js";
-import { BUSY_REPLY_TEXT, NOTE_BUTTON_LABEL, noteCallbackData, BusyNoteStore } from "./notes.js";
+import { BusyNoteStore } from "./notes.js";
+import { QueueStore } from "./queue.js";
+import { buildBusyReply, busyKeyboard, queueFullReply } from "./busy.js";
+import type { BusyReply } from "./busy.js";
 import { queueReport } from "./orchestrator/report.js";
 import { purgeConv, cmdPrune, handlePruneCallback } from "./orchestrator/purge.js";
 import { onTopicDeleted, reapPendingTopicDeletes } from "./orchestrator/topics.js";
@@ -37,6 +40,8 @@ export interface Host {
   cfg: Config;
   /** Shared retention for the busy-reply "Thêm vào note" button (owned by the Bot). */
   busyNotes: BusyNoteStore;
+  /** Shared queue for messages sent while a turn runs (owned by the Bot; docs/sdd/queue-and-steer.md). */
+  queue: QueueStore;
   /** Advisor (topic + Claude/Gemini session on the advisor machine). Present only when enabled. */
   advisor?: Advisor;
   /** Per-user preferences (language). Optional so legacy test-mock Hosts still type-check; the real Bot always sets it. */
@@ -515,7 +520,7 @@ export class Orchestrator {
     if (want === "off") {
       if (!top.manager) return void (await this.h.sendHtml(conv, tr(lang, "Manager đang tắt.", "The Manager is already off.")));
       if (top.sessionID) await this.h.oc.interrupt(top.sessionID).catch(() => {});
-      this.dropManagerTurn(conv); // the manager's session is being dropped — a late terminal event can't clear the flag
+      this.dropManagerTurn(conv, "interrupted"); // manager session dropped — late terminal event can't clear the flag (Q4: interrupted → no drain)
       this.bridgeChats.delete(chat);
       this.h.st.set(chat, { manager: false, sessionID: undefined, agent: undefined, directory: undefined, guided: false });
       await this.h.sendHtml(conv, tr(lang, "🧭 Đã tắt Manager. Chat chính quay lại làm việc như một session bình thường; các worker vẫn giữ nguyên.", "🧭 Manager off. The main chat works as a normal session again; the workers are kept as-is."));
@@ -969,7 +974,7 @@ export class Orchestrator {
     //      practice (turns are mostly serialized per conv) but not guarded.
     if (s.manager && !s.worker) {
       if (type === "session.execution.started") this.managerBusy.add(conv);
-      else this.dropManagerTurn(conv); // succeeded / failed / interrupted
+      else this.dropManagerTurn(conv, type === "session.execution.succeeded" ? "succeeded" : "failed"); // Q4: only a succeeded manager turn drains its queue
       return;
     }
     if (!s.worker) return;
@@ -1145,18 +1150,28 @@ export class Orchestrator {
     // A turn is already running (this user's previous message, or a bot event
     // such as a worker report): block and notify, matching normal chats.
     if (this.managerBusy.has(conv)) {
-      if (messageId != null) {
-        // Offer the same one-tap "save as note" as the regular busy reply: the
-        // button's callback data carries the user message's id and its text is
-        // retained, so the tap appends it to /note (handled in Bot.handleNoteCallback).
-        const kb: Keyboard = { inline_keyboard: [[{ text: NOTE_BUTTON_LABEL, callback_data: noteCallbackData(messageId) }]] };
-        await this.h.tg.sendMessage(conv, BUSY_REPLY_TEXT, { reply_markup: kb });
-        this.h.busyNotes.push(conv, messageId, text);
+      // Busy reply per config.busyMode (ask / queue / off — see src/busy.ts),
+      // same behaviour as the regular chat. In "queue" mode the message is
+      // auto-enqueued on arrival; the Steer-now button targets this Manager
+      // session (Q2.5: only the Manager's turn, workers are separate sessions).
+      const busyLang = lang ?? "vi";
+      let reply: BusyReply;
+      if (this.h.cfg.busyMode === "queue" && messageId != null) {
+        const createdBy = this.h.st.peek(conv)?.createdBy;
+        const r = this.h.queue.push(conv, { text, senderId: createdBy != null ? String(createdBy) : undefined });
+        if (r.ok) audit({ action: "queue_add", chatId: conv, userId: createdBy != null ? String(createdBy) : undefined, meta: { messageId, textLen: text.length, queuedCount: r.position, manager: true } });
+        reply = r.ok
+          ? buildBusyReply({ lang: busyLang, mode: "queue", messageId, queuedCount: r.position })
+          : queueFullReply({ lang: busyLang, messageId });
       } else {
-        await this.h.tg.sendMessage(conv, BUSY_REPLY_TEXT);
+        reply = buildBusyReply({ lang: busyLang, mode: this.h.cfg.busyMode, messageId, canSteer: true });
       }
+      const kb = busyKeyboard(reply.buttons);
+      await this.h.tg.sendMessage(conv, reply.text, kb ? { reply_markup: kb } : undefined);
+      if (messageId != null) this.h.busyNotes.push(conv, messageId, text);
       return;
     }
+
     this.managerBusy.add(conv); // mark before the await so a 2nd message can't slip through
     this.budget.set(conv, DISPATCH_BUDGET); // the user spoke: refill the dispatch budget
     // Per-user language preference: pin the Manager session to English when the
@@ -1166,7 +1181,7 @@ export class Orchestrator {
     try {
       await this.h.oc.prompt(this.h.st.get(conv).sessionID!, text);
     } catch (e) {
-      this.dropManagerTurn(conv); // the prompt was never accepted — don't stay busy forever
+      this.dropManagerTurn(conv, "interrupted"); // the prompt was never accepted — don't stay busy forever (Q4: interrupted → no drain)
       throw e;
     }
     const ms = this.h.st.get(conv);
@@ -1191,9 +1206,27 @@ export class Orchestrator {
    * (busy reply → turn end) always closes with the busy flag, so a tap after the
    * turn ends (or on /stop, /new, /clear, manager off, or purge) is "not found".
    */
-  private dropManagerTurn(conv: ConvKey): void {
+  private dropManagerTurn(conv: ConvKey, outcome: "succeeded" | "failed" | "interrupted" = "interrupted"): void {
     this.managerBusy.delete(conv);
     this.h.busyNotes.clear(conv);
+    // Q4: only a SUCCEEDED manager turn runs the next queued message (a failed
+    // or interrupted turn holds it — mirrors the plain-session drain). Fire-and-
+    // forget through promptManager (manager semantics: no inflight controller).
+    if (outcome === "succeeded") this.drainManagerQueue(conv);
+  }
+
+  /**
+   * Q4 — run the head of a manager conv's queue as a fresh manager turn: one
+   * item per turn-end (no self-recursion). Uses promptManager (NOT runPrompt) so
+   * manager semantics are kept: no inflight AbortController, fire-and-forget. A
+   * busy manager makes promptManager reply "Đang chạy…" instead of starting a
+   * second turn, so it is race-safe.
+   */
+  private drainManagerQueue(conv: ConvKey): void {
+    const item = this.h.queue.shift(conv);
+    if (!item) return; // nothing queued
+    audit({ action: "queue_run", chatId: conv, userId: item.senderId, meta: { senderId: item.senderId, waitedMs: Date.now() - item.at, manager: true } });
+    void this.promptManager(conv, item.text, undefined, this.langOf(conv));
   }
 
   /** Spend one unit of the chat's dispatch budget, or refuse. */
@@ -1270,7 +1303,7 @@ export class Orchestrator {
     this.budget.delete(conv);
     this.clearSchedTimer(conv);
     this.finishing.delete(conv);
-    this.dropManagerTurn(conv);
+    this.dropManagerTurn(conv, "interrupted"); // Q4: session retiring — don't drain its queue
     this.reports.delete(conv);
     const t = this.reportTimers.get(conv);
     if (t) {
