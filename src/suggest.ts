@@ -13,12 +13,14 @@
  * best-effort — a failed set is simply retried on the next prompt (the
  * applied-marker is only recorded on success).
  */
+import { createHash } from "node:crypto";
 import type { StateManager } from "./state.js";
 import type { ConvKey } from "./conv.js";
 import type { InstructionCtl } from "./language.js";
 
 /** Instruction key for the quick-replies pin (namespaced `api/<key>`). */
 export const SUGGEST_KEY = "tgbot.suggest";
+
 
 /**
  * The exact instruction injected so the model offers `[OPTIONS: …]` lines.
@@ -38,6 +40,16 @@ export const SUGGEST_INSTRUCTION =
   "and write nothing after it.";
 
 /**
+ * Fingerprint of the instruction text. Changing the text changes this, which
+ * makes applySuggestPin re-pin already-tracked sessions on their next turn
+ * (the session-id tracker alone would keep serving a stale text after a
+ * deploy — verified live 2026-11-12: a tuned instruction never reached
+ * sessions pinned under the previous text).
+ */
+export const SUGGEST_VERSION =
+  createHash("sha256").update(SUGGEST_INSTRUCTION).digest("hex").slice(0, 16);
+
+/**
  * Apply (or clear) the per-session quick-replies instruction. `enabled` true
  * sets the pin; false clears it (so toggling the flag off removes it).
  * Idempotent and best-effort — never throws, and a failed set is retried on the
@@ -53,10 +65,12 @@ export async function applySuggestPin(
   const state = st.peek(conv);
   if (!state) return;
   if (enabled) {
-    if (state.suggestSession !== sessionID) {
+    if (state.suggestSession !== sessionID || state.suggestVersion !== SUGGEST_VERSION) {
       try {
         await oc.setInstruction(sessionID, SUGGEST_KEY, SUGGEST_INSTRUCTION);
-        st.set(conv, { suggestSession: sessionID }); // success only — a failure retries next prompt
+        // success only — a failure retries next prompt; the version check makes
+        // an instruction-text change re-pin tracked sessions on their next turn
+        st.set(conv, { suggestSession: sessionID, suggestVersion: SUGGEST_VERSION });
       } catch {
         /* best-effort */
       }
@@ -67,6 +81,6 @@ export async function applySuggestPin(
     } catch {
       /* best-effort */
     }
-    st.set(conv, { suggestSession: undefined });
+    st.set(conv, { suggestSession: undefined, suggestVersion: undefined });
   }
 }
