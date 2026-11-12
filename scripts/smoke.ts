@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
-import { dirname } from "node:path";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { loadConfig } from "../src/config.js";
 import { OpenCodeCtl } from "../src/opencode.js";
@@ -69,6 +70,10 @@ async function main(): Promise<void> {
   process.env.TELEGRAM_BOT_TOKEN = "dummy";
   process.env.TELEGRAM_ALLOWED_USER_IDS = "1";
   process.env.OPENCODE_DIRECTORY = "/tmp/opencode/testws";
+  // The next-step Review rule decides "did this turn change anything?" from the
+  // git working tree, so the smoke workspace must be a git repo (idempotent).
+  mkdirSync("/tmp/opencode/testws", { recursive: true });
+  if (!existsSync(join("/tmp/opencode/testws", ".git"))) execFileSync("git", ["init", "-q", "/tmp/opencode/testws"]);
   // Keep the live activity line off: its "✅ … · Ns" text would trip the
   // smoke's prompt-completed heuristics. It has its own unit tests.
   process.env.OPENCODE_TG_ACTIVITY = "0";

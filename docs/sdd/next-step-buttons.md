@@ -66,7 +66,8 @@ written by the agent, ours are decided by plain rules in the bot.
 
 - N2.1 `review` shall never be shown in the Manager conversation (`/review` already refuses there: the Manager has no repo).
 - N2.2 `review` shall not fire for workers that cannot write (`writes: false`, plan/explore/general read-only agents).
-- N2.3 "Files changed since the last offer" shall mean: the set of modified files reported for the session now contains a path it did not contain when `review` was last offered in this conversation. The set is kept in memory per conversation.
+- N2.3 "Files changed" for the plain-session `review` rule shall mean the git working tree of the session's folder differs after the turn from before it (HEAD, and every path `git status` lists with its modification time and size; git-ignored files do not count). Only when that cannot be measured (the folder is not a git repository, git fails or is slow, or too many paths changed) shall the rule fall back to the session report, where a file listed that was not offered before counts. An empty report shall NOT count as "changed".
+  - *Amended 2026-11-12.* The original wording ("modified files reported for the session contain a path not seen at the last offer") plus an "assume changed when the report is empty" shortcut made Review appear after almost every build turn of 90 seconds or more, because the build agent often creates files through the shell and the report does not list those. The git check sees them. The worker `review` rule still uses the report-based wording and is unchanged.
 
 ### N3 Tap behaviour
 - N3.1 Every button shall work once. After a tap the system shall remove that keyboard.

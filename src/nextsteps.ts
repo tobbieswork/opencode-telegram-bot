@@ -67,7 +67,7 @@ export interface Rule {
 // ── Labels (N3.4: fixed text, label says what happens) ──────────────────────
 
 const LABELS: Record<RuleId, { vi: string; en: string }> = {
-  review: { vi: "🔍 Xem lại", en: "🔍 Review changes" },
+  review: { vi: "🔍 Review thay đổi", en: "🔍 Review changes" },
   board: { vi: "📋 Board", en: "📋 Board" },
   "new-keep": { vi: "♻ Phiên mới, giữ context", en: "♻ New session, keep context" },
 };
@@ -115,6 +115,27 @@ export const RULES: Rule[] = [
     when: (f) => f.overflow === true && f.outcome === "failed",
   },
 ];
+
+// ── filesNew (N2.3, amended) ─────────────────────────────────────────────────
+
+/**
+ * Did this turn change anything worth reviewing? Prefer the git working-tree
+ * fingerprints taken before and after the turn (src/gitstate.ts): they see
+ * files created or rewritten through the shell, which the session report does
+ * not list. When either fingerprint is missing (not a git repo, git failed, too
+ * many changed paths), fall back to the report and count only a file it lists
+ * that was not offered before. An empty report is NOT treated as "changed":
+ * that assumption made Review appear after almost every long build turn.
+ */
+export function computeFilesNew(p: {
+  before?: string;
+  after?: string;
+  reportFiles: string[];
+  seen?: ReadonlySet<string>;
+}): boolean {
+  if (p.before !== undefined && p.after !== undefined) return p.before !== p.after;
+  return p.reportFiles.some((f) => !p.seen?.has(f));
+}
 
 // ── decide (N1) ──────────────────────────────────────────────────────────────
 
@@ -167,6 +188,9 @@ export const NS_PREFIX = "ns:";
 
 const records = new Map<string, RegistryRec>();
 
+/** Once the map holds this many records, `set` drops expired ones first (unclicked buttons never get a `get`). */
+const PRUNE_AT = 64;
+
 const B36_4 = /^[0-9a-z]{4}$/;
 
 /**
@@ -177,6 +201,7 @@ const B36_4 = /^[0-9a-z]{4}$/;
 export const registry = {
   /** Store a record and return a fresh 4-char base36 id. */
   set({ conv, sessionID, rule, now }: { conv: string; sessionID: string; rule: RuleId; now: number }): string {
+    if (records.size >= PRUNE_AT) registry.prune(now);
     let id = "";
     do {
       id = randomInt(0, 36 ** 4).toString(36).padStart(4, "0");
@@ -208,6 +233,10 @@ export const registry = {
       }
     }
     return n;
+  },
+  /** Number of live records (tests, diagnostics). */
+  size(): number {
+    return records.size;
   },
   /** Test helper: drop all records. */
   clear(): void {
