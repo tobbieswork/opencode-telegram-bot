@@ -598,6 +598,139 @@ const repo = join(tmp, "repo");
   check("dropManagerTurn default outcome holds the queue", host.queue.size("m1") === 1, String(host.queue.size("m1")));
 }
 
+// ── S4 worker Review row: git-fingerprint semantics (PR #142) ───────────────
+// The offer must key off the working tree, not the (often empty) session
+// report: equal fingerprints → no row even with an empty report; a change
+// made through plain shell → row with an empty report; non-git dir → report
+// fallback; the baseline rolls forward with each offer; a respawn carries it.
+{
+  const g = (cwd: string, ...a: string[]) =>
+    execFileSync("git", ["-C", cwd, ...a], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  const nsRepo = join(tmp, "ns-repo");
+  mkdirSync(nsRepo, { recursive: true });
+  g(nsRepo, "init", "-q", "-b", "main");
+  g(nsRepo, "config", "user.email", "t@example.com");
+  g(nsRepo, "config", "user.name", "t");
+  writeFileSync(join(nsRepo, "f.txt"), "one\n");
+  g(nsRepo, "add", "-A");
+  g(nsRepo, "commit", "-qm", "init");
+  const nsNongit = join(tmp, "ns-nongit");
+  mkdirSync(nsNongit, { recursive: true });
+  writeFileSync(join(nsNongit, "f.txt"), "one\n");
+
+  const sent: string[] = [];
+  let thread = 200;
+  let sessions = 0;
+  let reportFiles: string[] = [];
+  const tg: any = {
+    createForumTopic: async () => ++thread,
+    editForumTopic: async () => {},
+    answerCallbackQuery: async () => {},
+    sendMessage: async (_c: unknown, t: string) => void sent.push(t),
+    sendMessageId: async (_c: unknown, t: string) => (sent.push(t), 9100),
+    deleteMessage: async () => {},
+    deleteForumTopic: async () => {},
+    closeForumTopic: async () => {},
+  };
+  const oc: any = {
+    createSession: async () => `ses_ns${++sessions}`,
+    prompt: async () => "msg_x",
+    interrupt: async () => {},
+    removeSession: async () => {},
+    latestReply: async () => ({ text: "ok\nSUMMARY: done", time: 5 }),
+    sessionState: async () => ({ busy: false }),
+    getSessionReport: async () => ({ modifiedFiles: reportFiles }),
+    listMessages: async () => [],
+  };
+  const st = new StateManager(join(tmp, "ns-state.json"));
+  const cfg = {
+    opencodeDirectory: join(tmp, "ns-root"),
+    browseRoots: [nsRepo, nsNongit],
+    managerDir: join(tmp, "mgr"),
+    maxWorkers: 4,
+    worktreeMode: "off",
+    nextSteps: true,
+    recoverOverflow: true,
+    autoClose: false,
+  } as unknown as Config;
+  const host: Host = {
+    tg,
+    oc,
+    st,
+    cfg,
+    busyNotes: new BusyNoteStore(),
+    queue: new QueueStore(),
+    sendHtml: async () => {},
+    applyModelAndVariant: async () => {},
+    startTyping: () => {},
+    startWorking: () => {},
+    stopWorking: () => {},
+  };
+  const orch = new Orchestrator(host);
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const spawn = (name: string, directory: string) =>
+    orch.spawn("99", { name, directory, spawnedBy: "user", writes: true, task: "t" } as any);
+  /** Fire the done event and report whether a Review line was sent to the conv. */
+  const reviewShown = async (conv: string): Promise<boolean> => {
+    const before = sent.length;
+    orch.onExecution(conv, "session.execution.succeeded");
+    await sleep(400);
+    return sent.slice(before).some((t) => t.includes("xem lại thay đổi"));
+  };
+
+  // 1. Spawn captures the baseline (git repo, feature on, writing worker).
+  const a = await spawn("ns-a", nsRepo);
+  const fpA = st.get(a.conv).worker?.fpBase;
+  check("spawn captures the fp baseline in a git repo", fpA !== undefined, String(fpA));
+
+  // 2. Nothing changed + empty report → NO row (the old "empty = changed"
+  //    heuristic offered one here — the regression guard).
+  reportFiles = [];
+  check("no changes + empty report → no review row", (await reviewShown(a.conv)) === false);
+  check("…and the baseline is left alone", st.get(a.conv).worker?.fpBase === fpA);
+
+  // 3. File created through plain shell, empty report → row offered.
+  const b = await spawn("ns-b", nsRepo);
+  const fpAtSpawn = st.get(b.conv).worker?.fpBase;
+  writeFileSync(join(nsRepo, "shell-made.txt"), "x\n"); // invisible to the session report
+  check("shell-made file + empty report → review row offered", (await reviewShown(b.conv)) === true);
+  check("…offer rolled the baseline forward", st.get(b.conv).worker?.fpBase !== undefined && st.get(b.conv).worker?.fpBase !== fpAtSpawn);
+
+  // 4. Non-git directory: no fingerprint at all → report fallback; empty → no row.
+  const c = await spawn("ns-c", nsNongit);
+  check("non-git dir → no baseline captured", st.get(c.conv).worker?.fpBase === undefined, String(st.get(c.conv).worker?.fpBase));
+  check("non-git + empty report → no review row", (await reviewShown(c.conv)) === false);
+
+  // 5. Baseline roll-forward through the real offer path: a stale baseline
+  //    offers once (and persists the rolled-forward baseline), then a second
+  //    done with no further changes offers nothing.
+  st.set("99:901", {
+    sessionID: "ses_nsroll",
+    directory: nsRepo,
+    agent: "build",
+    worker: { name: "ns-roll", status: "running", spawnedBy: "user", writes: true, repoRoot: nsRepo, createdAt: 1, updatedAt: 1, fpBase: "stale" },
+  });
+  let roll = st.get("99:901");
+  const row1 = await (orch as any).workerReviewRow("99:901", roll, roll.worker, "vi");
+  check("stale baseline + on-disk changes → row offered", Array.isArray(row1) && row1.length === 1, String(row1));
+  check("…persisted baseline rolled forward", st.get("99:901").worker?.fpBase !== "stale" && st.get("99:901").worker?.fpBase !== undefined);
+  roll = st.get("99:901");
+  const row2 = await (orch as any).workerReviewRow("99:901", roll, roll.worker, "vi");
+  check("second done, no further changes → no row", row2 === undefined, String(row2));
+
+  // 6. A respawned worker inherits the dead predecessor's fpBase, so the
+  //    predecessor's unreviewed changes stay reviewable.
+  const OVF = "Requested token count exceeds the model's maximum context length of 160000 tokens";
+  const d = await spawn("ns-d", nsRepo);
+  const fpD = st.get(d.conv).worker?.fpBase;
+  writeFileSync(join(nsRepo, "d-work.txt"), "x\n"); // unreviewed changes at the moment of death
+  orch.onExecution(d.conv, "session.execution.failed", OVF);
+  await sleep(800);
+  const respawned = st.convsOfChat("99").find(([, s2]) => s2.worker?.respawnedFrom === "ns-d");
+  check("overflow failure → worker respawned", !!respawned);
+  check("respawn carries the predecessor's fpBase over", !!respawned && fpD !== undefined && respawned?.[1].worker?.fpBase === fpD);
+}
+
 rmSync(tmp, { recursive: true, force: true });
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
