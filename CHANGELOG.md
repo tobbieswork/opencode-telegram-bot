@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.20.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.19.0...opencode-telegram-bot-v1.20.0) (2026-11-12)
+
+
+### Features
+
+* add next-step Board and New-session-keep-context buttons ([b99f000](https://github.com/tobbieswork/opencode-telegram-bot/commit/b99f000c701034b13a8581420ed750f080a1d9bb))
+* add next-step Review button for writing workers ([c724bae](https://github.com/tobbieswork/opencode-telegram-bot/commit/c724baea262a3486ce32a775b1e4592aa196b930))
+* add next-step suggestion engine (decide, rule table, registry) ([0da85ff](https://github.com/tobbieswork/opencode-telegram-bot/commit/0da85ff99a76ef4c9070a430eb080a180221b024))
+* add nextstep_shown/nextstep_tap audit events + tap-rate script ([c2ccfaf](https://github.com/tobbieswork/opencode-telegram-bot/commit/c2ccfaf1305b7eadcdd24df3d080d92c673afb7e))
+* add OPENCODE_TG_NEXT_STEPS / NEXT_MIN_SECS config for next-step buttons ([7557cb7](https://github.com/tobbieswork/opencode-telegram-bot/commit/7557cb745e7b60b6c7646a98dbc34dd9200371b7))
+* next-step buttons (review / board / new-keep) on turn end ([56dd5ce](https://github.com/tobbieswork/opencode-telegram-bot/commit/56dd5ce56301d4e0f5374adc36219d79f9082ae9))
+* wire next-step Review button for plain sessions ([a0e5592](https://github.com/tobbieswork/opencode-telegram-bot/commit/a0e55929a5be586794849a3aa68b491255fff69c))
+
+
+### Bug Fixes
+
+* show the Review button when the session report lists no files ([9b06005](https://github.com/tobbieswork/opencode-telegram-bot/commit/9b0600573d7f92a10752b607ad1e45c8cf516094))
+
 ## [1.19.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.18.0...opencode-telegram-bot-v1.19.0) (2026-11-12)
 
 
