@@ -1446,6 +1446,8 @@ export class Orchestrator {
     const id = nsRegistry.set({ conv, sessionID: s.sessionID, rule: "review", now });
     // N2.3: this offer now defines the last-offered set for this worker topic.
     this.workerReviewFiles.set(conv, new Set(files));
+    // N4.3: shown event for the worker review button.
+    audit({ action: "nextstep_shown", chatId: conv, session: s.sessionID, userId: s.createdBy, meta: { rule: "review" } });
     return [{ text: suggestion.label(lang), callback_data: callbackFor(id, 0) }];
   }
 

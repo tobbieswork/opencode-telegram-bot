@@ -2341,6 +2341,9 @@ export class Bot {
       if (s.rule !== "review") continue; // S4/S5 rules are not rendered yet
       const id = nsRegistry.set({ conv, sessionID, rule: s.rule, now });
       row.push({ text: s.label(info.lang), callback_data: callbackFor(id, row.length) });
+      // N4.3: every shown button is in the audit log with its rule id, so tap
+      // rates can be measured (scripts/nextstep-tap-rate.ts).
+      audit({ action: "nextstep_shown", chatId: conv, session: sessionID, userId: state.createdBy, meta: { rule: s.rule } });
     }
     if (row.length === 0) return undefined;
     // N2.3: this offer now defines the "last-offered" file set for the conv.
@@ -2393,6 +2396,8 @@ export class Bot {
       if (s.rule !== "new-keep") continue;
       const id = nsRegistry.set({ conv, sessionID, rule: s.rule, now });
       row.push({ text: s.label(info.lang), callback_data: callbackFor(id, row.length) });
+      // N4.3: same shown event for the failure-path button.
+      audit({ action: "nextstep_shown", chatId: conv, session: sessionID, userId: state.createdBy, meta: { rule: s.rule } });
     }
     if (row.length === 0) return undefined;
     return { inline_keyboard: [row] };
@@ -2434,6 +2439,8 @@ export class Bot {
     if (!suggestion) return;
     const id = nsRegistry.set({ conv, sessionID: st.sessionID, rule: "board", now });
     const row: Btn[] = [{ text: suggestion.label(lang), callback_data: callbackFor(id, 0) }];
+    // N4.3: shown event for the board line.
+    audit({ action: "nextstep_shown", chatId: conv, session: st.sessionID, userId: st.createdBy, meta: { rule: "board" } });
     const lineId = await this.tg
       .sendMessageId(conv, tr(lang, `⚡ ${busyWorkers} worker đang chạy — xem board:`, `⚡ ${busyWorkers} worker(s) running — check the board:`), { reply_markup: { inline_keyboard: [row] } })
       .catch(() => -1);
@@ -3850,6 +3857,9 @@ export class Bot {
       this.nextStepResiduals.delete(conv);
     }
     nsRegistry.delete(parsed.id);
+    // N4.3: an accepted tap (all N3 checks passed, action about to run) is in
+    // the audit log with its rule id, so tap rates can be measured.
+    audit({ action: "nextstep_tap", chatId: conv, session: rec.sessionID, userId: cb.from?.id, outcome: "ok", meta: { rule: rec.rule } });
     if (rec.rule === "review") {
       const prompt = reviewPrompt("", lang);
       if (!prompt) {
