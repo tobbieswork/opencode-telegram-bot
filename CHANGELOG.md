@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.22.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.22.0...opencode-telegram-bot-v1.22.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* stop the Review button showing after every long build turn ([ffae229](https://github.com/tobbieswork/opencode-telegram-bot/commit/ffae229e3feae5ab103d34363894fa7f43204651))
+
 ## [1.22.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.21.4...opencode-telegram-bot-v1.22.0) (2026-11-12)
 
 
