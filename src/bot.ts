@@ -16,6 +16,7 @@ import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, formatTurnFailure, isOverflowError } from "./format.js";
 import { tr, STRINGS } from "./i18n.js";
 import { applyLanguagePin } from "./language.js";
+import { applySuggestPin } from "./suggest.js";
 import {
   extractMedia,
   buildPromptText,
@@ -27,7 +28,7 @@ import {
 } from "./uploads.js";
 import { richMarkdownChunks } from "./rich.js";
 import { redactSecrets } from "./redact.js";
-import { extractTrailingChoices, choiceKeyboard, registry } from "./choices.js";
+import { extractTrailingChoices, extractOptionsMarker, choiceKeyboard, registry } from "./choices.js";
 import { scheduleForRegistration, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
 import {
   classifyAction,
@@ -1206,13 +1207,34 @@ export class Bot {
     // an inline keyboard mirroring it. The keyboard rides the LAST chunk only.
     // Detection returns null when unsure → kb undefined → the reply is sent
     // exactly as before (never broken).
-    const ch = extractTrailingChoices(clean);
-    const kb: Keyboard | undefined = ch
-      ? choiceKeyboard(registry.put(conv, this.st.peek(conv)?.sessionID, ch.options), ch.options)
-      : undefined;
-    const body = ch ? ch.body : clean;
+    // Quick replies (R3, R1.5): a model-written [OPTIONS: …] marker (only when
+    // OPENCODE_TG_SUGGEST is on) takes precedence over the lettered list below.
+    // Its options are never truncated (the label must equal the sent text; R1.3
+    // caps each at 56). No marker / flag off → the lettered-list path, as before.
+    const marker = this.cfg.suggest ? extractOptionsMarker(clean) : null;
+    const ch = marker ? null : extractTrailingChoices(clean);
+    const opts: string[] | undefined = marker ? marker.options : ch?.options;
+    const kb: Keyboard | undefined =
+      opts && opts.length > 0
+        ? choiceKeyboard(registry.put(conv, this.st.peek(conv)?.sessionID, opts), opts, marker !== null)
+        : undefined;
+    const body = marker ? marker.body : ch ? ch.body : clean;
     const worker = this.st.peek(conv)?.worker;
     const purpose: MsgPurpose = worker ? "worker-done" : "reply";
+    // R5.2: audit the quick-replies outcome for eligible replies (flag on, not
+    // a worker topic, the instruction actually applied to this session).
+    // "shown" = buttons rendered; "none" = an eligible reply carried no marker
+    // (model compliance can be measured as 1 − none/shown).
+    if (this.cfg.suggest && !worker) {
+      const s0 = this.st.peek(conv);
+      if (s0?.sessionID && s0.suggestSession === s0.sessionID) {
+        audit(
+          marker && opts && opts.length > 0
+            ? { action: "suggest_shown", chatId: conv, userId: s0.createdBy, meta: { count: opts.length } }
+            : { action: "suggest_none", chatId: conv, userId: s0.createdBy },
+        );
+      }
+    }
     // Worker DONE relay: a LONG report becomes a `.md` file attachment (the
     // main case — research, design docs, test summaries). A short report, or
     // any conversational (manager) reply, keeps the existing message path.
@@ -2039,6 +2061,8 @@ export class Bot {
       // chose "en" ("vi"/unset clears it). Idempotent and self-tracked per session,
       // so a fresh session after /new, /use, or rotation re-applies on its prompt.
       await applyLanguagePin(this.oc, this.st, conv, sid, lang);
+      // Quick replies (R2): pin the [OPTIONS] instruction when enabled; idempotent + self-tracked.
+      await applySuggestPin(this.oc, this.st, conv, sid, this.cfg.suggest);
       // "Stay in the user's language" is a per-session INSTRUCTION (OpenCode
       // injects `api/*` entries into the system context), not prepended text —
       // cleaner and it doesn't grow the user-turn context. Tracked per SESSION
@@ -2170,14 +2194,19 @@ export class Bot {
       // S3 (next-step buttons): the quiet footer carries the turn's keyboard —
       // no extra message. decide() returns [] for everything it must not show
       // (N1.3–N1.5: choices/other-keyboard, stopped turns, non-idle convs).
-      const kb = await this.buildNextStepKeyboard(conv, sid, {
-        outcome,
-        interrupted: res.interrupted,
-        reply: res.reply,
-        elapsedMs: res.elapsedMs,
-        error: res.error,
-        lang: langEff,
-      });
+      // R4.1: a reply carrying quick replies (an [OPTIONS] marker) gets no
+      // rule-based next-step buttons for that turn (the model's options win).
+      const hasQuickReplies = this.cfg.suggest && extractOptionsMarker(stripTags(res.reply ?? "")) !== null;
+      const kb = hasQuickReplies
+        ? undefined
+        : await this.buildNextStepKeyboard(conv, sid, {
+            outcome,
+            interrupted: res.interrupted,
+            reply: res.reply,
+            elapsedMs: res.elapsedMs,
+            error: res.error,
+            lang: langEff,
+          });
       if (kb) {
         const footerId = await this.tg.sendMessageId(conv, meta, { reply_markup: kb }).catch(() => -1);
         if (footerId > 0) this.nextStepFooters.set(conv, footerId);
@@ -3780,31 +3809,65 @@ export class Bot {
    * re-tap or a stale button (e.g. after a /new) can never fire a second turn.
    */
   private async handleChoiceCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+    const lang = this.userPrefs.getLang(cb.from?.id ?? "");
+    // R3.3: the inert "chosen" button (replaces the keyboard after an accepted
+    // tap) — re-tapping it does nothing; it only shows what was sent.
+    if ((cb.data ?? "") === "ch:inert") {
+      await this.tg.answerCallbackQuery(cb.id);
+      return;
+    }
     const parts = (cb.data ?? "").split(":");
     const id = parts[1];
     const idx = Number(parts[2] ?? "");
-    // One-shot: drop the keyboard first so a double-tap can't double-fire.
-    if (messageId) {
-      await this.tg.editMessageReplyMarkup(conv, messageId, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
-    }
     const rec = id ? registry.get(id) : undefined;
-    const choice = rec?.options[idx];
     const state = this.st.peek(conv);
-    // Stale button: unknown id, missing session, or the conv's session changed
-    // (a /new / /use replaced it) — tapping would hit the wrong session.
-    if (!rec || !rec.sessionID || choice === undefined || (state?.sessionID && state.sessionID !== rec.sessionID)) {
-      if (id) registry.delete(id);
-      await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Nút này không còn áp dụng.", "This button is no longer applicable."));
+    // R3.4: unknown id (the registry is in-memory — it outlived a restart) or
+    // TTL-expired → "expired".
+    if (!rec) {
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Nút này đã hết hạn.", "This button has expired."));
       return;
     }
-    await this.tg.answerCallbackQuery(cb.id);
-    registry.delete(id); // consume: the choice set is single-use
-    // Fire the new user turn; the event loop relays the reply when it ends. A
-    // failure here (session busy/gone) is non-fatal — the user can just retype.
-    await this.oc.prompt(rec.sessionID, choice).catch(async (e) => {
+    const choice = rec.options[idx];
+    // R3.4: bound to the session it was created for — the conv's session
+    // changed (a /new / /use / Manager rotation) → "no longer applies".
+    if (!rec.sessionID || choice === undefined || !state || (state.sessionID && state.sessionID !== rec.sessionID)) {
+      registry.delete(id);
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Nút này không còn áp dụng.", "This button is no longer applicable."));
+      return;
+    }
+    // R3.2: a turn is running → refuse, KEEP the buttons, send nothing. (This
+    // changes today's behaviour, where a tap silently steered into the running
+    // turn; R5.1 extends the refusal to the existing lettered-list buttons.)
+    if (state.manager ? this.orch.managerInflight : this.inflight.has(conv)) {
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Đang chạy task — hẵng thử lại sau.", "A task is running — try again later."));
+      return;
+    }
+    // Consume BEFORE any await so a double-tap can never double-fire (R3.4).
+    registry.delete(id);
+    // R3.1: a tap is a typed message — the same entry point as a typed message
+    // (runPrompt for plain sessions, promptManager for the Manager), so it is
+    // audited, shows the typing indicator, gets the turn footer + next-step
+    // buttons, and refills the Manager's dispatch budget. Called synchronously
+    // — its busy guard runs in this same tick, so the R3.2 check above holds.
+    // Fire-and-forget: the callback must be answered promptly, and the reply is
+    // relayed by the event loop when the turn ends.
+    audit({ action: "suggest_tap", chatId: conv, userId: state.createdBy, meta: { idx, count: rec.options.length, manager: !!state.manager } });
+    const turn = state.manager
+      ? this.orch.promptManager(conv, choice, messageId, lang)
+      : this.runPrompt(conv, choice, state, messageId, lang);
+    void turn.catch(async (e) => {
       warn("choice prompt:", (e as Error)?.message);
-      await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "❌ Không thể xử lý — thử nhập lại.", "❌ Couldn't process that — try typing it again.")).catch(() => {});
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, "❌ Không thể xử lý — thử nhập lại.", "❌ Couldn't process that — try typing it again.")).catch(() => {});
     });
+    await this.tg.answerCallbackQuery(cb.id);
+    // R3.3: replace the keyboard with a single inert button showing the chosen
+    // text + a check mark, so the chat shows what was sent.
+    if (messageId) {
+      const label = "✓ " + (choice.length > 60 ? choice.slice(0, 60) : choice);
+      await this.tg
+        .editMessageReplyMarkup(conv, messageId, { reply_markup: { inline_keyboard: [[{ text: label, callback_data: "ch:inert" }]] } })
+        .catch(() => {});
+    }
   }
 
   /**

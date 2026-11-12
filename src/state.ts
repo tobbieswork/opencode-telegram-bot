@@ -137,6 +137,8 @@ export interface ChatState {
    * rotation re-applies on its first prompt. See src/language.ts.
    */
   languageEnSession?: string;
+  /** Session the quick-replies instruction was applied to (R2; self-tracked like languageEnSession). */
+  suggestSession?: string;
   /**
    * The Telegram uid that last drove this conversation. Lets the orchestrator
    * (which has no message uid) resolve the conv owner's language preference for
