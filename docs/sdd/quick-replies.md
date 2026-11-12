@@ -140,6 +140,13 @@ Spike: `scripts/spike-suggest.ts`, run 2026-11-12 against the live service
   on Manager sessions), applied via the identical `applySuggestPin` call
   site in `promptManager`.
 
+Refinement from the R5 smoke run (same day, same model): the model
+**did** offer 3 valid options as buttons when the user's own prompt
+referenced options ("…Keep each direction to one line. Then stop — I will
+pick **from your options**."). So: instruction alone → 0/6; instruction
++ an option-primed decision prompt → compliant. The feature fires in the
+real case it is for (a user asking for options to pick from).
+
 **Decision: default stays OFF.** The feature is dormant on the current
 model. The infrastructure (parser, rendering, tap routing, audit, report,
 smoke) is complete and tested; flip `OPENCODE_TG_SUGGEST=1` to measure a
