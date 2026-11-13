@@ -13,6 +13,7 @@ import { listDirs } from "./fsbrowser.js";
 import { spawnRequestBody } from "./reactions.js";
 import { buildHandoffPrompt, followUpsFromMessages, respawnName, respawnNotice, shouldRespawnWorker } from "./recovery.js";
 import { scriptInstruction } from "./sandbox/scriptPreamble.js";
+import { topicDeepLink } from "./shared.js";
 import { ICON, esc, trunc, timeAgo, stripTags, mdToHtmlChunks } from "./format.js";
 import { log, warn } from "./logger.js";
 import { audit } from "./audit.js";
@@ -784,9 +785,11 @@ export class Orchestrator {
     log(`[chat ${chat}] spawned worker ${name} (${agent}) in ${directory}`);
 
     // Deep-link button so the user can jump from the main topic into the worker's topic.
-    // `t.me/c/` links only resolve for supergroups (negative -100… ids) — skip otherwise.
-    if (chatId < -1000000000000) {
-      const topicLink = `https://t.me/c/${Math.abs(chatId) - 1000000000000}/${threadId}`;
+    // Bot API 10.4: supergroups use `t.me/c/<id>/<thread>`; private chats with
+    // topics use `t.me/<bot_username>/<thread>` (opens only for that chat's
+    // owner). No link for either (unknown username, other chat type) → skip.
+    const topicLink = await topicDeepLink(chatId, threadId, await this.h.tg.botUsername());
+    if (topicLink) {
       await this.h
         .sendHtml(
           convKey(chatId),
@@ -1255,6 +1258,12 @@ export class Orchestrator {
   /** True while at least one manager turn is in flight (used by the Bot's shutdown drain). */
   get managerInflight(): boolean {
     return this.managerBusy.size > 0;
+  }
+
+  /** True while THIS conv's manager turn is in flight (per-conversation: the rotation
+   *  gate uses this so another conv's manager turn can't block it). */
+  isManagerBusy(conv: ConvKey): boolean {
+    return this.managerBusy.has(conv);
   }
 
   /**

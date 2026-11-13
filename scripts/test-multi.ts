@@ -145,6 +145,8 @@ const repo = join(tmp, "repo");
   let sessions = 0;
   const instrCalls: { sid: string; key: string }[] = [];
   const tg: any = {
+    // Bot API 10.4 deep-link: private-chat topic links need the bot's @username.
+    botUsername: async () => "mock_bot",
     createForumTopic: async (_chat: number, name: string) => (topics.push(name), 100 + topics.length),
     editForumTopic: async (_conv: string, name: string) => void topics.push(name),
     closeForumTopic: async (conv: string) => void closedTopics.push(conv),
@@ -208,6 +210,13 @@ const repo = join(tmp, "repo");
   check("spawn opens a topic named with status", topics[0] === "🟢 api-fix" && r.conv === "42:101");
   check("spawn binds a session to the topic", st.get("42:101").sessionID === "ses_1" && st.findChatBySession("ses_1") === "42:101");
   check("task is prompted with the worker preamble", prompts[0]?.sid === "ses_1" && /worker "api-fix"/.test(prompts[0].text) && /do X$/.test(prompts[0].text));
+  // Bot API 10.4: a private-chat spawn also posts a deep-link card whose button
+  // opens the new worker topic (t.me/<bot_username>/<thread>).
+  check(
+    "private-chat spawn sends a 10.4 topic deep-link card",
+    sent.some((t) => /Worker api-fix/.test(t)) && lastKb?.inline_keyboard?.[0]?.[0]?.url === "https://t.me/mock_bot/101",
+    JSON.stringify(lastKb),
+  );
   // Language mirror: an English task pins the fresh worker session to English.
   check("English task pins the worker session to English", instrCalls.some((c) => c.sid === "ses_1" && c.key === "tgbot.language_en"));
   // A Vietnamese task gets no pin (the model's natural default).
@@ -633,6 +642,7 @@ const repo = join(tmp, "repo");
   let sessions = 0;
   let reportFiles: string[] = [];
   const tg: any = {
+    botUsername: async () => "mock_bot",
     createForumTopic: async () => ++thread,
     editForumTopic: async () => {},
     answerCallbackQuery: async () => {},
