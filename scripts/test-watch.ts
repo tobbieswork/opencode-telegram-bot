@@ -13,9 +13,19 @@
  *     10 s, honor retry_after, reset on success).
  *   - W3.1 final states: done/failed/stopped emit one un-throttled final edit
  *     and freeze (no unfreeze on later events).
- *
- * I/O paths (the actual editMessageTextStrict calls) are NOT unit-tested, per
- * repo convention (pure logic only).
+ *   - W3 pure additions: watchHistory (prompt pick + list cap), watchKeyboard
+ *     (Close / Close+Stop / Close+Watch-again, per status), watchRegistry (id
+ *     format + TTL), watchTickDecision (timeout > idle > poll precedence),
+ *     mapSessionOutcome.
+ *   - W3 mock-Bot integration (src/bot.ts against a mock Telegram + OpenCode +
+ *     a fake clock): card post (idle/working + buttons), event feed (prompt
+ *     fetch, text fold, tool label in the card's own language, throttle),
+ *     edit-failure handling (429 backoff, gone card → stopped "edit-failed"),
+ *     turn-end final card (frozen, never the answer), auto-stops (idle 60 s,
+ *     timeout cap, /watch replace, Close, unknown tap, session-mismatch
+ *     refusal), the 5 s tick (W2.5 poll end-recovery, W3.4 idle freeze, W3.5
+ *     timeout), the browse-setsess session switch (W5.1), and the W6.3 audit
+ *     lines (watch_start, watch_end, exactly ONE per watch).
  *
  * Run:  npx tsx scripts/test-watch.ts
  */
@@ -28,7 +38,14 @@ import {
   onEditFailedFlood,
   clampWatchInterval,
   formatElapsed,
+  watchHistory,
+  watchKeyboard,
+  watchRegistry,
+  watchTickDecision,
+  mapSessionOutcome,
   WATCH_CARD_LIMIT,
+  WATCH_IDLE_FREEZE_MS,
+  WATCH_POLL_GAP_MS,
 } from "../src/watch.js";
 
 let failures = 0;
@@ -255,5 +272,512 @@ check("throttle: exactly the interval → edit", r.edit !== undefined);
   check("text: buffer stays tail-capped after 100 KB", s.text.length <= 8000 && s.text.endsWith("z".repeat(4000)));
 }
 
-console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);
-process.exit(failures === 0 ? 0 : 1);
+// ════════════════════════════════════════════════════════════════════════════
+// W3 pure additions (watch.ts)
+// ════════════════════════════════════════════════════════════════════════════
+{
+  // watchHistory: prompt = last non-blank user message; list = last 6 ascending.
+  const h = watchHistory([
+    { type: "user", time: { created: 1 }, text: "first" },
+    { type: "user", time: { created: 2 }, text: "second" },
+    { type: "user", time: { created: 3 }, text: "third" },
+    { type: "user", time: { created: 4 }, text: "fourth" },
+    { type: "user", time: { created: 5 }, text: "fifth" },
+    { type: "assistant", time: { created: 6 }, content: [{ type: "text", text: "p1" }, { type: "tool", text: "x" }, { type: "text", text: "p2" }] },
+    { type: "user", time: { created: 7 }, text: "   " }, // blank → not the prompt
+    { type: "user", time: { created: 8 }, text: "last one" },
+  ]);
+  check("history: prompt is the LAST non-blank user message", h.prompt === "last one", h.prompt);
+  check("history: blank user messages never become the prompt", h.prompt !== "");
+  check("history: assistant content parts joined with a newline", h.history.some((m) => m.type === "assistant" && m.text === "p1\np2"), JSON.stringify(h.history));
+  check("history: cap 6, ascending", h.history.length === 6 && h.history[0].text === "third" && h.history[5].text === "last one", JSON.stringify(h.history));
+  check("history: empty input → no prompt", watchHistory([]).prompt === undefined);
+}
+{
+  const kw = watchKeyboard("ab12", "working", "en");
+  check("kb: working = Close + Stop task", kw.inline_keyboard.length === 2, JSON.stringify(kw));
+  check("kb: close data", kw.inline_keyboard[0][0].callback_data === "w:ab12:c");
+  check("kb: stop data", kw.inline_keyboard[1][0].callback_data === "w:ab12:s");
+  const ki = watchKeyboard("ab12", "idle", "en");
+  check("kb: idle = Close only", ki.inline_keyboard.length === 1 && ki.inline_keyboard[0][0].callback_data === "w:ab12:c");
+  const kf = watchKeyboard("ab12", "frozen", "vi");
+  check("kb: frozen = Close + Watch again", kf.inline_keyboard.length === 2 && kf.inline_keyboard[0][0].callback_data === "w:ab12:c" && kf.inline_keyboard[1][0].callback_data === "w:ab12:r");
+  check("kb: vi labels", kf.inline_keyboard[0][0].text === "❌ Đóng" && kf.inline_keyboard[1][0].text === "👁 Xem lại");
+  const ke = watchKeyboard("ab12", "frozen", "en");
+  check("kb: en labels", ke.inline_keyboard[0][0].text === "Close" && ke.inline_keyboard[1][0].text === "Watch again");
+}
+{
+  const rid = watchRegistry.newId();
+  check("registry: id is 4 base36 chars", /^[0-9a-z]{4}$/.test(rid), rid);
+  watchRegistry.put(rid, { conv: "1", sessionID: "s", cardMsgId: 9, createdAt: Date.now() });
+  check("registry: put/get round-trip", watchRegistry.get(rid)?.cardMsgId === 9);
+  check("registry: newId avoids a live id", watchRegistry.newId() !== rid);
+  watchRegistry.delete(rid);
+  check("registry: delete → undefined", watchRegistry.get(rid) === undefined);
+  const oldId = watchRegistry.newId();
+  watchRegistry.put(oldId, { conv: "1", sessionID: "s", cardMsgId: 1, createdAt: Date.now() - 25 * 3600_000 });
+  check("registry: expired (25 h) record dropped on get", watchRegistry.get(oldId) === undefined);
+}
+{
+  const T = 1_000_000_000;
+  const base = { createdAt: T, lastEventAt: T, maxMs: 600_000, idleMs: WATCH_IDLE_FREEZE_MS, pollGapMs: WATCH_POLL_GAP_MS, polling: false };
+  check("tick: fresh idle watch → none", watchTickDecision({ ...base, phase: "idle", now: T + 1_000 }) === "none");
+  check("tick: idle gap 59.9 s → none", watchTickDecision({ ...base, phase: "idle", now: T + 59_900 }) === "none");
+  check("tick: idle gap just over 60 s → idle freeze", watchTickDecision({ ...base, phase: "idle", now: T + 60_001 }) === "idle");
+  check("tick: fresh working watch → none", watchTickDecision({ ...base, phase: "working", now: T + 1_000 }) === "none");
+  check("tick: working gap 9.9 s → none", watchTickDecision({ ...base, phase: "working", now: T + 9_900 }) === "none");
+  check("tick: working gap just over 10 s → poll", watchTickDecision({ ...base, phase: "working", now: T + 10_001 }) === "poll");
+  check("tick: active poll stays polling", watchTickDecision({ ...base, phase: "working", now: T + 1_000, polling: true }) === "poll");
+  check("tick: timeout beats poll", watchTickDecision({ ...base, phase: "working", now: T + 600_001, polling: true }) === "timeout");
+  check("tick: timeout beats idle", watchTickDecision({ ...base, phase: "idle", now: T + 600_001 }) === "timeout");
+  check("tick: exactly at the cap → still not a timeout", watchTickDecision({ ...base, phase: "idle", now: T + 600_000 }) !== "timeout");
+}
+{
+  check("outcome: succeeded → done", mapSessionOutcome("succeeded") === "done");
+  check("outcome: failed → failed", mapSessionOutcome("failed") === "failed");
+  check("outcome: interrupted → stopped", mapSessionOutcome("interrupted") === "stopped");
+  check("outcome: undefined → done", mapSessionOutcome(undefined) === "done");
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// W3 mock-Bot integration (src/bot.ts): the watch lifecycle end to end
+// against a mock Telegram + mock OpenCode + a fake clock.
+// ════════════════════════════════════════════════════════════════════════════
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Bot } from "../src/bot.js";
+import { StateManager } from "../src/state.js";
+import { configureAudit } from "../src/audit.js";
+
+const tmpRoot = mkdtempSync(join(tmpdir(), "ocbot-watch-"));
+let auditN = 0;
+let auditFile = join(tmpRoot, "audit-0.log");
+configureAudit({ path: auditFile });
+
+const flush = async (): Promise<void> => {
+  await new Promise<void>((r) => setImmediate(r));
+  await new Promise<void>((r) => setImmediate(r));
+};
+const auditLines = (): Record<string, unknown>[] => {
+  try {
+    return readFileSync(auditFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  } catch {
+    return [];
+  }
+};
+const byAction = (action: string) => auditLines().filter((l) => l.action === action);
+
+const realNow = Date.now.bind(Date);
+let fakeNow = 1_700_000_000_000;
+Date.now = () => fakeNow;
+
+/**
+ * A Bot with the watch machinery wired to mocks. The clock stays FAKED for the
+ * whole section (restore it at the end).
+ */
+function makeWatchBot(opts: {
+  listMsgs?: any[];
+  busy?: boolean;
+  outcome?: string;
+  sessionState?: Array<{ busy: boolean; outcome?: string }>;
+} = {}) {
+  auditN++;
+  auditFile = join(tmpRoot, `audit-${auditN}.log`);
+  configureAudit({ path: auditFile });
+
+  const sent: { conv: string; text: string; kb?: { inline_keyboard: unknown[][] } }[] = [];
+  const edits: { conv: string; msgId: number; text: string; kb?: { inline_keyboard: unknown[][] } }[] = [];
+  const deleted: number[] = [];
+  const answers: { id: string; text?: string }[] = [];
+  const ssCalls: string[] = [];
+  const ssQueue = [...(opts.sessionState ?? [])];
+  let failMode: "gone" | "flood" | undefined;
+  const doEdit = async (conv: string, msgId: number, text: string, opts: any) => {
+    if (failMode === "gone") { const e: any = new Error("message to edit not found"); e.code = 400; throw e; }
+    if (failMode === "flood") { const e: any = new Error("Too Many Requests"); e.code = 429; e.retryAfter = 2; throw e; }
+    edits.push({ conv, msgId, text, kb: opts?.reply_markup });
+  };
+
+  const tg: any = {
+    onThreadNotFound: undefined,
+    onMessageReaction: undefined,
+    sendMessage: async (_c: string, _t: string) => {},
+    sendChatAction: async () => {},
+    deleteMessage: async (_c: string, id: number) => { deleted.push(id); },
+    openForumTopic: async () => {},
+    setReaction: async () => true,
+    editMessageText: async () => true,
+    stop: () => {},
+    sendMessageId: async (conv: string, text: string, opts: any) => {
+      const kb = opts?.reply_markup;
+      sent.push({ conv, text, kb });
+      return 1000 + sent.length;
+    },
+    editMessageTextStrict: doEdit,
+    answerCallbackQuery: async (id: string, text?: string) => { answers.push({ id, text }); },
+  };
+
+  const oc: any = {
+    promptAndWait: async () => ({ reply: "done", outcome: "succeeded", interrupted: false, elapsedMs: 1 }),
+    prompt: async () => "msg_x",
+    interrupt: async () => {},
+    createSession: async () => "ses_x",
+    listMessages: async () => opts.listMsgs ?? [],
+    sessionState: async (sid: string) => {
+      ssCalls.push(sid);
+      return ssQueue.length ? ssQueue.shift()! : { busy: !!opts.busy, outcome: opts.outcome };
+    },
+  };
+
+  const st = new StateManager(join(tmpRoot, `state-${auditN}.json`));
+  const cfg: any = {
+    stateFile: join(tmpRoot, `state-${auditN}.json`),
+    maxSchedules: 5,
+    watchActive: true,
+    watch: true,
+    stream: false,
+    watchIntervalMs: 3000,
+    watchMaxMin: 10,
+  };
+  const bot = new Bot(tg, oc, st, cfg);
+  const neutral: string[] = [
+    "sendReply", "sendHtml", "startTyping", "stopTyping", "startWorking",
+    "stopWorking", "clearActivity", "dropPreview", "offerContinueKeyboard",
+  ];
+  for (const m of neutral) (bot as any)[m] = async () => {};
+  // The group-floor clamp must never kick in for these conversations (DMs).
+  bot.startWatchTicker = () => {}; // keep it OFF: tests drive ticks explicitly
+
+  return {
+    bot, tg, st, cfg, sent, edits, deleted, answers, ssCalls,
+    setFail: (mode: "gone" | "flood" | undefined) => { failMode = mode; },
+  };
+}
+
+const cb = (data: string, from = 7): any => ({ id: "cb_" + data, data, from: { id: from } });
+const cardKb = (e: { kb?: { inline_keyboard: unknown[][] } }) => (e.kb?.inline_keyboard ?? [] as unknown[][]) as Array<Array<{ callback_data: string; text: string }>>;
+const dm = "7"; // isDmConv("7") === true → no group floor
+
+// ── W1.4/W3.2: posting an idle card (no in-flight turn) ──────────────────────
+{
+  const m = makeWatchBot({
+    listMsgs: [
+      { type: "user", time: { created: 1 }, text: "do the thing" },
+      { type: "assistant", time: { created: 2 }, content: [{ type: "text", text: "on it" }] },
+    ],
+  });
+  m.st.set(dm, { sessionID: "ses_1" });
+  (m.bot as any).userPrefs.setLang(7, "en");
+  await (m.bot as any).startWatch(dm, m.st.get(dm), 7);
+  check("post: exactly one card message", m.sent.length === 1 && m.sent[0].conv === dm, JSON.stringify(m.sent));
+  check("post: idle card has the Idle header", m.sent[0].text.includes("Idle"), m.sent[0].text);
+  check("post: idle card shows the history", m.sent[0].text.includes("do the thing") && m.sent[0].text.includes("on it"), m.sent[0].text);
+  const rows = cardKb(m.sent[0]);
+  check("post: idle card has Close button", rows.length === 1 && rows[0][0].callback_data === "w:" + m.bot.watches.get(dm)!.id + ":c", JSON.stringify(rows));
+  check("post: watch recorded (idle, not frozen)", m.bot.watches.get(dm)!.state.phase === "idle" && !m.bot.watches.get(dm)!.frozen);
+  check("post: card message id recorded", m.bot.watches.get(dm)!.cardMsgId === m.sent[0].kb ? 1001 : m.bot.watches.get(dm)!.cardMsgId === 1001);
+  const ws = byAction("watch_start");
+  check("post: watch_start audited (session + user + interval meta)", ws.length === 1 && ws[0].session === "ses_1" && ws[0].userId === 7 && ws[0].meta?.intervalMs === 3000 && ws[0].meta?.isGroup === false, JSON.stringify(ws));
+  check("post: no watch_end yet", byAction("watch_end").length === 0);
+}
+
+// ── W3.3: the event feed — prompt fetch, text fold, tool label, throttle ────
+{
+  const m = makeWatchBot({
+    listMsgs: [
+      { type: "user", time: { created: 1 }, text: "do the thing" },
+      { type: "assistant", time: { created: 2 }, content: [{ type: "text", text: "on it" }] },
+    ],
+  });
+  m.st.set(dm, { sessionID: "ses_1" });
+  (m.bot as any).userPrefs.setLang(7, "en");
+  await (m.bot as any).startWatch(dm, m.st.get(dm), 7);
+  check("feed: pre — 1 card, 0 edits", m.sent.length === 1 && m.edits.length === 0);
+
+  const w = () => m.bot.watches.get(dm)!;
+  // A turn starts: the prompt is fetched from the session history (W3.3).
+  m.bot.feedWatch("session.execution.started", { sessionID: "ses_1" });
+  await flush();
+  check("feed: turn-start edited the card once", m.edits.length === 1, JSON.stringify(m.edits.length));
+  check("feed: working header appears", m.edits[0].text.includes("Working"), m.edits[0].text);
+  check("feed: prompt line comes from the history fetch", m.edits[0].text.includes("do the thing"), m.edits[0].text);
+  const rowsWork = cardKb(m.edits[0]);
+  check("feed: working card has Close + Stop task", rowsWork.length === 2 && rowsWork[1][0].callback_data.endsWith(":s"), JSON.stringify(rowsWork));
+  check("feed: phase working + not frozen", w().state.phase === "working" && !w().frozen);
+
+  // Text deltas fold in (W3.3).
+  m.bot.feedWatch("session.text.delta", { sessionID: "ses_1", delta: "hello" });
+  await flush();
+  m.bot.feedWatch("session.text.delta", { sessionID: "ses_1", delta: " world" });
+  await flush();
+  check("feed: deltas within the interval do not re-edit", m.edits.length === 1, String(m.edits.length));
+  check("feed: deltas folded into state", w().state.text === "hello world", w().state.text);
+
+  // The same tool label as the activity line, in the card's OWN language.
+  m.bot.feedWatch("session.tool.input.started", { sessionID: "ses_1", id: "t1", name: "read" });
+  await flush();
+  check("feed: tool input.started alone never edits", m.edits.length === 1);
+  fakeNow += 3000; // pass the throttle
+  m.bot.feedWatch("session.tool.called", { sessionID: "ses_1", id: "t1", name: "read", input: { path: "src/a.ts" } });
+  await flush();
+  check("feed: tool label rendered (en, like the activity line)", m.edits.length === 2 && m.edits[1].text.includes("📖 Reading src/a.ts"), m.edits[1]?.text);
+  // A different session's events are ignored.
+  m.bot.feedWatch("session.text.delta", { sessionID: "ses_OTHER", delta: "nope" });
+  await flush();
+  check("feed: other session's events ignored", w().state.text === "hello world");
+  fakeNow += 3000; // pass the throttle
+  m.bot.feedWatch("session.tool.success", { sessionID: "ses_1", id: "t1" });
+  await flush();
+  check("feed: tool success shows the activity-line done form", m.edits[2]?.text.includes("✅") && m.edits[2]?.text.includes("Read src/a.ts"), m.edits[2]?.text);
+}
+
+// ── W5.2/W2.4: edit failures — 429 backoff, gone card → stopped edit-failed ─
+{
+  const m = makeWatchBot({ listMsgs: [{ type: "user", time: { created: 1 }, text: "hi" }] });
+  m.st.set(dm, { sessionID: "ses_1" });
+  (m.bot as any).userPrefs.setLang(7, "en");
+  await (m.bot as any).startWatch(dm, m.st.get(dm), 7);
+  m.bot.feedWatch("session.execution.started", { sessionID: "ses_1" });
+  await flush();
+  check("fail: pre — card + turn-start edit", m.sent.length === 1 && m.edits.length === 1);
+
+  m.setFail("flood");
+  fakeNow += 3000; // pass the throttle so the edit actually goes out
+  m.bot.feedWatch("session.text.delta", { sessionID: "ses_1", delta: "boom" });
+  await flush();
+  const w = () => m.bot.watches.get(dm)!;
+  check("fail: 429 keeps the watch alive (backoff)", !!w() && !w().frozen);
+  check("fail: backoff doubled the interval (3000 → 6000)", w().state.intervalMs === 6000, String(w().state.intervalMs));
+  check("fail: retry_after floor applied (2 s)", w().state.earliestEditAt === fakeNow + 2000, String(w().state.earliestEditAt));
+  check("fail: no edit landed while flooded", m.edits.length === 1);
+  fakeNow += 6000; // past BOTH the retry_after floor and the doubled throttle
+  m.setFail(undefined);
+  m.bot.feedWatch("session.text.delta", { sessionID: "ses_1", delta: "ok now" });
+
+  await flush();
+  check("fail: edit lands after the floor", m.edits.length === 2, String(m.edits.length));
+  check("fail: backoff reset on success", w().state.intervalMs === 3000 && w().state.earliestEditAt === 0, `${w().state.intervalMs}/${w().state.earliestEditAt}`);
+
+  m.setFail("gone");
+  fakeNow += 10_000; // clear the (reset) throttle
+  m.bot.feedWatch("session.text.delta", { sessionID: "ses_1", delta: "gone" });
+
+  await flush();
+  check("fail: gone card (400) stops the watch", !m.bot.watches.has(dm));
+  const we = byAction("watch_end");
+  check("fail: watch_end audited with reason edit-failed", we.length === 1 && we[0].meta?.reason === "edit-failed", JSON.stringify(we));
+}
+
+// ── W3.1: turn end → one final card, frozen, never the answer ───────────────
+{
+  const m = makeWatchBot({ listMsgs: [{ type: "user", time: { created: 1 }, text: "compute" }] });
+  m.st.set(dm, { sessionID: "ses_1" });
+  (m.bot as any).userPrefs.setLang(7, "en");
+  await (m.bot as any).startWatch(dm, m.st.get(dm), 7);
+  m.bot.feedWatch("session.execution.started", { sessionID: "ses_1" });
+  await flush();
+  m.bot.feedWatch("session.text.delta", { sessionID: "ses_1", delta: "the answer is 42" });
+  fakeNow += 3000;
+  await flush();
+  check("end: pre — card + edits, not frozen", !!m.bot.watches.get(dm) && !m.bot.watches.get(dm)!.frozen);
+  const preEdits = m.edits.length;
+
+  m.bot.feedWatch("session.execution.succeeded", { sessionID: "ses_1" });
+  await flush();
+  check("end: exactly ONE final edit", m.edits.length === preEdits + 1, String(m.edits.length));
+  const finalText = m.edits[preEdits].text;
+  check("end: final card shows Done", finalText.includes("Done"), finalText);
+  check("end: final card shows a duration", /· \d+m? ?\d*s/.test(finalText), finalText);
+  check("end: the answer is NOT repeated", !finalText.includes("the answer"), finalText);
+  const rowsFinal = cardKb(m.edits[preEdits]);
+  check("end: frozen card has Close + Watch again", rowsFinal.length === 2 && rowsFinal[1][0].callback_data.endsWith(":r"), JSON.stringify(rowsFinal));
+  check("end: watch frozen", m.bot.watches.get(dm)!.frozen && m.bot.watches.get(dm)!.state.phase === "done");
+  const we = byAction("watch_end");
+  check("end: watch_end audited once", we.length === 1 && we[0].meta?.reason === "done", JSON.stringify(we));
+  const preEnd = byAction("watch_end").length;
+  // Stale events after the freeze are dropped.
+  m.bot.feedWatch("session.text.delta", { sessionID: "ses_1", text: "stale" });
+  m.bot.feedWatch("session.execution.succeeded", { sessionID: "ses_1" });
+  await flush();
+  check("end: stale events after the freeze are dropped", m.edits.length === preEdits + 1 && byAction("watch_end").length === preEnd);
+}
+
+// ── W3.4: idle freeze after 60 s of silence ─────────────────────────────────
+{
+  const m = makeWatchBot({ listMsgs: [] });
+  m.st.set(dm, { sessionID: "ses_1" });
+  (m.bot as any).userPrefs.setLang(7, "en");
+  await (m.bot as any).startWatch(dm, m.st.get(dm), 7);
+  fakeNow += 59_900;
+  await (m.bot as any).watchTick();
+  check("idle: 59.9 s of silence → still alive", m.bot.watches.has(dm));
+  fakeNow += 1_100; // just over the 60 s threshold
+  await (m.bot as any).watchTick();
+  check("idle: just over 60 s of silence → frozen (card + record stay)", m.bot.watches.get(dm)!.frozen === true);
+  const we = byAction("watch_end");
+  check("idle: watch_end reason idle", we.length === 1 && we[0].meta?.reason === "idle", JSON.stringify(we));
+  check("idle: a final edit was pushed", m.edits.length === 1 && m.edits[0].text.includes("Idle"), m.edits[0]?.text);
+}
+
+// ── W3.5: the lifetime cap (watchMaxMin) ────────────────────────────────────
+{
+  const m = makeWatchBot({ listMsgs: [], sessionState: [{ busy: false }, { busy: true }, { busy: true }, { busy: true }] });
+  m.st.set(dm, { sessionID: "ses_1" });
+  (m.bot as any).userPrefs.setLang(7, "en");
+  await (m.bot as any).startWatch(dm, m.st.get(dm), 7); // consumes the 1st (idle) read
+  m.bot.feedWatch("session.execution.started", { sessionID: "ses_1" });
+  await flush();
+  m.ssCalls.length = 0;
+  fakeNow += m.cfg.watchMaxMin * 60_000 - 10_000;
+  await (m.bot as any).watchTick(); // poll (busy) keeps lastEventAt fresh
+  check("timeout: just under the cap → alive (poll kept it current)", m.bot.watches.has(dm) && m.ssCalls.length === 1, JSON.stringify(m.ssCalls.length));
+  fakeNow += 11_000; // past the cap
+  await (m.bot as any).watchTick();
+  check("timeout: past the cap → frozen", m.bot.watches.get(dm)!.frozen === true);
+  const we = byAction("watch_end");
+  check("timeout: watch_end reason timeout", we.length === 1 && we[0].meta?.reason === "timeout", JSON.stringify(we));
+}
+
+// ── W1.5: a second /watch replaces the first (its card is deleted) ──────────
+{
+  const m = makeWatchBot({ listMsgs: [{ type: "user", time: { created: 1 }, text: "hi" }] });
+  m.st.set(dm, { sessionID: "ses_1" });
+  (m.bot as any).userPrefs.setLang(7, "en");
+  await (m.bot as any).startWatch(dm, m.st.get(dm), 7);
+  const firstCard = m.bot.watches.get(dm)!.cardMsgId;
+  const firstEnd = byAction("watch_end").length;
+  await (m.bot as any).startWatch(dm, m.st.get(dm), 7);
+  await flush();
+  check("replace: old card deleted", m.deleted.includes(firstCard), JSON.stringify(m.deleted));
+  check("replace: exactly one watch remains", m.bot.watches.size === 1);
+  check("replace: old watch audited as replaced", byAction("watch_end").length === firstEnd + 1 && byAction("watch_end")[firstEnd].meta?.reason === "replaced", JSON.stringify(byAction("watch_end")));
+  check("replace: new card posted", m.sent.length === 2);
+}
+
+// ── W3.6/W6.4: the Close button (and unknown-tap refusal) ───────────────────
+{
+  const m = makeWatchBot({ listMsgs: [] });
+  m.st.set(dm, { sessionID: "ses_1" });
+  (m.bot as any).userPrefs.setLang(7, "en");
+  await (m.bot as any).startWatch(dm, m.st.get(dm), 7);
+  const cardId = m.bot.watches.get(dm)!.cardMsgId;
+  const id1 = m.bot.watches.get(dm)!.id;
+  await (m.bot as any).handleWatchCallback(cb("w:" + id1 + ":c"), dm);
+  check("close: card deleted", m.deleted.includes(cardId), JSON.stringify(m.deleted));
+  check("close: watch removed", !m.bot.watches.has(dm));
+  check("close: tap acknowledged", m.answers.length === 1 && m.answers[0].id === "cb_w:" + id1 + ":c", JSON.stringify(m.answers));
+  const we = byAction("watch_end");
+  check("close: watch_end reason closed", we.length === 1 && we[0].meta?.reason === "closed", JSON.stringify(we));
+
+  // Unknown callback data for a known watch → refused with a hint.
+  await (m.bot as any).startWatch(dm, m.st.get(dm), 7);
+  const id2 = m.bot.watches.get(dm)!.id;
+  m.answers.length = 0;
+  m.deleted.length = 0;
+  await (m.bot as any).handleWatchCallback(cb("w:" + id2 + ":z"), dm);
+  check("close: unknown action is swallowed (watch intact, card kept)", m.bot.watches.has(dm) && m.deleted.length === 0 && (m.answers[0]?.text ?? "") === "", JSON.stringify(m.answers));
+}
+
+// ── W3.6: a tap from another session is refused (the watch stays) ───────────
+{
+  const m = makeWatchBot({ listMsgs: [] });
+  m.st.set(dm, { sessionID: "ses_1" });
+  (m.bot as any).userPrefs.setLang(7, "en");
+  await (m.bot as any).startWatch(dm, m.st.get(dm), 7);
+  const cardId = m.bot.watches.get(dm)!.cardMsgId;
+  m.st.set(dm, { sessionID: "ses_2" }); // the conversation moved on
+  m.answers.length = 0;
+  await (m.bot as any).handleWatchCallback(cb("w:" + m.bot.watches.get(dm)!.id + ":c"), dm);
+  check("mismatch: refused — watch intact", m.bot.watches.has(dm));
+  check("mismatch: refused — card NOT deleted", !m.deleted.includes(cardId), JSON.stringify(m.deleted));
+  check("mismatch: refusal hint shown", m.answers.length === 1 && /another session/i.test(m.answers[0].text ?? ""), JSON.stringify(m.answers));
+}
+
+// ── W3.6: "Watch again" starts a fresh watch on the same session ────────────
+{
+  const m = makeWatchBot({ listMsgs: [] });
+  m.st.set(dm, { sessionID: "ses_1" });
+  (m.bot as any).userPrefs.setLang(7, "en");
+  await (m.bot as any).startWatch(dm, m.st.get(dm), 7);
+  m.bot.feedWatch("session.execution.started", { sessionID: "ses_1" });
+  m.bot.feedWatch("session.execution.succeeded", { sessionID: "ses_1" });
+  await flush();
+  check("again: pre — frozen watch", m.bot.watches.get(dm)!.frozen);
+  const before = m.sent.length;
+  m.answers.length = 0;
+  await (m.bot as any).handleWatchCallback(cb("w:" + m.bot.watches.get(dm)!.id + ":r"), dm);
+  await flush();
+  check("again: a new card is posted", m.sent.length === before + 1, `${before} → ${m.sent.length}`);
+  check("again: new watch alive and not frozen", m.bot.watches.has(dm) && !m.bot.watches.get(dm)!.frozen);
+  check("again: acknowledged", m.answers.length === 1);
+}
+
+// ── W2.5: the tick's fallback poll recovers a missed turn end ───────────────
+{
+  // Reads: [0] startWatch's own check (idle), [1] poll #1 (busy), [2] poll #2 (the turn ended).
+  const m = makeWatchBot({ listMsgs: [], sessionState: [{ busy: false }, { busy: true }, { busy: false, outcome: "succeeded" }] });
+  m.st.set(dm, { sessionID: "ses_1" });
+  (m.bot as any).userPrefs.setLang(7, "en");
+  await (m.bot as any).startWatch(dm, m.st.get(dm), 7);
+  m.bot.feedWatch("session.execution.started", { sessionID: "ses_1" });
+  await flush();
+  m.ssCalls.length = 0;
+  check("poll: pre — working, no poll", !m.bot.watches.get(dm)!.polling && m.ssCalls.length === 0);
+  fakeNow += 10_001; // just over the 10 s event gap → the poll arms
+  await (m.bot as any).watchTick();
+  check("poll: armed + one sessionState read", m.bot.watches.get(dm)!.polling && m.ssCalls.length === 1, JSON.stringify(m.ssCalls.length));
+  check("poll: busy → still alive", m.bot.watches.has(dm));
+  // The turn ended out-of-band: the poll is still active, so the next tick re-reads.
+  await (m.bot as any).watchTick();
+  check("poll: found idle → frozen + final edit (turn-start, elapsed, final)", m.bot.watches.get(dm)!.frozen === true && m.edits.length === 3, JSON.stringify(m.edits.map((e) => e.text)));
+  check("poll: final card says Done", m.edits[2]?.text.includes("Done"), m.edits[2]?.text);
+  const we = byAction("watch_end");
+  check("poll: watch_end audited", we.length === 1 && we[0].meta?.reason === "done", JSON.stringify(we));
+}
+
+// ── W5.1: the browse "Open new session" switch stops the watch ─────────────
+{
+  const m = makeWatchBot({ listMsgs: [] });
+  m.st.set(dm, { sessionID: "ses_1" });
+  (m.bot as any).userPrefs.setLang(7, "en");
+  await (m.bot as any).startWatch(dm, m.st.get(dm), 7);
+  check("setsess: pre — watch alive", m.bot.watches.has(dm));
+  // Simulate the browse "setsess" action's side effect on the conversation.
+  m.st.set(dm, { sessionID: "ses_2" });
+  (m.bot as any).stopWatch(dm, "session-changed");
+  check("setsess: watch stopped after the session switch", !m.bot.watches.has(dm));
+  const we = byAction("watch_end");
+  check("setsess: watch_end reason session-changed", we.length === 1 && we[0].meta?.reason === "session-changed", JSON.stringify(we));
+}
+
+// ── W6.3: the audit lines — exactly ONE watch_end per watch, ever ──────────
+{
+  const m = makeWatchBot({ listMsgs: [] });
+  m.st.set(dm, { sessionID: "ses_1" });
+  (m.bot as any).userPrefs.setLang(7, "en");
+  await (m.bot as any).startWatch(dm, m.st.get(dm), 7);
+  m.bot.feedWatch("session.execution.started", { sessionID: "ses_1" });
+  m.bot.feedWatch("session.execution.succeeded", { sessionID: "ses_1" }); // → done, audited
+  await flush();
+  check("audit: one watch_start + one watch_end (done)", byAction("watch_start").length === 1 && byAction("watch_end").length === 1, JSON.stringify(auditLines()));
+  // The frozen card is deleted by a later Close: cleanup only, no 2nd line.
+  const cardId = m.bot.watches.get(dm)!.cardMsgId;
+  m.deleted.length = 0;
+  await (m.bot as any).handleWatchCallback(cb("w:" + m.bot.watches.get(dm)!.id + ":c"), dm);
+  check("audit: Close after done deletes the card", m.deleted.includes(cardId), JSON.stringify(m.deleted));
+  check("audit: still exactly ONE watch_end", byAction("watch_end").length === 1, JSON.stringify(byAction("watch_end")));
+  // A second /watch after the end: one more pair, and only one more end.
+  await (m.bot as any).startWatch(dm, m.st.get(dm), 7);
+  await flush();
+  check("audit: re-watch audited (2 starts, 1 end so far)", byAction("watch_start").length === 2 && byAction("watch_end").length === 1, JSON.stringify(auditLines().map((l) => l.action)));
+}
+
+Date.now = realNow;
+
+if (failures > 0) {
+  console.error(`\n${failures} failure(s)`);
+  process.exit(1);
+}
+console.log("\nAll /watch checks passed.");
+

@@ -66,7 +66,25 @@ import { cmdAgents, cmdAgent, handleAgentCallback } from "./commands/agents.js";
 import { cmdSchedule, handleScheduleCallback } from "./commands/schedule.js";
 import { Advisor } from "./advisor/advisor.js";
 import { cmdHelp, cmdStatus, cmdHealth, cmdContext, cmdUsage, cmdHistory, cmdNote, cmdRotation, handleNoteCallback, cmdLang } from "./commands/meta.js";
-import { watchInactiveReason, watchNoSession } from "./watch.js";
+import {
+  clampWatchInterval,
+  createWatch,
+  mapSessionOutcome,
+  onEditFailedFlood,
+  onEditSucceeded,
+  onWatchEvent,
+  renderWatch,
+  watchHistory,
+  watchInactiveReason,
+  watchKeyboard,
+  watchNoSession,
+  watchRegistry,
+  watchTickDecision,
+  WATCH_IDLE_FREEZE_MS,
+  WATCH_POLL_GAP_MS,
+  type WatchEvent,
+  type WatchState,
+} from "./watch.js";
 import { cmdBtw } from "./btw.js";
 import { cmdAsk } from "./ask.js";
 import { reviewPrompt, reviewUsage } from "./review.js";
@@ -213,6 +231,39 @@ interface GhPr {
   merged_at: string | null;
   head: { sha: string; ref: string };
 }
+
+/**
+ * One live /watch card (docs/sdd/watch.md, task W3): the pure WatchState
+ * (src/watch.ts) plus the bot-side record — where the card lives, when the
+ * watch started, and the fallback-poll / freeze bookkeeping.
+ */
+interface WatchLive {
+  /** The 4-char watchRegistry key (the button callback data). */
+  id: string;
+  conv: ConvKey;
+  sessionID: string;
+  cardMsgId: number;
+  /** Group conversations never edit faster than 5 s (W2.3). */
+  isGroup: boolean;
+  /** The pure core state (reducer/render live there). */
+  state: WatchState;
+  /** When the watch started, ms — the W3.5 lifetime cap runs from here. */
+  createdAt: number;
+  /** When the last session event arrived, ms (W2.5 gap + W3.4 idle check). */
+  lastEventAt: number;
+  /** W2.5: the sessionState fallback poll is active. */
+  polling: boolean;
+  /** The card is frozen — no more edits (W3.1/W3.4/W3.5; "Watch again" starts a new card). */
+  frozen: boolean;
+  /** A watch_end audit line was already written — later stops (Close, /watch
+   *  again, shutdown) clean up without a second line (W6.3). */
+  ended?: boolean;
+  /** Serializes the async folds (the turn-start prompt fetch, the polls) per conv. */
+  chain: Promise<void>;
+}
+
+/** watch_end reasons (W6.3). */
+type WatchStopReason = "done" | "idle" | "timeout" | "closed" | "replaced" | "session-changed" | "edit-failed" | "shutdown";
 
 /** Shown on a live stream preview while the bot drains at shutdown. */
 const DRAIN_PREVIEW_TEXT = "⏳ Đang khởi động lại… kết quả sẽ gửi sau.";
@@ -361,6 +412,21 @@ export class Bot {
    * stray preview message after the final reply.
    */
   private turnGen = new Map<ConvKey, number>();
+
+  // ── /watch live card (docs/sdd/watch.md, task W3) ─────────────────────────
+  /** One live watch per conversation (W1.5: at most one per conv). */
+  private watches = new Map<ConvKey, WatchLive>();
+  /**
+   * Tool-call id → name per conv (the name arrives on `session.tool.input.started`,
+   * the label is needed on `session.tool.called` — mirrors onToolEvent, W0 F1).
+   */
+  /** Per conv: tool id → name + running label + start time (the done line). */
+  private watchToolNames = new Map<ConvKey, Map<string, { name: string; label: string; at: number }>>();
+  /** 5 s ticker: the W2.5 fallback poll + the W3.4/W3.5 freeze checks. */
+  private watchTimer?: ReturnType<typeof setInterval>;
+  /** Re-entrancy guard for the watch ticker (a slow sessionState call can't overlap the next tick). */
+  private watchTickBusy = false;
+
   /**
    * Retention for the "📝 Thêm vào note" busy-reply button: user messages that
    * arrived while the agent was busy, keyed by conv (capped, oldest dropped),
@@ -590,6 +656,7 @@ export class Bot {
    */
   async drainInflight(opts: { timeoutMs: number }): Promise<boolean> {
     this.draining = true; // pause preview pushes so the notice isn't overwritten
+    this.stopAllWatches(); // W5.1: stop the live cards (in-memory cleanup + audit — Telegram is stopped after)
     this.notifyQueuedNotRunning(); // Q1.8: queued turns won't start — tell the chats now
     const edits: Promise<unknown>[] = [];
     for (const [conv, w] of this.drafts) {
@@ -2076,22 +2143,375 @@ export class Bot {
   }
 
   /**
-   * W3 INTEGRATION STUB — the /watch live-card wiring goes here: createWatch +
-   * post the card, feed onWatchEvent from onOpenCodeEvent, the at-most-one-
-   * watch-per-conversation registry (W1.5), idle/time limits (W3.4/W3.5) and
-   * auto-stops (W5). W2 wires the command to this single point so W3 never
-   * touches command wiring again. When cfg.watchActive is false the command
-   * never reaches here (it replies with the W6.8 reason first), so off-mode is
-   * byte-identical to today.
+   * Post the conversation's /watch card and start updating it (task W3).
+   * W2 wires the command to this single point: cmdWatch gates on watchActive
+   * (W6.8) and on the session existing (W1.2), so when cfg.watchActive is
+   * false no watch code ever runs and off-mode is byte-identical to before.
+   * The card is ONE message edited in place (editMessageTextStrict, W5.2);
+   * events for the session reach it via feedWatch from onOpenCodeEvent.
    */
   private async startWatch(conv: ConvKey, state: ChatState, uid?: number): Promise<void> {
-    // W3: replace with the real card (createWatch + renderWatch + edit loop).
-    // For W2 the card does not exist yet, so report that it is pending.
-    void state; // the W3 card reads state.sessionID; the stub does not yet.
     const lang = this.userPrefs.getLang(uid ?? "");
-    await this.tg.sendMessage(conv, tr(lang,
-      "👁 /watch: thẻ xem trực tiếp sẽ có trong bản cập nhật tiếp theo (W3).",
-      "👁 /watch: the live card lands in the next update (W3)."));
+    const sessionID = state.sessionID;
+    if (!sessionID) return; // the caller (cmdWatch) already replied (W1.2)
+    // W1.5: at most one watch per conversation — a second /watch closes the
+    // first (its card is deleted) and starts a new one.
+    this.stopWatch(conv, "replaced", { deleteCard: true });
+    // W2.3: the group floor lives in the clamp (>= 5000 ms there).
+    const isGroup = !isDmConv(conv);
+    const intervalMs = clampWatchInterval(this.cfg.watchIntervalMs, isGroup);
+    // The idle-card snapshot + the prompt line (W1.4): the same list /history reads.
+    const msgs = await this.oc.listMessages(sessionID).catch(() => [] as any[]);
+    const { history, prompt } = watchHistory(msgs);
+    // A turn already in flight at post time (started elsewhere)? The card goes
+    // straight to "working"; its start is not exposed, so elapsed runs from now.
+    const { busy } = await this.oc.sessionState(sessionID).catch(() => ({ busy: false }));
+    const now = Date.now();
+    const s = createWatch({ sessionID, lang, now, intervalMs, history, prompt, turn: busy ? { startedAt: now } : undefined });
+    const id = watchRegistry.newId();
+    const status = s.phase === "working" ? "working" : "idle";
+    const cardMsgId = await this.tg
+      .sendMessageId(conv, renderWatch(s, lang, now), { reply_markup: watchKeyboard(id, status, lang) })
+      .catch((e) => {
+        warn("watch: failed to post card:", (e as Error).message ?? e);
+        return -1;
+      });
+    if (cardMsgId <= 0) return;
+    watchRegistry.put(id, { conv, sessionID, cardMsgId, createdAt: now });
+    this.watches.set(conv, {
+      id,
+      conv,
+      sessionID,
+      cardMsgId,
+      isGroup,
+      state: s,
+      createdAt: now,
+      lastEventAt: now,
+      polling: false,
+      frozen: false,
+      chain: Promise.resolve(),
+    });
+    this.startWatchTicker();
+    audit({ action: "watch_start", chatId: conv, session: sessionID, userId: uid, meta: { intervalMs, isGroup } });
+  }
+
+  /**
+   * One OpenCode session event → the conv's /watch card (task W3, W2.1-W2.5).
+   * No-op when /watch is inactive (W6.1: no watch code runs when watchActive
+   * is false) or the session has no watch. The event is folded into the pure
+   * WatchState (src/watch.ts); any emitted edit goes out via pushWatchEdit.
+   */
+  private feedWatch(t: string, d: any): void {
+    if (!this.cfg.watchActive) return;
+    const conv = d?.sessionID ? this.st.findChatBySession(d.sessionID) : undefined;
+    if (!conv) return;
+    const w = this.watches.get(conv);
+    if (!w || w.frozen || d.sessionID !== w.sessionID) return;
+    const now = Date.now();
+    w.lastEventAt = now;
+    w.polling = false; // an event arrived — the W2.5 fallback poll is over
+
+    // The tool NAME arrives on tool.input.started; the label needs it on
+    // tool.called (mirrors onToolEvent — W0 finding F1).
+    if (t === "session.tool.input.started") {
+      const id = typeof d?.id === "string" ? d.id : undefined;
+      if (id && typeof d?.name === "string" && d.name) {
+        let m = this.watchToolNames.get(conv);
+        if (!m) {
+          m = new Map();
+          this.watchToolNames.set(conv, m);
+        }
+        m.set(id, { name: d.name, label: "", at: now });
+      }
+      return;
+    }
+
+    let ev: WatchEvent | undefined;
+    let wantPrompt = false;
+    if (t === "session.execution.started") {
+      ev = { kind: "turn-start", now };
+      wantPrompt = true; // the prompt line follows the newest turn (even out-of-band ones)
+    } else if (t === "session.text.delta") {
+      ev = { kind: "text-delta", now, text: String(d?.delta ?? "") };
+    } else if (t === "session.tool.called" || t === "session.tool.success" || t === "session.tool.failed") {
+      // Same label as the activity line: the running form on called, the done
+      // line (verb swap + elapsed) on success/failed — mirroring
+      // onToolEvent → showActivity/finishActivity. The card's OWN language:
+      // the label renders inside the card, which is one language (the watcher's).
+      const id = typeof d?.id === "string" ? d.id : undefined;
+      const rec = id ? this.watchToolNames.get(conv)?.get(id) : undefined;
+      let label = "";
+      if (t === "session.tool.called") {
+        label = toolActivityLabel(rec?.name ?? "tool", d?.input, w.state.lang);
+        if (id) {
+          let m = this.watchToolNames.get(conv);
+          if (!m) {
+            m = new Map();
+            this.watchToolNames.set(conv, m);
+          }
+          m.set(id, { name: rec?.name ?? "tool", label, at: rec?.at ?? now });
+        }
+      } else {
+        label = rec?.label
+          ? activityDoneLine(rec.label, t === "session.tool.success", (now - rec.at) / 1000, w.state.lang)
+          : "";
+        if (id) this.watchToolNames.get(conv)?.delete(id); // finished — drop the row
+      }
+      ev = { kind: "tool-step", now, label };
+    } else if (t === "session.execution.succeeded") {
+      ev = { kind: "turn-end", now, outcome: "done" };
+    } else if (t === "session.execution.failed") {
+      ev = { kind: "turn-end", now, outcome: "failed", error: d?.error?.message ?? (typeof d?.error === "string" ? d.error : undefined) };
+    } else if (t === "session.execution.interrupted") {
+      ev = { kind: "turn-end", now, outcome: "stopped" };
+    }
+    if (!ev) return;
+
+    // Serialize the folds per conv: the async prompt fetch must not overtake
+    // the events that arrive behind it.
+    const apply = async (): Promise<void> => {
+      let e = ev!;
+      if (wantPrompt) {
+        try {
+          const p = watchHistory(await this.oc.listMessages(d.sessionID).catch(() => [] as any[])).prompt;
+          if (p && e.kind === "turn-start") e = { ...e, prompt: p }; // only turn-start carries a prompt
+        } catch {
+          // the fetch failed — keep the previous prompt
+        }
+      }
+      const r = onWatchEvent(w.state, e);
+      w.state = r.state;
+      if (!r.edit) return;
+      if (r.edit.reason === "final") {
+        // W3.1: ONE final edit (outcome + duration, never the answer), then
+        // freeze. The watch is over regardless of whether the edit lands — a
+        // vanished card is already stopped as "edit-failed" inside
+        // pushWatchEdit, and the record check below then stays false.
+        w.frozen = true;
+        w.polling = false;
+      }
+      await this.pushWatchEdit(w, r.edit);
+      if (r.edit.reason === "final" && this.watches.get(conv) === w) this.auditWatchEnd(w, "done");
+    };
+    w.chain = w.chain.then(apply).catch((e) => warn("watch event:", (e as Error).message ?? e));
+  }
+
+  /**
+   * Edit the card in place. editMessageTextStrict (W5.2) surfaces a vanished
+   * card instead of hiding it as a no-op; flood control takes the core's
+   * backoff (W2.4, as the streaming preview does); a gone card stops the
+   * watch quietly. Returns false when the edit did not go out.
+   */
+  private async pushWatchEdit(w: WatchLive, edit: { text: string; reason: "update" | "final" }): Promise<boolean> {
+    // The frozen row (Close + Watch again) is on the final edit and every
+    // freeze; a live working card carries the Stop task row (W4.2, wired in W4).
+    const status = w.frozen || edit.reason === "final" ? "frozen" : w.state.phase === "working" ? "working" : "idle";
+    try {
+      await this.tg.editMessageTextStrict(w.conv, w.cardMsgId, edit.text, { reply_markup: watchKeyboard(w.id, status, w.state.lang) });
+      w.state = onEditSucceeded(w.state, edit.text, Date.now());
+      return true;
+    } catch (e: any) {
+      if (e?.code === 429 || e?.retryAfter != null) {
+        w.state = onEditFailedFlood(w.state, Number(e?.retryAfter ?? 1), Date.now());
+        return false;
+      }
+      if (/message is not modified/i.test(String(e?.message))) return true; // card is there and matches
+      if (e?.code === 404 || /message to edit not found/i.test(String(e?.message))) {
+        this.stopWatch(w.conv, "edit-failed"); // W5.2: stop quietly
+        return false;
+      }
+      warn(`watch edit failed (${w.conv}):`, e?.message ?? e);
+      return false;
+    }
+  }
+
+  /**
+   * Freeze the card the same way the turn end does (W3.4/W3.5): stop updating
+   * and swap the row to the frozen one (Close + Watch again, W3.3). The record
+   * stays (frozen) so the buttons keep working; the card's text is re-rendered
+   * as-is (the edit carries the new row).
+   */
+  private async freezeWatch(w: WatchLive, reason: "idle" | "timeout"): Promise<void> {
+    if (w.frozen || this.watches.get(w.conv) !== w) return;
+    w.frozen = true;
+    w.polling = false;
+    const now = Date.now();
+    await this.pushWatchEdit(w, { text: renderWatch(w.state, w.state.lang, now), reason: "final" });
+    // The watch is over regardless of the edit's fate (a vanished card is
+    // already stopped as "edit-failed" inside pushWatchEdit, so the record
+    // check below stays false there).
+    if (this.watches.get(w.conv) === w) this.auditWatchEnd(w, reason);
+  }
+
+  /**
+   * Stop the conv's watch (W5.1): drop the record + registry entry (+ the card
+   * when asked) and write the watch_end audit line (W6.3). Safe to call when
+   * there is no watch (off-mode, or an already-stopped one).
+   */
+  private stopWatch(conv: ConvKey, reason: WatchStopReason, opts?: { deleteCard?: boolean }): void {
+    const w = this.watches.get(conv);
+    if (!w) return;
+    this.watches.delete(conv);
+    this.watchToolNames.delete(conv);
+    watchRegistry.delete(w.id);
+    if (opts?.deleteCard) void this.tg.deleteMessage(conv, w.cardMsgId).catch(() => {});
+    // A frozen watch already wrote its watch_end (done/idle/timeout) — the
+    // later Close / second /watch / shutdown is cleanup only (W6.3).
+    if (!w.ended) this.auditWatchEnd(w, reason);
+  }
+
+  /** One watch_end audit line (W6.3). */
+  private auditWatchEnd(w: WatchLive, reason: WatchStopReason): void {
+    audit({ action: "watch_end", chatId: w.conv, session: w.state.sessionID, meta: { reason, durationMs: Date.now() - w.createdAt } });
+    w.ended = true;
+  }
+
+  /**
+   * W5.1: stop every watch on bot shutdown. Telegram is already stopped by the
+   * time drainInflight runs, so this is in-memory cleanup + audit only — the
+   * cards stay where they are; after a restart their buttons answer "expired"
+   * (the registry is in-memory, W4.4).
+   */
+  stopAllWatches(): void {
+    for (const conv of [...this.watches.keys()]) this.stopWatch(conv, "shutdown");
+    if (this.watchTimer) {
+      clearInterval(this.watchTimer);
+      this.watchTimer = undefined;
+    }
+  }
+
+  /** The 5 s watch ticker — lazy: started only while /watch is active. */
+  private startWatchTicker(): void {
+    if (this.watchTimer || !this.cfg.watchActive) return;
+    this.watchTimer = setInterval(() => {
+      void this.watchTick().catch((e) => warn("watch tick:", (e as Error).message ?? e));
+    }, 5_000);
+    this.watchTimer.unref?.();
+  }
+
+  /**
+   * One 5 s tick (task W3):
+   *   - W3.5: a watch older than cfg.watchMaxMin freezes (reason "timeout").
+   *   - W3.4: an idle card with 60 s of inactivity freezes (reason "idle").
+   *   - W2.5: while a turn is running and no event arrived for 10 s, read
+   *     sessionState every tick until events resume — the ephemeral text
+   *     deltas lost in a stream reconnect are the gap this covers (W0 F1).
+   */
+  private async watchTick(): Promise<void> {
+    if (this.watchTickBusy) return;
+    this.watchTickBusy = true;
+    try {
+      const now = Date.now();
+      for (const w of [...this.watches.values()]) {
+        if (w.frozen || this.watches.get(w.conv) !== w) continue;
+        // W3.5 (timeout) > W3.4 (idle) > W2.5 (poll) — the order is the core's.
+        const action = watchTickDecision({
+          phase: w.state.phase,
+          createdAt: w.createdAt,
+          lastEventAt: w.lastEventAt,
+          now,
+          maxMs: this.cfg.watchMaxMin * 60_000,
+          idleMs: WATCH_IDLE_FREEZE_MS,
+          pollGapMs: WATCH_POLL_GAP_MS,
+          polling: w.polling,
+        });
+        if (action === "timeout") {
+          await this.freezeWatch(w, "timeout");
+          continue;
+        }
+        if (action === "idle") {
+          // W3.4: nothing for 60 s while idle → freeze the card the same way.
+          await this.freezeWatch(w, "idle");
+          continue;
+        }
+        if (action === "none") continue;
+        w.polling = true; // W2.5: the fallback poll (armed after a 10 s gap)
+        let busy = true;
+        let outcome: string | undefined;
+        try {
+          ({ busy, outcome } = await this.oc.sessionState(w.sessionID));
+        } catch {
+          busy = true; // a failed read is not evidence of an end
+        }
+        w.lastEventAt = now; // we just checked in — the gap restarts
+        if (!busy) {
+          // The turn ended without a visible terminal event.
+          const r = onWatchEvent(w.state, { kind: "turn-end", now, outcome: mapSessionOutcome(outcome) });
+          w.state = r.state;
+          w.polling = false;
+          w.frozen = true; // turn-end froze the state (or it already was)
+          if (r.edit) await this.pushWatchEdit(w, r.edit);
+          if (this.watches.get(w.conv) === w) this.auditWatchEnd(w, "done");
+          continue;
+        }
+        // Still busy: an elapsed-time tick (the header advances) — reusing the
+        // core's throttle + change detection via an empty text delta.
+        if (w.state.phase !== "working") {
+          // We missed the execution.started (stream gap) — recover the turn.
+          const r = onWatchEvent(w.state, { kind: "turn-start", now });
+          w.state = r.state;
+          if (r.edit) await this.pushWatchEdit(w, r.edit);
+        } else {
+          const r = onWatchEvent(w.state, { kind: "text-delta", now, text: "" });
+          w.state = r.state;
+          if (r.edit) await this.pushWatchEdit(w, r.edit);
+        }
+      }
+    } finally {
+      this.watchTickBusy = false;
+    }
+  }
+
+  /**
+   * The /watch card buttons: `w:<id>:c` Close, `w:<id>:r` Watch again,
+   * `w:<id>:s` Stop task (task W4 — the row is already rendered by
+   * watchKeyboard; the handler is a TODO stub so W4 fills it without rework).
+   * W4.3: the tap is bound to the session the card was created for — a tap on
+   * a card whose conversation has moved to another session is refused, and an
+   * unknown id (a restart dropped the registry) answers "expired" (W4.4).
+   */
+  private async handleWatchCallback(cb: CallbackQuery, conv: ConvKey): Promise<void> {
+    const lang = this.userPrefs.getLang(cb.from?.id ?? "");
+    const [, id, action] = (cb.data ?? "").split(":");
+    const rec = watchRegistry.get(id);
+    if (!rec || rec.conv !== conv) {
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Hết hiệu lực.", "Expired."));
+      return;
+    }
+    const cur = this.st.peek(conv)?.sessionID;
+    if (cur && cur !== rec.sessionID) {
+      // W4.3: the conversation moved to another session — refuse, do nothing.
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Phiên đã đổi — bấm này hết hiệu lực.", "The conversation moved to another session — this tap is refused."));
+      return;
+    }
+    if (action === "c") {
+      // Close (W4.1): stop updating and delete the card; the agent is untouched.
+      this.stopWatch(conv, "closed", { deleteCard: true });
+      await this.tg.answerCallbackQuery(cb.id);
+      return;
+    }
+    if (action === "r") {
+      // Watch again (W3.3): behaves as a new /watch on the current session.
+      const state = this.st.get(conv);
+      if (!state.sessionID) {
+        await this.tg.answerCallbackQuery(cb.id, tr(lang, "Chưa có phiên hiện tại.", "No current session."));
+        return;
+      }
+      await this.tg.answerCallbackQuery(cb.id);
+      await this.startWatch(conv, state, cb.from?.id);
+      return;
+    }
+    if (action === "s") {
+      // TODO(W4): "Stop task" — do exactly what /stop does: stopCurrent (abort
+      // the inflight controller, clear the queue, drop the preview) +
+      // oc.interrupt on rec.sessionID (the Manager's busy flag via the
+      // orchestrator), then make ONE final edit showing "Stopped" and freeze
+      // the card (reason "done" is NOT used — the turn was interrupted by the
+      // user; the audit reason for a stopped task is watch_stop_task, W6.3).
+      await this.tg.answerCallbackQuery(cb.id);
+      return;
+    }
+    await this.tg.answerCallbackQuery(cb.id);
   }
 
   // ── the long-running prompt ──────────────────────────────────────────────
@@ -3095,6 +3515,7 @@ export class Bot {
         .catch((e) => warn("carryover instruction:", (e as Error).message));
     }
     this.st.set(conv, { sessionID, directory: dir, ...dropNotes() }); // a fresh session must not inherit pending notes
+    this.stopWatch(conv, "session-changed"); // W5.1: the old session's watch is over
     await this.tg.sendMessage(
       conv,
       tr(this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? ""), `🆕 New session <code>${sessionID}</code>\ndir: <code>${esc(dir)}</code>${keep ? `\n🔁 carry-over: ${carryover ? "✓" : "(session cũ trống)"}` : ""}`, `🆕 New session <code>${sessionID}</code>\ndir: <code>${esc(dir)}</code>${keep ? `\n🔁 carry-over: ${carryover ? "✓" : "(old session empty)"}` : ""}`),
@@ -3204,7 +3625,9 @@ export class Bot {
 
   /** Apply the /use switch: remember the session and drop its predecessor's pending prompts. */
   private applyUseState(conv: ConvKey, sessionID: string): void {
+    const prev = this.st.peek(conv)?.sessionID;
     this.st.set(conv, { sessionID });
+    if (prev && prev !== sessionID) this.stopWatch(conv, "session-changed"); // W5.1
     this.cancelAllReminders(conv); // switching sessions abandons the old pending prompts
     const droppedQueue = this.queue.clear(conv); // a session switch clears the queue (Q1.5)
     if (droppedQueue > 0) audit({ action: "queue_drop", chatId: conv, meta: { count: droppedQueue, reason: "clear" } });
@@ -3391,6 +3814,10 @@ export class Bot {
       await this.handleChoiceCallback(cb, conv, messageId);
       return;
     }
+    if (data.startsWith("w:")) {
+      await this.handleWatchCallback(cb, conv);
+      return;
+    }
     if (data.startsWith("ns:")) {
       await this.handleNextStepCallback(cb, conv, messageId);
       return;
@@ -3533,6 +3960,7 @@ export class Bot {
             await this.oc.setAgent(sessionID, state.agent).catch((e) => warn("setAgent:", e?.message));
           }
           this.st.set(conv, { sessionID, directory: b.path });
+          this.stopWatch(conv, "session-changed"); // W5.1: the conversation moved to a new session
           b.view = "done";
           b.opened = true;
           b.result = [
@@ -4231,6 +4659,7 @@ export class Bot {
     this.cancelAllReminders(conv); // stop nudging + clear schedules before wiping state
     void state;
     this.st.clear(conv);
+    this.stopWatch(conv, "session-changed"); // W5.1
     for (const [formId, qf] of this.questionForms) {
       if (qf.conv === conv) this.questionForms.delete(formId);
     }
@@ -4241,6 +4670,9 @@ export class Bot {
   /** Entry point for every OpenCode event; only question forms interest us. */
   private onOpenCodeEvent(ev: any): void {
     const t = ev?.type;
+    // /watch (W3): fold session events into the conversation's live card.
+    // A no-op when /watch is inactive (W6.1) or the session has no watch.
+    if (typeof t === "string" && t.startsWith("session.")) this.feedWatch(t, ev?.data);
     if (t === "form.created") {
       const form = ev?.data?.form;
       if (form?.id && form?.sessionID) void this.onFormCreated(form);

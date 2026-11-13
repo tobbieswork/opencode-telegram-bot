@@ -19,7 +19,10 @@
  * doubles the interval (up to 10 s) while honoring retry_after — the same
  * shape as the streaming preview's backoff.
  */
+import { randomInt } from "node:crypto";
 import type { Lang } from "./state.js";
+import type { ConvKey } from "./conv.js";
+import type { Btn, Keyboard } from "./shared.js";
 import { esc, trunc, stripTags } from "./format.js";
 import { tr } from "./i18n.js";
 
@@ -318,6 +321,61 @@ export function onEditFailedFlood(state: WatchState, retryAfterSec: number, now:
   };
 }
 
+/**
+ * How long an IDLE card survives with no event at all before it freezes
+ * (W3.4). A working card is not idle-frozen: it is the W2.5 poll that covers
+ * its silence, and its lifetime is capped by W3.5 instead.
+ */
+export const WATCH_IDLE_FREEZE_MS = 60_000;
+/** The event gap that arms the sessionState fallback poll (W2.5). */
+export const WATCH_POLL_GAP_MS = 10_000;
+
+/** What one 5-second tick should do with a live watch (W2.5, W3.4, W3.5). */
+export type WatchTickAction = "timeout" | "idle" | "poll" | "none";
+
+/**
+ * Pure decision for the 5-second watch ticker; the bot performs the side
+ * effects:
+ *   - "timeout": the watch is older than its lifetime cap → freeze it
+ *     (W3.5), checked first so a stale watch can never idle- or poll-freeze
+ *     instead;
+ *   - "idle": an idle card saw nothing for `idleMs` → freeze it (W3.4);
+ *   - "poll": a turn is running and the event gap armed the fallback poll —
+ *     or the poll is already active → read sessionState (W2.5);
+ *   - "none": do nothing this tick.
+ */
+export function watchTickDecision(o: {
+  phase: WatchPhase;
+  /** When the watch started, ms (W3.5 runs from here). */
+  createdAt: number;
+  /** When the last event (or poll check-in) arrived, ms. */
+  lastEventAt: number;
+  now: number;
+  /** Lifetime cap in ms (cfg.watchMaxMin * 60_000, W3.5). */
+  maxMs: number;
+  /** Idle-freeze threshold in ms (WATCH_IDLE_FREEZE_MS, W3.4). */
+  idleMs: number;
+  /** Event gap that arms the fallback poll in ms (WATCH_POLL_GAP_MS, W2.5). */
+  pollGapMs: number;
+  /** The fallback poll is already active. */
+  polling: boolean;
+}): WatchTickAction {
+  if (o.now - o.createdAt > o.maxMs) return "timeout";
+  if (o.phase !== "working") return o.now - o.lastEventAt > o.idleMs ? "idle" : "none";
+  return o.polling || o.now - o.lastEventAt > o.pollGapMs ? "poll" : "none";
+}
+
+/**
+ * Map a session's last `outcome` (OpenCode literals "succeeded" / "failed" /
+ * "interrupted") to the card's turn-end outcome. Used by the W2.5 fallback
+ * poll when it finds a turn that ended without a visible terminal event.
+ */
+export function mapSessionOutcome(outcome?: string): WatchOutcome {
+  if (outcome === "failed") return "failed";
+  if (outcome === "interrupted") return "stopped";
+  return "done";
+}
+
 // ── command reply strings (W6.8 / W1.2) ─────────────────────────────────────
 /**
  * The reason shown when /watch is sent while INACTIVE (W6.8). `watch` false →
@@ -335,3 +393,92 @@ export function watchInactiveReason(lang: Lang, watch: boolean, stream: boolean)
 export function watchNoSession(lang: Lang): string {
   return tr(lang, "Chưa có phiên hiện tại. Gửi /new để bắt đầu, rồi /watch.", "No current session. Send /new to start one, then /watch.");
 }
+
+// ── history snapshot (W1.4: the same list /history reads, extracted helper) ──
+/**
+ * The idle-card snapshot + the last user prompt, from a `listMessages` result,
+ * extracted exactly the way cmdHistory renders it (design §4 "Initial
+ * snapshot"). Pure: takes the raw message objects, returns renderable lines.
+ * `history` is the LAST 6 messages; `prompt` is the LAST user message's raw
+ * text (renderWatch truncates it to WATCH_PROMPT_CHARS).
+ */
+export function watchHistory(msgs: any[]): { history: HistoryLine[]; prompt?: string } {
+  const sorted = [...msgs].sort((a: any, b: any) => (a?.time?.created ?? 0) - (b?.time?.created ?? 0));
+  const history: HistoryLine[] = sorted.slice(-6).map((m: any) =>
+    m?.type === "assistant"
+      ? { type: "assistant", text: (m.content ?? []).filter((c: any) => c?.type === "text").map((c: any) => c.text ?? "").join("\n") }
+      : { type: m?.type ?? "unknown", text: m?.text ?? "" },
+  );
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const m = sorted[i];
+    if (m?.type === "user" && typeof m.text === "string" && m.text.trim() !== "") {
+      return { history, prompt: m.text };
+    }
+  }
+  return { history };
+}
+
+// ── card buttons (spec §4) ────────────────────────────────────────────────────
+/**
+ * The card's button rows:
+ *   - working: Close, then "Stop task" on its OWN row (W4.2 — shown only while
+ *     a turn is running; the tap is wired in task W4, see handleWatchCallback)
+ *   - idle:    Close only (no turn to stop)
+ *   - frozen:  Close + "Watch again" (W3.3)
+ * Callback data is `w:<id>:c` / `w:<id>:s` / `w:<id>:r` — tiny (no option
+ * text, well under Telegram's 64-byte cap); id keys the in-memory registry.
+ */
+export function watchKeyboard(id: string, status: "working" | "idle" | "frozen", lang: Lang): Keyboard {
+  const rows: Btn[][] = [
+    [{ text: tr(lang, "❌ Đóng", "Close"), callback_data: `w:${id}:c` }],
+  ];
+  if (status === "frozen") {
+    rows.push([{ text: tr(lang, "👁 Xem lại", "Watch again"), callback_data: `w:${id}:r` }]);
+  } else if (status === "working") {
+    rows.push([{ text: tr(lang, "⏹ Dừng tác vụ", "Stop task"), callback_data: `w:${id}:s` }]);
+  }
+  return { inline_keyboard: rows };
+}
+
+// ── in-memory registry (same shape as choices.registry) ───────────────────────
+export interface WatchRecord {
+  conv: ConvKey;
+  sessionID: string;
+  cardMsgId: number;
+  /** When the record was created (for TTL pruning). */
+  createdAt: number;
+}
+
+const watchRecords = new Map<string, WatchRecord>();
+const WATCH_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * In-memory watch registry: a short 4-char base36 id → the watch's
+ * conversation, session and card message id, so `callback_data` stays tiny.
+ * In-memory only — a bot restart drops it, so a stale button answers
+ * "expired" (W4.4).
+ */
+export const watchRegistry = {
+  /** A fresh 4-char base36 id, unused by any live record. */
+  newId(): string {
+    let id = "";
+    do {
+      id = randomInt(0, 36 ** 4).toString(36).padStart(4, "0");
+    } while (watchRecords.has(id));
+    return id;
+  },
+  put(id: string, rec: WatchRecord): void {
+    watchRecords.set(id, rec);
+  },
+  get(id: string): WatchRecord | undefined {
+    const rec = watchRecords.get(id);
+    if (rec && Date.now() - rec.createdAt > WATCH_TTL_MS) {
+      watchRecords.delete(id);
+      return undefined;
+    }
+    return rec;
+  },
+  delete(id: string): void {
+    watchRecords.delete(id);
+  },
+};
