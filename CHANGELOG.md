@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.28.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.27.0...opencode-telegram-bot-v1.28.0) (2026-11-13)
+
+
+### Features
+
+* add Watch button to the Working indicator line ([#190](https://github.com/tobbieswork/opencode-telegram-bot/issues/190)) ([0f2ba6b](https://github.com/tobbieswork/opencode-telegram-bot/commit/0f2ba6b6a86506935fac5a8ee6cc7458de4dd120))
+
 ## [1.27.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.26.0...opencode-telegram-bot-v1.27.0) (2026-11-13)
 
 
