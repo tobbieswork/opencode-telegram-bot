@@ -105,4 +105,18 @@ export const STRINGS = {
     vi: "⏳ Đang xử lý…",
     en: "⏳ Working…",
   },
+  // "👁 Watch" button on the Working line (shown only while /watch is active)
+  // + the two short tap-notes the button answers with.
+  working_watch_button: {
+    vi: "👁 Theo dõi",
+    en: "👁 Watch",
+  },
+  working_watch_inactive: {
+    vi: "👁 Theo dõi đang tắt.",
+    en: "👁 Watch is inactive.",
+  },
+  working_watch_no_session: {
+    vi: "Chưa có phiên hiện tại.",
+    en: "No current session.",
+  },
 };
