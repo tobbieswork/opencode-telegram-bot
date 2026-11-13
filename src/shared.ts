@@ -17,3 +17,16 @@ export const NOTES_KEY = "tgbot.notes";
 
 export type Btn = { text: string; callback_data?: string; url?: string; switch_to_topic?: { message_id: number } };
 export type Keyboard = { inline_keyboard: Btn[][] };
+
+/**
+ * Deep link that opens a forum topic from another chat (Bot API 10.4):
+ * supergroups use `t.me/c/<id>/<thread>`; private chats with topics use
+ * `t.me/<bot_username>/<thread>` (the link only opens for the private chat's
+ * owner). Returns undefined when no link exists for this chat type, or when
+ * the bot's username is unknown (private-chat case) — callers skip the link.
+ */
+export function topicDeepLink(chatId: number, threadId: number, botUsername?: string): string | undefined {
+  if (chatId < -1000000000000) return `https://t.me/c/${Math.abs(chatId) - 1000000000000}/${threadId}`;
+  if (botUsername && chatId > 0) return `https://t.me/${botUsername}/${threadId}`;
+  return undefined;
+}

@@ -461,7 +461,9 @@ export class Bot {
    * removed (N3.1 tap / N3.7 dismiss), so the pre-existing buttons survive.
    * In-memory.
    */
-  private nextStepResiduals = new Map<ConvKey, Keyboard>();
+  // Keyed by messageId, NOT conv: a tap on a stale row must restore ITS OWN message's
+  // residual, not the newest row's (the conv key let a stale tap restore the wrong row).
+  private nextStepResiduals = new Map<number, Keyboard>();
   /**
    * How long a report's temp `.md` file stays on disk after it is sent, before
    * it is unlinked — long enough for Telegram to finish uploading it. 60s
@@ -3241,10 +3243,11 @@ export class Bot {
       const action = rotationGate({
         floorK,
         // Busy = an in-band turn (inflight) OR an OUT-OF-BAND manager turn (a
-        // schedule task / background wake on the manager session) tracked only in
-        // orch.managerInflight. Matches the shutdown drain's authoritative check
-        // (isBusy below); omitting it could rotate mid-turn and interrupt it.
-        busy: this.inflight.has(conv) || this.orch.managerInflight,
+        // schedule task / background wake on the manager session) tracked in
+        // orch.managerBusy. Per-conv, NOT the global managerInflight the shutdown
+        // drain uses: another conv's manager turn must not block this one's rotation.
+        // Omitting it could rotate mid-turn and interrupt it.
+        busy: this.inflight.has(conv) || this.orch.isManagerBusy(conv),
         nowMs: Date.now(),
         lastRotationMs: state.lastRotationMs,
         lastRotationPromptMs: state.lastRotationPromptMs,
@@ -4484,10 +4487,10 @@ export class Bot {
     // message (S5) reverts to its Continue row; everything else reverts to
     // no buttons.
     if (messageId) {
-      const residual = this.nextStepResiduals.get(conv) ?? { inline_keyboard: [] };
+      const residual = this.nextStepResiduals.get(messageId) ?? { inline_keyboard: [] };
       await this.tg.editMessageReplyMarkup(conv, messageId, { reply_markup: residual }).catch(() => {});
       this.nextStepFooters.delete(conv);
-      this.nextStepResiduals.delete(conv);
+      this.nextStepResiduals.delete(messageId);
     }
     nsRegistry.delete(parsed.id);
     // N4.3: an accepted tap (all N3 checks passed, action about to run) is in
@@ -4523,8 +4526,11 @@ export class Bot {
    */
   private noteNextStepMessage(conv: ConvKey, messageId: number, residual?: Keyboard): void {
     if (messageId <= 0) return;
+    // The footer stays keyed by conv (N3.7 dismisses this conv's newest row); the residual
+    // is keyed by messageId so a tap on a stale row restores ITS OWN row, not the newest.
+    // Cleanup happens on tap / dismiss — never drop a still-live row's residual here.
     this.nextStepFooters.set(conv, messageId);
-    if (residual) this.nextStepResiduals.set(conv, residual);
+    if (residual) this.nextStepResiduals.set(messageId, residual);
   }
 
   /** N3.7: drop the previous turn's next-step keyboard when the user speaks again (best effort). */
@@ -4533,8 +4539,8 @@ export class Bot {
     if (!id) return;
     this.nextStepFooters.delete(conv);
     // A worktree card keeps its own buttons (S4); a footer/line reverts to none.
-    const residual = this.nextStepResiduals.get(conv) ?? { inline_keyboard: [] };
-    this.nextStepResiduals.delete(conv);
+    const residual = this.nextStepResiduals.get(id) ?? { inline_keyboard: [] };
+    this.nextStepResiduals.delete(id);
     void this.tg.editMessageReplyMarkup(conv, id, { reply_markup: residual }).catch(() => {});
   }
 

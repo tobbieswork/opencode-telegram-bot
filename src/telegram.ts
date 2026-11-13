@@ -287,6 +287,24 @@ export class Telegram {
     return this.api("getMe");
   }
 
+  /** @username from getMe, cached after the first successful call. */
+  private botUsernameCache?: string;
+
+  /**
+   * The bot's @username (needed to build Bot API 10.4 private-chat topic
+   * links, `t.me/<username>/<thread>`). Cached; undefined while getMe has
+   * not succeeded yet — callers then skip the link rather than fail.
+   */
+  async botUsername(): Promise<string | undefined> {
+    if (this.botUsernameCache) return this.botUsernameCache;
+    try {
+      this.botUsernameCache = (await this.getMe()).username;
+    } catch {
+      /* transient — leave unknown, the caller falls back to no link */
+    }
+    return this.botUsernameCache;
+  }
+
   /** Resolve a file_id (document/photo/…) to a short-lived path on Telegram's servers. */
   async getFile(fileId: string): Promise<{ file_path: string; file_size?: number }> {
     return this.api("getFile", { file_id: fileId });

@@ -31,9 +31,10 @@ export interface NextStepFacts {
   worker?: { writes: boolean; hasWorktree: boolean };
   /** Workers still running or waiting (for the `board` rule). */
   busyWorkers: number;
-  /** N2.3: this turn modified >=1 file not reviewed before. Call sites compute it as
-   * (report lists no files) OR (>=1 listed file not reviewed before) — an empty report is
-   * treated as "assume changed", since the build agent often creates files via shell. */
+  /** N2.3: this turn changed something worth reviewing. Call sites compute it via
+   * `computeFilesNew` from git working-tree fingerprints (before/after); the report is
+   * only the fallback when a fingerprint is missing, and an empty report is NOT treated
+   * as "changed". See computeFilesNew. */
   filesNew: boolean;
   /** The turn failed with a context-overflow error (isOverflowError). */
   overflow: boolean;
