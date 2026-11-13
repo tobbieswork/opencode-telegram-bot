@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.24.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.23.1...opencode-telegram-bot-v1.24.0) (2026-11-13)
+
+
+### Features
+
+* retry transport-level Telegram API failures ([a96ac2e](https://github.com/tobbieswork/opencode-telegram-bot/commit/a96ac2ed71cb83d5c26de613fe04c2df3c48ab62))
+* retry transport-level Telegram API failures ([269ae5c](https://github.com/tobbieswork/opencode-telegram-bot/commit/269ae5cb4f5b549e29c28cedb134d2eca5721e0c))
+
 ## [1.23.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.23.0...opencode-telegram-bot-v1.23.1) (2026-11-12)
 
 
