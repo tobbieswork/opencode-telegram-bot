@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.27.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.26.0...opencode-telegram-bot-v1.27.0) (2026-11-13)
+
+
+### Features
+
+* treat caption-less stickers as their emoji (Bot API 7.0+) ([f99e60c](https://github.com/tobbieswork/opencode-telegram-bot/commit/f99e60c1ce5e0b2b7a9e77666d9f9e6700e321fc))
+* treat caption-less stickers as their emoji (Bot API 7.0+) ([09f26dc](https://github.com/tobbieswork/opencode-telegram-bot/commit/09f26dc8fb3cb67cc21d0878a0d5312e08d8fa89))
+
 ## [1.26.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.25.0...opencode-telegram-bot-v1.26.0) (2026-11-13)
 
 
