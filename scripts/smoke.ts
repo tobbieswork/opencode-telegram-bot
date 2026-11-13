@@ -30,6 +30,15 @@ class MockTelegram {
     this.out.push("[edit] " + text);
     if (opts?.reply_markup) this.keyboards.push(opts.reply_markup);
   }
+  // Rich path (OPENCODE_TG_RICH=1 in .env): the bot tries sendRichMessage
+  // first; the mock records the markdown as-is (no HTML conversion) and
+  // resolves a message id, mirroring the real sendRich.
+  async sendRich(_to: number, markdown: string, opts: { reply_markup?: unknown } = {}): Promise<number> {
+    const id = ++this.msgCounter;
+    this.out.push(markdown);
+    if (opts?.reply_markup) this.keyboards.push(opts.reply_markup);
+    return id;
+  }
   // Next-step one-shot revert (N3.1) edits the footer's reply markup in place;
   // the mock is a no-op (the smoke doesn't observe the row being dropped).
   async editMessageReplyMarkup(_chatId: number, _messageId: number, _opts: Record<string, unknown> = {}): Promise<void> {}
