@@ -175,6 +175,7 @@ bot:   The last commit adds retry logic but…
 | `/mode` | Pick an operating mode via buttons — `build` / `plan` / `general` / `explore` |
 | `/stop` | Interrupt the running task |
 | `/history` | Show the last few messages of the current session |
+| `/watch` | Open a self-updating card that follows the session while it works (alias `/live`) |
 | `/context` | Photo of the current session — usage, files touched, last prompt |
 | `/status` | Show what the bot is connected to |
 | `/clear` | Reset this chat's session/dir/model/agent |
@@ -319,6 +320,9 @@ All settings are environment variables (see `.env.example`).
 | `OPENCODE_TG_RECOVER_OVERFLOW` | | off | `1` = respawn a worker once (same directory, with the original task and git evidence) when it overflows. Spends tokens and runs a write agent unattended |
 | `OPENCODE_TG_RICH` | | off | `1` = send rich (server-side GFM) replies |
 | `OPENCODE_TG_STREAM` | | off | `1` = stream live drafts while the agent answers |
+| `OPENCODE_TG_WATCH` | | on | `0` = turn off the `/watch` live card. **No effect while `OPENCODE_TG_STREAM` is on** (the two live views are mutually exclusive) |
+| `OPENCODE_TG_WATCH_INTERVAL_MS` | | `3000` | How often the `/watch` card may be edited, ms (accepted 2000–5000; group chats are floored at 5000) |
+| `OPENCODE_TG_WATCH_MAX_MIN` | | `10` | How long a `/watch` card may run before it freezes, minutes |
 | `OPENCODE_TG_REACT` | | off | `1` = reaction UX: react to a worker's report to act on it, and the bot reacts to prompts and results (needs `message_reaction` updates) |
 | `OPENCODE_TG_BUSY_MODE` | | `ask` | Message sent while a turn runs: `ask` = busy reply with Queue/Steer/note buttons, `queue` = auto-enqueue (no tap), `off` = today's behaviour |
 | `OPENCODE_TG_UPLOADS` | | off | `1` = accept document/photo uploads and attach their path to the prompt |

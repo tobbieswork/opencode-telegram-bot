@@ -8,7 +8,8 @@
  *
  * Run:  npx tsx scripts/test-config.ts
  */
-import { loadConfig } from "../src/config.js";
+import { loadConfig, watchStartupWarning } from "../src/config.js";
+import { watchInactiveReason, watchNoSession } from "../src/watch.js";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: string): void {
@@ -216,6 +217,60 @@ delete process.env.OPENCODE_TG_TIMEZONE;
   process.env.OPENCODE_TG_BUSY_MODE = "bogus";
   check("busyMode invalid → ask", loadConfig(process.cwd()).busyMode === "ask");
   delete process.env.OPENCODE_TG_BUSY_MODE;
+}
+
+// --- /watch config (W6.1): watchActive truth table + startup warning (W6.7) +
+//     inactive / no-session reply wording (W6.8 / W1.2) -----------------------
+{
+  for (const k of ["OPENCODE_TG_WATCH", "OPENCODE_TG_STREAM", "OPENCODE_TG_WATCH_INTERVAL_MS", "OPENCODE_TG_WATCH_MAX_MIN"]) delete process.env[k];
+
+  // watchActive truth table + the ONE startup warning (W6.7).
+  const combos: Array<{ watch: string | undefined; stream: string | undefined; active: boolean; warning: boolean }> = [
+    { watch: undefined, stream: undefined, active: true,  warning: false }, // default: watch on, stream off
+    { watch: "1",       stream: "1",       active: false, warning: true  }, // watch on + stream on → warning
+    { watch: "0",       stream: undefined, active: false, warning: false }, // watch off
+    { watch: "0",       stream: "1",       active: false, warning: false }, // watch off (stream on is irrelevant)
+  ];
+  let warningFires = 0;
+  for (const c of combos) {
+    if (c.watch === undefined) delete process.env.OPENCODE_TG_WATCH; else process.env.OPENCODE_TG_WATCH = c.watch;
+    if (c.stream === undefined) delete process.env.OPENCODE_TG_STREAM; else process.env.OPENCODE_TG_STREAM = c.stream;
+    const cfg = loadConfig(process.cwd());
+    const tag = `watch=${c.watch ?? "unset"}, stream=${c.stream ?? "unset"}`;
+    check(`watchActive (${tag}) = ${c.active}`, cfg.watchActive === c.active, String(cfg.watchActive));
+    const w = watchStartupWarning(cfg);
+    const fired = w !== null;
+    if (fired) warningFires++;
+    check(`startup warning (${tag}) fired=${fired} (expect ${c.warning})`, fired === c.warning, w ?? "(none)");
+  }
+  check("startup warning fires in EXACTLY ONE of the four states", warningFires === 1, String(warningFires));
+
+  // /watch reply wording (W6.8 / W1.2) — pure, no Bot needed. Language-agnostic
+  // markers per cause, so the test pins the RIGHT reason for each state.
+  check("inactive reason (watch off, vi) names WATCH=0", watchInactiveReason("vi", false, false).includes("OPENCODE_TG_WATCH=0"), watchInactiveReason("vi", false, false));
+  check("inactive reason (watch off, en) names WATCH=0", watchInactiveReason("en", false, true).includes("OPENCODE_TG_WATCH=0"), watchInactiveReason("en", false, true));
+  check("inactive reason (stream on, vi) names STREAM", watchInactiveReason("vi", true, true).includes("OPENCODE_TG_STREAM"), watchInactiveReason("vi", true, true));
+  check("inactive reason (stream on, en) names STREAM", watchInactiveReason("en", true, true).includes("OPENCODE_TG_STREAM"), watchInactiveReason("en", true, true));
+  check("no-session (vi) names /new", watchNoSession("vi").includes("/new"), watchNoSession("vi"));
+  check("no-session (en) names /new", watchNoSession("en").includes("/new"), watchNoSession("en"));
+
+  // /watch numeric knobs: defaults + NaN / below-min fallback (the accepted
+  // range 2000–5000 is enforced by the core's clampWatchInterval, not here).
+  delete process.env.OPENCODE_TG_WATCH;
+  delete process.env.OPENCODE_TG_STREAM;
+  delete process.env.OPENCODE_TG_WATCH_INTERVAL_MS;
+  delete process.env.OPENCODE_TG_WATCH_MAX_MIN;
+  check("watchIntervalMs default 3000", loadConfig(process.cwd()).watchIntervalMs === 3000, String(loadConfig(process.cwd()).watchIntervalMs));
+  check("watchMaxMin default 10", loadConfig(process.cwd()).watchMaxMin === 10, String(loadConfig(process.cwd()).watchMaxMin));
+  process.env.OPENCODE_TG_WATCH_INTERVAL_MS = "abc";
+  check("watchIntervalMs NaN → default 3000", loadConfig(process.cwd()).watchIntervalMs === 3000);
+  process.env.OPENCODE_TG_WATCH_INTERVAL_MS = "1000"; // below min 2000
+  check("watchIntervalMs below min → default 3000", loadConfig(process.cwd()).watchIntervalMs === 3000);
+  process.env.OPENCODE_TG_WATCH_INTERVAL_MS = "4500";
+  process.env.OPENCODE_TG_WATCH_MAX_MIN = "25";
+  check("watchIntervalMs valid respected (4500)", loadConfig(process.cwd()).watchIntervalMs === 4500);
+  check("watchMaxMin valid respected (25)", loadConfig(process.cwd()).watchMaxMin === 25);
+  for (const k of ["OPENCODE_TG_WATCH", "OPENCODE_TG_STREAM", "OPENCODE_TG_WATCH_INTERVAL_MS", "OPENCODE_TG_WATCH_MAX_MIN"]) delete process.env[k];
 }
 
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);

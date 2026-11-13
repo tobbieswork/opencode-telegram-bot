@@ -105,6 +105,24 @@ export interface Config {
    */
   stream: boolean;
   /**
+   * /watch: post a self-updating live card that follows the conversation's
+   * session. Default ON (off only on an explicit "0"). A pure view — nothing
+   * else in the bot changes. It is inert while the streaming preview
+   * (OPENCODE_TG_STREAM) is on, so the two live views never edit the chat at
+   * the same time (W6.1). See watchActive.
+   */
+  watch: boolean;
+  /** /watch card edit throttle, ms (accepted range 2000–5000; the core clamps). */
+  watchIntervalMs: number;
+  /** /watch card lifetime cap, minutes (then it freezes; W3.5). */
+  watchMaxMin: number;
+  /**
+   * Derived ONCE at load: /watch runs only when the feature is on AND the
+   * streaming preview is off. The command, the /history Live button and the
+   * W6.7 startup warning all gate on this. No watch code runs when it is false.
+   */
+  watchActive: boolean;
+  /**
    * Accept document/photo uploads: save them under data/uploads/<conv>/ and
    * attach their path to the prompt. Default OFF; enable with
    * OPENCODE_TG_UPLOADS=1. When off the bot behaves exactly as before.
@@ -230,6 +248,11 @@ export function loadConfig(root: string): Config {
   }
 
   const dir = resolve(process.env.OPENCODE_DIRECTORY?.trim() || process.cwd());
+  // Live-view toggles (W6.1). watchActive is derived ONCE here: /watch runs
+  // only when the feature is on AND the streaming preview is off, so the two
+  // live views can never edit the chat at the same time.
+  const stream = process.env.OPENCODE_TG_STREAM === "1" || process.env.OPENCODE_TG_STREAM === "true";
+  const watch = process.env.OPENCODE_TG_WATCH !== "0";
   const cfg: Config = {
     telegramToken: token,
     telegramTokenSource: tokenSource,
@@ -271,7 +294,18 @@ export function loadConfig(root: string): Config {
     // Default OFF: only an explicit "1"/"true" enables rich (server-side GFM) replies.
     richReplies: process.env.OPENCODE_TG_RICH === "1" || process.env.OPENCODE_TG_RICH === "true",
     // Default OFF: only an explicit "1"/"true" enables live streaming drafts.
-    stream: process.env.OPENCODE_TG_STREAM === "1" || process.env.OPENCODE_TG_STREAM === "true",
+    stream,
+    // Default ON: /watch is available unless explicitly "0" (inert while the
+    // streaming preview is on — see watchActive below, W6.1).
+    watch,
+    // Base edit throttle (ms). The accepted range [2000, 5000] is enforced by
+    // the core's clampWatchInterval at watch creation; here we only guard
+    // against NaN / below-min (parseIntSetting), defaulting to 3000.
+    watchIntervalMs: parseIntSetting("OPENCODE_TG_WATCH_INTERVAL_MS", 3000, 2000),
+    // Card lifetime cap, minutes (W3.5).
+    watchMaxMin: parseIntSetting("OPENCODE_TG_WATCH_MAX_MIN", 10, 1),
+    // W6.1: one derived value, computed once at load (see the consts above).
+    watchActive: watch && !stream,
     // Default OFF: only an explicit "1"/"true" accepts document/photo uploads.
     uploads: process.env.OPENCODE_TG_UPLOADS === "1" || process.env.OPENCODE_TG_UPLOADS === "true",
     // Per-file cap in MB (Bot API ceiling 20) → bytes; TTL in days.
@@ -318,6 +352,19 @@ export function loadConfig(root: string): Config {
   if (modelId && modelProvider) cfg.defaultModel = { id: modelId, providerID: modelProvider };
   cfg.browseRoots = loadBrowseRoots(cfg.opencodeDirectory);
   return cfg;
+}
+
+/**
+ * W6.7: the ONE startup warning to log when /watch is switched on but can't
+ * run because the streaming preview is also on. Returns the message only in
+ * that single state (watch on AND stream on); null in the other three, so the
+ * other three states log nothing. index.ts logs it once at startup.
+ */
+export function watchStartupWarning(cfg: Config): string | null {
+  if (cfg.watch && cfg.stream) {
+    return "OPENCODE_TG_WATCH is on but OPENCODE_TG_STREAM is also on — /watch is INACTIVE while the live preview runs. Set OPENCODE_TG_STREAM=0 to use /watch.";
+  }
+  return null;
 }
 
 /** An integer setting; anything unparsable or below `min` falls back to the default (with a warning). */

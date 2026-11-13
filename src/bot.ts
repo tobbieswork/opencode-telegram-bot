@@ -66,6 +66,7 @@ import { cmdAgents, cmdAgent, handleAgentCallback } from "./commands/agents.js";
 import { cmdSchedule, handleScheduleCallback } from "./commands/schedule.js";
 import { Advisor } from "./advisor/advisor.js";
 import { cmdHelp, cmdStatus, cmdHealth, cmdContext, cmdUsage, cmdHistory, cmdNote, cmdRotation, handleNoteCallback, cmdLang } from "./commands/meta.js";
+import { watchInactiveReason, watchNoSession } from "./watch.js";
 import { cmdBtw } from "./btw.js";
 import { cmdAsk } from "./ask.js";
 import { reviewPrompt, reviewUsage } from "./review.js";
@@ -2016,6 +2017,9 @@ export class Bot {
         return cmdUsage(this, conv, arg);
       case "/history":
         return cmdHistory(this, conv, state);
+      case "/watch":
+      case "/live":
+        return this.cmdWatch(conv, state, uid);
       case "/rotation":
         return cmdRotation(this, conv);
       case "/clear":
@@ -2047,6 +2051,47 @@ export class Bot {
       default:
         return this.tg.sendMessage(conv, `Unknown command: ${esc(cmd)}\nSend /help`);
     }
+  }
+
+  /**
+   * `/watch` (alias `/live`) — a live card that follows the conversation's
+   * session (docs/sdd/watch.md, task W2). Availability is gated by
+   * cfg.watchActive (watch on AND stream off, W6.1): when inactive, reply with
+   * the reason (W6.8) and post nothing; when active but with no session, say so
+   * (W1.2); otherwise hand off to the W3 integration stub.
+   */
+  private async cmdWatch(conv: ConvKey, state: ChatState, uid?: number): Promise<void> {
+    const lang = this.userPrefs.getLang(uid ?? "");
+    // W6.8: only available while watchActive; otherwise explain why, post nothing.
+    if (!this.cfg.watchActive) {
+      await this.tg.sendMessage(conv, watchInactiveReason(lang, this.cfg.watch, this.cfg.stream));
+      return;
+    }
+    // W1.2: no session → say so, post nothing.
+    if (!state.sessionID) {
+      await this.tg.sendMessage(conv, watchNoSession(lang));
+      return;
+    }
+    return this.startWatch(conv, state, uid);
+  }
+
+  /**
+   * W3 INTEGRATION STUB — the /watch live-card wiring goes here: createWatch +
+   * post the card, feed onWatchEvent from onOpenCodeEvent, the at-most-one-
+   * watch-per-conversation registry (W1.5), idle/time limits (W3.4/W3.5) and
+   * auto-stops (W5). W2 wires the command to this single point so W3 never
+   * touches command wiring again. When cfg.watchActive is false the command
+   * never reaches here (it replies with the W6.8 reason first), so off-mode is
+   * byte-identical to today.
+   */
+  private async startWatch(conv: ConvKey, state: ChatState, uid?: number): Promise<void> {
+    // W3: replace with the real card (createWatch + renderWatch + edit loop).
+    // For W2 the card does not exist yet, so report that it is pending.
+    void state; // the W3 card reads state.sessionID; the stub does not yet.
+    const lang = this.userPrefs.getLang(uid ?? "");
+    await this.tg.sendMessage(conv, tr(lang,
+      "👁 /watch: thẻ xem trực tiếp sẽ có trong bản cập nhật tiếp theo (W3).",
+      "👁 /watch: the live card lands in the next update (W3)."));
   }
 
   // ── the long-running prompt ──────────────────────────────────────────────

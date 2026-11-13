@@ -317,3 +317,21 @@ export function onEditFailedFlood(state: WatchState, retryAfterSec: number, now:
     earliestEditAt: now + ra,
   };
 }
+
+// ── command reply strings (W6.8 / W1.2) ─────────────────────────────────────
+/**
+ * The reason shown when /watch is sent while INACTIVE (W6.8). `watch` false →
+ * the feature is switched off (OPENCODE_TG_WATCH=0); `watch` true (so `stream`
+ * is true) → the live preview is on (OPENCODE_TG_STREAM). Pure + localized so
+ * the config test can pin the wording per state.
+ */
+export function watchInactiveReason(lang: Lang, watch: boolean, stream: boolean): string {
+  return !watch
+    ? tr(lang, "🔴 /watch đang tắt (OPENCODE_TG_WATCH=0).", "🔴 /watch is switched off (OPENCODE_TG_WATCH=0).")
+    : tr(lang, "🔴 /watch đang tắt vì preview trực tiếp (OPENCODE_TG_STREAM) đang bật. Tắt stream để dùng /watch.", "🔴 /watch is inactive because the live preview (OPENCODE_TG_STREAM) is on. Turn the stream off to use /watch.");
+}
+
+/** W1.2: the conversation has no session. */
+export function watchNoSession(lang: Lang): string {
+  return tr(lang, "Chưa có phiên hiện tại. Gửi /new để bắt đầu, rồi /watch.", "No current session. Send /new to start one, then /watch.");
+}
