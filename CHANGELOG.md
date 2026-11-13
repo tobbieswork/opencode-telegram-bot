@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.25.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.24.0...opencode-telegram-bot-v1.25.0) (2026-11-13)
+
+
+### Features
+
+* /watch live update loop, auto-stops and card buttons ([e82cc12](https://github.com/tobbieswork/opencode-telegram-bot/commit/e82cc12a88146b12378ba1890e769c61c6dc8bb3))
+* add /watch command and config ([a68af4b](https://github.com/tobbieswork/opencode-telegram-bot/commit/a68af4b70bf72ef26d649ffeac3770396d402e04))
+* add /watch pure core and W0 findings ([3e3548b](https://github.com/tobbieswork/opencode-telegram-bot/commit/3e3548b1dc033f2ab3f0eb5532d5e0e95ab4a3d4))
+* wire the /watch card's "Stop task" button (W4) ([17a608b](https://github.com/tobbieswork/opencode-telegram-bot/commit/17a608bb4d8d97716db6fe82f21674f5b8a4e690))
+* wire the /watch card's "Stop task" button (W4) ([ca9de90](https://github.com/tobbieswork/opencode-telegram-bot/commit/ca9de905b31314b8513c4411558b224aceea4ad3))
+
 ## [1.24.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.23.1...opencode-telegram-bot-v1.24.0) (2026-11-13)
 
 
