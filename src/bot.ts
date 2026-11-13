@@ -388,7 +388,7 @@ export class Bot {
   /** The self-editing "agent is doing…" line per conv: message id + current label. */
   private activity = new Map<ConvKey, { msgId: number; label: string; toolStart: number }>();
   /** The "⏳ Đang xử lý…" line per conv (General top-level only): msgId once sent + the elapsed-time timer. */
-  private working = new Map<ConvKey, { msgId?: number; startedAt: number; timer?: ReturnType<typeof setInterval>; base: string }>();
+  private working = new Map<ConvKey, { msgId?: number; startedAt: number; timer?: ReturnType<typeof setInterval>; base: string; watchKb?: Record<string, unknown> }>();
   /** Tool-call id → tool name per conv (learned from session.tool.input.started). */
   private toolNames = new Map<ConvKey, Map<string, string>>();
   /**
@@ -1662,9 +1662,17 @@ export class Bot {
     log(`⏳ working indicator shown for ${conv}`);
     const startedAt = Date.now();
     const base = tr(lang ?? "vi", STRINGS.working_indicator.vi, STRINGS.working_indicator.en);
-    this.working.set(conv, { msgId: undefined, startedAt, timer: undefined, base }); // sync marker (race-safe)
+    // "👁 Watch" button: shown ONLY while /watch is active. Tapping it (ww:go)
+    // opens the live watch card for this conversation (handleWorkingWatchButton
+    // → startWatch). When watchActive is false no keyboard is sent at all, so
+    // the Working line stays byte-identical to off-mode and the ww: branch is
+    // unreachable (the button is never rendered).
+    const watchKb: Record<string, unknown> | undefined = this.cfg.watchActive
+      ? { inline_keyboard: [[{ text: tr(lang ?? "vi", STRINGS.working_watch_button.vi, STRINGS.working_watch_button.en), callback_data: "ww:go" }]] }
+      : undefined;
+    this.working.set(conv, { msgId: undefined, startedAt, timer: undefined, base, watchKb }); // sync marker (race-safe)
     void this.tg
-      .sendMessageId(conv, base)
+      .sendMessageId(conv, base, watchKb ? { reply_markup: watchKb } : undefined)
       .then((id) => {
         const e = this.working.get(conv);
         if (id <= 0) {
@@ -1675,7 +1683,8 @@ export class Bot {
         e.msgId = id;
         e.timer = setInterval(() => {
           const secs = Math.round((Date.now() - startedAt) / 1000);
-          void this.tg.editMessageText(conv, id, `${e.base} · ${secs}s`).catch(() => {});
+          // The 10s elapsed edit PRESERVES the Watch button (the same keyboard).
+          void this.tg.editMessageText(conv, id, `${e.base} · ${secs}s`, e.watchKb ? { reply_markup: e.watchKb } : undefined).catch(() => {});
         }, 10000);
         (e.timer as any).unref?.();
       })
@@ -2465,6 +2474,30 @@ export class Bot {
     } finally {
       this.watchTickBusy = false;
     }
+  }
+
+  /**
+   * The "👁 Watch" button (ww:go) on the "⏳ Working…" line: open the live
+   * watch card for this conversation. No agent turn. Mirrors cmdWatch's gating
+   * exactly — answer "inactive" when watchActive is false, "no session" when
+   * there's no current session, otherwise hand off to startWatch (which is
+   * safe against double-invocation: it closes any prior watch card first).
+   */
+  private async handleWorkingWatchButton(cb: CallbackQuery, conv: ConvKey): Promise<void> {
+    const lang = this.userPrefs.getLang(cb.from?.id ?? "");
+    // Same gate as /watch (cmdWatch): only available while watchActive.
+    if (!this.cfg.watchActive) {
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, STRINGS.working_watch_inactive.vi, STRINGS.working_watch_inactive.en));
+      return;
+    }
+    // No current session → say so (same wording style as cmdWatch's watchNoSession).
+    const state = this.st.peek(conv);
+    if (!state?.sessionID) {
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, STRINGS.working_watch_no_session.vi, STRINGS.working_watch_no_session.en));
+      return;
+    }
+    await this.tg.answerCallbackQuery(cb.id);
+    await this.startWatch(conv, state, cb.from?.id);
   }
 
   /**
@@ -3842,6 +3875,12 @@ export class Bot {
     }
     if (data.startsWith("w:")) {
       await this.handleWatchCallback(cb, conv);
+      return;
+    }
+    // "👁 Watch" button on the Working line. "ww:go" does NOT start with "w:"
+    // (it's "ww", not "w:"), so the w: branch above can never swallow it.
+    if (data.startsWith("ww:")) {
+      await this.handleWorkingWatchButton(cb, conv);
       return;
     }
     if (data.startsWith("ns:")) {
