@@ -126,4 +126,46 @@ Verification order for every task: `npm run typecheck` and `npm run test:unit` f
 Watching a worker from the main chat (`/watch <worker>`), several watches at once, paging back through older messages inside the card, persisting a watch across restarts, and live updates of `/history` itself.
 
 ## 7. Findings (filled in by task W0)
-_Not run yet._
+## 7. Findings (filled in by task W0)
+
+_Run 2026-11-13 by worker "watch-core", read-only (no model calls, no mutating Telegram calls)._
+
+### F1. Session event fields (from @opencode/schema v2.2.6 types + src/bot.ts usage)
+
+Verified against the installed schemas: `node_modules/@opencode/schema/dist/session-event.d.ts` and `event-manifest.d.ts` (client 2.2.6). All data payloads carry `sessionID`; the top-level envelope adds `id`, `created`, `type`, and optional `metadata`/`location`.
+
+| Event | data fields | Durability |
+|---|---|---|
+| `session.text.delta` | `sessionID`, `assistantMessageID`, `ordinal` (int), `delta` (string) | **ephemeral** (not in the durable log) |
+| `session.tool.input.started` | `sessionID`, `assistantMessageID`, `id` (tool-call id), **`name`** (tool name) | durable |
+| `session.tool.called` | `sessionID`, `assistantMessageID`, `id`, **`input`** (Record<string,unknown>), `executed` (bool), `native?` | durable |
+| `session.tool.success` | `sessionID`, `assistantMessageID`, `id`, `content[]`, `executed` | durable |
+| `session.tool.failed` | `sessionID`, `assistantMessageID`, `id`, `error`, `executed` | durable |
+| `session.execution.started` | `sessionID` | durable |
+| `session.execution.succeeded` | `sessionID` | durable |
+| `session.execution.failed` | `sessionID`, **`error { type, message, status?, response?, retryAfterMs? }`** | durable |
+| `session.execution.interrupted` | `sessionID`, **`reason`** (`user` / `shutdown` / `superseded` / `inactivity`) | durable |
+
+Key implementation notes for W3:
+- `session.tool.called` does NOT carry `name` — the tool name arrives in `session.tool.input.started`. The existing `onToolEvent` (src/bot.ts:1669) already handles this with a tool-call-id → name map; the watch reducer must follow the same pattern (the core reducer therefore takes an already-rendered label; the I/O layer computes it via `toolActivityLabel(name, input, lang)`, src/activity.ts:21 — the same label the activity line shows, per W1.3).
+- `text.delta` is ephemeral: if the event stream drops (reconnect), deltas are lost with no replay — exactly the gap W2.5's `sessionState()` fallback poll covers. No design change needed.
+- The execution lifecycle handler already reads `ev.data.error.message` (src/bot.ts:4240) — matches the schema (`error` is an object with `message`, not a string).
+
+### F2. Events arrive for turns driven from outside the bot — CONFIRMED
+
+- The bot subscribes to the service-LEVEL event stream, not per-prompt: `src/opencode.ts:709` `subscribeEvents()` → `this.client.event.subscribe()` — every session event on the OpenCode service reaches the handler, regardless of what started the turn.
+- `src/bot.ts:4235-4254` explicitly handles "out-of-band executions — e.g. a background task waking the session": for convs not in `inflight` it starts typing on `execution.started` and relays the result on `execution.succeeded/failed/interrupted` via `sweepUnrelayedReplies(conv, "turn ended out-of-band", ...)` (src/bot.ts:830).
+- Live evidence (no test turn started): `journalctl --user -u opencode-bot | grep -c "turn ended out-of-band"` → 324 occurrences in the last 7 days (latest: Nov 13 09:57 "relayed 3 unrelayed replies (turn ended out-of-band)"). These are turns the bot chat did not start (manager/worker/background turns) whose events flowed through the same stream.
+
+Conclusion: the design's event-coverage assumption holds. The session→conv mapping (`st.findChatBySession`) already exists and is the only gate: a turn in a session the bot has never seen is correctly ignored.
+
+### F3. deleteMessage works on a message with an inline keyboard — CONFIRMED
+
+- Telegram Bot API: `deleteMessage` deletes any message sent by the bot (groups: requires `can_delete_messages`, which the bot has). An inline keyboard imposes no restriction; it is removed with the message.
+- Codebase: `Telegram.deleteMessage` (src/telegram.ts:549) is a plain `deleteMessage` call that swallows "already gone" errors.
+- Working precedent in production code: the browse card (`renderBrowse`, src/bot.ts:3263, returns `{ text, keyboard }` with inline buttons) is deleted with `tg.deleteMessage` when its Close button is tapped (src/bot.ts:3516, case "close"). The activity line is deleted the same way (`clearActivity`, src/bot.ts:1657). The Close-button design of W4.1 is therefore safe as specified.
+
+### Verdict
+
+No contradictions with §4. The design holds; W1 can be built. One implementation note carried into W1: the reducer tracks tool steps by label (the I/O layer resolves name+input → label with the existing `toolActivityLabel` and the input.started→called id mapping, mirroring `onToolEvent`).
+
