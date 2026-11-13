@@ -32,7 +32,7 @@ export type Message = {
   reply_to_message?: { message_id?: number; message_thread_id?: number };
   /** Caption on media (photo/sticker/video/voice/document); counts as text. */
   caption?: string;
-  sticker?: { file_id?: string; type?: string };
+  sticker?: { file_id?: string; type?: string; emoji?: string };
   photo?: Record<string, unknown>[];
   video?: Record<string, unknown>;
   voice?: Record<string, unknown>;

@@ -988,7 +988,10 @@ export class Bot {
     const conv = this.convOf(msg);
     const uid = msg.from?.id as number | undefined;
     // A media caption counts as text: it goes through the same dispatch as a plain message.
-    const text = (msg.text ?? msg.caption ?? "").trim();
+    // A caption-less sticker acts as its own emoji (Bot API 7.0+ `sticker.emoji`), so the
+    // agent answers it as if the user typed that emoji. A caption (if any) wins over the
+    // emoji; a sticker with no usable `emoji` field still falls to the noteNonText note.
+    const text = (msg.text ?? msg.caption ?? msg.sticker?.emoji ?? "").trim();
     // document/photo upload (gate OPENCODE_TG_UPLOADS, default OFF): save the
     // file and append its path to the prompt. Gate OFF → media is null →
     // byte-identical to the old paths below. A caption starting with "/" is a
