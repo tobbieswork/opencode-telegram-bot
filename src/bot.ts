@@ -2502,13 +2502,33 @@ export class Bot {
       return;
     }
     if (action === "s") {
-      // TODO(W4): "Stop task" — do exactly what /stop does: stopCurrent (abort
-      // the inflight controller, clear the queue, drop the preview) +
-      // oc.interrupt on rec.sessionID (the Manager's busy flag via the
-      // orchestrator), then make ONE final edit showing "Stopped" and freeze
-      // the card (reason "done" is NOT used — the turn was interrupted by the
-      // user; the audit reason for a stopped task is watch_stop_task, W6.3).
+      // Stop task (W4.2): does exactly what /stop does (stopTaskFor), then the
+      // card shows "Stopped" and freezes. The row is rendered only while a
+      // turn is running (watchKeyboard's "working" status); a tap that lands
+      // after the turn is over — e.g. the double-tap race, where the first
+      // tapper already stopped it (spec §4) — finds nothing to stop:
+      // "not running", no state change.
+      const w = this.watches.get(conv);
+      if (!w || w.frozen || w.state.phase !== "working") {
+        await this.tg.answerCallbackQuery(cb.id, tr(lang, "Không có tác vụ nào đang chạy.", "Nothing is running."));
+        return;
+      }
+      // Claim the stop synchronously, BEFORE any await: the state is already
+      // "stopped" when the first await yields, so a second tap (serialized
+      // behind this one on the conv queue) sees the card frozen and answers
+      // "not running", and the server's execution.interrupted event (folded by
+      // feedWatch) finds the state frozen — no double final edit, no double
+      // audit. The end is audited as watch_stop_task (W6.3); the record stays
+      // for Close / Watch again, which write the watch_end reason later.
+      const now = Date.now();
+      const r = onWatchEvent(w.state, { kind: "turn-end", now, outcome: "stopped" });
+      w.state = r.state;
+      w.frozen = true;
+      w.polling = false;
       await this.tg.answerCallbackQuery(cb.id);
+      await this.stopTaskFor(conv, rec.sessionID);
+      audit({ action: "watch_stop_task", chatId: conv, session: rec.sessionID, userId: cb.from?.id });
+      if (r.edit) await this.pushWatchEdit(w, r.edit); // the ONE final "Stopped" edit (W4.2)
       return;
     }
     await this.tg.answerCallbackQuery(cb.id);
@@ -4647,10 +4667,22 @@ export class Bot {
     await this.tg.sendMessage(conv, tr(lang, "📥 Hàng chờ (" + items.length + "):", "📥 Queue (" + items.length + "):") + "\n" + lines.join("\n"));
   }
 
-  private async cmdStop(conv: ConvKey, state: ChatState): Promise<void> {
+  /**
+   * Stop the conversation's running turn — the shared /stop mechanism: stop
+   * waiting (stopCurrent: abort the inflight controller, clear the queue, drop
+   * the preview, clear the manager's busy flag) + interrupt the turn on the
+   * server. /stop uses this and replies in chat; the watch card's "Stop task"
+   * button (W4.2) uses the same path without a chat reply — the card itself
+   * shows "Stopped".
+   */
+  private async stopTaskFor(conv: ConvKey, sessionID?: string): Promise<void> {
     await this.stopCurrent(conv);
     this.cancelAllReminders(conv);
-    if (state.sessionID) await this.oc.interrupt(state.sessionID).catch(() => {});
+    if (sessionID) await this.oc.interrupt(sessionID).catch(() => {});
+  }
+
+  private async cmdStop(conv: ConvKey, state: ChatState): Promise<void> {
+    await this.stopTaskFor(conv, state.sessionID);
     await this.tg.sendMessage(conv, "⏹️ Interrupted.");
   }
 

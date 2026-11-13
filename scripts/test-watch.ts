@@ -391,6 +391,7 @@ function makeWatchBot(opts: {
   const deleted: number[] = [];
   const answers: { id: string; text?: string }[] = [];
   const ssCalls: string[] = [];
+  const interruptCalls: string[] = [];
   const ssQueue = [...(opts.sessionState ?? [])];
   let failMode: "gone" | "flood" | undefined;
   const doEdit = async (conv: string, msgId: number, text: string, opts: any) => {
@@ -421,7 +422,7 @@ function makeWatchBot(opts: {
   const oc: any = {
     promptAndWait: async () => ({ reply: "done", outcome: "succeeded", interrupted: false, elapsedMs: 1 }),
     prompt: async () => "msg_x",
-    interrupt: async () => {},
+    interrupt: async (sid: string) => { interruptCalls.push(sid); },
     createSession: async () => "ses_x",
     listMessages: async () => opts.listMsgs ?? [],
     sessionState: async (sid: string) => {
@@ -450,7 +451,7 @@ function makeWatchBot(opts: {
   bot.startWatchTicker = () => {}; // keep it OFF: tests drive ticks explicitly
 
   return {
-    bot, tg, st, cfg, sent, edits, deleted, answers, ssCalls,
+    bot, tg, st, cfg, sent, edits, deleted, answers, ssCalls, interruptCalls,
     setFail: (mode: "gone" | "flood" | undefined) => { failMode = mode; },
   };
 }
@@ -771,6 +772,208 @@ const dm = "7"; // isDmConv("7") === true → no group floor
   await (m.bot as any).startWatch(dm, m.st.get(dm), 7);
   await flush();
   check("audit: re-watch audited (2 starts, 1 end so far)", byAction("watch_start").length === 2 && byAction("watch_end").length === 1, JSON.stringify(auditLines().map((l) => l.action)));
+}
+
+// ── W4.2 visibility: the Stop task row appears only while a turn is running ──
+// (the row is tied to the phase, not to the card being live: the idle-post
+// test above already pins "live but idle → Close only")
+{
+  const m = makeWatchBot({ listMsgs: [], busy: true });
+  m.st.set(dm, { sessionID: "ses_1" });
+  (m.bot as any).userPrefs.setLang(7, "en");
+  await (m.bot as any).startWatch(dm, m.st.get(dm), 7);
+  const rows = cardKb(m.sent[0]);
+  check("vis: card posted mid-turn has Close + Stop task (own row)", rows.length === 2 && rows[0][0].callback_data.endsWith(":c") && rows[1].length === 1 && rows[1][0].callback_data.endsWith(":s"), JSON.stringify(rows));
+  const w = m.bot.watches.get(dm)!;
+  check("vis: working at post time (turn running)", w.state.phase === "working" && !w.frozen);
+}
+
+// ── W4.2: Stop task while a turn is running — /stop's behaviour, "Stopped" ─
+{
+  const m = makeWatchBot({ listMsgs: [{ type: "user", time: { created: 1 }, text: "hi" }] });
+  m.st.set(dm, { sessionID: "ses_1" });
+  (m.bot as any).userPrefs.setLang(7, "en");
+  await (m.bot as any).startWatch(dm, m.st.get(dm), 7);
+  m.bot.feedWatch("session.execution.started", { sessionID: "ses_1" });
+  await flush();
+  const preEdits = m.edits.length;
+  await (m.bot as any).handleWatchCallback(cb("w:" + m.bot.watches.get(dm)!.id + ":s"), dm);
+  await flush();
+  const w = m.bot.watches.get(dm)!;
+  check("stop: interrupt sent for the card's session", m.interruptCalls.length === 1 && m.interruptCalls[0] === "ses_1", JSON.stringify(m.interruptCalls));
+  check("stop: card stays (frozen, not deleted)", w.frozen && !m.deleted.includes(w.cardMsgId), JSON.stringify(m.deleted));
+  check("stop: phase stopped", w.state.phase === "stopped");
+  check("stop: ONE final edit showing Stopped", m.edits.length === preEdits + 1 && m.edits[preEdits].text.includes("Stopped"), JSON.stringify(m.edits.map((e) => e.text)));
+  check("stop: duration shown", /· \d+m? ?\d*s/.test(m.edits[preEdits]?.text ?? ""), m.edits[preEdits]?.text);
+  const rows = cardKb(m.edits[preEdits]);
+  check("stop: frozen keyboard (Close + Watch again, no Stop row)", rows.length === 2 && rows[0][0].callback_data.endsWith(":c") && rows[1][0].callback_data.endsWith(":r"), JSON.stringify(rows));
+  check("stop: tap acknowledged (neutral)", m.answers.length === 1 && (m.answers[0].text ?? "") === "", JSON.stringify(m.answers));
+  const st = byAction("watch_stop_task");
+  check("stop: watch_stop_task audited (session + user)", st.length === 1 && st[0].session === "ses_1" && st[0].userId === 7, JSON.stringify(st));
+  check("stop: no watch_end yet (written when the record is dropped)", byAction("watch_end").length === 0, JSON.stringify(byAction("watch_end")));
+}
+
+// ── W4.2: the "Stopped" wording is localized (vi) ──────────────────
+{
+  const m = makeWatchBot({ listMsgs: [] });
+  m.st.set(dm, { sessionID: "ses_1" });
+  (m.bot as any).userPrefs.setLang(7, "vi");
+  await (m.bot as any).startWatch(dm, m.st.get(dm), 7);
+  m.bot.feedWatch("session.execution.started", { sessionID: "ses_1" });
+  await flush();
+  const preEdits = m.edits.length;
+  await (m.bot as any).handleWatchCallback(cb("w:" + m.bot.watches.get(dm)!.id + ":s"), dm);
+  await flush();
+  check("stop-vi: final card says Đã dừng", m.edits.length === preEdits + 1 && m.edits[preEdits].text.includes("Đã dừng"), m.edits[preEdits]?.text);
+}
+
+// ── W4.2: tap when nothing is running → "not running", card stays live ──
+{
+  // Idle card (no turn): a stale "s" tap is answered neutrally, nothing changes.
+  const m = makeWatchBot({ listMsgs: [] });
+  m.st.set(dm, { sessionID: "ses_1" });
+  (m.bot as any).userPrefs.setLang(7, "en");
+  await (m.bot as any).startWatch(dm, m.st.get(dm), 7);
+  const preEdits = m.edits.length;
+  m.answers.length = 0;
+  await (m.bot as any).handleWatchCallback(cb("w:" + m.bot.watches.get(dm)!.id + ":s"), dm);
+  await flush();
+  check("notrunning: idle card → 'not running' answer", m.answers.length === 1 && /nothing is running/i.test(m.answers[0].text ?? ""), JSON.stringify(m.answers));
+  const w = m.bot.watches.get(dm)!;
+  check("notrunning: card stays live (not frozen, still idle)", !w.frozen && w.state.phase === "idle");
+  check("notrunning: no interrupt, no edit, no stop audit", m.interruptCalls.length === 0 && m.edits.length === preEdits && byAction("watch_stop_task").length === 0, JSON.stringify(m.interruptCalls));
+
+  // Same for a working card whose turn already ended (frozen "done"):
+  // the Stop row is gone, a stale tap finds nothing to stop.
+  m.bot.feedWatch("session.execution.started", { sessionID: "ses_1" });
+  m.bot.feedWatch("session.execution.succeeded", { sessionID: "ses_1" });
+  await flush();
+  check("notrunning: pre — turn ended, card frozen done", m.bot.watches.get(dm)!.frozen && m.bot.watches.get(dm)!.state.phase === "done");
+  const pre2 = m.edits.length;
+  m.answers.length = 0;
+  await (m.bot as any).handleWatchCallback(cb("w:" + m.bot.watches.get(dm)!.id + ":s"), dm);
+  await flush();
+  check("notrunning: frozen card → 'not running', no 2nd final edit", /nothing is running/i.test(m.answers[0]?.text ?? "") && m.edits.length === pre2, JSON.stringify(m.answers));
+  check("notrunning: still no interrupt / stop audit", m.interruptCalls.length === 0 && byAction("watch_stop_task").length === 0);
+}
+
+// ── W4.2: the double-tap race (spec §4) — the second tapper gets "not running" ─
+{
+  const m = makeWatchBot({ listMsgs: [] });
+  m.st.set(dm, { sessionID: "ses_1" });
+  (m.bot as any).userPrefs.setLang(7, "en");
+  (m.bot as any).userPrefs.setLang(8, "en");
+  await (m.bot as any).startWatch(dm, m.st.get(dm), 7);
+  m.bot.feedWatch("session.execution.started", { sessionID: "ses_1" });
+  await flush();
+  const id = m.bot.watches.get(dm)!.id;
+  await (m.bot as any).handleWatchCallback(cb("w:" + id + ":s", 7), dm); // tapper 1
+  await flush();
+  const preEdits = m.edits.length;
+  m.answers.length = 0;
+  // Tapper 2 (serialized behind tapper 1, as the conv queue runs them):
+  await (m.bot as any).handleWatchCallback(cb("w:" + id + ":s", 8), dm);
+  await flush();
+  check("double: second tap answered 'not running'", m.answers.length === 1 && /nothing is running/i.test(m.answers[0].text ?? ""), JSON.stringify(m.answers));
+  check("double: no second interrupt", m.interruptCalls.length === 1, JSON.stringify(m.interruptCalls));
+  check("double: no second final edit / no second stop audit", m.edits.length === preEdits && byAction("watch_stop_task").length === 1, JSON.stringify(byAction("watch_stop_task")));
+}
+
+// ── W4.3: "Stop task" is bound to the card's session (moved → refused) ───
+{
+  const m = makeWatchBot({ listMsgs: [] });
+  m.st.set(dm, { sessionID: "ses_1" });
+  (m.bot as any).userPrefs.setLang(7, "en");
+  await (m.bot as any).startWatch(dm, m.st.get(dm), 7);
+  m.bot.feedWatch("session.execution.started", { sessionID: "ses_1" });
+  await flush();
+  const id = m.bot.watches.get(dm)!.id;
+  m.st.set(dm, { sessionID: "ses_2" }); // the conversation moved on
+  m.answers.length = 0;
+  await (m.bot as any).handleWatchCallback(cb("w:" + id + ":s"), dm);
+  await flush();
+  check("stop-mismatch: refused (session moved)", m.answers.length === 1 && /another session/i.test(m.answers[0].text ?? ""), JSON.stringify(m.answers));
+  const w = m.bot.watches.get(dm)!;
+  check("stop-mismatch: nothing stopped (watch intact, still working)", !w.frozen && w.state.phase === "working" && m.interruptCalls.length === 0, JSON.stringify(m.interruptCalls));
+}
+
+// ── W4.4: post-restart — the in-memory registry is empty, stale tap → "expired" ─
+{
+  const m = makeWatchBot({ listMsgs: [] });
+  m.st.set(dm, { sessionID: "ses_1" });
+  (m.bot as any).userPrefs.setLang(7, "en");
+  // No watch was ever created for this id: after a restart every stale button
+  // lands here (registry empty ⇒ unknown id).
+  m.answers.length = 0;
+  await (m.bot as any).handleWatchCallback(cb("w:zzzz:s"), dm);
+  await flush();
+  check("expired: unknown id (post-restart) answers 'expired'", m.answers.length === 1 && /expired/i.test(m.answers[0].text ?? ""), JSON.stringify(m.answers));
+  check("expired: nothing changed (no watches, no interrupt, no audit)", m.bot.watches.size === 0 && m.interruptCalls.length === 0 && byAction("watch_stop_task").length === 0);
+  (m.bot as any).userPrefs.setLang(7, "vi");
+  m.answers.length = 0;
+  await (m.bot as any).handleWatchCallback(cb("w:zzzz:c"), dm);
+  await flush();
+  check("expired: vi wording", (m.answers[0]?.text ?? "") === "Hết hiệu lực.", JSON.stringify(m.answers));
+}
+
+// ── W4.3: taps work once — subsequent taps are swallowed neutrally ───
+{
+  const m = makeWatchBot({ listMsgs: [] });
+  m.st.set(dm, { sessionID: "ses_1" });
+  (m.bot as any).userPrefs.setLang(7, "en");
+  await (m.bot as any).startWatch(dm, m.st.get(dm), 7);
+  m.bot.feedWatch("session.execution.started", { sessionID: "ses_1" });
+  await flush();
+  const id = m.bot.watches.get(dm)!.id;
+  // Stop task once:
+  await (m.bot as any).handleWatchCallback(cb("w:" + id + ":s"), dm);
+  await flush();
+  m.answers.length = 0;
+  await (m.bot as any).handleWatchCallback(cb("w:" + id + ":s"), dm); // stale re-tap
+  await flush();
+  check("once: second Stop tap → 'not running', still one stop audit", /nothing is running/i.test(m.answers[0]?.text ?? "") && byAction("watch_stop_task").length === 1, JSON.stringify(m.answers));
+  // Watch again once (on the frozen card):
+  await (m.bot as any).handleWatchCallback(cb("w:" + id + ":r"), dm);
+  await flush();
+  const newId = m.bot.watches.get(dm)!.id;
+  check("once: Watch again created a NEW card (old id retired)", newId !== id && !m.bot.watches.get(dm)!.frozen, newId);
+  m.answers.length = 0;
+  await (m.bot as any).handleWatchCallback(cb("w:" + id + ":r"), dm); // re-tap on the OLD card
+  await flush();
+  check("once: stale 'Watch again' re-tap → 'expired'", /expired/i.test(m.answers[0]?.text ?? ""), JSON.stringify(m.answers));
+  // Close once:
+  await (m.bot as any).handleWatchCallback(cb("w:" + newId + ":c"), dm);
+  await flush();
+  m.answers.length = 0;
+  await (m.bot as any).handleWatchCallback(cb("w:" + newId + ":c"), dm); // re-tap
+  await flush();
+  check("once: second Close → 'expired' (record gone)", /expired/i.test(m.answers[0]?.text ?? "") && m.bot.watches.size === 0, JSON.stringify(m.answers));
+}
+
+// ── W4.3: every watch button passes the allow-list gate (like ns:/choice:) ──
+{
+  const m = makeWatchBot({ listMsgs: [] });
+  m.st.set(dm, { sessionID: "ses_1" });
+  (m.bot as any).userPrefs.setLang(7, "en");
+  (m.bot as any).userPrefs.setLang(9, "en");
+  m.cfg.allowAny = false;
+  m.cfg.allowedUserIds = [7];
+  await (m.bot as any).startWatch(dm, m.st.get(dm), 7);
+  m.bot.feedWatch("session.execution.started", { sessionID: "ses_1" });
+  await flush();
+  const id = m.bot.watches.get(dm)!.id;
+  const msg: any = { message_id: 1001, chat: { id: 7 }, is_topic_message: false };
+  m.answers.length = 0;
+  // A tapper outside the allow-list is refused at the gate, before any handler runs.
+  await (m.bot as any).handleCallback({ id: "cb_x", data: "w:" + id + ":s", from: { id: 9 }, message: msg });
+  await flush();
+  check("gate: non-allowlisted tapper refused", m.answers.length === 1 && /not allowed/i.test(m.answers[0].text ?? ""), JSON.stringify(m.answers));
+  check("gate: refusal changed nothing", m.bot.watches.get(dm) && !m.bot.watches.get(dm)!.frozen && m.interruptCalls.length === 0, JSON.stringify(m.interruptCalls));
+  // An allowlisted tapper passes the same gate and the stop runs.
+  m.answers.length = 0;
+  await (m.bot as any).handleCallback({ id: "cb_y", data: "w:" + id + ":s", from: { id: 7 }, message: msg });
+  await flush();
+  check("gate: allowlisted tapper passes and the stop runs", m.interruptCalls.length === 1 && m.bot.watches.get(dm)!.frozen, JSON.stringify(m.interruptCalls));
 }
 
 Date.now = realNow;
