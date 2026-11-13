@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.26.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.25.0...opencode-telegram-bot-v1.26.0) (2026-11-13)
+
+
+### Features
+
+* private-chat topic deep-links + 3 next-step/rotation review nits ([b913e76](https://github.com/tobbieswork/opencode-telegram-bot/commit/b913e7642a82ba6d5a1f39d72381c39ae9d56e19))
+* private-chat topic deep-links + 3 next-step/rotation review nits ([0f377cd](https://github.com/tobbieswork/opencode-telegram-bot/commit/0f377cd10e67db1c94046057a33fe26508e6cdb1))
+
 ## [1.25.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.24.0...opencode-telegram-bot-v1.25.0) (2026-11-13)
 
 
