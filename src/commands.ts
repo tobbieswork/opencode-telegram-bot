@@ -90,6 +90,7 @@ export const COMMANDS: BotCommand[] = [
   { cmd: "usage", desc: "Mức dùng context theo phiên + cảnh báo gần tràn", descEn: "Context usage per session + near-overflow warning", button: "📊 Usage", group: "control" },
   { cmd: "rotation", desc: "Sức khoẻ xoay phiên Manager (nền + lịch sử)", descEn: "Manager session rotation health (floor + history)", button: "♻️ Rotation", group: "control" },
   { cmd: "history", desc: "Xem tin nhắn gần đây", descEn: "View recent messages", button: "📜 Lịch sử", buttonEn: "📜 History", group: "control" },
+  { cmd: "watch", aliases: ["live"], desc: "Xem trực tiếp phiên đang chạy (thẻ tự cập nhật)", descEn: "Watch the live session (self-updating card)", group: "control" },
   { cmd: "status", desc: "Trạng thái kết nối", descEn: "Connection status", button: "🔌 Trạng thái", buttonEn: "🔌 Status", group: "control" },
   { cmd: "health", desc: "Sức khoẻ các hệ thống nền (OK / cảnh báo / lỗi)", descEn: "Health of the background subsystems (OK / warn / fail)", group: "control" },
   { cmd: "reboot", desc: "Reboot máy (2 bước xác nhận)", descEn: "Reboot the machine (2-step confirm)", button: "🔄 Reboot", group: "control" },

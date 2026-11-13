@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { loadDotEnv, loadConfig } from "./config.js";
+import { loadDotEnv, loadConfig, watchStartupWarning } from "./config.js";
 import { sweepUploads, UPLOADS_MAX_TOTAL_BYTES } from "./uploads.js";
 import { OpenCodeCtl } from "./opencode.js";
 import { Telegram } from "./telegram.js";
@@ -43,6 +43,10 @@ async function main(): Promise<void> {
   }
   log(`Default directory: ${cfg.opencodeDirectory}`);
   log(`State file: ${cfg.stateFile}`);
+  // W6.7: /watch is compiled in but can't run while the streaming preview is
+  // on — log it ONCE so the operator knows /watch is inactive, not broken.
+  const watchWarn = watchStartupWarning(cfg);
+  if (watchWarn) warn(watchWarn);
 
   const st = new StateManager(cfg.stateFile);
   // Append-only trail of prompts / spawns / dispatch decisions, next to the state file.
