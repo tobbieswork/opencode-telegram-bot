@@ -155,6 +155,13 @@ const THREAD_TARGETING_METHODS = new Set([
  * No framework dependency — the whole transport is visible in this file.
  */
 export class Telegram {
+  /**
+   * Delays between transport-level retries in api() (ms). Total attempts
+   * = retryDelaysMs.length + 1 (first attempt + one retry per delay).
+   * Overridable by tests (set a short array to keep the suite fast).
+   */
+  static retryDelaysMs = [1000, 2000, 3000];
+
   private offset = 0;
   private stopped = false;
   private abort = new AbortController();
@@ -203,7 +210,35 @@ export class Telegram {
     return `https://api.telegram.org/bot${this.token}/${method}`;
   }
 
+  /**
+   * Thin retry wrapper around apiOnce. Retries ONLY transport-level
+   * failures - the errors apiOnce marks with `network = true` (undici
+   * `fetch failed`, ECONNRESET, TLS drops...); Telegram HTTP errors
+   * (bad params, 429, ...) are NEVER retried - reaching Telegram means
+   * the network is working and the request was understood, so a retry
+   * just repeats the same error. An aborted request rethrows at once,
+   * no retry.
+   */
   private async api<T = unknown>(method: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+    const delays = Telegram.retryDelaysMs;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.apiOnce<T>(method, body, signal);
+      } catch (e) {
+        const retriable =
+          (e as any)?.network === true &&
+          !signal?.aborted &&
+          (e as Error)?.name !== "AbortError" &&
+          attempt < delays.length;
+        if (!retriable) throw e;
+        const delayMs = delays[attempt];
+        warn(`Telegram ${method} network error (attempt ${attempt + 1}/${delays.length + 1}), retrying in ${delayMs}ms`);
+        await new Promise<void>((r) => setTimeout(r, delayMs));
+      }
+    }
+  }
+
+  private async apiOnce<T = unknown>(method: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     let res: Response;
     try {
       res = await fetch(this.url(method), {
