@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.30.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.29.2...opencode-telegram-bot-v1.30.0) (2026-11-14)
+
+
+### Features
+
+* accept style numbers in /style ([#198](https://github.com/tobbieswork/opencode-telegram-bot/issues/198)) ([2630c86](https://github.com/tobbieswork/opencode-telegram-bot/commit/2630c86c373f4cf0ac92fe22a21aae9c3dafdc85))
+
 ## [1.29.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.29.1...opencode-telegram-bot-v1.29.2) (2026-11-14)
 
 
