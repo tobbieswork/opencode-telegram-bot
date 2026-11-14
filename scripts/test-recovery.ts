@@ -48,7 +48,7 @@ const OVF = "Requested token count exceeds the model's maximum context length of
   check("billing error → false", isOverflowError("billing error: insufficient credit") === false);
   check("generic failure → false", isOverflowError("Something went wrong upstream") === false);
   check("empty string → false", isOverflowError("") === false);
-  // Same classifier as formatTurnFailure (classifyFailure): rate limit > overflow > cap.
+  // Same classifier as formatTurnFailure (classifyFailure): rate limit > provider 5xx > overflow > cap.
   check("'context limit reached' is overflow (not a usage cap) → true", isOverflowError("context limit reached") === true);
   check("overflow wording + 'per minute' (rate limit wins) → false", isOverflowError("too many tokens per minute") === false);
   check("undefined → false", isOverflowError(undefined) === false);

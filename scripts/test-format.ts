@@ -202,15 +202,26 @@ const show = (label: string, units: string[]) => {
   check("fail: usage cap NOT ctx", !usageCap.includes("/clear") && !usageCap.includes("đầy context"), usageCap);
   check("fail: usage cap shows raw detail", usageCap.includes("Free usage limit reached"), usageCap);
 
-  // A generic (non-rate, non-context) error shows the raw message + type + elapsed.
+  // A provider-side 5xx (e.g. a platform outage) is transient: wait and retry —
+  // no /clear, no rate-limit label, no usage-cap label.
+  const provDown = formatTurnFailure({ type: "provider.error", message: "503 Service Unavailable" }, 3000);
+  console.log(`\n== provider down (5xx) ==\n${provDown}\n`);
+  check("fail: 5xx labelled as 5xx", provDown.includes("5xx"), provDown);
+  check("fail: 5xx NOT ctx (no /clear)", !provDown.includes("đầy context") && !provDown.includes("/clear"), provDown);
+  check("fail: 5xx NOT rate-limit", !provDown.includes("giới hạn tốc độ"), provDown);
+  check("fail: 5xx NOT usage cap", !provDown.includes("hết hạn mức"), provDown);
+  check("fail: 5xx shows raw detail", provDown.includes("503 Service Unavailable"), provDown);
+
+  // A generic (non-rate, non-5xx, non-context) error shows the raw message + type + elapsed.
   const other = formatTurnFailure(
-    { type: "provider.error", message: "Internal error 500: server exploded" },
+    { type: "provider.error", message: "The request could not be completed" },
     1200,
   );
   console.log(`\n== generic provider error ==\n${other}\n`);
   check("fail: other shows type", other.includes("provider.error"), other);
-  check("fail: other shows message", other.includes("server exploded"), other);
+  check("fail: other shows message", other.includes("The request could not be completed"), other);
   check("fail: other not mislabeled as ctx", !other.includes("đầy context"), other);
+  check("fail: other not mislabeled as 5xx", !other.includes("5xx"), other);
   check("fail: other shows elapsed", other.includes("1.2s"), other);
 
   const none = formatTurnFailure(undefined, 500);
@@ -224,6 +235,7 @@ const show = (label: string, units: string[]) => {
     ["ratePerMinute", ratePerMinute],
     ["usageCap", usageCap],
     ["ctxAnthropic", ctxAnthropic],
+    ["provDown", provDown],
     ["other", other],
     ["none", none],
   ] as const) {
@@ -284,6 +296,10 @@ const show = (label: string, units: string[]) => {
   check("classify: weak 'too many tokens' alone → overflow", classifyFailure("You have provided too many tokens") === "overflow");
   check("classify: 'too many tokens per minute' → rate limit", classifyFailure("too many tokens per minute") === "rate-limit");
   check("classify: 'usage limit … per minute' stays rate limit", classifyFailure("usage limit hit, 50 per minute") === "rate-limit");
+  check("classify: 503 → provider-down", classifyFailure("503 Service Unavailable") === "provider-down");
+  check("classify: 'Internal server error' → provider-down", classifyFailure("Internal server error") === "provider-down");
+  check("classify: '529 Overloaded' stays rate-limit (overload wins)", classifyFailure("529 Overloaded") === "rate-limit");
+  check("classify: '150000 tokens' is NOT a 5xx", classifyFailure("requested 150000 tokens") === undefined);
   check("classify: unknown → undefined", classifyFailure("Something went wrong") === undefined);
   check("isOverflowError agrees", isOverflowError("context limit reached") === true && isOverflowError("monthly usage cap quota") === false);
   const capMsg = formatTurnFailure({ message: "context limit reached" }, 1000);

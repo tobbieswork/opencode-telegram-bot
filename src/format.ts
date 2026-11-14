@@ -31,6 +31,14 @@ export function trunc(s: string, n: number): string {
 /** Transient provider RATE LIMIT — NOT a full context, so /clear won't help; retrying shortly does. */
 const RATE_LIMIT_RE = /rate ?limit|per (minute|hour|day)|too many requests|requests per (minute|hour)|throttl|overloaded/i;
 
+/**
+ * Provider-side SERVER failure (5xx) — the provider is down or failing at the
+ * HTTP level (e.g. a platform outage). Transient like a rate limit: waiting
+ * helps; /clear and /model do not. A standalone 3-digit 5xx status (\b keeps
+ * "150000 tokens" from matching) or a canonical 5xx phrase.
+ */
+const PROVIDER_DOWN_RE = /\b5\d\d\b|internal server error|bad gateway|gateway time-?out|service unavailable/i;
+
 /** A plan/quota/credit cap — does NOT clear in seconds, so "wait a moment" would be wrong advice. */
 const USAGE_CAP_RE = /usage limit|quota|limit reached|insufficient (credit|balance|fund)|out of credit|billing/i;
 
@@ -39,18 +47,21 @@ const CONTEXT_OVERFLOW_RE = /context (length|window|limit|size)|maximum context|
 /** Weaker overflow wording ("too many tokens"): also used by quota errors, so a cap word vetoes it. */
 const WEAK_OVERFLOW_RE = /too many tokens/i;
 
-export type FailureKind = "rate-limit" | "overflow" | "usage-cap";
+export type FailureKind = "rate-limit" | "provider-down" | "overflow" | "usage-cap";
 
 /**
  * Classify a provider error text. ONE classifier for both what the user is told
  * (formatTurnFailure) and what the bot does (worker auto-respawn), so the two can
- * never disagree. Precedence: rate limit > context overflow > usage cap.
- * Overflow beats the cap because USAGE_CAP_RE is broad ("limit reached") and a
+ * never disagree. Precedence: rate limit > provider 5xx > context overflow >
+ * usage cap. Provider-down beats overflow because real overflow rejections are
+ * 4xx — a 5xx in the text signals the provider, not the prompt. Overflow beats
+ * the cap because USAGE_CAP_RE is broad ("limit reached") and a
  * "context limit reached" error must say /clear, not "switch model"; only the
  * weak "too many tokens" wording yields to a cap word (quota/billing…).
  */
 export function classifyFailure(text: string): FailureKind | undefined {
   if (RATE_LIMIT_RE.test(text)) return "rate-limit";
+  if (PROVIDER_DOWN_RE.test(text)) return "provider-down";
   if (CONTEXT_OVERFLOW_RE.test(text)) return "overflow";
   if (USAGE_CAP_RE.test(text)) return "usage-cap";
   if (WEAK_OVERFLOW_RE.test(text)) return "overflow";
@@ -67,7 +78,8 @@ export function isOverflowError(text: string): boolean {
  * almost always means the provider rejected the request. The raw error comes
  * from the newest assistant / idle / compaction message's `.error` field (the
  * session object carries none). We distinguish a *rate limit* (wait and retry —
- * /clear is useless) from a *usage cap* (wait for a reset or switch model) and
+ * /clear is useless), a *provider 5xx* (provider down/outage — wait and retry,
+ * no /clear) from a *usage cap* (wait for a reset or switch model) and
  * from *context overflow* (auto-compacted; /clear if unrecoverable), then fall back to the raw message.
  */
 export function formatTurnFailure(
@@ -86,6 +98,12 @@ export function formatTurnFailure(
         lang,
         `⏳ Provider đang giới hạn tốc độ (rate limit) — không phải lỗi context, chờ vài giây rồi thử lại.${detail}`,
         `⏳ The provider is rate limiting — not a context error; wait a few seconds and try again.${detail}`,
+      );
+    case "provider-down":
+      return tr(
+        lang,
+        `⚠️ <b>Provider báo lỗi phía server</b> (5xx, có thể provider đang gặp sự cố) — không phải lỗi context hay rate limit. Chờ một lúc rồi thử lại.${detail}`,
+        `⚠️ <b>Provider server error</b> (5xx, e.g. the provider is down) — not a context or rate-limit problem. Wait a moment and retry.${detail}`,
       );
     case "overflow":
       // Since OpenCode 2.2.5 an overflow triggers auto-compaction (and a
