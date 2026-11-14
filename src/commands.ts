@@ -98,6 +98,7 @@ export const COMMANDS: BotCommand[] = [
   { cmd: "queue", arg: "[clear]", desc: "Xem/xoá tin đang chờ trong hàng đợi", descEn: "View/clear messages in the queue", group: "control" },
   { cmd: "schedule", arg: "<spec> <prompt>", desc: "Đặt lịch chạy prompt tự động", descEn: "Schedule an automated prompt run", button: "⏰ Lịch", buttonEn: "⏰ Schedule", group: "control" },
   { cmd: "lang", arg: "vi|en", desc: "Đặt ngôn ngữ: vi (Tiếng Việt) / en (English)", descEn: "Set language: vi (Tiếng Việt) / en (English)", group: "control" },
+  { cmd: "style", arg: "[default|concise|explanatory|learning|proactive]", desc: "Đặt style trả lời (trống = xem danh sách)", descEn: "Set reply style (empty = view the list)", group: "control" },
   { cmd: "help", desc: "Danh sách lệnh + nút bấm", descEn: "Command list + buttons", button: "📖 Help", group: "control" },
 ];
 

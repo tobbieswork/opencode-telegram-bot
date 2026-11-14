@@ -196,6 +196,7 @@ bot:   The last commit adds retry logic but…
 | `/health` | One line per background subsystem (OpenCode, bridge, scheduler, PR-watch, advisor, uptime, DNS heal): OK / warn / fail / off, with time of last success |
 | `/schedule <spec> <prompt>` | Schedule a prompt to run automatically |
 | `/lang vi\|en` | Set the language: `vi` (Tiếng Việt) or `en` (English) |
+| `/style [name]` | Set the reply style: `default` / `concise` / `explanatory` / `learning` / `proactive` (empty = view the list) |
 | `/reboot` | Reboot the machine (2-step confirmation) |
 
 ### When OpenCode asks a question

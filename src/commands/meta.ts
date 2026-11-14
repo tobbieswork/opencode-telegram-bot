@@ -15,7 +15,8 @@ import { QUESTIONS_PREAMBLE, NOTES_KEY } from "../shared.js";
 import { renderRotationReport } from "../rotation-health.js";
 import { collectHealth, formatHealth } from "../health.js";
 import { buildProbes } from "../health-probes.js";
-import { tr, STRINGS } from "../i18n.js";
+import { tr, STRINGS, type Str } from "../i18n.js";
+import { STYLE_NAMES, type StyleName } from "../style.js";
 import type { Lang } from "../state.js";
 
 /** `/help` — grouped command list + tappable button grid. Localized by the caller's lang. */
@@ -349,4 +350,54 @@ export async function cmdLang(bot: Bot, conv: ConvKey, arg: string, uid?: number
   // The /autocomplete menu is bot-global: re-register it in the new language
   // so it doesn't stay in the old one until the next bot restart.
   void bot.tg.setMyCommands(myCommands(lang as Lang)).catch((e) => warn("setMyCommands:", (e as Error).message));
+}
+
+/** One-line list entries and confirmations for each style (bilingual). */
+const STYLE_DESC: Record<StyleName, Str> = {
+  default: STRINGS.style_default,
+  concise: STRINGS.style_concise,
+  explanatory: STRINGS.style_explanatory,
+  learning: STRINGS.style_learning,
+  proactive: STRINGS.style_proactive,
+};
+const STYLE_SET: Record<StyleName, Str> = {
+  default: STRINGS.style_set_default,
+  concise: STRINGS.style_set_concise,
+  explanatory: STRINGS.style_set_explanatory,
+  learning: STRINGS.style_set_learning,
+  proactive: STRINGS.style_set_proactive,
+};
+
+/**
+ * `/style [default|concise|explanatory|learning|proactive]` — set the user's
+ * output style. Stored per-user (not per-chat, like /lang) and pinned to the
+ * Manager conversation so replies match the style. No argument → show the
+ * current style + the full list; an invalid argument → usage + list.
+ */
+export async function cmdStyle(bot: Bot, conv: ConvKey, arg: string, uid?: number): Promise<void> {
+  const cur = bot.userPrefs.getStyle(uid ?? "");
+  const lang = bot.userPrefs.getLang(uid ?? "");
+  const list = STYLE_NAMES.map((n) => tr(lang, STYLE_DESC[n].vi, STYLE_DESC[n].en)).join("\n");
+  const a = arg.trim().toLowerCase();
+  if (a === "") {
+    await bot.sendHtml(
+      conv,
+      `${tr(lang, STRINGS.style_current.vi, STRINGS.style_current.en)}<b>${esc(cur)}</b>\n${list}\n${tr(lang, STRINGS.style_usage.vi, STRINGS.style_usage.en)}`,
+    );
+    return;
+  }
+  if (!STYLE_NAMES.includes(a as StyleName)) {
+    await bot.sendHtml(
+      conv,
+      `${tr(lang, STRINGS.style_unknown.vi, STRINGS.style_unknown.en)}${esc(a)}\n${tr(lang, STRINGS.style_usage.vi, STRINGS.style_usage.en)}\n${list}`,
+    );
+    return;
+  }
+  if (uid == null) {
+    await bot.tg.sendMessage(conv, "⚠️ Cannot identify user.");
+    return;
+  }
+  bot.userPrefs.setStyle(uid, a as StyleName);
+  const set = STYLE_SET[a as StyleName];
+  await bot.tg.sendMessage(conv, tr(lang, set.vi, set.en));
 }

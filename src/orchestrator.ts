@@ -27,6 +27,7 @@ import { onTopicDeleted, reapPendingTopicDeletes } from "./orchestrator/topics.j
 import { workerIntroHtml, approvalLines } from "./orchestrator/templates.js";
 import { applyLanguagePin, detectTaskLang } from "./language.js";
 import { applySuggestPin } from "./suggest.js";
+import { applyStylePin } from "./style.js";
 import type { Schedule } from "./schedule.js";
 import type { Advisor } from "./advisor/advisor.js";
 import { AGENTS, agentLabel, resolveAgent } from "./advisor/agents.js";
@@ -1237,6 +1238,8 @@ export class Orchestrator {
     await applyLanguagePin(this.h.oc, this.h.st, conv, this.h.st.get(conv).sessionID!, lang);
     // Quick replies (R2): pin the [OPTIONS] instruction on the Manager session when enabled.
     await applySuggestPin(this.h.oc, this.h.st, conv, this.h.st.get(conv).sessionID!, this.h.cfg.suggest);
+    // Per-user output style: pin the style instruction on the Manager session when set ("default" = no pin).
+    await applyStylePin(this.h.oc, this.h.st, conv, this.h.st.get(conv).sessionID!, this.h.userPrefs?.getStyle(this.h.st.peek(conv)?.createdBy ?? "") ?? "default");
     await this.h.prepareNotes?.(conv, this.h.st.get(conv).sessionID!); // /note: surface pending notes this turn
     try {
       await this.h.oc.prompt(this.h.st.get(conv).sessionID!, text);
