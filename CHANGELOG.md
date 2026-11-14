@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.29.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.29.1...opencode-telegram-bot-v1.29.2) (2026-11-14)
+
+
+### Bug Fixes
+
+* make /style usage hint HTML-safe so the command responds ([#196](https://github.com/tobbieswork/opencode-telegram-bot/issues/196)) ([4060876](https://github.com/tobbieswork/opencode-telegram-bot/commit/406087667065b80cda080bfe0bd0d5629c0ac396))
+
 ## [1.29.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.29.0...opencode-telegram-bot-v1.29.1) (2026-11-14)
 
 
