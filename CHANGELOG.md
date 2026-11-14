@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.29.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.29.0...opencode-telegram-bot-v1.29.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* classify provider 5xx as a transient wait-and-retry error ([#194](https://github.com/tobbieswork/opencode-telegram-bot/issues/194)) ([a43e684](https://github.com/tobbieswork/opencode-telegram-bot/commit/a43e6846d25d6366a30022a7ac24da97a569a41b))
+
 ## [1.29.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.28.0...opencode-telegram-bot-v1.29.0) (2026-11-14)
 
 
