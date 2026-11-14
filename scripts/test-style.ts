@@ -226,7 +226,7 @@ function makeStyleBot() {
   const list = htmls[0] ?? "";
   check("no-arg shows current style", list.includes("<b>default</b>"), list);
   for (const n of STYLE_NAMES) check(`no-arg lists ${n}`, list.includes(n), list);
-  check("no-arg shows the usage hint", list.includes("/style <default|concise|explanatory|learning|proactive>"), list);
+  check("no-arg shows the usage hint", list.includes("/style [default|concise|explanatory|learning|proactive]"), list);
 
   // Valid arg → sets + confirms.
   await cmdStyle(bot, conv, "concise", uid);
@@ -243,7 +243,7 @@ function makeStyleBot() {
   await cmdStyle(bot, conv, "bogus", uid);
   check("invalid arg does not change the pref", bot.userPrefs.getStyle(uid) === before);
   check("invalid arg replies with the offending arg", htmls.length === 2 && htmls[1].includes("bogus"), (htmls[1] ?? "").slice(0, 120));
-  check("invalid arg shows the usage hint", (htmls[1] ?? "").includes("/style <default|concise|explanatory|learning|proactive>"), (htmls[1] ?? "").slice(0, 200));
+  check("invalid arg shows the usage hint", (htmls[1] ?? "").includes("/style [default|concise|explanatory|learning|proactive]"), (htmls[1] ?? "").slice(0, 200));
 
   // "default" clears back to stock behavior.
   await cmdStyle(bot, conv, "default", uid);

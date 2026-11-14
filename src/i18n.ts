@@ -91,8 +91,8 @@ export const STRINGS = {
   },
   // ── /style (per-user output style) ─────────────────────────────────────────
   style_usage: {
-    vi: "Dùng: /style <default|concise|explanatory|learning|proactive>",
-    en: "Usage: /style <default|concise|explanatory|learning|proactive>",
+    vi: "Dùng: /style [default|concise|explanatory|learning|proactive]",
+    en: "Usage: /style [default|concise|explanatory|learning|proactive]",
   },
   style_current: {
     vi: "🎨 Style hiện tại: ",
