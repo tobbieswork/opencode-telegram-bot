@@ -29,6 +29,20 @@ export type StyleName = "default" | "concise" | "explanatory" | "learning" | "pr
 /** All styles, in display order (default first). */
 export const STYLE_NAMES: StyleName[] = ["default", "concise", "explanatory", "learning", "proactive"];
 
+/**
+ * Resolve a `/style` argument — a 1-based number string ("1".."5", mapped into
+ * STYLE_NAMES order) or a style name — to a valid style, or null when it
+ * matches neither. Whitespace is trimmed; matching is case-insensitive.
+ */
+export function resolveStyleArg(a: string): StyleName | null {
+  const s = a.trim().toLowerCase();
+  if (s === "") return null;
+  if (/^\d+$/.test(s)) {
+    return STYLE_NAMES[Number(s) - 1] ?? null;
+  }
+  return STYLE_NAMES.includes(s as StyleName) ? (s as StyleName) : null;
+}
+
 /** Instruction key for the output-style pin (namespaced `api/<key>`). */
 export const STYLE_KEY = "tgbot.style";
 

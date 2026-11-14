@@ -16,7 +16,7 @@ import { renderRotationReport } from "../rotation-health.js";
 import { collectHealth, formatHealth } from "../health.js";
 import { buildProbes } from "../health-probes.js";
 import { tr, STRINGS, type Str } from "../i18n.js";
-import { STYLE_NAMES, type StyleName } from "../style.js";
+import { STYLE_NAMES, resolveStyleArg, type StyleName } from "../style.js";
 import type { Lang } from "../state.js";
 
 /** `/help` — grouped command list + tappable button grid. Localized by the caller's lang. */
@@ -369,15 +369,18 @@ const STYLE_SET: Record<StyleName, Str> = {
 };
 
 /**
- * `/style [default|concise|explanatory|learning|proactive]` — set the user's
- * output style. Stored per-user (not per-chat, like /lang) and pinned to the
+ * `/style [1-5|name]` — set the user's output style by number (1-based, in
+ * STYLE_NAMES order) or by name. Stored per-user (not per-chat, like /lang) and pinned to the
  * Manager conversation so replies match the style. No argument → show the
  * current style + the full list; an invalid argument → usage + list.
  */
 export async function cmdStyle(bot: Bot, conv: ConvKey, arg: string, uid?: number): Promise<void> {
   const cur = bot.userPrefs.getStyle(uid ?? "");
   const lang = bot.userPrefs.getLang(uid ?? "");
-  const list = STYLE_NAMES.map((n) => tr(lang, STYLE_DESC[n].vi, STYLE_DESC[n].en)).join("\n");
+  const list = STYLE_NAMES.map((n, i) => {
+    const marker = n === cur ? ` ${tr(lang, STRINGS.style_current_marker.vi, STRINGS.style_current_marker.en)}` : "";
+    return `${i + 1}. ${n}${marker}`;
+  }).join("\n");
   const a = arg.trim().toLowerCase();
   if (a === "") {
     await bot.sendHtml(
@@ -386,7 +389,8 @@ export async function cmdStyle(bot: Bot, conv: ConvKey, arg: string, uid?: numbe
     );
     return;
   }
-  if (!STYLE_NAMES.includes(a as StyleName)) {
+  const resolved = resolveStyleArg(a);
+  if (resolved === null) {
     await bot.sendHtml(
       conv,
       `${tr(lang, STRINGS.style_unknown.vi, STRINGS.style_unknown.en)}${esc(a)}\n${tr(lang, STRINGS.style_usage.vi, STRINGS.style_usage.en)}\n${list}`,
@@ -397,7 +401,7 @@ export async function cmdStyle(bot: Bot, conv: ConvKey, arg: string, uid?: numbe
     await bot.tg.sendMessage(conv, "⚠️ Cannot identify user.");
     return;
   }
-  bot.userPrefs.setStyle(uid, a as StyleName);
-  const set = STYLE_SET[a as StyleName];
+  bot.userPrefs.setStyle(uid, resolved);
+  const set = STYLE_SET[resolved];
   await bot.tg.sendMessage(conv, tr(lang, set.vi, set.en));
 }

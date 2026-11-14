@@ -91,12 +91,16 @@ export const STRINGS = {
   },
   // ── /style (per-user output style) ─────────────────────────────────────────
   style_usage: {
-    vi: "Dùng: /style [default|concise|explanatory|learning|proactive]",
-    en: "Usage: /style [default|concise|explanatory|learning|proactive]",
+    vi: "Dùng: /style [1|2|3|4|5] — hoặc nhập tên",
+    en: "Usage: /style [1|2|3|4|5] — or type a name",
   },
   style_current: {
     vi: "🎨 Style hiện tại: ",
     en: "Current style: ",
+  },
+  style_current_marker: {
+    vi: "← hiện tại",
+    en: "← current",
   },
   style_unknown: {
     vi: "❌ Style không rõ: ",
