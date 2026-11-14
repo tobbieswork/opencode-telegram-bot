@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.29.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.28.0...opencode-telegram-bot-v1.29.0) (2026-11-14)
+
+
+### Features
+
+* add /style output-style command (per-user, 5 styles) ([#192](https://github.com/tobbieswork/opencode-telegram-bot/issues/192)) ([d2479fe](https://github.com/tobbieswork/opencode-telegram-bot/commit/d2479fe835b6b69dfc50a6439edb0ae9bca50ddc))
+
 ## [1.28.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.27.0...opencode-telegram-bot-v1.28.0) (2026-11-13)
 
 
