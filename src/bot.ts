@@ -17,6 +17,7 @@ import { esc, stripTags, chunk, trunc, mdToHtmlChunks, formatTurnFailure, isOver
 import { tr, STRINGS } from "./i18n.js";
 import { applyLanguagePin } from "./language.js";
 import { applySuggestPin } from "./suggest.js";
+import { applyStylePin } from "./style.js";
 import {
   extractMedia,
   buildPromptText,
@@ -65,7 +66,7 @@ import type { Btn, Keyboard } from "./shared.js";
 import { cmdAgents, cmdAgent, handleAgentCallback } from "./commands/agents.js";
 import { cmdSchedule, handleScheduleCallback } from "./commands/schedule.js";
 import { Advisor } from "./advisor/advisor.js";
-import { cmdHelp, cmdStatus, cmdHealth, cmdContext, cmdUsage, cmdHistory, cmdNote, cmdRotation, handleNoteCallback, cmdLang } from "./commands/meta.js";
+import { cmdHelp, cmdStatus, cmdHealth, cmdContext, cmdUsage, cmdHistory, cmdNote, cmdRotation, handleNoteCallback, cmdLang, cmdStyle } from "./commands/meta.js";
 import {
   clampWatchInterval,
   createWatch,
@@ -2129,6 +2130,8 @@ export class Bot {
         return cmdSchedule(this, conv, arg, state, uid);
       case "/lang":
         return cmdLang(this, conv, arg, uid);
+      case "/style":
+        return cmdStyle(this, conv, arg, uid);
       default:
         return this.tg.sendMessage(conv, `Unknown command: ${esc(cmd)}\nSend /help`);
     }
@@ -2617,6 +2620,10 @@ export class Bot {
       await applyLanguagePin(this.oc, this.st, conv, sid, lang);
       // Quick replies (R2): pin the [OPTIONS] instruction when enabled; idempotent + self-tracked.
       await applySuggestPin(this.oc, this.st, conv, sid, this.cfg.suggest);
+      // Per-user output style: pin the style instruction when set ("default" = no pin); idempotent + self-tracked.
+      // uid source: the conv's last driver (createdBy, set from the sender uid on every user message) —
+      // the same resolution the orchestrator uses for the Manager pin.
+      await applyStylePin(this.oc, this.st, conv, sid, this.userPrefs.getStyle(state.createdBy ?? ""));
       // "Stay in the user's language" is a per-session INSTRUCTION (OpenCode
       // injects `api/*` entries into the system context), not prepended text —
       // cleaner and it doesn't grow the user-turn context. Tracked per SESSION

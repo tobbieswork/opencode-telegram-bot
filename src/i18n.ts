@@ -89,6 +89,59 @@ export const STRINGS = {
     vi: "Dùng: /lang vi hoặc /lang en",
     en: "Usage: /lang vi or /lang en",
   },
+  // ── /style (per-user output style) ─────────────────────────────────────────
+  style_usage: {
+    vi: "Dùng: /style <default|concise|explanatory|learning|proactive>",
+    en: "Usage: /style <default|concise|explanatory|learning|proactive>",
+  },
+  style_current: {
+    vi: "🎨 Style hiện tại: ",
+    en: "Current style: ",
+  },
+  style_unknown: {
+    vi: "❌ Style không rõ: ",
+    en: "❌ Unknown style: ",
+  },
+  style_default: {
+    vi: "• default — mặc định, không áp thêm hướng dẫn nào",
+    en: "• default — no extra instruction (stock behavior)",
+  },
+  style_concise: {
+    vi: "• concise — ngắn gọn: kết quả trước, không mở đầu, không tóm tắt cuối",
+    en: "• concise — result first, no preamble or closing summary",
+  },
+  style_explanatory: {
+    vi: "• explanatory — kèm khối '★ Insight' giải thích vì sao chọn cách làm đó",
+    en: "• explanatory — adds a short '★ Insight' block on the why",
+  },
+  style_learning: {
+    vi: "• learning — giải thích + chừa '// TODO: you' để bạn tự viết",
+    en: "• learning — explanatory + '// TODO: you' stubs to fill in",
+  },
+  style_proactive: {
+    vi: "• proactive — chủ động làm ngay, chỉ hỏi khi quyết định quan trọng/mạo hiểm",
+    en: "• proactive — acts immediately; only asks on high-risk decisions",
+  },
+  style_set_default: {
+    vi: "✅ Style: mặc định (không áp thêm hướng dẫn)",
+    en: "✅ Style: default (no extra instruction)",
+  },
+  style_set_concise: {
+    vi: "✅ Style: concise (ngắn gọn)",
+    en: "✅ Style: concise",
+  },
+  style_set_explanatory: {
+    vi: "✅ Style: explanatory (kèm insight)",
+    en: "✅ Style: explanatory (with insight)",
+  },
+  style_set_learning: {
+    vi: "✅ Style: learning (kèm TODO cho bạn tự viết)",
+    en: "✅ Style: learning (with TODO stubs)",
+  },
+  style_set_proactive: {
+    vi: "✅ Style: proactive (chủ động)",
+    en: "✅ Style: proactive",
+  },
   unknown_command: {
     vi: "Lệnh không rõ",
     en: "Unknown command",

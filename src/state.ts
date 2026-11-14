@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
 import { ConvKey, chatOf } from "./conv.js";
+import type { StyleName } from "./style.js";
 import type { PrSnapshot } from "./pr-watch.js";
 import type { AgentId } from "./advisor/agents.js";
 import type { RotationHistoryEntry, FloorTrendEntry } from "./rotation-health.js";
@@ -153,6 +154,10 @@ export interface ChatState {
   suggestSession?: string;
   /** Fingerprint (SUGGEST_VERSION) of the instruction text applied to suggestSession; a text change re-pins. */
   suggestVersion?: string;
+  /** Session the per-user output-style instruction was applied to (self-tracked like suggestSession). */
+  styleSession?: string;
+  /** Fingerprint (styleVersionFor) of the style text applied to styleSession; a text/style change re-pins. */
+  styleVersion?: string;
   /**
    * The Telegram uid that last drove this conversation. Lets the orchestrator
    * (which has no message uid) resolve the conv owner's language preference for
@@ -270,6 +275,8 @@ export type Lang = "vi" | "en";
 /** Per-user preferences (keyed by Telegram user ID). */
 export interface UserPrefs {
   language?: Lang;
+  /** Output style pinned to the user's Manager conversation (default = no injection). */
+  style?: StyleName;
 }
 
 /**
@@ -310,6 +317,19 @@ export class UserPrefsStore {
     const key = String(userId);
     if (!this.data[key]) this.data[key] = {};
     this.data[key].language = lang;
+    this.save();
+  }
+
+  /** Returns the user's output style, defaulting to "default" (no injection). */
+  getStyle(userId: string | number): StyleName {
+    return this.data[String(userId)]?.style ?? "default";
+  }
+
+  /** Set the user's output style preference and persist. */
+  setStyle(userId: string | number, style: StyleName): void {
+    const key = String(userId);
+    if (!this.data[key]) this.data[key] = {};
+    this.data[key].style = style;
     this.save();
   }
 
