@@ -226,7 +226,9 @@ function makeStyleBot() {
   const list = htmls[0] ?? "";
   check("no-arg shows current style", list.includes("<b>default</b>"), list);
   for (const n of STYLE_NAMES) check(`no-arg lists ${n}`, list.includes(n), list);
-  check("no-arg shows the usage hint", list.includes("/style [default|concise|explanatory|learning|proactive]"), list);
+  check("no-arg lists styles as numbered lines", list.includes("1. default") && list.includes("2. concise") && list.includes("5. proactive"), list);
+  check("no-arg marks exactly one style as current", (list.match(/←/g) ?? []).length === 1, list);
+  check("no-arg shows the usage hint", list.includes("/style [1|2|3|4|5]"), list);
 
   // Valid arg → sets + confirms.
   await cmdStyle(bot, conv, "concise", uid);
@@ -243,7 +245,7 @@ function makeStyleBot() {
   await cmdStyle(bot, conv, "bogus", uid);
   check("invalid arg does not change the pref", bot.userPrefs.getStyle(uid) === before);
   check("invalid arg replies with the offending arg", htmls.length === 2 && htmls[1].includes("bogus"), (htmls[1] ?? "").slice(0, 120));
-  check("invalid arg shows the usage hint", (htmls[1] ?? "").includes("/style [default|concise|explanatory|learning|proactive]"), (htmls[1] ?? "").slice(0, 200));
+  check("invalid arg shows the usage hint", (htmls[1] ?? "").includes("/style [1|2|3|4|5]"), (htmls[1] ?? "").slice(0, 200));
 
   // "default" clears back to stock behavior.
   await cmdStyle(bot, conv, "default", uid);
@@ -253,6 +255,34 @@ function makeStyleBot() {
   // No-arg now shows the updated current style.
   await cmdStyle(bot, conv, "", uid);
   check("no-arg reflects the updated current style", (htmls[2] ?? "").includes("<b>default</b>"), (htmls[2] ?? "").slice(0, 120));
+}
+
+// ── cmdStyle: numbers (1-based) resolve to the fixed STYLE_NAMES order ────────
+{
+  const { bot, htmls } = makeStyleBot();
+  const uid = 888;
+  const byNumber: Array<[string, StyleName]> = [
+    ["1", "default"],
+    ["2", "concise"],
+    ["3", "explanatory"],
+    ["4", "learning"],
+    ["5", "proactive"],
+  ];
+  for (const [num, want] of byNumber) {
+    await cmdStyle(bot, conv, num, uid);
+    check(`number ${num} → ${want}`, bot.userPrefs.getStyle(uid) === want);
+  }
+  // Out-of-range numbers are invalid: pref unchanged, usage hint shown.
+  const before = bot.userPrefs.getStyle(uid);
+  const h0 = htmls.length;
+  for (const bad of ["0", "6", "99"]) {
+    await cmdStyle(bot, conv, bad, uid);
+  }
+  check("out-of-range numbers leave the pref unchanged", bot.userPrefs.getStyle(uid) === before);
+  check("out-of-range numbers reply with the usage hint", htmls.length === h0 + 3 && htmls.slice(h0).every((h) => h.includes("/style [1|2|3|4|5]")), htmls.slice(h0).join("|").slice(0, 200));
+  // A name still resolves (backward compatible).
+  await cmdStyle(bot, conv, "concise", uid);
+  check("name still resolves (backward compatible)", bot.userPrefs.getStyle(uid) === "concise");
 }
 
 if (failures > 0) {
