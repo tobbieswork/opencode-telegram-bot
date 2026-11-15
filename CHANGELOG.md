@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.30.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.30.0...opencode-telegram-bot-v1.30.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* mask JWT bearer tokens in the redact guard ([#200](https://github.com/tobbieswork/opencode-telegram-bot/issues/200)) ([8e1321a](https://github.com/tobbieswork/opencode-telegram-bot/commit/8e1321a33a92dc284168e3098cd5b42e438ed02e))
+
 ## [1.30.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.29.2...opencode-telegram-bot-v1.30.0) (2026-11-14)
 
 
