@@ -6,7 +6,8 @@
  * into its output (env dumps, .env reads, credential-file contents, command
  * output), the relay must not carry it to that channel. Same class of incident
  * as the Claude Code User-Agent email leak (anthropics/claude-code#107757,
- * 2026-11-05): agent tooling leaking credentials into third-party traffic.
+ * 2026-11-05) or the Cursor/Fireworks marketplace breach (2026-11-13), where
+ * copied agent traces carried unredacted credentials.
  *
  * The guard is a pure, always-on function with no config surface: it replaces
  * only strings matching KNOWN secret formats, keeping a first4…last4
@@ -36,6 +37,9 @@ const PATTERNS: Array<[RegExp, (m: string) => string]> = [
   [/\bxox[baprs]-[A-Za-z0-9-]{10,255}\b/g, mask],
   // Google API keys.
   [/\bAIza[0-9A-Za-z_-]{35}\b/g, mask],
+  // JWT bearer tokens: the base64url header always starts with '{"' -> "eyJ".
+  // The most common credential format in API traces (curl output, auth headers).
+  [/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*\b/g, mask],
 ];
 
 /** Replace known secret formats with first4…last4 fingerprints. Idempotent. */
