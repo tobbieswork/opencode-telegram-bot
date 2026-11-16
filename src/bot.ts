@@ -33,6 +33,7 @@ import { extractTrailingChoices, extractOptionsMarker, choiceKeyboard, registry 
 import { scheduleForRegistration, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
 import {
   classifyAction,
+  pickAddedReaction,
   decideSpawn,
   decideApprove,
   indexKey,
@@ -1402,29 +1403,32 @@ export class Bot {
   /**
    * Reaction UX: a user reaction landed. Resolves the (message,emoji) pair
    * against the persisted index and fires the mapped action at most once.
-   * Deliberately cheap up front: dedup + mark happen synchronously, before
-   * any await, so concurrent/duplicated updates can't double-trigger.
+   * The UPDATE itself is diffed first: only an emoji present in new_reaction
+   * but absent from old_reaction acts (pickAddedReaction) — a removal or
+   * reorder is ignored entirely, with no dedupe marker written. Deliberately
+   * cheap up front: dedup + mark happen synchronously, before any await, so
+   * concurrent/duplicated updates can't double-trigger.
    */
   private async onMessageReaction(ev: MessageReactionUpdated): Promise<void> {
     if (!this.cfg.react) return;
-    const emoji = ev.new_reaction?.[0];
-    if (!emoji || emoji.type !== "emoji" || !emoji.emoji) return; // only emoji reactions act
+    const added = pickAddedReaction(ev.new_reaction, ev.old_reaction);
+    if (!added) return; // removal / reorder / unmapped emoji: no add, no side effects
     const chatId = ev.chat.id;
     const messageId = ev.message_id;
     const m = this.st.peek(MACHINE_STATE_KEY) ?? {};
-    if (alreadyReacted(m.reacted, chatId, messageId, emoji.emoji)) return; // fired once, ever
-    this.markReacted(chatId, messageId, emoji.emoji);
+    if (alreadyReacted(m.reacted, chatId, messageId, added)) return; // fired once, ever
+    this.markReacted(chatId, messageId, added);
     const entry = m.msgIndex?.[indexKey(chatId, messageId)];
     if (!entry) {
       const key = indexKey(chatId, messageId);
       if (!this.missingIdxLogged.has(key)) {
         this.missingIdxLogged.add(key);
-        log(`reaction ${emoji.emoji} on unindexed message ${key} — ignoring (sent before the reaction UX, or pruned)`);
+        log(`reaction ${added} on unindexed message ${key} — ignoring (sent before the reaction UX, or pruned)`);
       }
       return;
     }
-    const action = classifyAction(emoji.emoji);
-    if (!action) return; // any other emoji: no-op
+    const action = classifyAction(added);
+    if (!action) return; // defensive: pickAddedReaction only returns mapped emojis
     try {
       if (action === "spawn") await this.reactSpawn(entry);
       else if (action === "approve") await this.reactApprove(entry);
