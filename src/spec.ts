@@ -56,6 +56,20 @@ function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/**
+ * Fenced code blocks (``` or ~~~) are data, not structure: headings, items
+ * and requirement lines inside a fence must not be matched.
+ */
+function fenceToggles(lines: string[]): boolean[] {
+  const inside: boolean[] = [];
+  let inFence = false;
+  for (const l of lines) {
+    if (/^\s*(?:```|~~~)/.test(l)) inFence = !inFence;
+    inside.push(inFence);
+  }
+  return inside;
+}
+
 interface ItemAcc {
   line: number; // 1-based line where the item starts
   n: number;
@@ -88,6 +102,14 @@ function finishItem(c: ItemAcc): ParsedTask {
     }
   }
   const reqIds: string[] = [];
+  // "S4.1 to S4.3" ranges: expand to every id in between (spec shorthand).
+  for (const m of c.rest.matchAll(/\b([A-Z]+\d+)\.(\d+)\s+to\s+\1\.(\d+)\b/g)) {
+    const [lo, hi] = [parseInt(m[2], 10), parseInt(m[3], 10)].sort((a, b) => a - b);
+    for (let i = lo; i <= hi; i++) {
+      const id = `${m[1]}.${i}`;
+      if (!reqIds.includes(id)) reqIds.push(id);
+    }
+  }
   for (const m of c.rest.matchAll(REQ_ID)) {
     if (!reqIds.includes(m[0])) reqIds.push(m[0]);
   }
@@ -107,8 +129,10 @@ function finishItem(c: ItemAcc): ParsedTask {
 export function parseSpec(md: string): ParseResult {
   try {
     const lines = md.split(/\r?\n/);
+    const fenced = fenceToggles(lines);
     let heading = -1;
     for (let i = 0; i < lines.length; i++) {
+      if (fenced[i]) continue;
       if (TASKS_HEADING.test(lines[i])) {
         heading = i;
         break;
@@ -129,6 +153,7 @@ export function parseSpec(md: string): ParseResult {
 
     for (let i = heading + 1; i < lines.length; i++) {
       const line = lines[i];
+      if (fenced[i]) continue; // fence marker lines toggle state; content is skipped
       if (H2.test(line)) break;
       const item = line.match(ITEM_START);
       if (item) {
@@ -193,8 +218,10 @@ export function parseSpec(md: string): ParseResult {
  * in the tasks section; -1 if absent.
  */
 function locateTaskLine(lines: string[], n: number): number {
+  const fenced = fenceToggles(lines);
   let heading = -1;
   for (let i = 0; i < lines.length; i++) {
+    if (fenced[i]) continue;
     if (TASKS_HEADING.test(lines[i])) {
       heading = i;
       break;
@@ -202,6 +229,7 @@ function locateTaskLine(lines: string[], n: number): number {
   }
   if (heading === -1) return -1;
   for (let i = heading + 1; i < lines.length; i++) {
+    if (fenced[i]) continue;
     if (H2.test(lines[i])) break;
     const item = lines[i].match(ITEM_START);
     if (!item || parseInt(item[1], 10) !== n) continue;
@@ -236,8 +264,10 @@ export function markTask(md: string, n: number, commit?: string): string {
  */
 export function initMarkers(md: string): string {
   const lines = md.split(/\r?\n/);
+  const fenced = fenceToggles(lines);
   let heading = -1;
   for (let i = 0; i < lines.length; i++) {
+    if (fenced[i]) continue;
     if (TASKS_HEADING.test(lines[i])) {
       heading = i;
       break;
@@ -245,6 +275,7 @@ export function initMarkers(md: string): string {
   }
   if (heading === -1) return md;
   for (let i = heading + 1; i < lines.length; i++) {
+    if (fenced[i]) continue;
     if (H2.test(lines[i])) break;
     const item = lines[i].match(ITEM_START);
     if (!item) continue;
@@ -260,15 +291,18 @@ export function initMarkers(md: string): string {
 /**
  * Look up a requirement by line prefix `- <id>` in the spec's requirement
  * section (the `## … Requirements …` section, if the spec has one; otherwise
- * the whole document). Returns the line text, trimmed, or undefined.
+ * the whole document). Returns the line text — including indented
+ * continuation lines, joined by spaces — trimmed, or undefined.
  */
 export function findRequirement(md: string, id: string): string | undefined {
   const lines = md.split(/\r?\n/);
+  const fenced = fenceToggles(lines);
   const re = new RegExp(`^\\s*-\\s*(?:\\*\\*)?${escapeRe(id)}(?:\\*\\*)?(?=\\s|$)`);
   let start = 0;
   let end = lines.length;
   let inReq = false;
   for (let i = 0; i < lines.length; i++) {
+    if (fenced[i]) continue;
     if (H2.test(lines[i])) {
       if (inReq) {
         end = i;
@@ -281,6 +315,14 @@ export function findRequirement(md: string, id: string): string | undefined {
     }
   }
   const scope = inReq ? lines.slice(start, end) : lines;
-  const found = scope.find((l) => re.test(l));
-  return found === undefined ? undefined : found.trim();
+  const idx = scope.findIndex((l, i) => !fenced[start + i] && re.test(l));
+  if (idx === -1) return undefined;
+  const parts = [scope[idx].trim()];
+  for (let i = idx + 1; i < scope.length; i++) {
+    const l = scope[i];
+    if (!l.trim() || fenced[start + i]) break;
+    if (/^\s/.test(l)) parts.push(l.trim());
+    else break;
+  }
+  return parts.join(" ");
 }
