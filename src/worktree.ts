@@ -172,22 +172,44 @@ export async function mergeWorktree(
  * If it does fail, the error propagates to the caller (who reports it to the
  * user). Note: `add -A` also stages UNTRACKED files (as in mergeWorktree) —
  * intended, so nothing in the worktree is lost whatever its git status.
+ *
+ * If the worktree directory is ALREADY GONE (deleted out-of-band — by hand,
+ * disk cleanup, or a half-finished earlier removal), the preservation commit
+ * is skipped and the stale registration is pruned instead, so removal still
+ * succeeds and the branch cleanup below runs (issue #152: /prune, the startup
+ * sweep and topic-delete retries were stuck on such convs forever).
  */
 export async function removeWorktree(repoRoot: string, wt: { root: string; branch: string }, lang: Lang = "vi"): Promise<string> {
-  if (await git(wt.root, ["status", "--porcelain"])) {
-    await git(wt.root, ["add", "-A"]);
-    await git(wt.root, [
-      "-c", "user.name=Qwen3.8-27B (OpenCode)",
-      "-c", "user.email=qwen38-27b-noreply@opencode.local",
-      "commit", "--no-verify", "-m", "tg: preserve uncommitted work before worktree removal",
-    ]);
+  let gone = false;
+  if (!existsSync(wt.root)) {
+    // The directory was deleted out-of-band (by hand, disk cleanup, or a
+    // half-finished earlier removal) — there is nothing to commit/preserve.
+    // Clear the registration: prune drops the stale entry, and remove is
+    // best-effort because it can complain about a directory that is already
+    // gone — treat that as success.
+    gone = true;
+    await git(repoRoot, ["worktree", "prune"]).catch(() => {});
+    await git(repoRoot, ["worktree", "remove", "--force", wt.root]).catch(() => {});
+  } else {
+    if (await git(wt.root, ["status", "--porcelain"])) {
+      await git(wt.root, ["add", "-A"]);
+      await git(wt.root, [
+        "-c", "user.name=Qwen3.8-27B (OpenCode)",
+        "-c", "user.email=qwen38-27b-noreply@opencode.local",
+        "commit", "--no-verify", "-m", "tg: preserve uncommitted work before worktree removal",
+      ]);
+    }
+    await git(repoRoot, ["worktree", "remove", "--force", wt.root]);
   }
-  await git(repoRoot, ["worktree", "remove", "--force", wt.root]);
   const kept = await git(repoRoot, ["branch", "-d", wt.branch]).then(
     () => false,
     () => true,
   );
   return kept
-    ? tr(lang, `Đã xoá worktree. Nhánh ${wt.branch} chưa merge nên được giữ lại.`, `Worktree deleted. Branch ${wt.branch} is unmerged, so it was kept.`)
-    : tr(lang, "Đã xoá worktree và nhánh.", "Worktree and branch deleted.");
+    ? gone
+      ? tr(lang, `Worktree đã không còn trên đĩa — đã dọn dẹp đăng ký. Nhánh ${wt.branch} chưa merge nên được giữ lại.`, `The worktree directory was already gone — cleaned up its registration. Branch ${wt.branch} is unmerged, so it was kept.`)
+      : tr(lang, `Đã xoá worktree. Nhánh ${wt.branch} chưa merge nên được giữ lại.`, `Worktree deleted. Branch ${wt.branch} is unmerged, so it was kept.`)
+    : gone
+      ? tr(lang, "Worktree đã không còn trên đĩa — đã dọn dẹp đăng ký và nhánh.", "The worktree directory was already gone — cleaned up its registration and branch.")
+      : tr(lang, "Đã xoá worktree và nhánh.", "Worktree and branch deleted.");
 }
