@@ -71,6 +71,7 @@ const cp = parseSpec(canonical);
     check("task 1: todo, no commit", t1.marker === "todo" && t1.commit === undefined);
     check("task 1: id/title", t1.id === "S1" && t1.title === "Parser", JSON.stringify({ id: t1.id, title: t1.title }));
     check("task 1: reqIds incl. range endpoints", t1.reqIds.includes("S1.1") && t1.reqIds.includes("S1.4") && t1.reqIds.includes("S4.1") && t1.reqIds.includes("S4.3"), JSON.stringify(t1.reqIds));
+    check("task 1: range S4.1 to S4.3 expanded (S4.2 present)", t1.reqIds.includes("S4.2"), JSON.stringify(t1.reqIds));
     check("task 1: checkpoint", t1.checkpoint === "review the parsed output for each spec.", JSON.stringify(t1.checkpoint));
     check("task 1: body keeps the spec file ref, drops the checkpoint", t1.body.includes("`src/spec.ts`") && !t1.body.includes("Checkpoint"), t1.body);
     check("task 1: body not rewrapped (single line)", !t1.body.includes("\n"), t1.body);
@@ -89,6 +90,7 @@ const np = parseSpec(nextstep);
     check("markerless: all todo", np.tasks.every((x) => x.marker === "todo" && x.commit === undefined));
     check("markerless: no commit on task 5 (no parens in shape)", np.tasks[5].commit === undefined && np.tasks[5].title === "Manager and failures", JSON.stringify(np.tasks[5]));
     check("markerless: reqIds bare + dotted", np.tasks[1].reqIds.includes("N1") && np.tasks[1].reqIds.includes("N3.1") && np.tasks[1].reqIds.includes("N3.6"), JSON.stringify(np.tasks[1].reqIds));
+    check("markerless: range N3.1 to N3.6 expanded (N3.2-N3.5 present)", [2,3,4,5].every((i) => np.tasks[1].reqIds.includes(`N3.${i}`)), JSON.stringify(np.tasks[1].reqIds));
   }
 }
 
@@ -192,6 +194,85 @@ const qp = parseSpec(queue);
   check("findReq: miss → undefined", findRequirement(canonical, "Z9.9") === undefined);
   const q12 = findRequirement(queue, "Q1.2");
   check("findReq: queue Q1.2 hit", q12 !== undefined && q12.startsWith("- Q1.2 "), q12);
+}
+
+// ── reqId ranges (spec shorthand "X1 to X2") ───────────────────────────────
+{
+  const md = [
+    "# Spec: ranges",
+    "",
+    "## 1. Requirements",
+    "- S4.1 one",
+    "- S4.2 two",
+    "- S4.3 three",
+    "- W2.9 nine",
+    "",
+    "## 2. Tasks",
+    "",
+    "1. **R1 Range.** (S4.1 to S4.3). Body.",
+    "2. **R2 Reversed.** (S4.3 to S4.1). Body.",
+    "3. **R3 Cross-prefix.** (S4.1 to W2.3). Body.",
+    "4. **R4 Single.** (S4.2). Body.",
+  ].join("\n");
+  const r = parseSpec(md);
+  check("ranges: parses 4 tasks", isOk(r) && r.tasks.length === 4, JSON.stringify(r));
+  if (isOk(r)) {
+    check("ranges: S4.1 to S4.3 → S4.1,S4.2,S4.3", JSON.stringify(r.tasks[0].reqIds) === JSON.stringify(["S4.1","S4.2","S4.3"]), JSON.stringify(r.tasks[0].reqIds));
+    check("ranges: reversed range expands the same way", ["S4.1","S4.2","S4.3"].every((x) => r.tasks[1].reqIds.includes(x)), JSON.stringify(r.tasks[1].reqIds));
+    check("ranges: cross-prefix is NOT expanded", JSON.stringify(r.tasks[2].reqIds) === JSON.stringify(["S4.1","W2.3"]), JSON.stringify(r.tasks[2].reqIds));
+    check("ranges: single id untouched", JSON.stringify(r.tasks[3].reqIds) === JSON.stringify(["S4.2"]), JSON.stringify(r.tasks[3].reqIds));
+  }
+}
+
+// ── findRequirement: multi-line (indented continuation) ─────────────────────
+{
+  const md = [
+    "# Spec: multiline req",
+    "",
+    "## 1. Requirements",
+    "- M1.1 First line of the requirement.",
+    "  continued on the next line",
+    "  and a third",
+    "- M1.2 Single line requirement.",
+    "",
+    "## 2. Tasks",
+    "",
+    "1. **T1 X.** (M1.1). Body.",
+  ].join("\n");
+  const full = findRequirement(md, "M1.1");
+  check("req multiline: continuation lines joined (keeps the - M1.1 prefix, existing contract)", full === "- M1.1 First line of the requirement. continued on the next line and a third", full);
+  check("req multiline: single-line unchanged", (findRequirement(md, "M1.2") ?? "").startsWith("- M1.2 Single line requirement."), findRequirement(md, "M1.2"));
+  check("req multiline: id boundary still exact", findRequirement(md, "M1") === undefined);
+}
+
+// ── fenced code blocks are not structure ────────────────────────────────────
+{
+  const md = [
+    "# Spec: fence",
+    "",
+    "## 1. Requirements",
+    "- F1.1 Real requirement.",
+    "",
+    "Example of a task list (not real):",
+    "",
+    "```",
+    "## 5. Tasks",
+    "",
+    "99. **Z9 Fenced item.** Should never parse.",
+    "```",
+    "",
+    "## 5. Tasks",
+    "",
+    "1. **F1 Real task.** (F1.1). Body.",
+    "```",
+    "- F1.1 a requirement that must not match",
+    "```",
+  ].join("\n");
+  const r = parseSpec(md);
+  check("fence: fenced Tasks heading ignored, real one parsed", isOk(r) && r.tasks.length === 1 && r.tasks[0].id === "F1", JSON.stringify(r));
+  check("fence: fenced requirement line not matched", (findRequirement(md, "F1.1") ?? "").includes("Real requirement"), findRequirement(md, "F1.1"));
+  const onlyFenced = parseSpec("# X\n\n```\n## 5. Tasks\n\n1. **Z9 Fenced.** x.\n```\n");
+  check("fence: no real heading → named error", !isOk(onlyFenced) && onlyFenced.error.line === 0, JSON.stringify(onlyFenced));
 }
 
 // ── GOLDEN: every file in docs/sdd/ ─────────────────────────────────────────
