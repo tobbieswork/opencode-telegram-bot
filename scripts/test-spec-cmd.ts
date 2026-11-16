@@ -196,6 +196,21 @@ try {
     check("detail omega: all-done note", t.includes("xong") || t.includes("done"), t);
   }
 
+  // ── regression: detail notes follow the user's language (S6.3) ─────────────
+  {
+    const { bot, sent } = mkBot("en", repo);
+    await handleSpecCallback(bot, cb("spec:omega"), CONV);
+    const t = sent[0]?.text ?? "";
+    check("detail omega (en): all-done note in English", t.includes("All tasks done."), t);
+    check("detail omega (en): no Vietnamese leak", !t.includes("Tất cả"), t);
+  }
+  {
+    const { bot, sent } = mkBot("vi", repo);
+    await handleSpecCallback(bot, cb("spec:gamma"), CONV);
+    const t = sent[0]?.text ?? "";
+    check("parse-error detail (vi): heading in Vietnamese", t.includes("Không phân tích được"), t);
+  }
+
   // ── Run tap: bilingual "not available yet" (execution is S4) ───────────────
   {
     const { bot, sent } = mkBot("vi", repo);

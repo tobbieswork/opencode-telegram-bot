@@ -119,7 +119,7 @@ function taskLine(t: ParsedTask, status: "done" | "next" | "todo" | "blocked"): 
   return l;
 }
 
-function detailText(title: string, tasks: ParsedTask[]): string {
+function detailText(lang: Lang, title: string, tasks: ParsedTask[]): string {
   const done = tasks.filter((t) => t.marker === "done").length;
   const next = nextRunnable(tasks);
   const lines: string[] = [`📋 <b>${esc(title)}</b> — ${done}/${tasks.length}`, ""];
@@ -133,15 +133,15 @@ function detailText(title: string, tasks: ParsedTask[]): string {
     lines.push("");
     lines.push(
       done === tasks.length
-        ? "✅ " + tr("vi", "Tất cả tasks đã xong.", "All tasks done.")
-        : "⛔ " + tr("vi", "Không còn task chạy được — các task còn lại đang bị chặn.", "No runnable task left — the rest are blocked.")
+        ? "✅ " + tr(lang, "Tất cả tasks đã xong.", "All tasks done.")
+        : "⛔ " + tr(lang, "Không còn task chạy được — các task còn lại đang bị chặn.", "No runnable task left — the rest are blocked.")
     );
   }
   return lines.join("\n");
 }
 
-function errorDetailText(title: string, name: string, error: { line: number; message: string }): string {
-  const head = tr("vi", "⚠️ <b>Không phân tích được spec này</b>", "⚠️ <b>This spec could not be parsed</b>");
+function errorDetailText(lang: Lang, title: string, name: string, error: { line: number; message: string }): string {
+  const head = tr(lang, "⚠️ <b>Không phân tích được spec này</b>", "⚠️ <b>This spec could not be parsed</b>");
   const file = `📄 <code>${esc(name)}.md</code> — <b>${esc(title)}</b>`;
   const line = error.line > 0 ? `📍 ${error.line}: ${esc(error.message)}` : esc(error.message);
   return `${head}\n${file}\n${line}`;
@@ -228,7 +228,7 @@ export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: Conv
   if ("error" in res) {
     // S1.4: name the spec file and the first failed line. No buttons: a
     // spec that cannot be parsed never offers to run anything.
-    await bot.sendHtml(conv, errorDetailText(title, name, res.error));
+    await bot.sendHtml(conv, errorDetailText(lang, title, name, res.error));
     return;
   }
   const next = nextRunnable(res.tasks);
@@ -236,5 +236,5 @@ export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: Conv
     next >= 0
       ? { reply_markup: { inline_keyboard: [[{ text: `▶️ Run ${res.tasks[next].id}`, callback_data: `specrun:${name}:${res.tasks[next].n}` }]] } }
       : undefined;
-  await bot.sendHtml(conv, detailText(title, res.tasks), keyboard);
+  await bot.sendHtml(conv, detailText(lang, title, res.tasks), keyboard);
 }
