@@ -320,6 +320,7 @@ All settings are environment variables (see `.env.example`).
 | `OPENCODE_TG_WORKING` | | on | `0` = hide the "working…" line shown in the main chat while the Manager works |
 | `OPENCODE_TG_AUTO_CLOSE` | | on | `0` = keep a worker's topic open when the worker finishes |
 | `OPENCODE_TG_RECOVER_OVERFLOW` | | off | `1` = respawn a worker once (same directory, with the original task and git evidence) when it overflows. Spends tokens and runs a write agent unattended |
+| `OPENCODE_TG_DELETE_TOPICS` | | off | One-shot maintenance hook: comma-separated `chatId:threadId` topics to delete at startup — for orphaned topics the bot lost track of (Bot API cannot list topics). Topics still in state are skipped; idempotent. Remove the var when done |
 | `OPENCODE_TG_RICH` | | off | `1` = send rich (server-side GFM) replies |
 | `OPENCODE_TG_STREAM` | | off | `1` = stream live drafts while the agent answers |
 | `OPENCODE_TG_WATCH` | | on | `0` = turn off the `/watch` live card. **No effect while `OPENCODE_TG_STREAM` is on** (the two live views are mutually exclusive) |

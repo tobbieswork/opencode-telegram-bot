@@ -9,7 +9,7 @@ import { OpenCodeCtl, newMessageID, assistantText, ModelInfo, SessionBrief } fro
 import { StateManager, ChatState, MsgPurpose, MACHINE_STATE_KEY, UserPrefsStore, Lang } from "./state.js";
 import { ConvKey, convKey, chatOf, parseConv } from "./conv.js";
 import { Orchestrator, BUSY } from "./orchestrator.js";
-import { closeFinishedTopicsAtStartup } from "./orchestrator/topics.js";
+import { closeFinishedTopicsAtStartup, deleteOrphanTopicsAtStartup } from "./orchestrator/topics.js";
 import { ScheduleStore, Scheduler } from "./scheduler.js";
 import { isUserAllowed } from "./schedule.js";
 import { Config } from "./config.js";
@@ -594,6 +594,9 @@ export class Bot {
     // Close topics left open by workers that finished before auto-close existed
     // (or while the service was down). Fire-and-forget; never fails startup.
     void closeFinishedTopicsAtStartup(this.orch).catch((e) => warn("startup topic close:", e?.message));
+    // One-shot maintenance hook: delete orphaned topics listed in OPENCODE_TG_DELETE_TOPICS
+    // (entries still tracked in state are skipped — it can never delete a live topic).
+    void deleteOrphanTopicsAtStartup(this.orch).catch((e) => warn("startup topic delete:", e?.message));
     // Register the Telegram /command autocomplete menu (cosmetic, best-effort).
     this.registerCommands();
     // Nudge the user to reboot the machine when uptime passes the threshold

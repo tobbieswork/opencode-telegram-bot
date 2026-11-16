@@ -1,4 +1,4 @@
-import type { ConvKey } from "../conv.js";
+import { convKey, type ConvKey } from "../conv.js";
 import { log, warn } from "../logger.js";
 import { selectFinishedWorkers, WorkerConv } from "../prune.js";
 import type { Orchestrator } from "../orchestrator.js";
@@ -105,5 +105,35 @@ export async function closeFinishedTopicsAtStartup(o: Orchestrator): Promise<num
   } catch (e) {
     warn("startup topic close:", e instanceof Error ? e.message : String(e));
     return 0;
+  }
+}
+
+/**
+ * One-shot maintenance hook: delete the topics listed in
+ * `cfg.orphanTopicDeletes` (OPENCODE_TG_DELETE_TOPICS) at startup. For topics
+ * the bot has LOST TRACK OF — no longer in state.json — which the Bot API
+ * cannot enumerate (there is no list-topics call), e.g. a worker topic left
+ * open when its conv was removed out-of-band. Safety:
+ *  - an entry whose conv is still tracked in state is SKIPPED (never delete
+ *    a live topic);
+ *  - malformed entries are already skipped at parse time (config);
+ *  - idempotent: deleting an already-deleted topic just logs the error.
+ * Fire-and-forget at startup; never fails startup.
+ */
+export async function deleteOrphanTopicsAtStartup(o: Orchestrator): Promise<void> {
+  const list = o.h.cfg.orphanTopicDeletes ?? [];
+  if (!list.length) return;
+  for (const t of list) {
+    const conv = convKey(t.chatId, t.threadId);
+    if (o.h.st.peek(conv)) {
+      warn(`orphan-topic delete (${conv}): still tracked in state — skipping`);
+      continue;
+    }
+    try {
+      await o.h.tg.deleteForumTopic(conv);
+      log(`orphan-topic delete (${conv}): deleted`);
+    } catch (e) {
+      warn(`orphan-topic delete (${conv}): ${(e as Error)?.message ?? e}`);
+    }
   }
 }
