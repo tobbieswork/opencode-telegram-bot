@@ -152,6 +152,30 @@ try {
     check("reap: live marker (busy worker) kept", st.peek(chat)?.specRunning?.live?.worker === "spec-live");
   }
 
+  // ── Release via the setStatus hook (real Orchestrator, no manual release) ──
+  {
+    // setStatus with a CHANGED status calls tg.editForumTopic — a no-op duck.
+    const tg: any = { editForumTopic: async () => {} };
+    const st = new StateManager(join(tmp, "setstatus-state.json"));
+    const orch = new Orchestrator({ st, tg } as any);
+    const chat = "300";
+    const seed = () => {
+      st.set(chat, { specRunning: undefined });
+      st.set("300:7", { worker: { name: "spec-g", status: "running", specRun: { spec: "g", branch: "spec/g", task: "G1" } } });
+      orch.claimSpecRun(chat, "g", { branch: "spec/g", task: "G1", worker: "spec-g", since: 1 });
+    };
+    // done → the setStatus hook releases the marker (not a manual release call).
+    seed();
+    check("setstatus: marker claimed before done", st.peek(chat)?.specRunning?.g?.worker === "spec-g", JSON.stringify(st.peek(chat)?.specRunning));
+    orch.setStatus("300:7", "done");
+    check("setstatus: done releases the marker via the hook", st.peek(chat)?.specRunning?.g === undefined, JSON.stringify(st.peek(chat)?.specRunning));
+    check("setstatus: worker settled to done", st.peek("300:7")?.worker?.status === "done", String(st.peek("300:7")?.worker?.status));
+    // stopped → released again (covers the stop/kill path, not just done).
+    seed();
+    orch.setStatus("300:7", "stopped");
+    check("setstatus: stopped releases the marker via the hook", st.peek(chat)?.specRunning?.g === undefined, JSON.stringify(st.peek(chat)?.specRunning));
+  }
+
   // ── Non-blocked Run → spawn + audit + worktree ────────────────────────────
   {
     const { bot, sent, orch } = mkBot("vi", repo);
