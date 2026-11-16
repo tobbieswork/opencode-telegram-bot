@@ -68,10 +68,29 @@ export interface WorkerInfo {
    */
   respawnedFrom?: string;
   /**
+   * S4 (spec Run): set when this worker was spawned by a spec Run button — the
+   * spec it runs, its spec branch, and the task id. Drives the one-running-per-
+   * spec release: when the worker reaches a terminal status, the owner chat's
+   * `specRunning[spec]` marker is cleared (see Orchestrator.releaseSpecRun).
+   */
+  specRun?: { spec: string; branch: string; task: string };
+  /**
    * Id of the topic intro message; anchor for switch_to_topic navigation (the
    * manager board's per-worker jump buttons). Set at spawn.
    */
   introMessageId?: number;
+}
+
+/** One entry of ChatState.specRunning: a spec task with a running worker. */
+export interface SpecRunState {
+  /** The branch the worker runs on (`spec/<name>`). */
+  branch: string;
+  /** The task id being run (e.g. "S2"). */
+  task: string;
+  /** The worker's name (e.g. "spec-<name>"). */
+  worker: string;
+  /** When the run was claimed (epoch ms). */
+  since: number;
 }
 
 /**
@@ -206,6 +225,15 @@ export interface ChatState {
   topicDeletedPending?: boolean;
   /** True when this conversation's session is the Manager agent. */
   manager?: boolean;
+  /**
+   * S4 (spec Run): one-running-per-spec guard, keyed by spec NAME, on the
+   * top-level chat conv (the marker lives on `chatOf(conv)`, shared by all of
+   * the chat's topics). At most one running spec worker per SPEC (not per
+   * chat): a second Run of the same spec is refused until the current worker
+   * finishes or is stopped/killed. PERSISTED (survives a restart); a dead
+   * marker (no matching busy worker) is reaped at startup.
+   */
+  specRunning?: Record<string, SpecRunState>;
   /** Manager dispatch without asking (top-level conversation only). */
   auto?: boolean;
   /** epoch ms of the last COMPLETED manager rotation (idempotency guard: no re-rotation before the min interval). */
