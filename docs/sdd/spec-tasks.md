@@ -141,25 +141,40 @@ Verification order for every task: `npm run typecheck` and `npm run test:unit` f
 ## 7. Findings (filled in by task S0)
 
 Spike run 2026-11-16 with a real worker (`s0-spike`, session
-`ses_e1ce9ea35ffegzWxu4UnatBooj`): four shell commands, three expected to
-succeed and one to fail deliberately.
+`ses_e1ce9ea35ffegzWxu4UnatBooj`): four shell commands in the first turn
+(three expected to succeed, one to fail), then two follow-up notes into the
+finished session — a bare deliberately-failing command, and a retry after
+the working directory had been deleted.
 
-- **S3.2 (read the worker's executed commands and exit codes) — YES.** The
-  exact API the bot already uses: `Service.discover()` then
-  `client.message.list({ sessionID })` (`OpenCode.listMessages` in
+- **S3.2 (read the worker's executed commands and exit codes) — YES,
+  observed.** The exact API the bot already uses: `Service.discover()` then
+  `client.message.list({ sessionID })` (the `listMessages` method in
   `src/opencode.ts`). Every assistant message carries a `content[]` array in
   which each executed tool call is an item
-  `{ type: "tool", name, state: { status, input, content[], metadata }, time: { created, ran, completed } }`.
-  For the `shell` tool: `state.input.command` is the exact command line,
-  `state.metadata.exit` its exit code, `state.content` the captured output.
-  The checkpoint's "run / not run" lists can be built by filtering
-  `type: "tool"` items on `state.status` and reading `metadata.exit`.
-  Caveat: a worker that wraps a command (`cmd; echo exit:$?`) makes
-  `metadata.exit` the wrapper's code (0); the real code is then inside
-  `state.content` — the checkpoint builder must consult both.
-- **S3.5 (send a note to a finished worker session) — YES.**
-  `send_to_worker` delivered a follow-up note to the session after its first
-  turn had completed; the worker answered in the same session, kept context,
-  ran no commands.
+  `{ type: "tool", name, state: { status, input, content[], metadata?, error? }, time: { created, ran, completed } }`.
+  For the `shell` tool, `state.input.command` is the exact command line.
+  Observed `state.status` semantics (do not assume, both were seen live):
+  - `status: "completed"` + `metadata.exit: 2` — the command ran and failed
+    with a non-zero exit; the exit code is in `metadata.exit`, and
+    `state.content` carries the output plus an "Exited with code N" line.
+  - `status: "completed"` + `metadata.exit: 0` — ran and succeeded.
+  - `status: "error"` + `state.error: { type, message }` (no `metadata`, no
+    `content`) — the tool failed before running the command (observed:
+    "Working directory does not exist"); count this as not run.
 
-Verdict: build S3 as specified; no design change required.
+  So the checkpoint's "run / not run" lists are: `status: "error"` → not
+  run; `status: "completed"` with `metadata.exit !== 0` → run, failed;
+  `metadata.exit === 0` → run, passed. One caveat remains: a worker that
+  wraps a command (`cmd; echo exit:$?`) makes `metadata.exit` the wrapper's
+  code (0) and the real code only appears in `state.content` — the
+  checkpoint builder must treat a `;`/`&&` wrapper as "read the output too".
+  Note: client v2.2.6 messages use `content[]` (text/reasoning/tool items),
+  not the older `parts[]` shape.
+- **S3.5 (send a note to a finished worker session) — YES, observed.**
+  `send_to_worker` delivered two follow-up notes to the session after its
+  first turn had completed; each time the worker answered in the same
+  session, kept context, ran only the requested command.
+
+Verdict: build S3 as specified; no design change required, and the S5
+checkpoint builder must implement the three-way `state.status` /
+`metadata.exit` classification above.
