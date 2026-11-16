@@ -77,7 +77,7 @@ function unwrap<T = any>(x: any): T {
   return x as T;
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 const ID_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 let idLastMs = 0;
@@ -186,6 +186,8 @@ export class OpenCodeCtl {
   private version?: string;
   private discoverArgs?: { serviceUrl?: string; user?: string; password?: string };
   private eventCbs?: { onEvent: (ev: any) => void; onError?: (e: any) => void; onConnect?: () => void };
+  /** Backoff clock for the event loop; tests swap it out to drive time. */
+  private sleep: (ms: number) => Promise<void> = sleep;
 
   /** Discover the shared background service (or start one), or use an explicit URL. */
   async connect(
@@ -731,17 +733,25 @@ export class OpenCodeCtl {
     while (alive()) {
       try {
         const stream = this.client.event.subscribe({ signal: this.eventAbort?.signal }) as AsyncIterable<any>;
-        delay = 1000; // reset backoff after a clean (re)connect
         // The stream has no replay: anything emitted while we were away (a
         // question, a permission ask, a finished turn) is gone. Let the bot
         // reconcile from the API on every (re)connect.
-        try {
-          this.eventCbs?.onConnect?.();
-        } catch (e) {
-          onError?.(e);
-        }
+        let gotFirst = false;
         for await (const ev of stream) {
           if (!alive()) break;
+          if (!gotFirst) {
+            gotFirst = true;
+            // The first delivered event is the only proof the connection is
+            // live: reset the backoff and reconcile exactly once per real
+            // (re)connect. A stream that errors or closes before any event
+            // must let the backoff keep growing.
+            delay = 1000;
+            try {
+              this.eventCbs?.onConnect?.();
+            } catch (e) {
+              onError?.(e);
+            }
+          }
           try {
             onEvent(ev);
           } catch (e) {
@@ -753,7 +763,7 @@ export class OpenCodeCtl {
         onError?.(e);
       }
       if (!alive()) break;
-      await new Promise((r) => setTimeout(r, delay));
+      await this.sleep(delay);
       delay = Math.min(delay * 2, 30_000);
     }
     if (this.eventGen === gen) this.eventRunning = false;
