@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.30.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.30.1...opencode-telegram-bot-v1.30.2) (2026-11-16)
+
+
+### Bug Fixes
+
+* announce merged for PRs previously seen open ([#202](https://github.com/tobbieswork/opencode-telegram-bot/issues/202)) ([d05f837](https://github.com/tobbieswork/opencode-telegram-bot/commit/d05f837d7acab98c5bf99ebb6d3b521ba8dc6d84))
+* preserve corrupt state files and log save errors ([#203](https://github.com/tobbieswork/opencode-telegram-bot/issues/203)) ([a9c9111](https://github.com/tobbieswork/opencode-telegram-bot/commit/a9c911171034f318ff82e16be72c29c2cb732acf))
+* purge worktrees whose directory is already gone ([#204](https://github.com/tobbieswork/opencode-telegram-bot/issues/204)) ([5acaa7e](https://github.com/tobbieswork/opencode-telegram-bot/commit/5acaa7e45331ff50b37b9c77058d3e90eb0d9248))
+* refuse worktree removal when another conv still uses it ([#205](https://github.com/tobbieswork/opencode-telegram-bot/issues/205)) ([46b4672](https://github.com/tobbieswork/opencode-telegram-bot/commit/46b4672f02de6572ce94aa14956eb7211db0eeb8))
+
 ## [1.30.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.30.0...opencode-telegram-bot-v1.30.1) (2026-11-15)
 
 
