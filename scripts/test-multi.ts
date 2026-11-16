@@ -7,7 +7,7 @@
  * Run:  npx tsx scripts/test-multi.ts
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { convKey, parseConv, chatOf } from "../src/conv.js";
@@ -540,6 +540,44 @@ const repo = join(tmp, "repo");
   const after = st.get("9:1");
   check("worktree removed -> session retired", after.sessionID === undefined && after.worker?.status === "stopped" && !after.worker?.worktree);
   check("…topic points back at the main checkout subfolder", after.directory === join(repo, "pkg"), after.directory);
+}
+
+// ── #9b: rmok is refused while another conv (respawn replacement) shares the worktree ──
+{
+  const sent: string[] = [];
+  const alerts: string[] = [];
+  const st = new StateManager(join(tmp, "wt-shared-state.json"));
+  const host: Host = {
+    tg: { answerCallbackQuery: async (_id: string, text?: string) => { if (text) alerts.push(text); }, editMessageText: async () => {}, editForumTopic: async () => {} } as any,
+    oc: {} as any,
+    st,
+    cfg: { browseRoots: [repo], managerDir: join(tmp, "mgr"), maxWorkers: 2, worktreeMode: "auto" } as any,
+    busyNotes: new BusyNoteStore(),
+    queue: new QueueStore(),
+    sendHtml: async (_c, html) => void sent.push(html),
+    applyModelAndVariant: async () => {},
+    startTyping: () => {},
+  };
+  const orch = new Orchestrator(host);
+  const wt = await addWorktree(repo, join(repo, "pkg"), "dead");
+  const wshared = { root: wt.root, branch: wt.branch, base: wt.base };
+  // The dead worker's topic (where the callback comes from) …
+  st.set("9:1", {
+    sessionID: "ses_dead",
+    directory: wt.directory,
+    worker: { name: "dead", status: "done", spawnedBy: "user", writes: true, repoRoot: repo, worktree: wshared, createdAt: 1, updatedAt: 1 },
+  });
+  // …and its overflow-respawn replacement: a new topic pointing at the SAME worktree root.
+  st.set("9:2", {
+    sessionID: "ses_repl",
+    directory: wt.directory,
+    worker: { name: "dead-2", status: "running", spawnedBy: "user", writes: true, repoRoot: repo, worktree: wshared, respawnedFrom: "dead", createdAt: 2, updatedAt: 2 },
+  });
+  await orch.handleCallback({ id: "w", data: "wt:dead:rmok" } as any, "9:1", 3);
+  check("rmok refused while another conv shares the worktree", alerts.some((t) => t.includes("dead-2")), alerts.join(" | "));
+  check("…worktree still on disk", existsSync(wt.root));
+  check("…old conv state untouched", st.get("9:1").sessionID === "ses_dead" && st.get("9:1").worker?.worktree?.root === wt.root);
+  check("…replacement conv worktree state untouched", st.get("9:2").sessionID === "ses_repl" && st.get("9:2").worker?.name === "dead-2" && st.get("9:2").worker?.worktree?.root === wt.root);
 }
 
 // ── #6 + #1: OpenCode helpers (real logic, stubbed transport) ───────────────

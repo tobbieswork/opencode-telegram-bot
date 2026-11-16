@@ -7,8 +7,19 @@ import { warn } from "../logger.js";
 import { selectPruneable } from "../prune.js";
 import { removeWorktree } from "../worktree.js";
 import { tr } from "../i18n.js";
-import type { Lang } from "../state.js";
+import type { Lang, StateManager } from "../state.js";
 import type { Orchestrator } from "../orchestrator.js";
+
+/**
+ * Every conv OTHER than `except` whose worker still points at the worktree at
+ * `root` — e.g. an overflow respawn's replacement, which inherits the dead
+ * worker's worktree in a new topic. Empty array = not shared.
+ */
+export function worktreeSharedBy(st: StateManager, except: ConvKey, root: string): ConvKey[] {
+  return Object.entries(st.all())
+    .filter(([k, os]) => k !== except && os?.worker?.worktree?.root === root)
+    .map(([k]) => k);
+}
 
 /**
  * Fully retire a conversation: remove its git worktree (if any), its OpenCode
@@ -38,11 +49,9 @@ export async function purgeConv(o: Orchestrator, conv: ConvKey): Promise<boolean
     if (w?.worktree && w.repoRoot) {
       // A replacement worker (overflow respawn) may share this worktree in a new
       // topic — removing it would delete the directory from under the new worker.
-      const shared = Object.entries(o.h.st.all()).some(
-        ([k, os]) => k !== conv && os?.worker?.worktree?.root === w.worktree!.root,
-      );
-      if (shared) {
-        warn(`purgeConv (${conv}): worktree shared with another conv — keeping it`);
+      const shared = worktreeSharedBy(o.h.st, conv, w.worktree!.root);
+      if (shared.length) {
+        warn(`purgeConv (${conv}): worktree shared with ${shared.join(", ")} — keeping it`);
       } else {
         try {
           await (o.h.removeWorktree ?? removeWorktree)(w.repoRoot, w.worktree);
