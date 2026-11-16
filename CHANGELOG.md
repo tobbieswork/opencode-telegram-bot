@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.34.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.33.0...opencode-telegram-bot-v1.34.0) (2026-11-16)
+
+
+### Features
+
+* spec task prompt builder (spec-to-tasks S3) ([#233](https://github.com/tobbieswork/opencode-telegram-bot/issues/233)) ([af1c2da](https://github.com/tobbieswork/opencode-telegram-bot/commit/af1c2da7f138dbb57025df6279234af07441dbf6))
+
 ## [1.33.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.32.0...opencode-telegram-bot-v1.33.0) (2026-11-16)
 
 
