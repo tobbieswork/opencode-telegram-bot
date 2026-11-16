@@ -27,6 +27,7 @@ import { gitRoot, ensureSpecWorktree, runGit, specBranchName } from "../worktree
 import { parseSpec, initMarkers, type ParsedTask } from "../spec.js";
 import { buildTaskPrompt } from "../spec-prompt.js";
 import { warn } from "../logger.js";
+import { NAME_RE as WORKER_NAME_RE } from "../orchestrator.js";
 import { audit } from "../audit.js";
 import { isUserAllowed } from "../schedule.js";
 import { tr } from "../i18n.js";
@@ -244,6 +245,22 @@ async function specRunSpawn(
   const chat = chatOf(conv);
   const workerName = `spec-${name}`;
   const branch = specBranchName(name);
+  // The worker name is spec-<name> and must fit the worker-name rules
+  // (a-z, 0-9, -; 24 chars total → spec name ≤ 19). Fail early with a clear
+  // message instead of tripping the orchestrator's error after claim+worktree.
+  if (!WORKER_NAME_RE.test(workerName)) {
+    await bot.tg
+      .sendMessage(
+        conv,
+        tr(
+          lang,
+          `❌ Tên spec ${esc(name)} không dùng làm tên worker được (spec-${esc(name)}): chỉ a-z, 0-9, gạch ngang, tối đa 19 ký tự.`,
+          `❌ Spec name ${esc(name)} can't be a worker name (spec-${esc(name)}): a-z, 0-9, hyphen only, max 19 chars.`,
+        ),
+      )
+      .catch(() => {});
+    return;
+  }
   // S2.5: one running per spec — atomic claim (check + set, no await between,
   // so two concurrent taps can't both get through).
   if (!bot.orch.claimSpecRun(chat, name, { branch, task: task.id, worker: workerName, since: Date.now() })) {
@@ -321,8 +338,9 @@ async function specRunSpawn(
       warn(`spec run ${name}/${task.id} attempt ${attempt}/${MAX_ATTEMPTS} failed: ${(e as Error).message}`);
       // If a worker entry got registered before the failure, a retry would
       // collide on the worker name — stop and report instead of double-spawning.
-      const w = bot.st.peek(chat)?.worker;
-      if (w?.name === workerName || attempt >= MAX_ATTEMPTS) break;
+      // findWorker (not peek(chat)): worker entries live in topic convs
+      // (chat:threadId), never in the chat-level state.
+      if (bot.st.findWorker(chat, workerName) || attempt >= MAX_ATTEMPTS) break;
       await new Promise<void>((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
     }
   }

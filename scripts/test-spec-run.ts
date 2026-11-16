@@ -104,7 +104,7 @@ function mkBot(lang: "vi" | "en", dir: string, allow: { allowAny?: boolean; allo
   const bot: any = {
     cfg: { spec: true, opencodeDirectory: dir, allowAny: allow.allowAny ?? true, allowedUserIds: allow.allowedUserIds ?? [] },
     userPrefs: { getLang: () => lang },
-    st: { peek: () => stState, get: () => stState },
+    st: { peek: () => stState, get: () => stState, findWorker: (_chat: string, name: string) => (stState.worker && stState.worker.name === name ? [CONV, stState] : undefined) },
     tg: {
       sendMessage: async (c: string, text: string, opts?: any) => void push(c, text, opts),
       answerCallbackQuery: async (_id: string, _t?: string) => {},
@@ -393,6 +393,35 @@ try {
       check("spawn-retry: claim released, error sent", orch.releases.length === 1 && sent.some((m) => (m.text ?? "").includes("Couldn't run it")), JSON.stringify({ rel: orch.releases, msgs: sent.map((m) => m.text?.slice(0, 40)) }));
     }
     delete process.env.SPEC_RUN_RETRY_DELAY_MS;
+  }
+
+  // ── Invalid spec name → clear error, no claim, no spawn (worker-name rules)
+  {
+    const INVALID = `# Bad name spec
+
+## Tasks
+1. **B1 One.** first task
+`;
+    // (a) underscore — not in a-z0-9-
+    const f1 = join(repo, "docs", "sdd", "x_underscore.md");
+    writeFileSync(f1, INVALID);
+    // (b) 21 chars → spec-<name> = 26 > 24
+    const f2 = join(repo, "docs", "sdd", "abcdefghijklmnopqrstu.md");
+    writeFileSync(f2, INVALID);
+    try {
+      for (const nm of ["x_underscore", "abcdefghijklmnopqrstu"]) {
+        const { bot, sent, orch } = mkBot("en", repo);
+        await handleSpecCallback(bot, cb(`specrun:${nm}:1`), CONV);
+        check(`invalid-name (${nm.slice(0, 8)}…): no spawn`, orch.spawns.length === 0, JSON.stringify(orch.spawns));
+        check(`invalid-name (${nm.slice(0, 8)}…): no claim`, orch.claims.length === 0, JSON.stringify(orch.claims));
+        check(`invalid-name (${nm.slice(0, 8)}…): clear error sent`, sent.some((m) => (m.text ?? "").includes("can't be a worker name") && (m.text ?? "").includes("19")), JSON.stringify(sent.map((m) => m.text?.slice(0, 80))));
+      }
+      // no leftover worktree for the invalid names
+      check("invalid-name: no worktree created", !existsSync(join(tmp, "repo.worktrees", "spec-x_underscore")) && !existsSync(join(tmp, "repo.worktrees", "spec-abcdefghijklmnopqrstu")));
+    } finally {
+      rmSync(f1, { force: true });
+      rmSync(f2, { force: true });
+    }
   }
 }
 } finally {

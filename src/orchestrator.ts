@@ -90,7 +90,7 @@ export interface Host {
 
 export const MANAGER_AGENT = "tg-manager";
 const BRIDGE_NAME = "tg-bridge";
-const NAME_RE = /^[a-z0-9][a-z0-9-]{0,23}$/;
+export const NAME_RE = /^[a-z0-9][a-z0-9-]{0,23}$/;
 /** Worker statuses that count as "busy" (running or waiting on the user). Exported for the S5 board rule (src/bot.ts). */
 export const BUSY: WorkerStatus[] = ["running", "waiting"];
 /** Manager-initiated dispatches allowed between two user messages (loop/cost guard). */
