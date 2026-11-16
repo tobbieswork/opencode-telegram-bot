@@ -152,6 +152,48 @@ const show = (label: string, units: string[]) => {
   check("code-underscore: tags balanced", countTags(u5[0]).every((c) => c.ok), u5[0]);
 }
 
+// ── markdown links: URLs must survive the emphasis passes (issue #147) ─────
+{
+  const u1 = mdToHtmlChunks("[x](https://a.com/_a_/b)", MAX);
+  check("link-underscore: single msg", u1.length === 1, JSON.stringify(u1));
+  check("link-underscore: href intact", u1[0] === '<a href="https://a.com/_a_/b">x</a>', u1[0]);
+  check("link-underscore: tags balanced", countTags(u1[0]).every((c) => c.ok), u1[0]);
+
+  const u2 = mdToHtmlChunks('[a](https://a.com/x"y)', MAX);
+  check("link-quote: quote escaped in href", u2[0] === '<a href="https://a.com/x&quot;y">a</a>', u2[0]);
+  check("link-quote: tags balanced", countTags(u2[0]).every((c) => c.ok), u2[0]);
+
+  const u3 = mdToHtmlChunks('[a](x"y)', MAX);
+  check("link-raw-quote: not an anchor", !u3[0].includes("<a "), u3[0]);
+  check("link-raw-quote: rendered as literal text", u3[0] === '[a](x"y)', u3[0]);
+
+  const u4 = mdToHtmlChunks("[click](javascript:alert(1))", MAX);
+  check("link-js: not an anchor", !u4[0].includes("<a "), u4[0]);
+  check("link-js: rendered as literal text", u4[0] === "[click](javascript:alert(1))", u4[0]);
+
+  const u5 = mdToHtmlChunks("[x](https://a.com)", MAX);
+  check("link-plain: becomes anchor", u5[0] === '<a href="https://a.com">x</a>', u5[0]);
+
+  const u6 = mdToHtmlChunks("[m](mailto:a@b.c) [t](tg://resolve?domain=x)", MAX);
+  check(
+    "link-schemes: mailto and tg become anchors",
+    u6[0] === '<a href="mailto:a@b.c">m</a> <a href="tg://resolve?domain=x">t</a>',
+    u6[0],
+  );
+
+  const u7 = mdToHtmlChunks("[**x**](https://a.com)", MAX);
+  check("link-nested: bold inside text", u7[0] === '<a href="https://a.com"><b>x</b></a>', u7[0]);
+  check("link-nested: tags balanced", countTags(u7[0]).every((c) => c.ok), u7[0]);
+
+  const u8 = mdToHtmlChunks("**bold** [x](https://a.com) *it*", MAX);
+  check(
+    "link-adjacent: emphasis around link",
+    u8[0] === '<b>bold</b> <a href="https://a.com">x</a> <i>it</i>',
+    u8[0],
+  );
+  check("link-adjacent: tags balanced", countTags(u8[0]).every((c) => c.ok), u8[0]);
+}
+
 // ── failure messaging (context overflow vs generic provider error vs no detail) ──
 {
   const ctx = formatTurnFailure(
