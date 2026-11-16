@@ -41,7 +41,7 @@ spec file" to "a worker run with the right prompt" and back to "task done".
 - S1.4 A task list that cannot be parsed shall produce a message naming the spec and the first line that failed. It shall never run a guessed task.
 
 ### S2 Running a task
-- S2.1 When the user taps **Run** on a task, the system shall start a worker on the spec's branch `spec/<spec-name>` in its own worktree, creating the branch from the default branch if it does not exist.
+- S2.1 When the user taps **Run** on a task, the system shall start a worker on the spec's branch `spec/<spec-name>` in its own worktree, creating the branch from the default branch if it does not exist; when markers are missing it adds them in that same branch-creation commit (S4.3).
 - S2.2 The worker prompt shall contain: the full text of the task; the requirement IDs it names, each with its text copied from the spec; the spec's "Out of scope" section; and the verify order from `AGENTS.md` (typecheck and unit tests first, smoke last).
 - S2.3 The prompt shall instruct the worker to write tests before code, make one conventional commit for the task, and stop. It shall not start the next task.
 - S2.4 Only one task per spec shall run at a time. Tapping **Run** on a second task while one runs shall say which task is running.
@@ -60,7 +60,7 @@ spec file" to "a worker run with the right prompt" and back to "task done".
 ### S4 Status in the spec file
 - S4.1 Task status shall live in the spec file as a marker after the task number: `[ ]` todo, `[x]` done. Done tasks shall end with the short commit hash in parentheses.
 - S4.2 The system shall change only these markers and hashes. It shall not reformat or rewrap any other line.
-- S4.3 A spec with no markers shall be treated as all todo. The first Accept adds markers to the whole task list in one commit.
+- S4.3 A spec with no markers shall be treated as all todo. Markers are added when the spec's branch is created (S2.1), so every later marker change touches a single task line only.
 - S4.4 Status changes shall be written on the spec branch only, never on the user's checked-out branch.
 
 ### S5 Pull request
@@ -68,6 +68,7 @@ spec file" to "a worker run with the right prompt" and back to "task done".
 - S5.2 Each later Accept shall push the branch and update the PR body.
 - S5.3 When the last task is accepted, the system shall offer **Mark ready for review**. It shall never merge.
 - S5.4 The system shall not push to `main` or any protected branch, and shall name the branch explicitly when pushing.
+- S5.5 When the PR is merged (detected on the next `/spec` use), the system shall offer **Clean up**, which deletes the `spec/<spec-name>` branch and its worktree. It shall refuse while the branch has commits that are not in `main`.
 
 ### S6 Controls and visibility
 - S6.1 `OPENCODE_TG_SPEC` shall enable the feature. Default on. When off, `/spec` replies that it is disabled and nothing else changes.
@@ -125,7 +126,7 @@ spec file" to "a worker run with the right prompt" and back to "task done".
 4. [ ] **S4 Run** (S2.1, S2.4 to S2.6, S6.2). Spawn on `spec/<name>`, one running task per spec, audit events. *Checkpoint: run a trivial task end to end.*
 5. [ ] **S5 Checkpoint card** (S3.1 to S3.3, S3.7). Built from recorded results. *Checkpoint: read a card for a passing run and a failing run.*
 6. [ ] **S6 Accept, Redo, Stop** (S3.4 to S3.6, S4.4). *Checkpoint: accept one task and check the spec file diff is only a marker and a hash.*
-7. [ ] **S7 Pull request** (S5.1 to S5.4). Draft PR, body update, ready button. *Checkpoint: open a draft PR for a throwaway spec.*
+7. [ ] **S7 Pull request** (S5.1 to S5.5). Draft PR, body update, ready button, post-merge cleanup offer. *Checkpoint: open a draft PR for a throwaway spec.*
 8. [ ] **S8 End to end.** One extra scenario in `npm run smoke`: run a one-task spec, accept it. Smoke is the last step, as in `AGENTS.md`; restart the service afterwards.
 
 Verification order for every task: `npm run typecheck` and `npm run test:unit` first, `npm run smoke` once at the end.
