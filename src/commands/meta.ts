@@ -378,8 +378,9 @@ export async function cmdStyle(bot: Bot, conv: ConvKey, arg: string, uid?: numbe
   const cur = bot.userPrefs.getStyle(uid ?? "");
   const lang = bot.userPrefs.getLang(uid ?? "");
   const list = STYLE_NAMES.map((n, i) => {
+    const d = tr(lang, STYLE_DESC[n].vi, STYLE_DESC[n].en);
     const marker = n === cur ? ` ${tr(lang, STRINGS.style_current_marker.vi, STRINGS.style_current_marker.en)}` : "";
-    return `${i + 1}. ${n}${marker}`;
+    return `${i + 1}. ${n} — ${d}${marker}`;
   }).join("\n");
   const a = arg.trim().toLowerCase();
   if (a === "") {

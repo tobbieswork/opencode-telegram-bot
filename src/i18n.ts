@@ -107,24 +107,24 @@ export const STRINGS = {
     en: "❌ Unknown style: ",
   },
   style_default: {
-    vi: "• default — mặc định, không áp thêm hướng dẫn nào",
-    en: "• default — no extra instruction (stock behavior)",
+    vi: "mặc định, không áp thêm hướng dẫn nào",
+    en: "no extra instruction (stock behavior)",
   },
   style_concise: {
-    vi: "• concise — ngắn gọn: kết quả trước, không mở đầu, không tóm tắt cuối",
-    en: "• concise — result first, no preamble or closing summary",
+    vi: "ngắn gọn: kết quả trước, không mở đầu, không tóm tắt cuối",
+    en: "result first, no preamble or closing summary",
   },
   style_explanatory: {
-    vi: "• explanatory — kèm khối '★ Insight' giải thích vì sao chọn cách làm đó",
-    en: "• explanatory — adds a short '★ Insight' block on the why",
+    vi: "kèm khối '★ Insight' giải thích vì sao chọn cách làm đó",
+    en: "adds a short '★ Insight' block on the why",
   },
   style_learning: {
-    vi: "• learning — giải thích + chừa '// TODO: you' để bạn tự viết",
-    en: "• learning — explanatory + '// TODO: you' stubs to fill in",
+    vi: "giải thích + chừa '// TODO: you' để bạn tự viết",
+    en: "explanatory + '// TODO: you' stubs to fill in",
   },
   style_proactive: {
-    vi: "• proactive — chủ động làm ngay, chỉ hỏi khi quyết định quan trọng/mạo hiểm",
-    en: "• proactive — acts immediately; only asks on high-risk decisions",
+    vi: "chủ động làm ngay, chỉ hỏi khi quyết định quan trọng/mạo hiểm",
+    en: "acts immediately; only asks on high-risk decisions",
   },
   style_set_default: {
     vi: "✅ Style: mặc định (không áp thêm hướng dẫn)",

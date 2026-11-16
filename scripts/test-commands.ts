@@ -10,7 +10,7 @@
 import { COMMANDS, CMD_GROUPS, myCommands, helpText, commandGrid, knownCommands } from "../src/commands.js";
 import { Bot } from "../src/bot.js";
 import { cmdAgent } from "../src/commands/agents.js";
-import { cmdNote } from "../src/commands/meta.js";
+import { cmdNote, cmdStyle } from "../src/commands/meta.js";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: string): void {
@@ -184,6 +184,26 @@ const cmds = COMMANDS.map((c) => c.cmd);
   const noRawTags = last.replace(/<\/?(b|code)>/g, "");
   check("/models footer: id placeholder escaped", last.includes("&lt;id&gt;") && !last.includes("<id>"), last);
   check("/models footer: no raw angle brackets outside markup", !noRawTags.includes("<") && !noRawTags.includes(">"), noRawTags);
+}
+
+// ── /style list: numbered entries carry the per-style description ───────────
+{
+  for (const lang of ["vi", "en"] as const) {
+    const sent: string[] = [];
+    const duck: any = {
+      userPrefs: { getStyle: () => "explanatory", getLang: () => lang },
+      sendHtml: async (_c: string, t: string) => void sent.push(t),
+    };
+    await cmdStyle(duck, "conv-style", "");
+    const t0 = sent[0] ?? "";
+    const lines = t0.split("\n");
+    check(`style list (${lang}): 5 numbered entries`, lines.filter((l) => /^\d\. /.test(l)).length === 5, t0);
+    const n3 = lines.find((l) => l.startsWith("3. ")) ?? "";
+    check(`style list (${lang}): entry has "name — description"`, /3\. explanatory — /.test(n3), t0);
+    check(`style list (${lang}): current marker on explanatory`, n3.includes(lang === "vi" ? "← hiện tại" : "← current"), t0);
+    const noRawTags = t0.replace(/<\/(b|code)>/g, "").replace(/<b>|<\/b>/g, "");
+    check(`style list (${lang}): no raw angle brackets outside markup`, !noRawTags.includes("<") && !noRawTags.includes(">"), noRawTags);
+  }
 }
 
 if (failures > 0) {
