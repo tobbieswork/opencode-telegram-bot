@@ -403,6 +403,31 @@ const repo = join(tmp, "repo");
     for (const [k] of st.convsOfChat("42").filter(([, x]) => x.worker)) (orch as any).setStatus(k, "done");
   }
 
+  // #3b: two parallel writers in the same git repo can't both land in the main
+  // checkout. The in-flight main-checkout claim (recorded synchronously at the
+  // isolation decision, released when the spawn settles) makes the second spawn
+  // of the pair take a worktree. createSession is slowed so both spawns pass the
+  // decision before either is persisted - widening the race the old code lost
+  // (both would have taken the main checkout).
+  {
+    const slowSession = oc.createSession;
+    oc.createSession = async () => (await new Promise((r) => setTimeout(r, 50)), `ses_${++sessions}`);
+    for (let i = 1; i <= 3; i++) {
+      for (const [k] of st.convsOfChat("42").filter(([, x]) => x.worker)) (orch as any).setStatus(k, "done");
+      const [ra, rb] = await Promise.all([spawn(`pw${i}-a`, repo, { task: "edit" }), spawn(`pw${i}-b`, repo, { task: "edit" })]);
+      const wa = st.get(ra.conv).worker!;
+      const wb = st.get(rb.conv).worker!;
+      const mainCount = [wa, wb].filter((w) => !w.worktree).length;
+      const wtCount = [wa, wb].filter((w) => w.worktree !== undefined).length;
+      const detail = JSON.stringify([wa.name, wb.name].map((n) => st.findWorker("42", n)![1].worker?.worktree));
+      check(`parallel writers pair ${i}: at most one in the main checkout`, mainCount <= 1, detail);
+      check(`parallel writers pair ${i}: the other runs in its own worktree`, wtCount >= 1, detail);
+    }
+    check("in-flight main-checkout claims are released on settle", (orch as any).mainCheckoutPending.size === 0);
+    oc.createSession = slowSession;
+    for (const [k] of st.convsOfChat("42").filter(([, x]) => x.worker)) (orch as any).setStatus(k, "done");
+  }
+
   // #7: a failed session create leaves no topic, no worktree, and the name free.
   {
     const ok = oc.createSession;

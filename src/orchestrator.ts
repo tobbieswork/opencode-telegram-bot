@@ -259,6 +259,14 @@ export class Orchestrator {
    * name check nor the busy limit can be raced past.
    */
   private reserved = new Map<ConvKey, Set<string>>();
+  /**
+   * In-flight main-checkout claims, per chat: worker name -> repoRoot. A spawn that decides to run in the
+   * main checkout records its claim synchronously (before the next await), so a concurrent spawn's isolation
+   * check (mainCheckoutClaimed) sees it and is diverted to a worktree. Released when the spawn settles in
+   * spawn(). Closes the race where two parallel writers both decide "no other main-checkout writer" and
+   * both end up in the main checkout.
+   */
+  private mainCheckoutPending = new Map<ConvKey, Map<string, string>>();
   private healTimer?: ReturnType<typeof setInterval>;
 
   constructor(public h: Host) {}
@@ -661,7 +669,18 @@ export class Orchestrator {
     } finally {
       pending.delete(name);
       if (!pending.size) this.reserved.delete(chat);
+      const byName = this.mainCheckoutPending.get(chat);
+      byName?.delete(name);
+      if (byName && byName.size === 0) this.mainCheckoutPending.delete(chat);
     }
+  }
+
+  /** True when an in-flight spawn of this chat already claimed the main checkout of repoRoot. */
+  private mainCheckoutClaimed(chat: ConvKey, repoRoot: string): boolean {
+    const byName = this.mainCheckoutPending.get(chat);
+    if (!byName) return false;
+    for (const root of byName.values()) if (root === repoRoot) return true;
+    return false;
   }
 
   /** Busy workers of a chat, counting spawns in flight. */
@@ -690,13 +709,23 @@ export class Orchestrator {
     if (spec.isolate !== false && writes && this.h.cfg.worktreeMode !== "off") {
       repoRoot = await gitRoot(directory);
       if (repoRoot) {
-        const shared = this.workersOf(chat).some(
-          ([, s]) => BUSY.includes(s.worker!.status) && s.worker!.writes && !s.worker!.worktree && s.worker!.repoRoot === repoRoot,
-        );
+        const shared =
+          this.workersOf(chat).some(
+            ([, s]) => BUSY.includes(s.worker!.status) && s.worker!.writes && !s.worker!.worktree && s.worker!.repoRoot === repoRoot,
+          ) || this.mainCheckoutClaimed(chat, repoRoot);
         if (this.h.cfg.worktreeMode === "always" || shared) {
           const wt = await addWorktree(repoRoot, directory, name);
           worktree = { root: wt.root, branch: wt.branch, base: wt.base };
           directory = wt.directory;
+        } else {
+          // Claim the main checkout synchronously - no await between the check above and this record - so a
+          // concurrent spawn of the same chat/repo sees us and is diverted to a worktree. Released in spawn().
+          let byName = this.mainCheckoutPending.get(chat);
+          if (!byName) {
+            byName = new Map();
+            this.mainCheckoutPending.set(chat, byName);
+          }
+          byName.set(name, repoRoot);
         }
       }
     }
