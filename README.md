@@ -195,6 +195,7 @@ bot:   The last commit adds retry logic but…
 | `/rotation` | Manager session rotation health (context floor + history) |
 | `/health` | One line per background subsystem (OpenCode, bridge, scheduler, PR-watch, advisor, uptime, DNS heal): OK / warn / fail / off, with time of last success |
 | `/schedule <spec> <prompt>` | Schedule a prompt to run automatically |
+| `/spec` | List the `docs/sdd/` specs of the current git repo with progress; tap one to see its tasks (running comes later) |
 | `/lang vi\|en` | Set the language: `vi` (Tiếng Việt) or `en` (English) |
 | `/style [name]` | Set the reply style: `default` / `concise` / `explanatory` / `learning` / `proactive` (empty = view the list) |
 | `/reboot` | Reboot the machine (2-step confirmation) |
@@ -324,6 +325,7 @@ All settings are environment variables (see `.env.example`).
 | `OPENCODE_TG_WATCH` | | on | `0` = turn off the `/watch` live card. **No effect while `OPENCODE_TG_STREAM` is on** (the two live views are mutually exclusive) |
 | `OPENCODE_TG_WATCH_INTERVAL_MS` | | `3000` | How often the `/watch` card may be edited, ms (accepted 2000–5000; group chats are floored at 5000) |
 | `OPENCODE_TG_WATCH_MAX_MIN` | | `10` | How long a `/watch` card may run before it freezes, minutes |
+| `OPENCODE_TG_SPEC` | | on | `0` = turn off the `/spec` command (list + detail of `docs/sdd/` specs) |
 | `OPENCODE_TG_REACT` | | off | `1` = reaction UX: react to a worker's report to act on it, and the bot reacts to prompts and results (needs `message_reaction` updates) |
 | `OPENCODE_TG_BUSY_MODE` | | `ask` | Message sent while a turn runs: `ask` = busy reply with Queue/Steer/note buttons, `queue` = auto-enqueue (no tap), `off` = today's behaviour |
 | `OPENCODE_TG_UPLOADS` | | off | `1` = accept document/photo uploads and attach their path to the prompt |
