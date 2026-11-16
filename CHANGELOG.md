@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.37.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.37.0...opencode-telegram-bot-v1.37.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* spec tap survives a failed callback answer ([#244](https://github.com/tobbieswork/opencode-telegram-bot/issues/244)) ([f0f6228](https://github.com/tobbieswork/opencode-telegram-bot/commit/f0f6228288c247d4e33b5693cb1233c09ede7072))
+
 ## [1.37.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.36.0...opencode-telegram-bot-v1.37.0) (2026-11-16)
 
 
