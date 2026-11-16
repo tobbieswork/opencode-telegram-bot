@@ -8,6 +8,8 @@
  * Run:  npx tsx scripts/test-commands.ts
  */
 import { COMMANDS, CMD_GROUPS, myCommands, helpText, commandGrid, knownCommands } from "../src/commands.js";
+import { cmdAgent } from "../src/commands/agents.js";
+import { cmdNote } from "../src/commands/meta.js";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: string): void {
@@ -132,6 +134,35 @@ const cmds = COMMANDS.map((c) => c.cmd);
     const c = COMMANDS.find((y) => y.cmd === name);
     return c && b.text === (c.buttonEn ?? c.button);
   }));
+}
+
+// ── F6 (issue #155): UI hints must be valid Telegram HTML in BOTH languages ──
+// A raw <...> in an HTML-mode string makes Telegram reject the whole message
+// ("can't parse entities"), so the agent-picker and /note hints (vi + en)
+// must contain no angle brackets outside valid markup tags.
+{
+  const mkBot = (lang: "vi" | "en") => {
+    const sent: string[] = [];
+    const st: any = { get: () => ({}), peek: () => ({}) };
+    const bot: any = {
+      st,
+      userPrefs: { getLang: () => lang },
+      oc: { listAgents: async () => [] },
+      tg: { sendMessage: async (_c: string, text: string) => void sent.push(text) },
+    };
+    return { bot, sent };
+  };
+  for (const lang of ["vi", "en"] as const) {
+    const a = mkBot(lang);
+    await cmdAgent(a.bot, "1", "", {} as any);
+    const t = a.sent[0] ?? "";
+    const noRawTags = t.replace(/<\/?code>/g, "").replace(/<\/?b>/g, "");
+    check(`agent picker hint (${lang}): escaped, no raw <id>`, t.includes("<code>/agent &lt;id&gt;</code>") && !noRawTags.includes("<"), t);
+    const n = mkBot(lang);
+    await cmdNote(n.bot, "1", "");
+    const u = n.sent[0] ?? "";
+    check(`note hint (${lang}): no raw angle brackets`, !u.includes("<") && !u.includes(">"), u);
+  }
 }
 
 if (failures > 0) {

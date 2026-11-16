@@ -39,7 +39,7 @@ export async function cmdNote(bot: Bot, conv: ConvKey, arg: string): Promise<voi
       conv,
       pending
         ? tr(lang, "📝 Ghi chú đang chờ:\n", "📝 Pending notes:\n") + esc(pending)
-        : tr(lang, "Chưa có ghi chú nào. Dùng: /note (nội dung)", "No notes yet. Use: /note <content>"),
+        : tr(lang, "Chưa có ghi chú nào. Dùng: /note (nội dung)", "No notes yet. Use: /note (content)"),
     );
     return;
   }

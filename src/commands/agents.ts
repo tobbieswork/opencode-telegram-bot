@@ -60,7 +60,7 @@ function sendAgentPicker(bot: Bot, conv: ConvKey, errorNote?: string, lang: Lang
   rows.push([{ text: tr(lang, "❌ Đóng", "❌ Close"), callback_data: "agent:close" }]);
   return bot.tg.sendMessage(
     conv,
-    [errorNote ?? tr(lang, "❓ <b>/agent</b> cần tên agent", "❓ <b>/agent</b> needs an agent name"), tr(lang, "Hoặc gửi: <code>/agent &lt;id&gt;</code>", "Or send: <code>/agent <id></code>")].join("\n"),
+    [errorNote ?? tr(lang, "❓ <b>/agent</b> cần tên agent", "❓ <b>/agent</b> needs an agent name"), tr(lang, "Hoặc gửi: <code>/agent &lt;id&gt;</code>", "Or send: <code>/agent &lt;id&gt;</code>")].join("\n"),
     { reply_markup: { inline_keyboard: rows } },
   );
 }
