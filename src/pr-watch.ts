@@ -59,6 +59,91 @@ export const MAX_COMMENTS_PER_EVENT = 3;
 export const COMMENT_EXCERPT_LEN = 120;
 
 /**
+ * Minimal shape of the `gh api .../pulls` row the tick needs (a structural
+ * subset of the bot's GhPr — the detail fetcher is injected, so the tick's
+ * snapshot update stays unit-testable with a fake).
+ */
+export interface GhPrLike {
+  number: number;
+  state: "open" | "closed";
+  title: string;
+  updated_at: string;
+  merged_at: string | null;
+  head: { sha: string };
+}
+
+/** Fresh detail for one PR, as fetched by the bot's `gh api` calls. */
+export interface PrDetails {
+  snapshot: PrSnapshot;
+  comments: CommentEvent[];
+  reviews: { id: number; user: string; state: string }[];
+}
+
+/**
+ * One tick's snapshot update: build the next stored snapshot from prev + the
+ * open/closed PR lists, fetching detail only where it can have changed.
+ * Pure apart from `detailsFor` (the injected gh-api fetch).
+ *
+ * Refetch rules:
+ *   - Open PRs: always — comments, reviews and CI can change anytime.
+ *   - Closed PRs updated within the last 24 h: on first sight (its merge
+ *     event + final CI fire once). Afterwards the stored entry is kept as-is
+ *     so it is never re-announced — EXCEPT when we last saw the PR open: it
+ *     merged since the previous tick, so the fresh fetch is what makes the
+ *     open→merged transition diff (issue #154: keeping the stale open entry
+ *     swallowed the merge event until the entry aged out after 24 h).
+ *   - Merged entries are carried 7 days past the closed window so a restart
+ *     within that window cannot re-announce an old merge.
+ */
+export async function updatePrSnapshot(
+  prev: PrState,
+  open: GhPrLike[],
+  closed: GhPrLike[],
+  now: number,
+  detailsFor: (pr: GhPrLike) => Promise<PrDetails>,
+): Promise<{
+  next: PrState;
+  comments: Record<number, CommentEvent[]>;
+  reviews: Record<number, { id: number; user: string; state: string }[]>;
+}> {
+  const dayMs = 24 * 3600 * 1000;
+  const next: PrState = {};
+  const comments: Record<number, CommentEvent[]> = {};
+  const reviews: Record<number, { id: number; user: string; state: string }[]> = {};
+
+  // Open PRs: details can always change (comments, reviews, CI) → refetch.
+  for (const pr of open) {
+    const d = await detailsFor(pr);
+    next[pr.number] = d.snapshot;
+    comments[pr.number] = d.comments;
+    reviews[pr.number] = d.reviews;
+  }
+  // Closed PRs updated within the last 24 h: refetch the first time we see
+  // one; afterwards keep the stored entry — unless we last saw it open (see
+  // the refetch rules above).
+  for (const pr of closed) {
+    if (now - Date.parse(pr.updated_at) > dayMs) continue;
+    const p = prev[pr.number];
+    if (p && (p.state === "closed" || p.mergedAt)) {
+      next[pr.number] = p;
+      continue;
+    }
+    const d = await detailsFor(pr);
+    next[pr.number] = d.snapshot;
+    comments[pr.number] = d.comments;
+    reviews[pr.number] = d.reviews;
+  }
+  // Carry merged-but-unseen entries a little longer (state hygiene, 7 days)
+  // so a restart within that window cannot re-announce an old merge.
+  const weekMs = 7 * dayMs;
+  for (const [n, s] of Object.entries(prev)) {
+    const num = Number(n);
+    if (!(num in next) && s.mergedAt && now - Date.parse(s.mergedAt) < weekMs) next[num] = s;
+  }
+  return { next, comments, reviews };
+}
+
+/**
  * Diff two snapshots into events. `newComments` / `newReviews` are the
  * detail fetches for PRs whose max id advanced (the bot only fetches those,
  * so callers can pass empty arrays for unchanged PRs — no event is produced
