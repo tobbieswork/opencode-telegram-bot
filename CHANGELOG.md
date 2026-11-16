@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.37.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.36.0...opencode-telegram-bot-v1.37.0) (2026-11-16)
+
+
+### Features
+
+* checkpoint card for finished spec runs (spec-to-tasks S5) ([#242](https://github.com/tobbieswork/opencode-telegram-bot/issues/242)) ([fae8b17](https://github.com/tobbieswork/opencode-telegram-bot/commit/fae8b17cef93eefd4a37b151e80c99ef4e8e3589))
+
 ## [1.36.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.35.0...opencode-telegram-bot-v1.36.0) (2026-11-16)
 
 
