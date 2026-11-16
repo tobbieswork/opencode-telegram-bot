@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.31.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.30.5...opencode-telegram-bot-v1.31.0) (2026-11-16)
+
+
+### Features
+
+* spec parser for the spec-to-tasks flow (S1) ([#223](https://github.com/tobbieswork/opencode-telegram-bot/issues/223)) ([d9cd9d5](https://github.com/tobbieswork/opencode-telegram-bot/commit/d9cd9d5bf885fc076e91f0fe8eaff992be812cf1))
+
 ## [1.30.5](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.30.4...opencode-telegram-bot-v1.30.5) (2026-11-16)
 
 
