@@ -47,7 +47,7 @@ import {
   REACTION_FAIL,
 } from "./reactions.js";
 import { continuePrompt, continueButtonLabel, shouldOfferContinue, continueCallbackData, parseContinueData, alreadyOfferedContinue } from "./continue.js";
-import { PrSnapshot, PrState, diffSnapshots, renderEvent } from "./pr-watch.js";
+import { GhPrLike, PrSnapshot, PrState, diffSnapshots, renderEvent, updatePrSnapshot } from "./pr-watch.js";
 import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, SAFE_REBOOT_BIN, rebootTokenFile, buildTokenLine, rebootGoData, isRebootConfirmFresh } from "./uptime.js";
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
 import { DraftState, DraftAction, onTextDelta, onToolStart, isDmConv, EDIT_BUDGET } from "./stream.js";
@@ -1113,40 +1113,11 @@ export class Bot {
         this.ghApi<GhPr[]>("pulls?state=closed&per_page=30&sort=updated&direction=desc"),
       ]);
       const prev = (this.st.peek(MACHINE_STATE_KEY)?.prWatchSnapshot ?? {}) as PrState;
-      const now = Date.now();
-      const dayMs = 24 * 3600 * 1000;
-      const next: PrState = {};
-      const details: { comments: Record<number, { id: number; user: string; body: string }[]>; reviews: Record<number, { id: number; user: string; state: string }[]> } =
-        { comments: {}, reviews: {} };
-
-      // Open PRs: details can always change (comments, reviews, CI) → refetch.
-      for (const pr of open) {
-        const d = await this.prWatchDetails(pr);
-        next[pr.number] = d.snapshot;
-        details.comments[pr.number] = d.comments;
-        details.reviews[pr.number] = d.reviews;
-      }
-      // Closed PRs updated within the last 24 h: the first time we see one we
-      // fetch details (its merge event + final CI fire once); afterwards we
-      // keep the stored entry as-is so it is never re-announced.
-      for (const pr of closed) {
-        if (now - Date.parse(pr.updated_at) > dayMs) continue;
-        if (prev[pr.number]) {
-          next[pr.number] = prev[pr.number];
-          continue;
-        }
-        const d = await this.prWatchDetails(pr);
-        next[pr.number] = d.snapshot;
-        details.comments[pr.number] = d.comments;
-        details.reviews[pr.number] = d.reviews;
-      }
-      // Carry merged-but-unseen entries a little longer (state hygiene, 7 days)
-      // so a restart within that window cannot re-announce an old merge.
-      const weekMs = 7 * dayMs;
-      for (const [n, s] of Object.entries(prev)) {
-        const num = Number(n);
-        if (!(num in next) && s.mergedAt && now - Date.parse(s.mergedAt) < weekMs) next[num] = s;
-      }
+      // Snapshot update is pure logic (src/pr-watch.ts): open PRs are always
+      // refetched; closed PRs are refetched on first sight — and again when we
+      // last saw them OPEN, so a merge between ticks still diffs (#154).
+      const { next, comments, reviews } = await updatePrSnapshot(prev, open, closed, Date.now(), (pr) => this.prWatchDetails(pr));
+      const details = { comments, reviews };
 
       const firstRun = Object.keys(prev).length === 0;
       const events = firstRun ? [] : diffSnapshots(prev, next, details);
@@ -1168,7 +1139,7 @@ export class Bot {
   }
 
   /** Fresh detail for one PR: snapshot fields + the comment/review rows the diff needs. */
-  private async prWatchDetails(pr: GhPr): Promise<{
+  private async prWatchDetails(pr: GhPrLike): Promise<{
     snapshot: PrSnapshot;
     comments: { id: number; user: string; body: string }[];
     reviews: { id: number; user: string; state: string }[];

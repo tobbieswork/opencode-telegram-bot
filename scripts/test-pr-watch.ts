@@ -11,7 +11,7 @@
  *
  * Run:  npx tsx scripts/test-pr-watch.ts
  */
-import { diffSnapshots, renderEvent, MAX_COMMENTS_PER_EVENT, type PrSnapshot, type PrState } from "../src/pr-watch.js";
+import { diffSnapshots, renderEvent, updatePrSnapshot, MAX_COMMENTS_PER_EVENT, type GhPrLike, type PrSnapshot, type PrState } from "../src/pr-watch.js";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: string): void {
@@ -157,6 +157,73 @@ function snap(p: Partial<PrSnapshot> & { number: number }): PrSnapshot {
     REPO,
   );
   check("render multi comment lists all", multi.includes("2 comment mới") && multi.includes("@b"));
+}
+
+// ── tick-level: snapshot update across ticks (issue #154 regression) ──────
+// A PR that is open on tick 1 must announce its merge on tick 2. The old
+// code kept the stored open entry as-is for closed PRs, so the merge never
+// diffed and the event was lost until the entry aged out after 24 h.
+{
+  const NOW = Date.parse("2026-11-16T12:00:00Z");
+  const ago = (ms: number) => new Date(NOW - ms).toISOString();
+  const pr = (state: "open" | "closed", mergedAt: string | null, updatedMsAgo: number): GhPrLike => ({
+    number: 42,
+    state,
+    title: "feat: thing",
+    updated_at: ago(updatedMsAgo),
+    merged_at: mergedAt,
+    head: { sha: "sha1" },
+  });
+
+  const fetched: number[] = [];
+  const detailsFor = async (row: GhPrLike) => {
+    fetched.push(row.number);
+    return {
+      snapshot: snap({
+        number: row.number,
+        state: row.state,
+        headSha: row.head.sha,
+        updated: row.updated_at,
+        mergedAt: row.merged_at,
+      }),
+      comments: [],
+      reviews: [],
+    };
+  };
+  // Mirrors Bot.prWatchTick: baseline tick (empty prev) emits nothing, then
+  // the snapshot update is diffed against the previous tick's stored state.
+  const tick = async (prev: PrState, open: GhPrLike[], closed: GhPrLike[]) => {
+    const { next, comments, reviews } = await updatePrSnapshot(prev, open, closed, NOW, detailsFor);
+    const firstRun = Object.keys(prev).length === 0;
+    return { next, events: firstRun ? [] : diffSnapshots(prev, next, { comments, reviews }) };
+  };
+
+  // Tick 1: #42 open → stored (baseline tick, no events).
+  const t1 = await tick({}, [pr("open", null, 5 * 60_000)], []);
+  check("tick1 stores open PR, no baseline events", t1.next[42]?.state === "open" && t1.next[42]?.mergedAt === null && t1.events.length === 0);
+
+  // Tick 2: #42 merged between ticks (left the open list, appears in closed).
+  const fetchedBefore = fetched.length;
+  const t2 = await tick(t1.next, [], [pr("closed", ago(5 * 60_000), 10 * 60_000)]);
+  check("tick2 refetches a PR seen open on the previous tick", fetched.length === fetchedBefore + 1 && fetched[fetched.length - 1] === 42);
+  check("tick2 merged event fires (issue #154)", t2.events.length === 1 && t2.events[0].kind === "merged" && (t2.events[0] as any).number === 42);
+
+  // Tick 3: same closed PR again → entry kept as-is, no refetch, silence.
+  const t3 = await tick(t2.next, [], [pr("closed", ago(5 * 60_000), 11 * 60_000)]);
+  check("tick3 keeps stored closed entry without refetch", fetched.length === fetchedBefore + 1);
+  check("tick3 merged announced only once", t3.events.length === 0);
+
+  // Closed WITHOUT merge after being seen open: refetched once, no event.
+  const t1b = await tick({}, [pr("open", null, 5 * 60_000)], []);
+  fetched.length = 0;
+  const t2b = await tick(t1b.next, [], [pr("closed", null, 10 * 60_000)]);
+  check("closed-unmerged refetched once", fetched.length === 1);
+  check("closed-unmerged produces no event", t2b.events.length === 0);
+
+  // Closed PR updated >24 h ago and unseen before: ignored entirely.
+  const fetched2 = fetched.length;
+  const t4 = await tick(t2b.next, [], [pr("closed", null, 3 * 24 * 3600_000)]);
+  check("stale closed PR (>24h) not refetched, not stored", fetched.length === fetched2 && !(42 in t4.next));
 }
 
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} FAILURES`);
