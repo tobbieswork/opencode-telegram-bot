@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.35.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.34.0...opencode-telegram-bot-v1.35.0) (2026-11-16)
+
+
+### Features
+
+* run spec tasks on a dedicated branch (spec-to-tasks S4) ([#237](https://github.com/tobbieswork/opencode-telegram-bot/issues/237)) ([4775787](https://github.com/tobbieswork/opencode-telegram-bot/commit/4775787bd25c002812cc3f7ef47969773117dd9d))
+
 ## [1.34.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.33.0...opencode-telegram-bot-v1.34.0) (2026-11-16)
 
 
