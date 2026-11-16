@@ -119,7 +119,7 @@ spec file" to "a worker run with the right prompt" and back to "task done".
 
 ## 5. Tasks (each ends with a human checkpoint)
 
-0. [x] **S0 Spike.** Run one short real worker task by hand. Record in a Findings section whether the bot can read the worker's executed commands and their exit codes (S3.2), and whether a note can be sent to a finished worker's session (S3.5). *Checkpoint: confirm the answers before building S3.*
+0. [x] (c1249c0) **S0 Spike.** Run one short real worker task by hand. Record in a Findings section whether the bot can read the worker's executed commands and their exit codes (S3.2), and whether a note can be sent to a finished worker's session (S3.5). *Checkpoint: confirm the answers before building S3.*
 1. [ ] **S1 Parser** (S1.1, S1.4, S4.1 to S4.3). `src/spec.ts` and `test:spec`: parse, status rewrite, round trip, golden test over every file in `docs/sdd/`. *Checkpoint: review the parsed output for each spec.*
 2. [ ] **S2 `/spec` list and detail** (S1.2, S1.3, S6.1, S6.3). Command, buttons, README row, `.env.example`. No running yet. *Checkpoint: browse the specs in Telegram.*
 3. [ ] **S3 Prompt builder** (S2.2, S2.3). Pure function with unit tests, including the size cap. *Checkpoint: read the prompt built for three real tasks.*
