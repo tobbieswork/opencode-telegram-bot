@@ -1,4 +1,4 @@
-import { mkdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Telegram, CallbackQuery, TOPIC_COLORS } from "./telegram.js";
@@ -8,7 +8,9 @@ import { tr } from "./i18n.js";
 import { Config } from "./config.js";
 import { ConvKey, chatOf, convKey, parseConv } from "./conv.js";
 import { McpBridge, BridgeTool, makeRunScriptTool } from "./mcp-bridge.js";
-import { addWorktree, diffSummary, gitBoundary, gitRoot, gitStatusBrief, mergeWorktree, removeWorktree } from "./worktree.js";
+import { addWorktree, diffSummary, gitBoundary, gitRoot, gitStatusBrief, mergeWorktree, removeWorktree, runGit } from "./worktree.js";
+import { parseSpec, type ParsedTask } from "./spec.js";
+import { classifyShellItems, computeNotRan, renderCheckpointCard, checkpointOutcome } from "./spec-checkpoint.js";
 import { listDirs } from "./fsbrowser.js";
 import { spawnRequestBody } from "./reactions.js";
 import { buildHandoffPrompt, followUpsFromMessages, respawnName, respawnNotice, shouldRespawnWorker } from "./recovery.js";
@@ -178,9 +180,11 @@ interface SpawnSpec {
   /**
    * S4 (spec Run): set when this worker runs a spec task. Recorded on the
    * worker so the one-running-per-spec guard can release the slot when the
-   * worker finishes or is stopped/killed.
+   * worker finishes or is stopped/killed. S5 adds `conv` (the owner-chat conv
+   * where the Run tap happened — where the checkpoint card is posted) and
+   * `uid` (the tapping user's id, for the S6.2 `tapped_by` audit).
    */
-  specRun?: { spec: string; branch: string; task: string };
+  specRun?: { spec: string; branch: string; task: string; conv: ConvKey; uid: number };
 }
 
 /** A Manager action waiting for the user's ✅ (confirm mode). */
@@ -1022,6 +1026,11 @@ export class Orchestrator {
     const worker: WorkerInfo = { ...s.worker, status, updatedAt: Date.now(), ...(lastResult !== undefined ? { lastResult } : {}) };
     this.h.st.set(conv, { worker });
     if (status === "done" || status === "failed" || status === "stopped") this.releaseSpecRunOnFinish(conv); // S4
+    // S5: a spec worker that just reached a terminal status posts its checkpoint card.
+    // Gated on `changed` so a re-set of the same terminal status never double-posts.
+    if (changed && (status === "done" || status === "failed" || status === "stopped") && worker.specRun) {
+      void this.postSpecCheckpoint(conv, status).catch((e) => warn("postSpecCheckpoint:", e?.message));
+    }
     if (!BUSY.includes(status)) this.clearSchedTimer(conv); // the run this timer guarded is over
     if (changed) void this.h.tg.editForumTopic(conv, this.topicName(worker)).catch((e) => warn("editForumTopic:", e?.message));
   }
@@ -1059,6 +1068,146 @@ export class Orchestrator {
     const w = this.h.st.peek(workerConv)?.worker;
     if (!w?.specRun) return;
     this.releaseSpecRun(chatOf(workerConv), w.specRun.spec, w.name);
+  }
+
+  /**
+   * S5 (checkpoint card): a spec worker just reached a terminal status — gather
+   * the evidence and post the checkpoint card (S3.1) with the Accept / Redo /
+   * Stop buttons (S3.3) to the OWNER chat's conv (where the Run tap happened —
+   * `specRun.conv`). "Ran / not run" comes from the worker's ACTUAL shell tool
+   * results, never its claim (S3.2). An errored run or a run without a worker
+   * commit offers Redo with note + Stop ONLY — never Accept (S3.7). Emits the
+   * S6.2 `spec_checkpoint` audit event. Best-effort: any failure is logged and
+   * never fails the worker's finish. No-op for non-spec workers or a spec run
+   * that can't be routed (missing `specRun.conv`, e.g. a pre-S5 state entry).
+   */
+  private async postSpecCheckpoint(workerConv: ConvKey, status: WorkerStatus): Promise<void> {
+    const w = this.h.st.peek(workerConv)?.worker;
+    if (!w?.specRun) return;
+    const { spec, branch, task: taskId, conv, uid } = w.specRun;
+    if (!conv) return; // can't route the card (pre-S5 state entry)
+    const lang = this.langOf(conv);
+    const sessionID = this.h.st.peek(workerConv)?.sessionID;
+    const dir = this.h.st.peek(workerConv)?.directory;
+
+    // ── S3.1 facts: the worker's commit + files changed, re-read from git ──
+    const base = dir ? await this.resolveBaseBranch(dir) : undefined;
+    let commit: { hash: string; subject: string } | undefined;
+    let files: string[] = [];
+    if (dir) {
+      // Commits on the spec branch since the fork; the marker commit (made by
+      // the orchestrator before the worker started) is not the worker's work.
+      // The marker commit's subject is an exact known string (see
+      // ensureSpecMarkers) — compare by equality, no regex escaping.
+      const markerSubject = `docs: add S4 task markers to ${spec}.md`;
+      const isMarker = (line: string): boolean => {
+        const sp = line.indexOf(" ");
+        return sp > -1 && line.slice(sp + 1).trim() === markerSubject;
+      };
+      try {
+        const raw = await runGit(dir, ["log", "--format=%h %s", `${base}..HEAD`]);
+        const workerCommits = raw
+          .split("\n")
+          .map((l) => l.trim())
+          .filter(Boolean)
+          .filter((l) => !isMarker(l));
+        if (workerCommits.length > 0) {
+          const [hash, ...rest] = workerCommits[0].split(" ");
+          commit = { hash, subject: rest.join(" ") };
+        }
+        // Files changed since the fork (committed + uncommitted + untracked).
+        const [committed, uncommitted, untracked] = await Promise.all([
+          runGit(dir, ["diff", "--name-only", `${base}..HEAD`]).catch(() => ""),
+          runGit(dir, ["diff", "--name-only"]).catch(() => ""),
+          runGit(dir, ["ls-files", "--others", "--exclude-standard"]).catch(() => ""),
+        ]);
+        const set = new Set<string>();
+        for (const blob of [committed, uncommitted, untracked]) {
+          for (const l of blob.split("\n").map((x) => x.trim())) if (l) set.add(l);
+        }
+        files = [...set];
+      } catch (e) {
+        warn("postSpecCheckpoint git:", (e as Error)?.message);
+      }
+    }
+
+    // ── S3.2: the checks, from the worker's ACTUAL shell tool results ──
+    const items: Array<{ state?: any }> = [];
+    if (sessionID) {
+      const msgs = ((await this.h.oc.listMessages(sessionID).catch(() => [])) as any[]) ?? [];
+      for (const m of msgs) {
+        for (const c of (m?.content ?? []) as any[]) {
+          if (c?.type === "tool" && c.name === "shell") items.push(c);
+        }
+      }
+    }
+    const ran = classifyShellItems(items).ran;
+    const notRan = computeNotRan(ran);
+    const errored = status === "failed" || status === "stopped" || ran.some((c) => c.error !== undefined);
+
+    // ── S3.1: the task's checkpoint sentence, re-parsed from the worktree ──
+    let task: ParsedTask | undefined;
+    if (dir) {
+      try {
+        const md = readFileSync(join(dir, "docs", "sdd", `${spec}.md`), "utf8");
+        const res = parseSpec(md);
+        if (!("error" in res)) task = res.tasks.find((t) => t.id === taskId);
+      } catch {
+        /* no spec file in the worktree */
+      }
+    }
+    const taskInfo: ParsedTask =
+      task ?? { n: 0, id: taskId, title: "", marker: "todo", body: "", reqIds: [] };
+
+    // ── S6.2: audit the checkpoint (who tapped, which task, the outcome) ──
+    const rawReply = sessionID ? await this.h.oc.latestReply(sessionID, 0, { lastTurn: true }).catch(() => undefined) : undefined;
+    const lastResult = typeof rawReply === "string" ? trunc(rawReply, 500) : undefined;
+    const outcome = checkpointOutcome(commit, ran, errored);
+    audit({
+      action: "spec_checkpoint",
+      chatId: conv,
+      userId: uid ? String(uid) : undefined,
+      session: sessionID,
+      outcome,
+      meta: { spec, task: taskId, branch, worker: w.name, outcome, lastResult },
+    });
+
+    // ── S3.1/S3.3/S3.7: render + post the card to the owner chat's conv ──
+    const card = renderCheckpointCard({
+      task: taskInfo,
+      workerName: w.name,
+      branch,
+      commit,
+      files: files.length ? files : undefined,
+      checks: { ran, notRan },
+      errored,
+      lang,
+    });
+    await this.h.sendHtml(conv, card.text, { reply_markup: card.keyboard }).catch((e) => {
+      warn("postSpecCheckpoint send:", (e as Error)?.message);
+    });
+  }
+
+  /**
+   * S5: the branch the spec branch was cut from (its fork point), so we can
+   * scope "the worker's commit / files changed" to since-the-fork. Prefers the
+   * remote's default (origin/HEAD), then common local default names (the spec
+   * branch is `spec/*`, so `main`/`master` are safe candidates), then degrades
+   * to the current branch (a local-only repo with none of the above).
+   */
+  private async resolveBaseBranch(dir: string): Promise<string> {
+    const remote = await runGit(dir, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).catch(() => "");
+    if (remote) {
+      const b = remote.replace(/^origin\//, "");
+      if (b) return b;
+    }
+    for (const cand of ["main", "master"]) {
+      const ok = await runGit(dir, ["show-ref", "--verify", "--quiet", `refs/heads/${cand}`])
+        .then(() => true)
+        .catch(() => false);
+      if (ok) return cand;
+    }
+    return (await runGit(dir, ["rev-parse", "--abbrev-ref", "HEAD"]).catch(() => "")) || "HEAD";
   }
 
   /**
