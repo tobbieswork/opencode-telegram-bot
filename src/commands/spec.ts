@@ -283,7 +283,9 @@ async function specRunSpawn(
       // spec/<name> branch); skip the orchestrator's worktree pass so it
       // doesn't wrap this in a second tg/ worktree (matters in "always" mode).
       isolate: false,
-      specRun: { spec: name, branch: wt.branch, task: task.id },
+      // S5: conv = the conv the Run tap happened in (where the checkpoint card
+      // is posted); uid = the tapping user (S6.2 tapped_by).
+      specRun: { spec: name, branch: wt.branch, task: task.id, conv, uid: uid ?? 0 },
     });
     // S6.2: audit the run — who tapped, which spec, which task.
     audit({

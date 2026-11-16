@@ -72,8 +72,10 @@ export interface WorkerInfo {
    * spec it runs, its spec branch, and the task id. Drives the one-running-per-
    * spec release: when the worker reaches a terminal status, the owner chat's
    * `specRunning[spec]` marker is cleared (see Orchestrator.releaseSpecRun).
+   * `conv` + `uid` are S5: the OWNER chat (where the Run tap happened, where
+   * the checkpoint card is posted) and the tapping user's id (S6.2 `tapped_by`).
    */
-  specRun?: { spec: string; branch: string; task: string };
+  specRun?: { spec: string; branch: string; task: string; conv: ConvKey; uid: number };
   /**
    * Id of the topic intro message; anchor for switch_to_topic navigation (the
    * manager board's per-worker jump buttons). Set at spawn.
