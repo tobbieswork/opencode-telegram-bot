@@ -20,6 +20,73 @@ export async function gitRoot(dir: string): Promise<string | undefined> {
   return git(dir, ["rev-parse", "--show-toplevel"]).catch(() => undefined);
 }
 
+/** Run git in `cwd` (argument vector, never a shell string). Exported for the spec-run flow, which commits the S4 markers in the spec worktree. */
+export function runGit(cwd: string, args: string[], timeoutMs = 30_000): Promise<string> {
+  return git(cwd, args, timeoutMs);
+}
+
+/** S4: the branch a spec task runs on. Stable per spec (not per run). */
+export function specBranchName(specName: string): string {
+  return `spec/${specName}`;
+}
+
+/** S4: the worktree directory slug for a spec (stable per spec). */
+export function specSlug(specName: string): string {
+  return `spec-${specName}`;
+}
+
+/**
+ * The branch a new spec branch is cut from: `origin/HEAD` (the repo's default,
+ * e.g. "main") when a remote is set, else the current branch, else "main".
+ */
+export async function defaultBranch(repoRoot: string): Promise<string> {
+  const remoteHead = await git(repoRoot, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).catch(() => "");
+  if (remoteHead) {
+    const b = remoteHead.replace(/^origin\//, "");
+    if (b) return b;
+  }
+  const cur = await git(repoRoot, ["rev-parse", "--abbrev-ref", "HEAD"]).catch(() => "");
+  if (cur && cur !== "HEAD") return cur;
+  return "main";
+}
+
+/** A spec task's worktree: stable branch `spec/<name>` from the default branch. */
+export interface SpecWorktree {
+  directory: string;
+  root: string;
+  branch: string;
+  /** The branch the spec branch was cut from (its merge target). */
+  base: string;
+}
+
+async function branchExists(repoRoot: string, branch: string): Promise<boolean> {
+  return git(repoRoot, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]).then(
+    () => true,
+    () => false,
+  );
+}
+
+/**
+ * Ensure the spec branch `spec/<name>` and its worktree exist, creating them
+ * from the repo's default branch when missing. Idempotent: an existing
+ * worktree is reused; an existing branch with a deleted worktree is re-checked
+ * out. Returns the worktree (directory mirrors `dir`'s subfolder).
+ */
+export async function ensureSpecWorktree(repoRoot: string, dir: string, specName: string): Promise<SpecWorktree> {
+  const branch = specBranchName(specName);
+  const slug = specSlug(specName);
+  const root = join(dirname(repoRoot), `${basename(repoRoot)}.worktrees`, slug);
+  const base = await defaultBranch(repoRoot);
+  if (!existsSync(root)) {
+    if (await branchExists(repoRoot, branch)) {
+      await git(repoRoot, ["worktree", "add", root, branch]);
+    } else {
+      await git(repoRoot, ["worktree", "add", "-b", branch, root, base]);
+    }
+  }
+  return { directory: join(root, relative(repoRoot, dir)), root, branch, base };
+}
+
 export interface Worktree {
   /** Directory the worker should run in (mirrors the subfolder it was asked for). */
   directory: string;

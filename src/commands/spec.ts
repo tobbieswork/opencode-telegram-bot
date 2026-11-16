@@ -16,14 +16,18 @@
  * conversation's directory + git root and re-parses the spec files with the
  * pure parser in src/spec.ts. Nothing is persisted.
  */
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { Bot } from "../bot.js";
 import type { CallbackQuery } from "../telegram.js";
 import type { ConvKey } from "../conv.js";
+import { chatOf } from "../conv.js";
 import type { Lang } from "../state.js";
-import { gitRoot } from "../worktree.js";
-import { parseSpec, type ParsedTask } from "../spec.js";
+import { gitRoot, ensureSpecWorktree, runGit, specBranchName } from "../worktree.js";
+import { parseSpec, initMarkers, type ParsedTask } from "../spec.js";
+import { buildTaskPrompt } from "../spec-prompt.js";
+import { audit } from "../audit.js";
+import { isUserAllowed } from "../schedule.js";
 import { tr } from "../i18n.js";
 import { esc, trunc } from "../format.js";
 
@@ -185,10 +189,245 @@ export async function cmdSpec(bot: Bot, conv: ConvKey, uid?: number): Promise<vo
   );
 }
 
+// ── S4: Run ─────────────────────────────────────────────────────────────────
+// Tapping "Run" on a spec task spawns ONE worker on a dedicated spec branch
+// (spec/<name> in its own worktree, cut from main) with the buildTaskPrompt
+// output. One running worker per SPEC (not per chat), persisted in state.json.
+// A blocked task ("Needs:") never auto-spawns: the first tap probes what it
+// can and offers an explicit "Run anyway"; the second tap spawns (S2.6).
+
+/** Parse a run callback body "<name>:<n>" into a valid (name, n), or undefined. */
+function parseRunRef(body: string): { name: string; n: number } | undefined {
+  const [name, num] = body.split(":");
+  if (!name || !NAME_RE.test(name)) return undefined;
+  if (!/^\d+$/.test(num)) return undefined;
+  const n = parseInt(num, 10);
+  if (!Number.isFinite(n) || n < 1) return undefined;
+  return { name, n };
+}
+
 /**
- * Button taps from a /spec list: "spec:<name>" opens the detail view,
- * "specrun:<name>:<n>" is a Run tap (S4, not available yet). The state is
- * rebuilt from disk on every tap (S6.4).
+ * Ensure the spec branch carries S4 task markers, committing them when absent
+ * (S4.3). Committed with the repository's own author (git's configured
+ * identity). Returns true when a marker commit was made.
+ */
+async function ensureSpecMarkers(wtRoot: string, relPath: string, specName: string): Promise<boolean> {
+  const file = join(wtRoot, relPath);
+  const md = readFileSync(file, "utf8");
+  const marked = initMarkers(md);
+  if (marked === md) return false; // already marked (idempotent)
+  writeFileSync(file, marked);
+  await runGit(wtRoot, ["add", "--", relPath]);
+  await runGit(wtRoot, ["commit", "-m", `docs: add S4 task markers to ${specName}.md`]);
+  return true;
+}
+
+/**
+ * The shared spawn behind both run taps (S2.1). Claims the one-running-per-
+ * spec slot, creates/reuses the spec worktree, builds the prompt from the
+ * WORKTREE copy of the spec, and spawns one worker via the orchestrator's
+ * existing spawn. Rolls the claim back if anything before a successful spawn
+ * throws, so a failed run never wedges the spec.
+ */
+async function specRunSpawn(
+  bot: Bot,
+  conv: ConvKey,
+  lang: Lang,
+  uid: number | undefined,
+  name: string,
+  n: number,
+  task: ParsedTask,
+  root: string,
+  runAnyway: boolean,
+): Promise<void> {
+  const chat = chatOf(conv);
+  const workerName = `spec-${name}`;
+  const branch = specBranchName(name);
+  // S2.5: one running per spec — atomic claim (check + set, no await between,
+  // so two concurrent taps can't both get through).
+  if (!bot.orch.claimSpecRun(chat, name, { branch, task: task.id, worker: workerName, since: Date.now() })) {
+    const running = bot.st.peek(chat)?.specRunning?.[name];
+    await bot.tg
+      .sendMessage(
+        conv,
+        tr(
+          lang,
+          `⛔ Spec <b>${esc(name)}</b> đang có worker chạy (task ${esc(running?.task ?? task.id)}). Chờ nó xong hoặc dừng nó trước.`,
+          `⛔ Spec <b>${esc(name)}</b> already has a running worker (task ${esc(running?.task ?? task.id)}). Wait for it or stop it first.`,
+        ),
+      )
+      .catch(() => {});
+    return;
+  }
+  try {
+    // S2.1: dedicated worktree on the stable spec branch, cut from main. The
+    // worker runs at the repo root (dir === root).
+    const wt = await ensureSpecWorktree(root, root, name);
+    const relSpec = join("docs", "sdd", `${name}.md`);
+    // S4.3: the spec branch must carry task markers before the worker starts.
+    await ensureSpecMarkers(wt.root, relSpec, name);
+    // S2.1: build the prompt from the WORKTREE copy of the spec (so it carries
+    // the markers). Fall back to the main-checkout task if the worktree parse
+    // differs (shouldn't happen for a fresh branch).
+    const wtMd = readFileSync(join(wt.root, relSpec), "utf8");
+    const wtRes = parseSpec(wtMd);
+    const wtTask = "error" in wtRes ? undefined : wtRes.tasks.find((t) => t.n === n);
+    const prompt = buildTaskPrompt(wtMd, wtTask ?? task).prompt;
+    const r = await bot.orch.spawn(chat, {
+      name: workerName,
+      directory: wt.directory,
+      task: prompt,
+      writes: true,
+      spawnedBy: "user",
+      // We already isolated the worker into its own spec worktree (the
+      // spec/<name> branch); skip the orchestrator's worktree pass so it
+      // doesn't wrap this in a second tg/ worktree (matters in "always" mode).
+      isolate: false,
+      specRun: { spec: name, branch: wt.branch, task: task.id },
+    });
+    // S6.2: audit the run — who tapped, which spec, which task.
+    audit({
+      action: "spec_run",
+      chatId: conv,
+      userId: uid != null ? String(uid) : undefined,
+      session: bot.st.peek(r.conv)?.sessionID,
+      meta: { spec: name, task: task.id, branch: wt.branch, worker: workerName, runAnyway },
+    });
+    await bot.tg
+      .sendMessage(
+        conv,
+        tr(
+          lang,
+          `🏃 Đang chạy task <b>${esc(task.id)}</b> của spec ${esc(name)} — worker <b>${esc(workerName)}</b> trong branch <code>${esc(wt.branch)}</code>.`,
+          `🏃 Running task <b>${esc(task.id)}</b> of spec ${esc(name)} — worker <b>${esc(workerName)}</b> in branch <code>${esc(wt.branch)}</code>.`,
+        ),
+      )
+      .catch(() => {});
+  } catch (e) {
+    // Roll back the claim so the spec isn't wedged by a failed spawn.
+    bot.orch.releaseSpecRun(chat, name, workerName);
+    await bot.tg
+      .sendMessage(conv, tr(lang, `❌ Không chạy được: ${esc((e as Error).message)}`, `❌ Couldn't run it: ${esc((e as Error).message)}`))
+      .catch(() => {});
+  }
+}
+
+/**
+ * First tap of a Run on a spec task (S2.5, S2.6).
+ *  - todo (not blocked) → spawn immediately.
+ *  - blocked ("Needs:") → probe what we can, reply with the check result and
+ *    an explicit "Run anyway" button (the second tap). Never auto-spawn.
+ */
+async function specRunFirstTap(bot: Bot, cb: CallbackQuery, conv: ConvKey, name: string, n: number): Promise<void> {
+  const uid = cb.from?.id;
+  const lang = bot.userPrefs.getLang(uid ?? "");
+  // S2.5: allowlist gate (defense in depth — the bot's callback gate already
+  // blocks strangers before this runs; this keeps it true when called directly).
+  if (!isUserAllowed(bot.cfg, uid)) {
+    await bot.tg.sendMessage(conv, "⛔ <b>Not authorized.</b> You are not on the allowlist.").catch(() => {});
+    return;
+  }
+  const dir = convDir(bot, conv);
+  const root = await gitRoot(dir);
+  if (!root) {
+    await bot.tg.sendMessage(conv, tr(lang, "📁 Repo không phải git — không chạy được spec.", "📁 Not a git repository — can't run the spec."));
+    return;
+  }
+  let md: string;
+  try {
+    md = readFileSync(join(root, "docs", "sdd", `${name}.md`), "utf8");
+  } catch {
+    await bot.tg.sendMessage(conv, tr(lang, `❌ Không tìm thấy spec ${esc(name)} trong docs/sdd.`, `❌ Spec ${esc(name)} not found in docs/sdd.`));
+    return;
+  }
+  const res = parseSpec(md);
+  if ("error" in res) {
+    await bot.tg.sendMessage(conv, tr(lang, "❌ Spec này không phân tích được — không chạy được.", "❌ This spec can't be parsed — it can't be run."));
+    return;
+  }
+  const task = res.tasks.find((t) => t.n === n);
+  if (!task) {
+    await bot.tg.sendMessage(conv, tr(lang, "❌ Không tìm thấy task này trong spec.", "❌ Task not found in the spec."));
+    return;
+  }
+  // S2.5: a done task is never run.
+  if (task.marker === "done") {
+    await bot.tg.sendMessage(conv, tr(lang, `✅ Task ${esc(task.id)} đã xong — không chạy lại.`, `✅ Task ${esc(task.id)} is already done — not re-running.`));
+    return;
+  }
+  if (task.needs) {
+    // S2.6: blocked — probe + offer "Run anyway" (second tap spawns).
+    let checkLine: string;
+    if (/opencode/i.test(task.needs)) {
+      const p = await bot.specProbeService();
+      checkLine = p.checkable
+        ? p.ok
+          ? tr(lang, "🔎 Kiểm tra: dịch vụ OpenCode <b>đang phản hồi</b> (các điều kiện khác có thể vẫn thiếu).", "🔎 Check: the OpenCode service <b>is responding</b> (other conditions may still be missing).")
+          : tr(lang, "🔎 Kiểm tra: dịch vụ OpenCode <b>không phản hồi</b>.", "🔎 Check: the OpenCode service <b>is not responding</b>.")
+        : tr(lang, "🔎 Không thể tự kiểm tra điều kiện này.", "🔎 This condition can't be checked automatically.");
+    } else {
+      checkLine = tr(lang, `🔎 Không thể tự kiểm tra: <i>${esc(task.needs)}</i>.`, `🔎 Can't check automatically: <i>${esc(task.needs)}</i>.`);
+    }
+    await bot.sendHtml(
+      conv,
+      tr(lang, `⛔ Task <b>${esc(task.id)}</b> đang bị chặn: <i>${esc(task.needs)}</i>`, `⛔ Task <b>${esc(task.id)}</b> is blocked: <i>${esc(task.needs)}</i>`) +
+        `\n${checkLine}\n` +
+        tr(lang, "Bấm nếu bạn chắc chắn muốn chạy dù vậy:", "Tap if you're sure you want to run it anyway:"),
+      { reply_markup: { inline_keyboard: [[{ text: tr(lang, "▶️ Chạy dù vậy", "▶️ Run anyway"), callback_data: `specrunok:${name}:${n}` }]] } },
+    );
+    return;
+  }
+  await specRunSpawn(bot, conv, lang, uid, name, n, task, root, false);
+}
+
+/**
+ * Second tap — an explicit "Run anyway" after the blocked-task probe (S2.6).
+ * The block is NOT re-checked (that's the point of the second tap); it spawns
+ * with the same allowlist + resolution as the non-blocked first tap.
+ */
+async function specRunSecondTap(bot: Bot, cb: CallbackQuery, conv: ConvKey, name: string, n: number): Promise<void> {
+  const uid = cb.from?.id;
+  const lang = bot.userPrefs.getLang(uid ?? "");
+  if (!isUserAllowed(bot.cfg, uid)) {
+    await bot.tg.sendMessage(conv, "⛔ <b>Not authorized.</b> You are not on the allowlist.").catch(() => {});
+    return;
+  }
+  const dir = convDir(bot, conv);
+  const root = await gitRoot(dir);
+  if (!root) {
+    await bot.tg.sendMessage(conv, tr(lang, "📁 Repo không phải git — không chạy được spec.", "📁 Not a git repository — can't run the spec."));
+    return;
+  }
+  let md: string;
+  try {
+    md = readFileSync(join(root, "docs", "sdd", `${name}.md`), "utf8");
+  } catch {
+    await bot.tg.sendMessage(conv, tr(lang, `❌ Không tìm thấy spec ${esc(name)} trong docs/sdd.`, `❌ Spec ${esc(name)} not found in docs/sdd.`));
+    return;
+  }
+  const res = parseSpec(md);
+  if ("error" in res) {
+    await bot.tg.sendMessage(conv, tr(lang, "❌ Spec này không phân tích được — không chạy được.", "❌ This spec can't be parsed — it can't be run."));
+    return;
+  }
+  const task = res.tasks.find((t) => t.n === n);
+  if (!task) {
+    await bot.tg.sendMessage(conv, tr(lang, "❌ Không tìm thấy task này trong spec.", "❌ Task not found in the spec."));
+    return;
+  }
+  if (task.marker === "done") {
+    await bot.tg.sendMessage(conv, tr(lang, `✅ Task ${esc(task.id)} đã xong — không chạy lại.`, `✅ Task ${esc(task.id)} is already done — not re-running.`));
+    return;
+  }
+  await specRunSpawn(bot, conv, lang, uid, name, n, task, root, true);
+}
+
+/**
+ * Button taps from a /spec list (state rebuilt from disk on every tap, S6.4):
+ *  - "spec:<name>"            → the detail view (task list + Run buttons)
+ *  - "specrun:<name>:<n>"     → Run tap on the next runnable (non-blocked) → spawn
+ *  - "specblocked:<name>:<n>" → Run tap on a blocked task → probe + "Run anyway"
+ *  - "specrunok:<name>:<n>"   → the explicit second tap ("Run anyway") → spawn
  */
 export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: ConvKey): Promise<void> {
   const lang = bot.userPrefs.getLang(cb.from?.id ?? "");
@@ -198,18 +437,35 @@ export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: Conv
     await bot.tg.sendMessage(conv, disabledText(lang));
     return;
   }
+  await bot.tg.answerCallbackQuery(cb.id);
+  if (data.startsWith("specrunok:")) {
+    const ref = parseRunRef(data.slice("specrunok:".length));
+    if (!ref) {
+      await bot.tg.sendMessage(conv, tr(lang, "❌ Không rõ task nào.", "❌ Unknown task."));
+      return;
+    }
+    await specRunSecondTap(bot, cb, conv, ref.name, ref.n);
+    return;
+  }
+  if (data.startsWith("specblocked:")) {
+    const ref = parseRunRef(data.slice("specblocked:".length));
+    if (!ref) {
+      await bot.tg.sendMessage(conv, tr(lang, "❌ Không rõ task nào.", "❌ Unknown task."));
+      return;
+    }
+    await specRunFirstTap(bot, cb, conv, ref.name, ref.n);
+    return;
+  }
   if (data.startsWith("specrun:")) {
-    // S4 wires execution in; until then the Run tap only answers. Bilingual
-    // on purpose: the stub reply must land without knowing the user's lang.
-    await bot.tg.answerCallbackQuery(cb.id);
-    await bot.tg.sendMessage(
-      conv,
-      "🚧 Chưa thể chạy task — tính năng chạy sẽ có ở bước tiếp theo.\n🚧 Running tasks is not available yet — it comes in the next step."
-    );
+    const ref = parseRunRef(data.slice("specrun:".length));
+    if (!ref) {
+      await bot.tg.sendMessage(conv, tr(lang, "❌ Không rõ task nào.", "❌ Unknown task."));
+      return;
+    }
+    await specRunFirstTap(bot, cb, conv, ref.name, ref.n);
     return;
   }
   const name = data.slice("spec:".length);
-  await bot.tg.answerCallbackQuery(cb.id);
   if (!NAME_RE.test(name)) {
     await bot.tg.sendMessage(conv, tr(lang, "❌ Không rõ spec nào.", "❌ Unknown spec."));
     return;
@@ -226,15 +482,26 @@ export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: Conv
   const title = specTitle(md, name);
   const res = parseSpec(md);
   if ("error" in res) {
-    // S1.4: name the spec file and the first failed line. No buttons: a
-    // spec that cannot be parsed never offers to run anything.
+    // S1.4: name the spec file and the first failed line. No buttons: a spec
+    // that cannot be parsed never offers to run anything.
     await bot.sendHtml(conv, errorDetailText(lang, title, name, res.error));
     return;
   }
   const next = nextRunnable(res.tasks);
-  const keyboard =
-    next >= 0
-      ? { reply_markup: { inline_keyboard: [[{ text: `▶️ Run ${res.tasks[next].id}`, callback_data: `specrun:${name}:${res.tasks[next].n}` }]] } }
-      : undefined;
+  const buttons: { text: string; callback_data: string }[] = [];
+  if (next >= 0) {
+    buttons.push({ text: `▶️ Run ${res.tasks[next].id}`, callback_data: `specrun:${name}:${res.tasks[next].n}` });
+  }
+  // S2.6: every blocked todo ALSO offers a Run (a two-tap flow: the first tap
+  // probes + offers "Run anyway"; the second spawns). Distinct "specblocked:"
+  // prefix so the next-runnable "specrun:" button stays the single S2 one.
+  for (const t of res.tasks) {
+    if (t.marker === "todo" && t.needs) {
+      buttons.push({ text: `⛔ Run ${t.id}`, callback_data: `specblocked:${name}:${t.n}` });
+    }
+  }
+  const keyboard = buttons.length
+    ? { reply_markup: { inline_keyboard: buttons.map((b) => [b]) } }
+    : undefined;
   await bot.sendHtml(conv, detailText(lang, title, res.tasks), keyboard);
 }

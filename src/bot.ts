@@ -639,6 +639,30 @@ export class Bot {
     };
   }
 
+  /**
+   * S2.6: a read-only probe of whether the OpenCode service is responding,
+   * for the blocked-task Run flow. Best-effort: tries the cached client first,
+   * and if that fails, re-discovers the service once and retries. Never throws
+   * (the caller gets {ok:false, checkable:true}); a missing client (not yet
+   * connected) reports checkable:false.
+   */
+  async specProbeService(): Promise<{ ok: boolean; checkable: boolean }> {
+    try {
+      await this.oc.serverInfo();
+      return { ok: true, checkable: true };
+    } catch {
+      // The stored client may be stale (service restarted on a new port).
+      // Re-discover once and retry before declaring it unreachable.
+      try {
+        await this.oc.reconnect();
+        await this.oc.serverInfo();
+        return { ok: true, checkable: true };
+      } catch {
+        return { ok: false, checkable: true };
+      }
+    }
+  }
+
   /** Register fire-and-forget reply work so a shutdown drain waits for it. */
   private trackPending(p: Promise<void>): void {
     this.pendingSends.add(p);
@@ -3964,7 +3988,10 @@ export class Bot {
     }
     if (data.startsWith("kill:")) return this.orch.handleKillCallback(cb, conv, messageId);
     if (await this.orch.handleCallback(cb, conv, messageId)) return;
-    if (data.startsWith("spec:") || data.startsWith("specrun:")) {
+    // All spec-to-tasks callbacks (S2 list/detail + S4 Run): spec:<name>,
+    // specrun:<name>:<n> (next-runnable Run), specblocked:<name>:<n> (blocked
+    // Run, first tap) and specrunok:<name>:<n> (blocked "Run anyway", 2nd tap).
+    if (data.startsWith("spec:") || data.startsWith("specrun:") || data.startsWith("specblocked:") || data.startsWith("specrunok:")) {
       await handleSpecCallback(this, cb, conv);
       return;
     }

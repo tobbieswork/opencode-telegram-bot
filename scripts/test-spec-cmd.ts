@@ -77,6 +77,10 @@ for (const [name, body] of [
   ["omega.md", OMEGA],
 ] as const) writeFileSync(join(sdd, name), body);
 execFileSync("git", ["init", "-q"], { cwd: repo });
+execFileSync("git", ["config", "user.email", "test@test.local"], { cwd: repo });
+execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+execFileSync("git", ["add", "-A"], { cwd: repo });
+execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: repo });
 
 const bare = join(tmp, "bare"); // git repo, no docs/sdd
 mkdirSync(bare, { recursive: true });
@@ -95,8 +99,25 @@ function mkBot(lang: "vi" | "en", dir: string, spec = true) {
   const push = (_c: string, text: string, opts?: { reply_markup?: { inline_keyboard: SentMsg["kb"] } }) => {
     sent.push({ text, kb: opts?.reply_markup?.inline_keyboard });
   };
+  const orch: any = {
+    claims: [] as any[],
+    releases: [] as any[],
+    spawns: [] as any[],
+    claimSpecRun: (chat: string, spec: string, entry: any) => {
+      orch.claims.push({ chat, spec, entry });
+      return true;
+    },
+    releaseSpecRun: (chat: string, spec: string, worker?: string) => {
+      orch.releases.push({ chat, spec, worker });
+    },
+    spawn: async (_chat: string, spec: any) => {
+      orch.spawns.push(spec);
+      return { conv: "worker-conv", worker: { name: spec.name } };
+    },
+    reapSpecRunMarkers: () => {},
+  };
   const bot: any = {
-    cfg: { spec, opencodeDirectory: dir },
+    cfg: { spec, opencodeDirectory: dir, allowAny: true, allowedUserIds: [] },
     userPrefs: { getLang: () => lang },
     st: { peek: () => ({ directory: dir }), get: () => ({ directory: dir }) },
     tg: {
@@ -104,8 +125,10 @@ function mkBot(lang: "vi" | "en", dir: string, spec = true) {
       answerCallbackQuery: async (_id: string, _t?: string) => {},
     },
     sendHtml: async (c: string, text: string, opts?: any) => void push(c, text, opts),
+    orch,
+    specProbeService: async () => ({ ok: true, checkable: true }),
   };
-  return { bot, sent };
+  return { bot, sent, orch };
 }
 const CONV = "123:45";
 const cb = (data: string) => ({ id: "cb-1", from: { id: 7 }, data });
@@ -211,13 +234,13 @@ try {
     check("parse-error detail (vi): heading in Vietnamese", t.includes("Không phân tích được"), t);
   }
 
-  // ── Run tap: bilingual "not available yet" (execution is S4) ───────────────
+  // ── Run tap (S4): a non-blocked Run spawns a worker on the spec branch ────
   {
-    const { bot, sent } = mkBot("vi", repo);
+    const { bot, sent, orch } = mkBot("vi", repo);
     await handleSpecCallback(bot, cb("specrun:alpha:2"), CONV);
-    const t = sent[0]?.text ?? "";
-    check("run tap: vi line", t.includes("Chưa thể chạy task"), t);
-    check("run tap: en line", t.includes("not available yet"), t);
+    check("run tap: no longer 'not available yet'", !sent.map((m) => m.text).join("\n").includes("not available yet"), sent.map((m) => m.text).join("\n"));
+    check("run tap: spawns one worker", orch.spawns.length === 1, JSON.stringify(orch.spawns));
+    check("run tap: worker spec-alpha on spec/alpha running S2", orch.spawns[0]?.name === "spec-alpha" && orch.spawns[0]?.specRun?.branch === "spec/alpha" && orch.spawns[0]?.specRun?.task === "S2", JSON.stringify(orch.spawns[0]));
   }
 
   // ── S1.4: parse failure — listed marked, detail names file + line, no run ──

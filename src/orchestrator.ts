@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Telegram, CallbackQuery, TOPIC_COLORS } from "./telegram.js";
 import { OpenCodeCtl, userText } from "./opencode.js";
-import { StateManager, ChatState, WorkerInfo, WorkerStatus, UserPrefsStore, Lang } from "./state.js";
+import { StateManager, ChatState, WorkerInfo, WorkerStatus, UserPrefsStore, Lang, SpecRunState } from "./state.js";
 import { tr } from "./i18n.js";
 import { Config } from "./config.js";
 import { ConvKey, chatOf, convKey, parseConv } from "./conv.js";
@@ -175,6 +175,12 @@ interface SpawnSpec {
    * would lose its uncommitted work).
    */
   isolate?: boolean;
+  /**
+   * S4 (spec Run): set when this worker runs a spec task. Recorded on the
+   * worker so the one-running-per-spec guard can release the slot when the
+   * worker finishes or is stopped/killed.
+   */
+  specRun?: { spec: string; branch: string; task: string };
 }
 
 /** A Manager action waiting for the user's ✅ (confirm mode). */
@@ -278,6 +284,9 @@ export class Orchestrator {
       if (s.manager) await this.ensureManagerTooling(chatOf(conv)).catch((e) => warn("manager tooling:", e?.message));
     }
     await this.healWorkers();
+    // S4: healWorkers has settled busy workers to their real status; now drop
+    // any one-running-per-spec marker left with no live worker (a dead marker).
+    this.reapSpecRunMarkers();
     // After healWorkers has settled any stuck "running" workers to their real
     // status, re-purge convs whose topic was deleted but whose purge didn't
     // finish before the crash/restart (persisted topicDeletedPending marker).
@@ -744,6 +753,7 @@ export class Orchestrator {
       // the directory is final. Only for writing workers with the feature on —
       // off mode makes no git call at all (byte-identical).
       fpBase: this.h.cfg.nextSteps && writes ? await gitFingerprint(directory) : undefined,
+      specRun: spec.specRun,
       createdAt: now,
       updatedAt: now,
     };
@@ -1011,8 +1021,65 @@ export class Orchestrator {
     const changed = s.worker.status !== status;
     const worker: WorkerInfo = { ...s.worker, status, updatedAt: Date.now(), ...(lastResult !== undefined ? { lastResult } : {}) };
     this.h.st.set(conv, { worker });
+    if (status === "done" || status === "failed" || status === "stopped") this.releaseSpecRunOnFinish(conv); // S4
     if (!BUSY.includes(status)) this.clearSchedTimer(conv); // the run this timer guarded is over
     if (changed) void this.h.tg.editForumTopic(conv, this.topicName(worker)).catch((e) => warn("editForumTopic:", e?.message));
+  }
+
+  // ── S4 (spec Run): one-running-per-spec guard ───────────────────────────────
+  /**
+   * S4: atomically claim the one-running-per-spec slot for `spec` in this chat.
+   * Synchronous (check + set, no await between) so two concurrent taps can't
+   * both claim it. Returns false when a run of this spec is already active.
+   */
+  claimSpecRun(ownerConv: ConvKey, spec: string, entry: SpecRunState): boolean {
+    const map = { ...(this.h.st.peek(ownerConv)?.specRunning ?? {}) };
+    if (map[spec]) return false;
+    map[spec] = entry;
+    this.h.st.set(ownerConv, { specRunning: map });
+    return true;
+  }
+
+  /**
+   * S4: release the one-running-per-spec slot for `spec` in this chat. When
+   * `workerName` is given, only clears the entry owned by that worker, so a
+   * newer run of the same spec is never clobbered by a late release.
+   */
+  releaseSpecRun(ownerConv: ConvKey, spec: string, workerName?: string): void {
+    const map = this.h.st.peek(ownerConv)?.specRunning;
+    if (!map || !(spec in map)) return;
+    if (workerName && map[spec].worker !== workerName) return;
+    const next = { ...map };
+    delete next[spec];
+    this.h.st.set(ownerConv, { specRunning: Object.keys(next).length ? next : undefined });
+  }
+
+  /** S4: release the spec-run slot of a worker that just reached a terminal status. */
+  private releaseSpecRunOnFinish(workerConv: ConvKey): void {
+    const w = this.h.st.peek(workerConv)?.worker;
+    if (!w?.specRun) return;
+    this.releaseSpecRun(chatOf(workerConv), w.specRun.spec, w.name);
+  }
+
+  /**
+   * S4: at (re)connect, drop dead one-running-per-spec markers — entries with
+   * no matching BUSY spec worker (the bot restarted mid-run, or the worker
+   * died unobserved). healWorkers settles busy status first, so this sees the
+   * truth. Keeps the guard honest across restarts.
+   */
+  reapSpecRunMarkers(): void {
+    for (const [conv, s] of Object.entries(this.h.st.all())) {
+      const map = s.specRunning;
+      if (!map) continue;
+      let changed = false;
+      const next: Record<string, SpecRunState> = {};
+      for (const [spec, entry] of Object.entries(map)) {
+        const found = this.h.st.findWorker(conv, entry.worker);
+        if (found && BUSY.includes(found[1].worker!.status)) next[spec] = entry;
+        else changed = true;
+      }
+      if (changed) this.h.st.set(conv, { specRunning: Object.keys(next).length ? next : undefined });
+    }
   }
 
   // ── OpenCode lifecycle hooks (called by Bot.onOpenCodeEvent) ───────────────
@@ -1222,8 +1289,18 @@ export class Orchestrator {
     // fingerprint baseline, so the predecessor's unreviewed changes stay
     // reviewable by the replacement.
     this.h.st.set(r.conv, {
-      worker: { ...this.h.st.get(r.conv).worker!, worktree: w.worktree, repoRoot: w.repoRoot, respawnedFrom: w.name, fpBase: w.fpBase },
+      worker: { ...this.h.st.get(r.conv).worker!, worktree: w.worktree, repoRoot: w.repoRoot, respawnedFrom: w.name, fpBase: w.fpBase, specRun: w.specRun },
     });
+    if (w.specRun) {
+      // The dead worker's terminal status already released the one-running-per-spec
+      // slot; re-claim it so the replacement is covered for the rest of the run.
+      this.claimSpecRun(chatOf(r.conv), w.specRun.spec, {
+        branch: w.specRun.branch,
+        task: w.specRun.task,
+        worker: name2,
+        since: Date.now(),
+      });
+    }
     return name2;
   }
 
@@ -1601,6 +1678,7 @@ export class Orchestrator {
           directory: join(w.repoRoot, sub),
           worker: { ...w, worktree: undefined, status: "stopped", updatedAt: Date.now() },
         });
+        if (w.specRun) this.releaseSpecRun(chatOf(found[0]), w.specRun.spec, w.name); // S4: this inline stop bypasses setStatus
         void this.h.tg.editForumTopic(found[0], `${ICON.stopped} ${w.name}`).catch(() => {});
         if (messageId) await this.h.tg.editMessageText(conv, messageId, `🗑 ${esc(msg)}`).catch(() => {});
       } else if (op === "keep" && messageId) {
