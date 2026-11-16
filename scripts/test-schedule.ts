@@ -1,9 +1,9 @@
 /**
  * Checks the pure `/schedule` logic: parse (valid + invalid + option-token
  * stripping), nextRunAfter for every kind in Asia/Ho_Chi_Minh and
- * America/New_York across DST transitions (asserting exact epoch values and
- * the `every` wall-clock anchor), and decideRun (on-time / late-in-grace /
- * late-beyond-grace).
+ * America/New_York across DST transitions (asserting exact epoch values, the
+ * `every` wall-clock anchor for N<24 and the fixed UTC epoch anchor for
+ * N>=24), and decideRun (on-time / late-in-grace / late-beyond-grace).
  *
  * Run:  npx tsx scripts/test-schedule.ts
  */
@@ -166,6 +166,72 @@ const NY = "America/New_York";    // DST: 2026 spring 2026-03-08, fall 2026-11-0
     "NY once: 2026-11-01 08:00 (post-transition) = 13:00 UTC",
     nextRunAfter({ kind: "once", date: { y: 2026, mo: 11, d: 1 }, time: { h: 8, m: 0 } }, Z(2026, 10, 1, 0, 0, 0), NY) === Z(2026, 10, 1, 13, 0, 0),
   );
+}
+
+// ── nextRunAfter: every N>=24h — fixed UTC epoch anchor (tz ignored) ────────
+{
+  // 2026-10-01T00:00Z is day 20727 since the Unix epoch: a multiple of 36h
+  // and 168h (%3==0, %7==0) but NOT of 48h (odd day). The old slot logic
+  // collapsed to [0] for N>=24 → daily 00:00 (2x to 7x too often).
+  // n=24: exactly AT a fire instant → strictly after → next midnight UTC
+  check(
+    "every 24h: afterMs == fire instant → +24h (next 00:00 UTC)",
+    nextRunAfter({ kind: "every", hours: 24 }, Z(2026, 9, 1, 0, 0, 0), HICT) === Z(2026, 9, 2, 0, 0, 0),
+  );
+  // n=24: mid-day → next 00:00 UTC (daily at a UTC phase, tz ignored)
+  check(
+    "every 24h: mid-day → next 00:00 UTC",
+    nextRunAfter({ kind: "every", hours: 24 }, Z(2026, 9, 1, 7, 30, 0), HICT) === Z(2026, 9, 2, 0, 0, 0),
+  );
+  // n=48: odd-day midnight is not a fire → next even-day midnight (48h)
+  check(
+    "every 48h: odd-day midnight → +24h to the even-day fire (48h cycle)",
+    nextRunAfter({ kind: "every", hours: 48 }, Z(2026, 9, 1, 0, 0, 0), HICT) === Z(2026, 9, 2, 0, 0, 0),
+  );
+  // n=48: exactly AT a fire instant → +48h (the regression: used to be +24h)
+  check(
+    "every 48h: afterMs == fire instant → +48h (NOT next day)",
+    nextRunAfter({ kind: "every", hours: 48 }, Z(2026, 9, 2, 0, 0, 0), HICT) === Z(2026, 9, 4, 0, 0, 0),
+  );
+  // n=168: exactly AT a fire instant → +168h (weekly; used to be daily)
+  check(
+    "every 168h: afterMs == fire instant → +168h (NOT next day)",
+    nextRunAfter({ kind: "every", hours: 168 }, Z(2026, 9, 1, 0, 0, 0), HICT) === Z(2026, 9, 8, 0, 0, 0),
+  );
+  // n=168: 1h past a fire instant → the same next weekly instant
+  check(
+    "every 168h: 1h past fire instant → same +168h instant",
+    nextRunAfter({ kind: "every", hours: 168 }, Z(2026, 9, 1, 1, 0, 0), HICT) === Z(2026, 9, 8, 0, 0, 0),
+  );
+  // n=36 (not a day multiple): the fixed phase crosses midnights, exactly 36h apart
+  check(
+    "every 36h: midnight fire instant → next day 12:00 UTC (36h)",
+    nextRunAfter({ kind: "every", hours: 36 }, Z(2026, 9, 1, 0, 0, 0), HICT) === Z(2026, 9, 2, 12, 0, 0),
+  );
+  check(
+    "every 36h: 12:00 fire instant → two days later 00:00 UTC (36h)",
+    nextRunAfter({ kind: "every", hours: 36 }, Z(2026, 9, 2, 12, 0, 0), HICT) === Z(2026, 9, 4, 0, 0, 0),
+  );
+  // tz is ignored for N>=24: identical across NY (just after the 2026-11-01
+  // DST end — afterMs is local 00:00 EST) and HICT
+  check(
+    "every 48h: tz ignored across the DST end (NY == HICT, UTC phase)",
+    nextRunAfter({ kind: "every", hours: 48 }, Z(2026, 10, 1, 5, 0, 0), NY) === Z(2026, 10, 3, 0, 0, 0)
+      && nextRunAfter({ kind: "every", hours: 48 }, Z(2026, 10, 1, 5, 0, 0), HICT) === Z(2026, 10, 3, 0, 0, 0),
+  );
+  // invariants for N>=24 at scattered instants: strictly after, at most N
+  // hours ahead, and exactly on an N-hour multiple of the Unix epoch
+  for (const n of [24, 36, 48, 168]) {
+    const step = n * 3_600_000;
+    for (const base of [Z(2026, 8, 15, 3, 7, 9), Z(2026, 9, 31, 23, 59, 59), Z(2026, 10, 1, 5, 0, 0)]) {
+      const r = nextRunAfter({ kind: "every", hours: n }, base, HICT);
+      check(
+        `every ${n}h: next > from, <= N h ahead, on an epoch multiple`,
+        r > base && r <= base + step && r % step === 0,
+        `from=${new Date(base).toISOString()} next=${new Date(r).toISOString()}`,
+      );
+    }
+  }
 }
 
 // ── decideRun: on-time / late-in-grace / late-beyond-grace ───────────────────
