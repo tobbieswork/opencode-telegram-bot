@@ -3671,6 +3671,7 @@ export class Bot {
     if (sessions && !sessions.some((s) => s.id === arg)) {
       return this.sendUsePicker(conv, sessions, tr(lang, `❌ Không có session <code>${esc(arg)}</code>`, `❌ No session <code>${esc(arg)}</code>`), lang);
     }
+    await this.stopCurrent(conv, true); // stop the running turn before switching (same as /new, /clear)
     this.applyUseState(conv, arg);
     await this.tg.sendMessage(conv, tr(lang, `✅ Đang dùng session <code>${esc(arg)}</code>`, `✅ Now using session <code>${esc(arg)}</code>`));
   }
@@ -3678,7 +3679,7 @@ export class Bot {
   /** Apply the /use switch: remember the session and drop its predecessor's pending prompts. */
   private applyUseState(conv: ConvKey, sessionID: string): void {
     const prev = this.st.peek(conv)?.sessionID;
-    this.st.set(conv, { sessionID });
+    this.st.set(conv, { sessionID, ...dropNotes() }); // a switched-to session must not inherit the old session's pending notes (same as /new)
     if (prev && prev !== sessionID) this.stopWatch(conv, "session-changed"); // W5.1
     this.cancelAllReminders(conv); // switching sessions abandons the old pending prompts
     const droppedQueue = this.queue.clear(conv); // a session switch clears the queue (Q1.5)
@@ -3713,6 +3714,19 @@ export class Bot {
       if (id === "ls") await this.cmdList(conv);
       return;
     }
+    // A stale picker button may reference a session that no longer exists —
+    // validate before switching (a failed listing keeps the /use fallback: trust the id).
+    const sessions = await this.oc.listSessions().catch((e) => {
+      warn("listSessions:", (e as Error).message);
+      return undefined;
+    });
+    if (sessions && !sessions.some((s) => s.id === id)) {
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, `❌ Không có session: ${trunc(id, 30)}`, `❌ No session: ${trunc(id, 30)}`));
+      if (messageId)
+        await this.tg.editMessageText(conv, messageId, tr(lang, `❌ Không có session <code>${esc(id)}</code>`, `❌ No session <code>${esc(id)}</code>`)).catch(() => {});
+      return;
+    }
+    await this.stopCurrent(conv, true); // stop the running turn before switching (same as /new, /clear)
     this.applyUseState(conv, id);
     await this.tg.answerCallbackQuery(cb.id, tr(lang, `Dùng ${trunc(id, 30)}`, `Using ${trunc(id, 30)}`));
     if (messageId) await this.tg.editMessageText(conv, messageId, tr(lang, `✅ Đang dùng session <code>${esc(id)}</code>`, `✅ Now using session <code>${esc(id)}</code>`)).catch(() => {});
