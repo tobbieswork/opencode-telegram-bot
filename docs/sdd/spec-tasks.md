@@ -119,7 +119,7 @@ spec file" to "a worker run with the right prompt" and back to "task done".
 
 ## 5. Tasks (each ends with a human checkpoint)
 
-0. [ ] **S0 Spike.** Run one short real worker task by hand. Record in a Findings section whether the bot can read the worker's executed commands and their exit codes (S3.2), and whether a note can be sent to a finished worker's session (S3.5). *Checkpoint: confirm the answers before building S3.*
+0. [x] (c1249c0) **S0 Spike.** Run one short real worker task by hand. Record in a Findings section whether the bot can read the worker's executed commands and their exit codes (S3.2), and whether a note can be sent to a finished worker's session (S3.5). *Checkpoint: confirm the answers before building S3.*
 1. [ ] **S1 Parser** (S1.1, S1.4, S4.1 to S4.3). `src/spec.ts` and `test:spec`: parse, status rewrite, round trip, golden test over every file in `docs/sdd/`. *Checkpoint: review the parsed output for each spec.*
 2. [ ] **S2 `/spec` list and detail** (S1.2, S1.3, S6.1, S6.3). Command, buttons, README row, `.env.example`. No running yet. *Checkpoint: browse the specs in Telegram.*
 3. [ ] **S3 Prompt builder** (S2.2, S2.3). Pure function with unit tests, including the size cap. *Checkpoint: read the prompt built for three real tasks.*
@@ -139,4 +139,27 @@ Verification order for every task: `npm run typecheck` and `npm run test:unit` f
 - Specs outside `docs/sdd/`.
 
 ## 7. Findings (filled in by task S0)
-_Empty until S0 is done._
+
+Spike run 2026-11-16 with a real worker (`s0-spike`, session
+`ses_e1ce9ea35ffegzWxu4UnatBooj`): four shell commands, three expected to
+succeed and one to fail deliberately.
+
+- **S3.2 (read the worker's executed commands and exit codes) — YES.** The
+  exact API the bot already uses: `Service.discover()` then
+  `client.message.list({ sessionID })` (`OpenCode.listMessages` in
+  `src/opencode.ts`). Every assistant message carries a `content[]` array in
+  which each executed tool call is an item
+  `{ type: "tool", name, state: { status, input, content[], metadata }, time: { created, ran, completed } }`.
+  For the `shell` tool: `state.input.command` is the exact command line,
+  `state.metadata.exit` its exit code, `state.content` the captured output.
+  The checkpoint's "run / not run" lists can be built by filtering
+  `type: "tool"` items on `state.status` and reading `metadata.exit`.
+  Caveat: a worker that wraps a command (`cmd; echo exit:$?`) makes
+  `metadata.exit` the wrapper's code (0); the real code is then inside
+  `state.content` — the checkpoint builder must consult both.
+- **S3.5 (send a note to a finished worker session) — YES.**
+  `send_to_worker` delivered a follow-up note to the session after its first
+  turn had completed; the worker answered in the same session, kept context,
+  ran no commands.
+
+Verdict: build S3 as specified; no design change required.
