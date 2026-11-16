@@ -100,10 +100,11 @@ function mkBot(lang: "vi" | "en", dir: string, allow: { allowAny?: boolean; allo
       orch.reaps++;
     },
   };
+  const stState: any = { directory: dir };
   const bot: any = {
     cfg: { spec: true, opencodeDirectory: dir, allowAny: allow.allowAny ?? true, allowedUserIds: allow.allowedUserIds ?? [] },
     userPrefs: { getLang: () => lang },
-    st: { peek: () => ({ directory: dir }), get: () => ({ directory: dir }) },
+    st: { peek: () => stState, get: () => stState },
     tg: {
       sendMessage: async (c: string, text: string, opts?: any) => void push(c, text, opts),
       answerCallbackQuery: async (_id: string, _t?: string) => {},
@@ -112,7 +113,7 @@ function mkBot(lang: "vi" | "en", dir: string, allow: { allowAny?: boolean; allo
     orch,
     specProbeService: async () => ({ ok: true, checkable: true }),
   };
-  return { bot, sent, orch };
+  return { bot, sent, orch, stState };
 }
 
 try {
@@ -350,7 +351,50 @@ try {
     // Blocked Run, second tap → routed, spawns.
     await (bot as any).handleCallback(cbFor("specrunok:alpha:3"));
     check("route: specrunok: routed and spawns (second tap)", rec.spawns.length === before + 1, JSON.stringify(rec.spawns.map((x: any) => x.specRun)));
+  
+  // ── Spawn resilience (2026-11-16 incident): a network blip during the
+  // launch must not swallow the tap — retry the launch, hold the claim, and
+  // never double-spawn a worker that got registered before the failure.
+  {
+    process.env.SPEC_RUN_RETRY_DELAY_MS = "10";
+    // (a) transient failure → recovers, one worker, claim kept.
+    {
+      const { bot, sent, orch } = mkBot("en", repo);
+      let calls = 0;
+      orch.spawn = async (_chat: string, spec: any) => {
+        calls++;
+        if (calls < 3) throw new Error("network error");
+        orch.spawns.push(spec);
+        return { conv: "worker-conv", worker: { name: spec.name } };
+      };
+      await handleSpecCallback(bot, cb("specrun:alpha:2"), CONV);
+      check("spawn-retry: recovers after 2 failed attempts (3 calls, 1 worker)", calls === 3 && orch.spawns.length === 1, `calls=${calls} spawns=${orch.spawns.length}`);
+      check("spawn-retry: running notice sent exactly once", sent.filter((m) => (m.text ?? "").includes("Running task")).length === 1, JSON.stringify(sent.map((m) => m.text?.slice(0, 40))));
+      check("spawn-retry: claim kept on success (no release)", orch.releases.length === 0, JSON.stringify(orch.releases));
+    }
+    // (b) persistent failure → gives up after max attempts, releases claim, error notice.
+    {
+      const { bot, sent, orch } = mkBot("en", repo);
+      let calls = 0;
+      orch.spawn = async () => { calls++; throw new Error("network down"); };
+      await handleSpecCallback(bot, cb("specrun:alpha:2"), CONV);
+      check("spawn-retry: gives up after max attempts", calls === 3, `calls=${calls}`);
+      check("spawn-retry: claim released after failure", orch.releases.length === 1, JSON.stringify(orch.releases));
+      check("spawn-retry: error notice sent", sent.some((m) => (m.text ?? "").includes("Couldn't run it")), JSON.stringify(sent.map((m) => m.text?.slice(0, 60))));
+    }
+    // (c) worker entry already registered before the failure → no double spawn.
+    {
+      const { bot, sent, orch, stState } = mkBot("en", repo);
+      stState.worker = { name: "spec-alpha", status: "running" };
+      let calls = 0;
+      orch.spawn = async () => { calls++; throw new Error("network down"); };
+      await handleSpecCallback(bot, cb("specrun:alpha:2"), CONV);
+      check("spawn-retry: registered worker blocks the retry (1 call)", calls === 1, `calls=${calls}`);
+      check("spawn-retry: claim released, error sent", orch.releases.length === 1 && sent.some((m) => (m.text ?? "").includes("Couldn't run it")), JSON.stringify({ rel: orch.releases, msgs: sent.map((m) => m.text?.slice(0, 40)) }));
+    }
+    delete process.env.SPEC_RUN_RETRY_DELAY_MS;
   }
+}
 } finally {
   rmSync(tmp, { recursive: true, force: true });
 }
