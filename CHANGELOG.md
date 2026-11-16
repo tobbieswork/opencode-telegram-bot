@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.31.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.31.0...opencode-telegram-bot-v1.31.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* spec parser — expand reqId ranges, multi-line requirements, fence-aware scanning ([#225](https://github.com/tobbieswork/opencode-telegram-bot/issues/225)) ([da3ca13](https://github.com/tobbieswork/opencode-telegram-bot/commit/da3ca135b6e23a7160cd1be1d1d9529902c806ba))
+
 ## [1.31.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.30.5...opencode-telegram-bot-v1.31.0) (2026-11-16)
 
 
