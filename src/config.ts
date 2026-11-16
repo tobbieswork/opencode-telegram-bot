@@ -73,6 +73,14 @@ export interface Config {
   bridgePort: number;
   /** Close a worker's topic when the worker finishes (the user reopens it by messaging in it). */
   autoClose: boolean;
+  /**
+   * One-shot maintenance hook: comma-separated `chatId:threadId` topics to
+   * delete at startup — for topics the bot has lost track of (no longer in
+   * state.json), which the Bot API cannot enumerate (no list-topics call).
+   * Topics still tracked in state are skipped (never delete a live topic);
+   * idempotent (deleting a gone topic just logs the error). Off by default.
+   */
+  orphanTopicDeletes: { chatId: number; threadId: number }[];
   /** Nudge the user to reboot the machine when uptime passes the threshold (kernel updates). */
   uptimeMonitor: boolean;
   /** Reboot the machine (with confirmation) when uptime reaches this many days. */
@@ -288,6 +296,7 @@ export function loadConfig(root: string): Config {
     worktreeMode: parseWorktreeMode(process.env.OPENCODE_TG_WORKTREE),
     bridgePort: parseIntSetting("OPENCODE_TG_BRIDGE_PORT", 0, 0),
     autoClose: process.env.OPENCODE_TG_AUTO_CLOSE !== "0",
+    orphanTopicDeletes: parseOrphanTopicDeletes(process.env.OPENCODE_TG_DELETE_TOPICS),
     uptimeMonitor: process.env.OPENCODE_TG_UPTIME_MONITOR !== "0",
     uptimeThresholdDays: parseIntSetting("OPENCODE_TG_UPTIME_THRESHOLD_DAYS", 30, 1),
     uptimeRemindIntervalDays: parseIntSetting("OPENCODE_TG_UPTIME_REMIND_INTERVAL_DAYS", 3, 1),
@@ -442,6 +451,27 @@ function parseFloatSetting(name: string, fallback: number, min: number): number 
 function parseWorktreeMode(raw?: string): Config["worktreeMode"] {
   const v = raw?.trim().toLowerCase();
   return v === "always" || v === "off" ? v : "auto";
+}
+
+/**
+ * OPENCODE_TG_DELETE_TOPICS: comma-separated `chatId:threadId` topics to
+ * delete at startup (the orphan-topic maintenance hook). Malformed entries
+ * are skipped with a warning instead of throwing — a mistyped entry can at
+ * worst target a nonexistent topic, and the hook logs that failure.
+ */
+export function parseOrphanTopicDeletes(raw: string | undefined): { chatId: number; threadId: number }[] {
+  const out: { chatId: number; threadId: number }[] = [];
+  for (const part of (raw ?? "").split(",")) {
+    const t = part.trim();
+    if (!t) continue;
+    const m = /^(-?\d+):(\d+)$/.exec(t);
+    if (!m) {
+      warn(`OPENCODE_TG_DELETE_TOPICS: skipping malformed entry "${t}" (expected chatId:threadId)`);
+      continue;
+    }
+    out.push({ chatId: Number(m[1]), threadId: Number(m[2]) });
+  }
+  return out;
 }
 /** OPENCODE_TG_BUSY_MODE: "ask" (default) / "queue" / "off"; anything else → "ask" (with a warning). */
 function parseBusyMode(raw?: string): Config["busyMode"] {
