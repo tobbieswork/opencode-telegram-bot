@@ -210,9 +210,17 @@ export class OpenCodeCtl {
   async reconnect(): Promise<void> {
     if (!this.discoverArgs) return;
     this.stopEvents();
-    await this.establishClient();
-    this.modelsCache = undefined; // the service may have restarted; refetch models
-    if (this.eventCbs) this.subscribeEvents(this.eventCbs.onEvent, this.eventCbs.onError, this.eventCbs.onConnect);
+    try {
+      await this.establishClient();
+      this.modelsCache = undefined; // the service may have restarted; refetch models
+    } finally {
+      // Re-subscribe even when establishment failed: the event loop itself
+      // retries with backoff, so pointing it at a still-dead service is safe,
+      // and skipping it would leave the question/permission relay dead until
+      // the process restarts (issue #159). The establishment error still
+      // propagates to the caller, after the finally has run.
+      if (this.eventCbs) this.subscribeEvents(this.eventCbs.onEvent, this.eventCbs.onError, this.eventCbs.onConnect);
+    }
   }
 
   private async establishClient(): Promise<void> {
@@ -476,8 +484,12 @@ export class OpenCodeCtl {
     // to THIS turn. (Reading "the last assistant message in the session" leaked
     // the PREVIOUS turn's answer: message.list is paged, newest-first, so a turn
     // that produced no new text echoed the earlier reply back to the user.)
+    // A failed snapshot must FAIL the turn: proceeding with an empty
+    // before-ids would count every existing assistant message as "fresh" and
+    // echo the PREVIOUS turn's answer for this one (issue #159). A failed
+    // turn is honest; a stale answer is data corruption.
     const beforeIds = new Set<string>(
-      ((await this.listMessages(sessionID, 200).catch(() => [])) as any[])
+      ((await this.listMessages(sessionID, 200)) as any[])
         .map((m: any) => m?.id)
         .filter(Boolean),
     );
@@ -512,8 +524,13 @@ export class OpenCodeCtl {
     let error: { type?: string; message?: string } | undefined;
     for (let attempt = 0; attempt < 4; attempt++) {
       const messages = (await this.listMessages(sessionID, 200).catch(() => [])) as any[];
-      const fresh = messages.filter((m: any) => m && m.id && !beforeIds.has(m.id));
-      for (const m of fresh) {
+      // Pick the latest by time.created, not by list position: the list comes
+      // back newest-first today, but that ordering is not a stable contract.
+      const fresh = messages
+        .filter((m: any) => m && m.id && !beforeIds.has(m.id))
+        .sort((a: any, b: any) => (a.time?.created ?? 0) - (b.time?.created ?? 0));
+      for (let i = fresh.length - 1; i >= 0; i--) {
+        const m = fresh[i];
         // A failed turn leaves the provider/turn error NOT only on the assistant
         // message but on the "idle" (outcome + error) and "compaction" messages
         // too — grab the first of these types that carries an error.
@@ -525,7 +542,7 @@ export class OpenCodeCtl {
         if (t) {
           reply = t;
           replyTime = m.time?.created ?? 0;
-          break; // messages are newest-first, so the first hit is the latest
+          break; // iterating newest-first, so the first hit is the latest
         }
       }
       if (reply || error || opts.signal?.aborted) break;
