@@ -231,12 +231,18 @@ function weekdayOf(y: number, mo: number, d: number): number {
  * Next fire time (ms epoch, UTC) strictly after `afterMs` for `spec` in zone
  * `tz`.
  *
- * `every Nh` is anchored to the tz-local wall clock, NOT to creation: it fires
- * at the fixed local hours 0, N, 2N, … (all < 24) each day, so "created at
- * 14:30" → next fire 18:00 the same day for `every 6h`. (For N that does not
- * divide 24 the times-of-day are still fixed — e.g. `every 5h` runs 00/05/10/
- * 15/20, and the gap from 20:00 to the next day's 00:00 is 4h, not 5h — this
- * keeps the fire times predictable.)
+ * `every Nh` with N < 24 is anchored to the tz-local wall clock, NOT to
+ * creation: it fires at the fixed local hours 0, N, 2N, … (all < 24) each
+ * day, so "created at 14:30" → next fire 18:00 the same day for `every 6h`.
+ * (For N that does not divide 24 the times-of-day are still fixed — e.g.
+ * `every 5h` runs 00/05/10/15/20, and the gap from 20:00 to the next day's
+ * 00:00 is 4h, not 5h — this keeps the fire times predictable.)
+ *
+ * `every Nh` with N >= 24 is anchored to the Unix epoch instead, in pure UTC
+ * (the `tz` argument is ignored): it fires at the multiples of N hours from
+ * 1970-01-01T00:00:00Z, exactly N hours apart — `every 24h` daily 00:00 UTC,
+ * `every 48h` every 2nd day 00:00 UTC, `every 168h` weekly 00:00 UTC,
+ * `every 36h` every 36h on a fixed phase.
  *
  * `once` returns its single fixed instant regardless of `afterMs`; the
  * scheduler marks a fired `once` disabled, so it is never evaluated again.
@@ -284,6 +290,16 @@ export function nextRunAfter(spec: SchedSpec, afterMs: number, tz: string, lang:
     }
     case "every": {
       const n = spec.hours!;
+      if (n >= 24) {
+        // Fixed UTC phase (tz intentionally ignored): the next multiple of n
+        // hours after afterMs, measured from the Unix epoch — `every 48h`
+        // fires every 2nd day at 00:00 UTC, `every 168h` weekly at 00:00 UTC.
+        // (The local-slot logic below would collapse its slot list to [0]
+        // for n >= 24 and fall through to next-day 00:00 — 2x to 7x more
+        // often than requested.)
+        const stepMs = n * 3_600_000;
+        return afterMs + stepMs - (afterMs % stepMs);
+      }
       const p = localParts(afterMs, tz);
       const slots: number[] = [];
       for (let k = 0; k * n < 24; k++) slots.push(k * n);
