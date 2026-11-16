@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.36.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.35.0...opencode-telegram-bot-v1.36.0) (2026-11-16)
+
+
+### Features
+
+* one-shot maintenance hook to delete orphaned topics at startup ([60dd8b0](https://github.com/tobbieswork/opencode-telegram-bot/commit/60dd8b0c64517c86584abab82a0d1ec16c6e75f0))
+* one-shot maintenance hook to delete orphaned topics at startup ([0674cc9](https://github.com/tobbieswork/opencode-telegram-bot/commit/0674cc957234eea48c0f97cdea48ae52594f372b))
+
 ## [1.35.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.34.0...opencode-telegram-bot-v1.35.0) (2026-11-16)
 
 
