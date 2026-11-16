@@ -155,6 +155,13 @@ const qp = parseSpec(queue);
   check("markTask: unknown n is a no-op", markTask(canonical, 99) === canonical);
   check("markTask: re-marking done task keeps its hash", markTask(canonical, 0) === canonical);
 
+  // markTask WITHOUT a commit: the inserted marker must survive re-parse
+  const outNC = markTask(nextstep, 0);
+  const lineNC = outNC.split("\n")[115];
+  check("markTask no-commit: space after [x]", lineNC.startsWith("0. [x] **S0 Read-only check.**"), lineNC);
+  const reNC = parseSpec(outNC);
+  check("markTask no-commit: round-trip keeps done, no commit", isOk(reNC) && reNC.tasks[0].marker === "done" && reNC.tasks[0].commit === undefined, JSON.stringify(reNC.tasks?.[0]));
+
   // markerless item: marker inserted, commit appended after the marker
   const out2 = markTask(nextstep, 0, "deadbee");
   const diff2 = changedLineIndices(nextstep, out2);

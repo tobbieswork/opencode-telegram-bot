@@ -225,7 +225,7 @@ export function markTask(md: string, n: number, commit?: string): string {
   if (!m) return md;
   const [, num, , , hash, rest] = m;
   const keep = commit ?? hash;
-  lines[idx] = `${num}[x]${keep ? ` (${keep}) ` : ""}${rest}`;
+  lines[idx] = `${num}[x] ${keep ? `(${keep}) ` : ""}${rest}`;
   return lines.join("\n");
 }
 
