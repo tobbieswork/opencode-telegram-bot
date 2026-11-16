@@ -68,7 +68,7 @@ const cp = parseSpec(canonical);
     check("task 0: no needs", t0.needs === undefined);
 
     const t1 = t[1];
-    check("task 1: todo, no commit", t1.marker === "todo" && t1.commit === undefined);
+    check("task 1: done with commit da3ca13", t1.marker === "done" && t1.commit === "da3ca13", JSON.stringify(t1));
     check("task 1: id/title", t1.id === "S1" && t1.title === "Parser", JSON.stringify({ id: t1.id, title: t1.title }));
     check("task 1: reqIds incl. range endpoints", t1.reqIds.includes("S1.1") && t1.reqIds.includes("S1.4") && t1.reqIds.includes("S4.1") && t1.reqIds.includes("S4.3"), JSON.stringify(t1.reqIds));
     check("task 1: range S4.1 to S4.3 expanded (S4.2 present)", t1.reqIds.includes("S4.2"), JSON.stringify(t1.reqIds));
