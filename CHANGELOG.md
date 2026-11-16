@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.30.3](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.30.2...opencode-telegram-bot-v1.30.3) (2026-11-16)
+
+
+### Bug Fixes
+
+* escape untrusted text in HTML-mode messages ([#210](https://github.com/tobbieswork/opencode-telegram-bot/issues/210)) ([ec9d626](https://github.com/tobbieswork/opencode-telegram-bot/commit/ec9d62644ff76c5e06c8f16ceaa6ee58adfa0184))
+* only reset event-loop backoff after the first real event ([#208](https://github.com/tobbieswork/opencode-telegram-bot/issues/208)) ([72b4019](https://github.com/tobbieswork/opencode-telegram-bot/commit/72b4019f2cb5b56c2d45622065745627fbc5d660))
+* protect markdown link URLs from emphasis passes ([#209](https://github.com/tobbieswork/opencode-telegram-bot/issues/209)) ([fd9bd7d](https://github.com/tobbieswork/opencode-telegram-bot/commit/fd9bd7da89b92e9f54b2919e635dd05ea5e4f0bd))
+* schedule every-Nh correctly for N &gt;= 24 ([#207](https://github.com/tobbieswork/opencode-telegram-bot/issues/207)) ([0bdfc80](https://github.com/tobbieswork/opencode-telegram-bot/commit/0bdfc801f427fe78caf6534b798769585f23ab11)), closes [#153](https://github.com/tobbieswork/opencode-telegram-bot/issues/153)
+* serialize worktree isolation decision per repo ([#211](https://github.com/tobbieswork/opencode-telegram-bot/issues/211)) ([85dda22](https://github.com/tobbieswork/opencode-telegram-bot/commit/85dda221c281b30f386dc628f25bb6ec8e3713c2))
+
 ## [1.30.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.30.1...opencode-telegram-bot-v1.30.2) (2026-11-16)
 
 
