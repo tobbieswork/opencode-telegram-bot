@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
+import { error, warn } from "./logger.js";
 import { ConvKey, chatOf } from "./conv.js";
 import type { StyleName } from "./style.js";
 import type { PrSnapshot } from "./pr-watch.js";
@@ -279,6 +280,43 @@ export interface UserPrefs {
   style?: StyleName;
 }
 
+/** A best-effort one-line description of a thrown value for logs. */
+function errText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * Load a JSON store file. A missing file returns the empty default (the
+ * normal first start). A corrupt or unreadable file is moved to
+ * `<file>.corrupt-<timestamp>` so the evidence survives the next atomic
+ * write, a warning carries the path, and the empty default is returned:
+ * startup always proceeds, but nothing is ever lost silently.
+ */
+function loadJsonFileOrEmpty<T>(file: string): T {
+  if (!existsSync(file)) return {} as T;
+  try {
+    return JSON.parse(readFileSync(file, "utf8")) as T;
+  } catch (e) {
+    const backup = `${file}.corrupt-${Date.now()}`;
+    warn(`state store: ${file} is corrupt or unreadable (${errText(e)}) — moving to ${backup} and starting empty`);
+    try {
+      renameSync(file, backup);
+    } catch {
+      /* best effort — the store still starts empty in memory either way */
+    }
+    return {} as T;
+  }
+}
+
+/** Save failures already logged, keyed by file+error so a persistent failure isn't re-logged on every write. */
+const loggedSaveFailures = new Set<string>();
+function noteSaveFailure(file: string, e: unknown): void {
+  const key = `${file} :: ${errText(e)}`;
+  if (loggedSaveFailures.has(key)) return;
+  loggedSaveFailures.add(key);
+  error(`state store: failed to write ${file}: ${errText(e)}`);
+}
+
 /**
  * Tiny JSON-backed store for per-user preferences (separate from the
  * per-conversation state so /clear and topic sweeps never wipe them).
@@ -288,13 +326,7 @@ export class UserPrefsStore {
   private data: Record<string, UserPrefs> = {};
 
   constructor(private file: string) {
-    if (existsSync(file)) {
-      try {
-        this.data = JSON.parse(readFileSync(file, "utf8")) as Record<string, UserPrefs>;
-      } catch {
-        this.data = {};
-      }
-    }
+    this.data = loadJsonFileOrEmpty<Record<string, UserPrefs>>(file);
   }
 
   /** Returns the user's language preference, defaulting to "vi" (backward compatible). */
@@ -339,8 +371,8 @@ export class UserPrefsStore {
       const tmp = `${this.file}.${process.pid}.tmp`;
       writeFileSync(tmp, JSON.stringify(this.data, null, 2), { mode: 0o600 });
       renameSync(tmp, this.file);
-    } catch {
-      /* best-effort persistence */
+    } catch (e) {
+      noteSaveFailure(this.file, e);
     }
   }
 }
@@ -357,13 +389,7 @@ export class StateManager {
   private bySession = new Map<string, ConvKey>();
 
   constructor(private file: string) {
-    if (existsSync(file)) {
-      try {
-        this.data = JSON.parse(readFileSync(file, "utf8")) as StateMap;
-      } catch {
-        this.data = {};
-      }
-    }
+    this.data = loadJsonFileOrEmpty<StateMap>(file);
     this.reindex();
   }
 
@@ -425,8 +451,8 @@ export class StateManager {
       const tmp = `${this.file}.${process.pid}.tmp`;
       writeFileSync(tmp, JSON.stringify(this.data, null, 2), { mode: 0o600 });
       renameSync(tmp, this.file);
-    } catch {
-      /* best-effort persistence */
+    } catch (e) {
+      noteSaveFailure(this.file, e);
     }
   }
 }
