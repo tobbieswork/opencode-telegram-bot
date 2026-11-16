@@ -4120,7 +4120,7 @@ export class Bot {
     const models = await this.oc.listModels();
     const cur = this.st.get(conv).model?.id;
     const max = this.cfg.replyMaxLen;
-    const footer = "\n\nSet with /model <id>";
+    const footer = "\n\nSet with /model &lt;id&gt;";
     // Show EVERY model, packed into ≤max-char pages on line boundaries so each
     // message is valid HTML with balanced tags (no mid-tag cuts → no 400s).
     const units = [

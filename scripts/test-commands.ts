@@ -8,6 +8,7 @@
  * Run:  npx tsx scripts/test-commands.ts
  */
 import { COMMANDS, CMD_GROUPS, myCommands, helpText, commandGrid, knownCommands } from "../src/commands.js";
+import { Bot } from "../src/bot.js";
 import { cmdAgent } from "../src/commands/agents.js";
 import { cmdNote } from "../src/commands/meta.js";
 
@@ -163,6 +164,26 @@ const cmds = COMMANDS.map((c) => c.cmd);
     const u = n.sent[0] ?? "";
     check(`note hint (${lang}): no raw angle brackets`, !u.includes("<") && !u.includes(">"), u);
   }
+}
+
+
+// ── /models footer: the "Set with /model <id>" line is HTML-mode text ────────
+// A raw <id> makes Telegram reject the whole listing (400 "can't parse
+// entities"), so the footer must escape it (same class as the F6 findings).
+{
+  const sent: string[] = [];
+  const duck: any = {
+    oc: { listModels: async () => [{ id: "m-one" }, { id: "m-two", name: "M Two" }] },
+    st: { get: () => ({ model: undefined }) },
+    cfg: { replyMaxLen: 100_000 },
+    tg: { sendMessage: async (_c: string, t: string) => void sent.push(t) },
+  };
+  (duck as any).cmdModels = (Bot.prototype as any).cmdModels;
+  await duck.cmdModels("conv-models");
+  const last = sent[sent.length - 1] ?? "";
+  const noRawTags = last.replace(/<\/?(b|code)>/g, "");
+  check("/models footer: id placeholder escaped", last.includes("&lt;id&gt;") && !last.includes("<id>"), last);
+  check("/models footer: no raw angle brackets outside markup", !noRawTags.includes("<") && !noRawTags.includes(">"), noRawTags);
 }
 
 if (failures > 0) {
