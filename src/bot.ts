@@ -31,6 +31,7 @@ import { richMarkdownChunks } from "./rich.js";
 import { redactSecrets } from "./redact.js";
 import { extractTrailingChoices, extractOptionsMarker, choiceKeyboard, registry } from "./choices.js";
 import { scheduleForRegistration, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
+import { isAlreadyResolvedPermissionError } from "./perm.js";
 import {
   classifyAction,
   pickAddedReaction,
@@ -1982,6 +1983,14 @@ export class Bot {
         this.st.set(conv, {
           pendingPrompts: { ...this.st.get(conv).pendingPrompts, [promptId]: { ...pp, messageId: freshId } },
         });
+        // Keep the in-memory permission entry's messageId in step with the card
+        // that is actually visible, so a later "answered elsewhere" edit or the
+        // budget-exhausted auto-deny lands on the right message. (Forms don't
+        // store a messageId in memory, so permissions only.)
+        if (pp.kind === "permission") {
+          const perm = this.permissionPrompts.get(promptId);
+          if (perm) this.permissionPrompts.set(promptId, { ...perm, messageId: freshId });
+        }
       }
     }
     if (reminderBudgetExhausted(sent, max)) {
@@ -5080,16 +5089,40 @@ export class Bot {
     };
     // Re-registration after a restart (reconcile): refresh the original card in
     // place instead of posting a duplicate permission prompt.
+    const cardText = lines.join("\n");
     const prevId = this.st.get(conv).pendingPrompts?.[requestID]?.messageId;
-    let messageId = prevId ? await this.editCardInPlace(relayConv, prevId, lines.join("\n"), kb) : -1;
-    if (messageId < 0) messageId = await this.tg.sendMessageId(relayConv, lines.join("\n"), { reply_markup: kb }).catch(() => -1);
-    if (messageId > 0) {
-      this.permissionPrompts.set(requestID, { requestID, sessionID, conv, relayConv, messageId });
-      // Start nudging if unanswered — but ONLY when the card was actually sent.
-      // A failed send (messageId = -1) would leave a reminder re-sending a card
-      // whose buttons are no longer valid (dead buttons).
-      this.startPromptReminder(conv, requestID, "permission", lines.join("\n"), kb, messageId, relayConv);
+    let messageId = prevId ? await this.editCardInPlace(relayConv, prevId, cardText, kb) : -1;
+    // The card send can fail (Telegram 429, a network blip, an HTML parse
+    // error). Retry it a few times; if it still fails we MUST register the
+    // prompt anyway, otherwise the user never sees the ask and the agent hangs
+    // on a request only a restart could recover. The armed reminder re-sends
+    // the card (idempotently) until it lands.
+    if (messageId < 0) messageId = await this.sendPermissionCard(relayConv, cardText, kb, requestID);
+    const cardId = messageId > 0 ? messageId : 0; // 0 = "card missing" sentinel
+    this.permissionPrompts.set(requestID, { requestID, sessionID, conv, relayConv, messageId: cardId });
+    if (cardId === 0) {
+      warn(`permission card send failed for ${requestID} — registered without a card; a reminder will re-send it`);
     }
+    // Arm the reminder in both cases: with a card it nudges; with a missing
+    // card (messageId 0) its fire RE-SENDS the card, and the resend path updates
+    // the stored messageId so button edits work.
+    this.startPromptReminder(conv, requestID, "permission", cardText, kb, cardId, relayConv);
+  }
+
+  /**
+   * Send the permission card, retrying a few times with a short backoff.
+   * Returns the new message id, or -1 if every attempt failed. A failed send
+   * must never lose the prompt — the caller registers it (messageId 0) and arms
+   * a reminder that re-sends the card.
+   */
+  private async sendPermissionCard(relayConv: ConvKey, text: string, kb: Keyboard, requestID: string): Promise<number> {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const id = await this.tg.sendMessageId(relayConv, text, { reply_markup: kb }).catch(() => -1);
+      if (id > 0) return id;
+      warn(`permission card send failed for ${requestID} (attempt ${attempt}/3)`);
+      if (attempt < 3) await new Promise((r) => setTimeout(r, 250 * attempt)); // 250ms, then 500ms
+    }
+    return -1;
   }
 
   /** The request was answered elsewhere (e.g. the TUI) — settle the Telegram card. */
@@ -5137,17 +5170,27 @@ export class Bot {
       await this.tg.answerCallbackQuery(cb.id);
       if (messageId) await this.tg.editMessageText(conv, messageId, labels[decision]).catch(() => {});
     } catch (e) {
-      const msg = (e as Error)?.message ?? "";
-        if (/not found|permission/i.test(msg)) {
-          this.permissionPrompts.delete(requestID);
-          this.cancelReminder(p.conv, requestID); // answered elsewhere → stop nudging (schedule lives under the worker conv)
+      if (isAlreadyResolvedPermissionError(e)) {
+        // The server says the request is no longer pending (answered here or
+        // elsewhere, e.g. the TUI, or already gone) — settle the card and stop
+        // nudging.
+        this.permissionPrompts.delete(requestID);
+        this.cancelReminder(p.conv, requestID); // answered elsewhere → stop nudging (schedule lives under the worker conv)
         await this.tg.answerCallbackQuery(cb.id, tr(lang, "Yêu cầu này đã được xử lý ở nơi khác.", "This request was handled elsewhere."));
         if (messageId) {
           await this.tg.editMessageText(conv, messageId, tr(lang, "ℹ️ Quyền đã được xử lý ở nơi khác.", "ℹ️ Permission was handled elsewhere.")).catch(() => {});
         }
         return;
       }
-      await this.tg.answerCallbackQuery(cb.id, `⚠️ ${msg.slice(0, 100)}`);
+      // Any OTHER failure (network blip, transport error, a real "permission
+      // denied", an HTTP 403): the request is STILL pending on the server. Keep
+      // the prompt and its buttons so the user can tap again to retry.
+      const msg = (e as Error)?.message ?? "";
+      warn(`permission reply failed for ${requestID} (still pending, buttons kept): ${msg}`);
+      await this.tg.answerCallbackQuery(
+        cb.id,
+        `${tr(lang, "⚠️ Chưa trả lời được — vẫn đang chờ, thử bấm lại.", "⚠️ Couldn't answer — still pending, tap again to retry.")} ${msg.slice(0, 100)}`,
+      );
     }
   }
 }
