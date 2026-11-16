@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.30.5](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.30.4...opencode-telegram-bot-v1.30.5) (2026-11-16)
+
+
+### Bug Fixes
+
+* decode added reaction by diffing old and new lists ([#216](https://github.com/tobbieswork/opencode-telegram-bot/issues/216)) ([9cb0567](https://github.com/tobbieswork/opencode-telegram-bot/commit/9cb0567533bb42a395540397308bf164e504501b))
+* keep permission prompts retryable when the reply or card send fails ([#218](https://github.com/tobbieswork/opencode-telegram-bot/issues/218)) ([ab61303](https://github.com/tobbieswork/opencode-telegram-bot/commit/ab613034403c2b0ab9b064418a4a1309262b9604))
+* stop the running turn and validate the target in /use ([#217](https://github.com/tobbieswork/opencode-telegram-bot/issues/217)) ([316e1fb](https://github.com/tobbieswork/opencode-telegram-bot/commit/316e1fb43588cbe426bc1de48e8e81fb777088df))
+
 ## [1.30.4](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.30.3...opencode-telegram-bot-v1.30.4) (2026-11-16)
 
 
