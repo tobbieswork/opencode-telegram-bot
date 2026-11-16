@@ -1,6 +1,7 @@
 /**
  * Checks the reaction UX's pure decision logic (src/reactions.ts):
  *  - emoji → action mapping (🔥 spawn / 👍 approve / 👎 reject / no-op),
+ *  - the added-reaction diff (new_reaction vs old_reaction, FB-05),
  *  - the (message,emoji) "fired once" dedup keys,
  *  - index/reacted pruning at the caps (oldest first, no-op under cap),
  *  - the 👍 approve decision (worker-done only, never a busy worker),
@@ -11,6 +12,7 @@
  */
 import {
   classifyAction,
+  pickAddedReaction,
   indexKey,
   reactedKey,
   alreadyReacted,
@@ -45,6 +47,38 @@ function check(name: string, cond: boolean, detail?: string): void {
   check("unknown emoji (👏) → no-op", classifyAction("👏") === null);
   check("empty → no-op", classifyAction("") === null);
   check("body-language emojis are settable constants", REACTION_THINK === "🤔" && REACTION_CELEBRATE === "🎉");
+}
+
+// ── added-reaction diff (new_reaction vs old_reaction, FB-05) ─────────────
+// Telegram sends the FULL reaction lists; only an emoji in new_reaction that
+// is absent from old_reaction is a real add. The old new_reaction[0] decode
+// misfired on multi-reaction messages in both directions.
+{
+  const r = (e: string): { type: string; emoji: string } => ({ type: "emoji", emoji: e });
+
+  // FB-05 case 1: user has 👍 and adds 🔥 → the ADD is 🔥 (spawn), whichever
+  // order Telegram reports the list.
+  check("add 🔥 beside 👍 (new [👍,🔥], old [👍]) → 🔥", pickAddedReaction([r("👍"), r("🔥")], [r("👍")]) === "🔥");
+  check("add 🔥 beside 👍 (new [🔥,👍], old [👍]) → 🔥 (order-insensitive)", pickAddedReaction([r("🔥"), r("👍")], [r("👍")]) === "🔥");
+
+  // FB-05 case 2: removing 👍 from [👍,🔥] → nothing was added → undefined
+  // (no spurious spawn, no dedupe marker).
+  check("remove 👍 from [👍,🔥] (new [🔥], old [👍,🔥]) → undefined", pickAddedReaction([r("🔥")], [r("👍"), r("🔥")]) === undefined);
+  check("remove the only reaction (new [], old [👍]) → undefined", pickAddedReaction([], [r("👍")]) === undefined);
+  check("reorder without change (new [🔥,👍], old [👍,🔥]) → undefined", pickAddedReaction([r("🔥"), r("👍")], [r("👍"), r("🔥")]) === undefined);
+
+  // brand-new mapped emoji on a clean message
+  check("brand-new 👍 (new [👍], old []) → 👍 (approve)", pickAddedReaction([r("👍")], []) === "👍");
+  check("brand-new 👎 (new [👎], old []) → 👎 (reject)", pickAddedReaction([r("👎")], []) === "👎");
+
+  // re-adding a previously removed emoji is a real add by diff (the handler's
+  // once-ever dedupe marker applies on top, as before)
+  check("re-add after removal (new [🔥], old []) → 🔥 again", pickAddedReaction([r("🔥")], []) === "🔥");
+
+  // unmapped emojis never act, mapped ones do even alongside unmapped
+  check("new unmapped 👏 (new [👏], old []) → undefined", pickAddedReaction([r("👏")], []) === undefined);
+  check("new [👏,👍] beside empty old → 👍 (first mapped add)", pickAddedReaction([r("👏"), r("👍")], []) === "👍");
+  check("undefined lists → undefined", pickAddedReaction(undefined, undefined) === undefined);
 }
 
 // ── dedup keys ─────────────────────────────────────────────────────────────

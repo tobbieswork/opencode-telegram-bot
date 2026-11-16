@@ -25,6 +25,41 @@ export function classifyAction(emoji: string): ReactionAction | null {
   return null;
 }
 
+/**
+ * Which MAPPED action did this reaction update actually ADD?
+ *
+ * A `message_reaction` update carries the FULL reaction lists: new_reaction
+ * is what is on the message now, old_reaction what was there before. A tap
+ * is "new" only when its emoji is in new_reaction and NOT in old_reaction —
+ * reading new_reaction[0] instead (the old bug) misfired on multi-reaction
+ * messages: adding 🔥 beside an existing 👍 reported 👍, and REMOVING 👍
+ * from [👍,🔥] reported 🔥 as if it had just been added (spurious spawn).
+ *
+ * Returns the first emoji in new_reaction that is absent from old_reaction
+ * and maps to an action (classifyAction), or undefined when the update added
+ * nothing mappable (a removal, a reorder, or an unmapped emoji) — the caller
+ * must then ignore the update entirely: no dedupe marker, no side effects.
+ * Re-adding a previously removed emoji is a real add by this diff; the
+ * (message,emoji) "fired once" dedupe gate (alreadyReacted) still applies
+ * on top, exactly as before.
+ */
+export function pickAddedReaction(
+  newReaction: ReadonlyArray<{ type: string; emoji?: string }> | undefined,
+  oldReaction: ReadonlyArray<{ type: string; emoji?: string }> | undefined,
+): string | undefined {
+  const oldSet = new Set(
+    (oldReaction ?? [])
+      .filter((r) => r.type === "emoji" && r.emoji)
+      .map((r) => r.emoji as string),
+  );
+  for (const r of newReaction ?? []) {
+    if (r.type !== "emoji" || !r.emoji) continue;
+    if (oldSet.has(r.emoji)) continue; // already on the message before this update
+    if (classifyAction(r.emoji)) return r.emoji;
+  }
+  return undefined;
+}
+
 /** Cap on the machine-wide message index (oldest ts dropped first). */
 export const REACT_INDEX_CAP = 500;
 /** Cap on the (message,emoji) reacted-once set. */
