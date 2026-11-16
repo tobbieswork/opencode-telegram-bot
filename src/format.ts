@@ -171,6 +171,33 @@ export function chunk(text: string, max: number): string[] {
 }
 
 /**
+ * The character-level emphasis passes (bold / strikethrough / italic) on
+ * already-escaped text. The single-star / single-underscore italic boundaries
+ * keep us from touching a leading/trailing `*`/`_` (already bolded) or
+ * identifiers like snake_case and file names (a letter is never a boundary).
+ */
+function applyEmphasis(out: string): string {
+  out = out.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+  out = out.replace(/__([^_]+)__/g, "<b>$1</b>");
+  out = out.replace(/~~([^~]+)~~/g, "<s>$1</s>");
+  out = out.replace(/(^|[^*A-Za-z0-9])\*([^*\n]+)\*(?!\*)/g, "$1<i>$2</i>");
+  out = out.replace(/(^|[^_A-Za-z0-9])_([^_\n]+)_(?!_)/g, "$1<i>$2</i>");
+  return out;
+}
+
+/**
+ * Build the HTML for one Markdown link from its already-escaped parts. The
+ * url is kept verbatim (no emphasis pass may ever touch it), `"` is escaped
+ * in the href so it cannot close the attribute early, and only http(s)://,
+ * tg:// and mailto: urls become anchors — anything else (javascript:, raw
+ * strings, …) is rendered as literal escaped text instead of an href.
+ */
+function anchorHtml(text: string, url: string): string {
+  if (!/^(https?:\/\/|tg:\/\/|mailto:)/i.test(url)) return `[${text}](${url})`;
+  return `<a href="${url.replace(/"/g, "&quot;")}">${applyEmphasis(text)}</a>`;
+}
+
+/**
  * Convert a single Markdown "block" into a self-contained Telegram-HTML
  * fragment. Input is raw text; it is HTML-escaped first, then a safe subset of
  * Markdown (bold/italic/strikethrough/code/headings/links/bullets) is mapped to
@@ -197,18 +224,22 @@ function blockToHtml(raw: string): string {
     codeSpans.push(`<code>${inner}</code>`);
     return `\u0000${codeSpans.length - 1}\u0000`;
   });
-  out = out.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
-  out = out.replace(/__([^_]+)__/g, "<b>$1</b>");
-  out = out.replace(/~~([^~]+)~~/g, "<s>$1</s>");
-  // Single-star / single-underscore italic. The boundaries keep us from touching
-  // a leading/trailing `*`/`_` (already bolded) or identifiers like snake_case
-  // and file names (a letter is never a boundary).
-  out = out.replace(/(^|[^*A-Za-z0-9])\*([^*\n]+)\*(?!\*)/g, "$1<i>$2</i>");
-  out = out.replace(/(^|[^_A-Za-z0-9])_([^_\n]+)_(?!_)/g, "$1<i>$2</i>");
+  // Pull Markdown links out NEXT (after code spans, before the emphasis
+  // passes) so a `_` or `*` inside the URL can never be read as an emphasis
+  // delimiter — that used to inject <i> into the href attribute and make
+  // Telegram reject the whole chunk (400 "can't parse entities"). Restored
+  // as a proper <a> tag (or literal text for non-link schemes) afterwards.
+  const links: string[] = [];
+  out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m: string, text: string, url: string) => {
+    links.push(anchorHtml(text, url));
+    return `\u0001${links.length - 1}\u0001`;
+  });
+  out = applyEmphasis(out);
   out = out.replace(/^#{1,6}\s+(.*)$/, "<b>$1</b>");
-  out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2">$1</a>');
   out = out.replace(/^(\s*)[-*]\s+/, "$1• ");
-  // Put the code spans back now that no delimiter passes are left to misread them.
+  // Put the links back first (a link's text may still hold code-span
+  // placeholders), then the code spans.
+  out = out.replace(/\u0001(\d+)\u0001/g, (m: string, i: string) => links[Number(i)] ?? m);
   out = out.replace(/\u0000(\d+)\u0000/g, (m: string, i: string) => codeSpans[Number(i)] ?? m);
   return out;
 }
