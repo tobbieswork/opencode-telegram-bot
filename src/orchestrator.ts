@@ -22,7 +22,7 @@ import { QueueStore } from "./queue.js";
 import { buildBusyReply, busyKeyboard, queueFullReply } from "./busy.js";
 import type { BusyReply } from "./busy.js";
 import { queueReport } from "./orchestrator/report.js";
-import { purgeConv, cmdPrune, handlePruneCallback } from "./orchestrator/purge.js";
+import { purgeConv, cmdPrune, handlePruneCallback, worktreeSharedBy } from "./orchestrator/purge.js";
 import { onTopicDeleted, reapPendingTopicDeletes } from "./orchestrator/topics.js";
 import { workerIntroHtml, approvalLines } from "./orchestrator/templates.js";
 import { applyLanguagePin, detectTaskLang } from "./language.js";
@@ -1521,6 +1521,21 @@ export class Orchestrator {
       return;
     }
     const wt = w.worktree;
+    // An overflow-respawn replacement shares this worktree in a new topic
+    // (respawnOverflow copies w.worktree onto the replacement's conv). Removing
+    // or merging it here would delete the directory from under that still-running
+    // worker — refuse; the worktree is managed from the topic that owns it.
+    if (op !== "diff" && op !== "keep") {
+      const shared = worktreeSharedBy(this.h.st, conv, wt.root);
+      if (shared.length) {
+        const names = shared.map((k) => this.h.st.peek(k)?.worker?.name ?? k).join(", ");
+        await this.h.tg.answerCallbackQuery(cb.id, tr(lang,
+          `⚠️ Worktree đang dùng chung với worker ${names} — xoá/merge ở đây sẽ làm mất thư mục của worker đó. Hãy thao tác từ topic của nó.`,
+          `⚠️ This worktree is shared with worker ${names} — removing or merging it here would delete that worker's directory. Manage it from that worker's topic instead.`,
+        ));
+        return;
+      }
+    }
     if (BUSY.includes(w.status) && op !== "diff") {
       await this.h.tg.answerCallbackQuery(cb.id, tr(lang, "Worker đang chạy — /kill hoặc chờ xong rồi thử lại.", "The worker is running — /kill or wait for it to finish and try again."));
       return;
