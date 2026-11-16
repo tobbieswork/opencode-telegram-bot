@@ -176,6 +176,17 @@ try {
     check("setstatus: stopped releases the marker via the hook", st.peek(chat)?.specRunning?.g === undefined, JSON.stringify(st.peek(chat)?.specRunning));
   }
 
+  // ── Answer resilience (B3 class): a failing answerCallbackQuery must not
+  // abort the tap — a live incident lost a user's Run tap when the box network
+  // blipped and the fatal answer threw before dispatch.
+  {
+    const { bot, sent } = mkBot("vi", repo);
+    bot.tg.answerCallbackQuery = async () => { throw new Error("network error"); };
+    await handleSpecCallback(bot, cb("spec:alpha"), CONV);
+    const detail = sent.find((m) => (m.text ?? "").includes("<b>Alpha spec</b>"));
+    check("tap: failing answer does not abort dispatch (detail still sent)", !!detail, JSON.stringify(sent.map((m) => m.text?.slice(0, 50))));
+  }
+
   // ── Non-blocked Run → spawn + audit + worktree ────────────────────────────
   {
     const { bot, sent, orch } = mkBot("vi", repo);

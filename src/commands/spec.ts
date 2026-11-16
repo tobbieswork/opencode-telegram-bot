@@ -30,6 +30,7 @@ import { audit } from "../audit.js";
 import { isUserAllowed } from "../schedule.js";
 import { tr } from "../i18n.js";
 import { esc, trunc } from "../format.js";
+import { warn } from "../logger.js";
 
 /** One spec in docs/sdd/: parsed (with progress) or unparseable (S1.4). */
 type SpecEntry =
@@ -439,7 +440,12 @@ export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: Conv
     await bot.tg.sendMessage(conv, disabledText(lang));
     return;
   }
-  await bot.tg.answerCallbackQuery(cb.id);
+  // Non-fatal: a transient network failure here must NOT abort the tap — a
+  // fatal answer once silently lost a user's Run tap during a network blip
+  // (the handler aborted before dispatch).
+  await bot.tg.answerCallbackQuery(cb.id).catch((e) =>
+    warn("answerCallbackQuery (spec):", (e as Error)?.message),
+  );
   if (data.startsWith("specrunok:")) {
     const ref = parseRunRef(data.slice("specrunok:".length));
     if (!ref) {
