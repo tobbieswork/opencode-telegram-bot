@@ -198,6 +198,12 @@ export interface Config {
   /** A scheduled run still running/waiting after this long is interrupted (slice 3). */
   scheduleTimeoutMs: number;
   /**
+   * /spec: list the docs/sdd/ specs of the conversation's git repo with
+   * progress, and show a spec's task list with status (spec-to-tasks S2).
+   * Default ON; only an explicit "0" disables it (S6.1).
+   */
+  spec: boolean;
+  /**
    * Advisor: consult another model (Claude, Gemini/agy) on the advisor
    * daemon's machine over Tailscale for a second opinion (pure advice — no
    * code). Default OFF; enable by setting both ADVISOR_URL and ADVISOR_TOKEN
@@ -336,6 +342,9 @@ export function loadConfig(root: string): Config {
     // Minute-valued env → ms (the scheduler works in ms; decideRun/nextRunAfter too).
     scheduleGraceMs: parseIntSetting("OPENCODE_TG_SCHEDULE_GRACE_MIN", 60, 1) * 60_000,
     scheduleTimeoutMs: parseIntSetting("OPENCODE_TG_SCHEDULE_TIMEOUT_MIN", 30, 1) * 60_000,
+    // --- /spec (spec-to-tasks S2: list + detail; running comes in S4) ---
+    // Default ON; only an explicit "0" disables it (S6.1).
+    spec: process.env.OPENCODE_TG_SPEC !== "0",
     // --- Advisor (consult Claude / Gemini on another machine over Tailscale) ---
     ...advisorConfig(),
     // --- Manager rotation (floor-driven; see src/rotation.ts) ---

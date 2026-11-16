@@ -69,6 +69,7 @@ import { cmdAgents, cmdAgent, handleAgentCallback } from "./commands/agents.js";
 import { cmdSchedule, handleScheduleCallback } from "./commands/schedule.js";
 import { Advisor } from "./advisor/advisor.js";
 import { cmdHelp, cmdStatus, cmdHealth, cmdContext, cmdUsage, cmdHistory, cmdNote, cmdRotation, handleNoteCallback, cmdLang, cmdStyle } from "./commands/meta.js";
+import { cmdSpec, handleSpecCallback } from "./commands/spec.js";
 import {
   clampWatchInterval,
   createWatch,
@@ -2127,6 +2128,8 @@ export class Bot {
         return cmdLang(this, conv, arg, uid);
       case "/style":
         return cmdStyle(this, conv, arg, uid);
+      case "/spec":
+        return cmdSpec(this, conv, uid);
       default:
         return this.tg.sendMessage(conv, `Unknown command: ${esc(cmd)}\nSend /help`);
     }
@@ -3961,6 +3964,10 @@ export class Bot {
     }
     if (data.startsWith("kill:")) return this.orch.handleKillCallback(cb, conv, messageId);
     if (await this.orch.handleCallback(cb, conv, messageId)) return;
+    if (data.startsWith("spec:") || data.startsWith("specrun:")) {
+      await handleSpecCallback(this, cb, conv);
+      return;
+    }
     if (data.startsWith("cmd:")) {
       await this.runCommandButton(cb, conv, data.slice(4));
       return;
