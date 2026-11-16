@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.30.4](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.30.3...opencode-telegram-bot-v1.30.4) (2026-11-16)
+
+
+### Bug Fixes
+
+* escape the /models footer id placeholder ([#213](https://github.com/tobbieswork/opencode-telegram-bot/issues/213)) ([8cd7cde](https://github.com/tobbieswork/opencode-telegram-bot/commit/8cd7cde97ada4790324a0f54e6c2cf0dd0326c36))
+
 ## [1.30.3](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.30.2...opencode-telegram-bot-v1.30.3) (2026-11-16)
 
 
