@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.37.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.37.1...opencode-telegram-bot-v1.37.2) (2026-11-16)
+
+
+### Bug Fixes
+
+* retry the spec worker launch across network blips ([#246](https://github.com/tobbieswork/opencode-telegram-bot/issues/246)) ([1a3b520](https://github.com/tobbieswork/opencode-telegram-bot/commit/1a3b520abcd9d79f6d8cff4944ae879f85caeebc))
+* spec name gate + correct double-spawn guard in specRunSpawn ([#248](https://github.com/tobbieswork/opencode-telegram-bot/issues/248)) ([73910a3](https://github.com/tobbieswork/opencode-telegram-bot/commit/73910a3d480bc565ff116803f9c22a5a2d247623))
+
 ## [1.37.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.37.0...opencode-telegram-bot-v1.37.1) (2026-11-16)
 
 
