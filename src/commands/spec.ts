@@ -26,11 +26,11 @@ import type { Lang } from "../state.js";
 import { gitRoot, ensureSpecWorktree, runGit, specBranchName } from "../worktree.js";
 import { parseSpec, initMarkers, type ParsedTask } from "../spec.js";
 import { buildTaskPrompt } from "../spec-prompt.js";
+import { warn } from "../logger.js";
 import { audit } from "../audit.js";
 import { isUserAllowed } from "../schedule.js";
 import { tr } from "../i18n.js";
 import { esc, trunc } from "../format.js";
-import { warn } from "../logger.js";
 
 /** One spec in docs/sdd/: parsed (with progress) or unparseable (S1.4). */
 type SpecEntry =
@@ -260,59 +260,77 @@ async function specRunSpawn(
       .catch(() => {});
     return;
   }
-  try {
-    // S2.1: dedicated worktree on the stable spec branch, cut from main. The
-    // worker runs at the repo root (dir === root).
-    const wt = await ensureSpecWorktree(root, root, name);
-    const relSpec = join("docs", "sdd", `${name}.md`);
-    // S4.3: the spec branch must carry task markers before the worker starts.
-    await ensureSpecMarkers(wt.root, relSpec, name);
-    // S2.1: build the prompt from the WORKTREE copy of the spec (so it carries
-    // the markers). Fall back to the main-checkout task if the worktree parse
-    // differs (shouldn't happen for a fresh branch).
-    const wtMd = readFileSync(join(wt.root, relSpec), "utf8");
-    const wtRes = parseSpec(wtMd);
-    const wtTask = "error" in wtRes ? undefined : wtRes.tasks.find((t) => t.n === n);
-    const prompt = buildTaskPrompt(wtMd, wtTask ?? task).prompt;
-    const r = await bot.orch.spawn(chat, {
-      name: workerName,
-      directory: wt.directory,
-      task: prompt,
-      writes: true,
-      spawnedBy: "user",
-      // We already isolated the worker into its own spec worktree (the
-      // spec/<name> branch); skip the orchestrator's worktree pass so it
-      // doesn't wrap this in a second tg/ worktree (matters in "always" mode).
-      isolate: false,
-      // S5: conv = the conv the Run tap happened in (where the checkpoint card
-      // is posted); uid = the tapping user (S6.2 tapped_by).
-      specRun: { spec: name, branch: wt.branch, task: task.id, conv, uid: uid ?? 0 },
-    });
-    // S6.2: audit the run — who tapped, which spec, which task.
-    audit({
-      action: "spec_run",
-      chatId: conv,
-      userId: uid != null ? String(uid) : undefined,
-      session: bot.st.peek(r.conv)?.sessionID,
-      meta: { spec: name, task: task.id, branch: wt.branch, worker: workerName, runAnyway },
-    });
-    await bot.tg
-      .sendMessage(
-        conv,
-        tr(
-          lang,
-          `🏃 Đang chạy task <b>${esc(task.id)}</b> của spec ${esc(name)} — worker <b>${esc(workerName)}</b> trong branch <code>${esc(wt.branch)}</code>.`,
-          `🏃 Running task <b>${esc(task.id)}</b> of spec ${esc(name)} — worker <b>${esc(workerName)}</b> in branch <code>${esc(wt.branch)}</code>.`,
-        ),
-      )
-      .catch(() => {});
-  } catch (e) {
-    // Roll back the claim so the spec isn't wedged by a failed spawn.
-    bot.orch.releaseSpecRun(chat, name, workerName);
-    await bot.tg
-      .sendMessage(conv, tr(lang, `❌ Không chạy được: ${esc((e as Error).message)}`, `❌ Couldn't run it: ${esc((e as Error).message)}`))
-      .catch(() => {});
+  // The launch calls the Telegram API (worker topic + intro message), so a
+  // transient network blip can fail it (live incident 2026-11-16: a blip
+  // swallowed two Run taps AND the error notice). Retry the whole launch a few
+  // times, holding the claim — the worktree/marker steps are idempotent, so a
+  // retry is safe.
+  const MAX_ATTEMPTS = 3;
+  const RETRY_DELAY_MS = Number(process.env.SPEC_RUN_RETRY_DELAY_MS ?? 15000);
+  let lastErr: unknown;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      // S2.1: dedicated worktree on the stable spec branch, cut from main. The
+      // worker runs at the repo root (dir === root).
+      const wt = await ensureSpecWorktree(root, root, name);
+      const relSpec = join("docs", "sdd", `${name}.md`);
+      // S4.3: the spec branch must carry task markers before the worker starts.
+      await ensureSpecMarkers(wt.root, relSpec, name);
+      // S2.1: build the prompt from the WORKTREE copy of the spec (so it carries
+      // the markers). Fall back to the main-checkout task if the worktree parse
+      // differs (shouldn't happen for a fresh branch).
+      const wtMd = readFileSync(join(wt.root, relSpec), "utf8");
+      const wtRes = parseSpec(wtMd);
+      const wtTask = "error" in wtRes ? undefined : wtRes.tasks.find((t) => t.n === n);
+      const prompt = buildTaskPrompt(wtMd, wtTask ?? task).prompt;
+      const r = await bot.orch.spawn(chat, {
+        name: workerName,
+        directory: wt.directory,
+        task: prompt,
+        writes: true,
+        spawnedBy: "user",
+        // We already isolated the worker into its own spec worktree (the
+        // spec/<name> branch); skip the orchestrator's worktree pass so it
+        // doesn't wrap this in a second tg/ worktree (matters in "always" mode).
+        isolate: false,
+        // S5: conv = the conv the Run tap happened in (where the checkpoint card
+        // is posted); uid = the tapping user (S6.2 tapped_by).
+        specRun: { spec: name, branch: wt.branch, task: task.id, conv, uid: uid ?? 0 },
+      });
+      // S6.2: audit the run — who tapped, which spec, which task.
+      audit({
+        action: "spec_run",
+        chatId: conv,
+        userId: uid != null ? String(uid) : undefined,
+        session: bot.st.peek(r.conv)?.sessionID,
+        meta: { spec: name, task: task.id, branch: wt.branch, worker: workerName, runAnyway },
+      });
+      await bot.tg
+        .sendMessage(
+          conv,
+          tr(
+            lang,
+            `🏃 Đang chạy task <b>${esc(task.id)}</b> của spec ${esc(name)} — worker <b>${esc(workerName)}</b> trong branch <code>${esc(wt.branch)}</code>.`,
+            `🏃 Running task <b>${esc(task.id)}</b> of spec ${esc(name)} — worker <b>${esc(workerName)}</b> in branch <code>${esc(wt.branch)}</code>.`,
+          ),
+        )
+        .catch(() => {});
+      return;
+    } catch (e) {
+      lastErr = e;
+      warn(`spec run ${name}/${task.id} attempt ${attempt}/${MAX_ATTEMPTS} failed: ${(e as Error).message}`);
+      // If a worker entry got registered before the failure, a retry would
+      // collide on the worker name — stop and report instead of double-spawning.
+      const w = bot.st.peek(chat)?.worker;
+      if (w?.name === workerName || attempt >= MAX_ATTEMPTS) break;
+      await new Promise<void>((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+    }
   }
+  // Roll back the claim so the spec isn't wedged by a failed spawn.
+  bot.orch.releaseSpecRun(chat, name, workerName);
+  await bot.tg
+    .sendMessage(conv, tr(lang, `❌ Không chạy được: ${esc((lastErr as Error).message)}`, `❌ Couldn't run it: ${esc((lastErr as Error).message)}`))
+    .catch(() => {});
 }
 
 /**
