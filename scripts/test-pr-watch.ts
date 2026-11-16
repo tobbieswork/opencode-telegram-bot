@@ -157,6 +157,21 @@ function snap(p: Partial<PrSnapshot> & { number: number }): PrSnapshot {
     REPO,
   );
   check("render multi comment lists all", multi.includes("2 comment mới") && multi.includes("@b"));
+  // Issue #155 FB-03: untrusted PR/review/comment text must arrive HTML-escaped.
+  const hostileTitle = "a < b & <b>bold</b>";
+  const mEsc = renderEvent({ kind: "merged", number: 1, title: hostileTitle }, REPO);
+  check("merged: title escaped (no raw <b> tag)", mEsc.includes("a &lt; b &amp; &lt;b&gt;bold&lt;/b&gt;") && !mEsc.includes("<b>"), mEsc);
+  const oEsc = renderEvent({ kind: "opened", number: 2, title: "<script>x</script>" }, REPO, "en");
+  check("opened: title escaped (brackets survive as entities)", oEsc.includes("&lt;script&gt;x&lt;/script&gt;") && !oEsc.includes("<script>"), oEsc);
+  const rEsc = renderEvent({ kind: "review", number: 3, user: "a<b>", state: "APPROVED" }, REPO);
+  check("review: user escaped", rEsc.includes("@a&lt;b&gt; approved"), rEsc);
+  const c1 = renderEvent({ kind: "comment", number: 4, comments: [{ id: 1, user: "a", body: "<script>alert(1)</script>\nline2" }] }, REPO);
+  check("comment: body escaped + newlines collapsed", c1.includes("“&lt;script&gt;alert(1)&lt;/script&gt; line2”") && !c1.includes("<script>") && !c1.includes("\n"), c1);
+  const c2 = renderEvent(
+    { kind: "comment", number: 5, comments: [{ id: 1, user: "a", body: "1" }, { id: 2, user: "b<&>", body: "c & d" }] },
+    REPO,
+  );
+  check("comment: multi users/bodies escaped", c2.includes("@b&lt;&amp;&gt;: “c &amp; d”"), c2);
 }
 
 // ── tick-level: snapshot update across ticks (issue #154 regression) ──────

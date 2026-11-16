@@ -102,6 +102,14 @@ const byAction = (action: string) => auditLines().filter((l) => l.action === act
   check("list shows each item's text", line.includes("alpha short") && line.includes("beta message"), line);
   check("list truncates long text (… marker)", line.includes("…"), line);
   check("long text is NOT shown in full (80 x's gone)", !line.includes("x".repeat(60)), line);
+  // Issue #155 FB-09: queued user text is untrusted and must be escaped in the
+  // HTML-mode list (fresh bot: the queue caps at 3 per conv).
+  const { bot: bot2, sent: sent2 } = makeBot();
+  const conv2 = "43";
+  bot2.queue.push(conv2, { text: "<script>alert(1)</script> & <b>bold</b>" });
+  await (bot2 as any).cmdQueue(conv2, "");
+  const escLine = sent2[sent2.length - 1];
+  check("list escapes hostile user text", escLine.includes("&lt;script&gt;alert(1)&lt;/script&gt; &amp; &lt;b&gt;bold&lt;/b&gt;") && !escLine.includes("<script>") && !escLine.includes("<b>"), escLine);
 }
 
 // ── /queue clear ───────────────────────────────────────────────────────────────

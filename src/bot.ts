@@ -1125,7 +1125,18 @@ export class Bot {
       const conv = this.lastActiveConv ?? (this.cfg.allowedUserIds[0] ? String(this.cfg.allowedUserIds[0]) : undefined);
       if (conv) {
         const lang = this.userPrefs.getLang(this.st.peek(chatOf(conv))?.createdBy ?? "");
-        for (const ev of events) await this.tg.sendMessage(conv, renderEvent(ev, repo, lang)).catch(() => {});
+        for (const ev of events) {
+          try {
+            await this.tg.sendMessage(conv, renderEvent(ev, repo, lang));
+          } catch (sendErr) {
+            // Send failed -> do NOT persist the new snapshot: the next tick
+            // must re-diff and re-announce this event (#155 A3). Log, don't
+            // swallow.
+            warn("pr-watch: notification send failed, snapshot not saved (will retry next tick):", (sendErr as Error).message);
+            this.prWatchLastError = (sendErr as Error).message;
+            return;
+          }
+        }
       }
       this.st.set(MACHINE_STATE_KEY, { prWatchSnapshot: next });
       this.prWatchLastOkAt = Date.now();
@@ -4689,7 +4700,7 @@ export class Bot {
       await this.tg.sendMessage(conv, tr(lang, "Không có tin nào trong hàng chờ.", "No messages in the queue."));
       return;
     }
-    const lines = items.map((it, i) => "#" + (i + 1) + " · " + trunc(it.text, 40) + " · " + formatQueueAge(it.ageMs));
+    const lines = items.map((it, i) => "#" + (i + 1) + " · " + esc(trunc(it.text, 40)) + " · " + formatQueueAge(it.ageMs));
     await this.tg.sendMessage(conv, tr(lang, "📥 Hàng chờ (" + items.length + "):", "📥 Queue (" + items.length + "):") + "\n" + lines.join("\n"));
   }
 
