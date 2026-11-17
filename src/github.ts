@@ -12,23 +12,40 @@
  * The transport is injectable (setGhApiImpl) so tests can stub the calls.
  */
 import { execFile } from "node:child_process";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { runGit } from "./worktree.js";
 
 export type GhApiFn = (repo: string, method: string, path: string, body?: unknown) => Promise<any>;
 
 async function ghApiDefault(repo: string, method: string, path: string, body?: unknown): Promise<any> {
   const args = ["api", "-X", method, `repos/${repo}/${path}`];
-  if (body !== undefined) args.push("--input", JSON.stringify(body));
-  return new Promise((resolve, reject) => {
-    execFile("gh", args, { timeout: 20_000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err) return reject(new Error(`gh api ${method} ${path}: ${stderr?.trim() || err.message}`));
-      try {
-        resolve(JSON.parse(stdout));
-      } catch (e) {
-        reject(e as Error);
-      }
+  let dir: string | undefined;
+  try {
+    if (body !== undefined) {
+      // `gh api --input` takes a FILE PATH, not the raw body: passing the JSON
+      // literal makes gh open a file literally named `{"title":…}` and fail
+      // with "no such file or directory" (live bug, S7 PR flow). Write the
+      // body to a temp file instead and clean it up afterwards.
+      dir = await mkdtemp(join(tmpdir(), "gh-api-"));
+      const file = join(dir, "body.json");
+      await writeFile(file, JSON.stringify(body));
+      args.push("--input", file);
+    }
+    return await new Promise((resolve, reject) => {
+      execFile(process.env.OPENCODE_TG_GH_BIN || "gh", args, { timeout: 20_000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+        if (err) return reject(new Error(`gh api ${method} ${path}: ${stderr?.trim() || err.message}`));
+        try {
+          resolve(JSON.parse(stdout));
+        } catch (e) {
+          reject(e as Error);
+        }
+      });
     });
-  });
+  } finally {
+    if (dir) await rm(dir, { recursive: true, force: true });
+  }
 }
 
 let impl: GhApiFn = ghApiDefault;
