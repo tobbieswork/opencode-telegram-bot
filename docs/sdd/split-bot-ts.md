@@ -8,7 +8,7 @@
 
 ## 1. Problem
 
-`src/bot.ts` is 4,097 lines with 51 imports. One `Bot` class holds command
+`src/bot.ts` is 5,241 lines with 59 imports (main, 2026-11-17). One `Bot` class holds command
 routing, the callback dispatcher (an `if (data.startsWith("..."))` chain of
 about 20 prefixes, plus a nested `switch` for the `bs:` menu), prompt running,
 keyboards, message text and state changes. It has about 104 direct reply/edit
