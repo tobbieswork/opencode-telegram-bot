@@ -125,7 +125,7 @@ spec file" to "a worker run with the right prompt" and back to "task done".
 3. [x] (af1c2da) **S3 Prompt builder** (S2.2, S2.3). Pure function with unit tests, including the size cap. *Checkpoint: read the prompt built for three real tasks.*
 4. [x] (4775787) **S4 Run** (S2.1, S2.4 to S2.6, S6.2). Spawn on `spec/<name>`, one running task per spec, audit events. *Checkpoint: run a trivial task end to end.*
 5. [x] (fae8b17) **S5 Checkpoint card** (S3.1 to S3.3, S3.7). Built from recorded results. *Checkpoint: read a card for a passing run and a failing run.*
-6. [ ] **S6 Accept, Redo, Stop** (S3.4 to S3.6, S4.4). *Checkpoint: accept one task and check the spec file diff is only a marker and a hash.*
+6. [x] **S6 Accept, Redo, Stop** (S3.4 to S3.6, S4.4) (6a38bc0). *Checkpoint: accept one task and check the spec file diff is only a marker and a hash.*
 7. [ ] **S7 Pull request** (S5.1 to S5.5). Draft PR, body update, ready button, post-merge cleanup offer. *Checkpoint: open a draft PR for a throwaway spec.*
 8. [ ] **S8 End to end.** One extra scenario in `npm run smoke`: run a one-task spec, accept it. Smoke is the last step, as in `AGENTS.md`; restart the service afterwards.
 
