@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.40.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.39.0...opencode-telegram-bot-v1.40.0) (2026-11-17)
+
+
+### Features
+
+* spec PR flow (draft PR, ready, post-merge clean up) ([b21fc74](https://github.com/tobbieswork/opencode-telegram-bot/commit/b21fc74eb96f248224086f3dd74de3670fe4729b))
+* **spec:** S7 pull-request flow (draft PR, ready, post-merge clean up) ([8c94ad4](https://github.com/tobbieswork/opencode-telegram-bot/commit/8c94ad43f48bf18d01aece8e43bda297d9743e38))
+
 ## [1.39.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.38.1...opencode-telegram-bot-v1.39.0) (2026-11-17)
 
 
