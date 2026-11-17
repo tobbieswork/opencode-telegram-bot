@@ -50,6 +50,27 @@ export async function defaultBranch(repoRoot: string): Promise<string> {
   return "main";
 }
 
+/**
+ * The branch a spec branch was cut from (its fork point), so "since the fork"
+ * git queries can be scoped. Prefers the remote's default (origin/HEAD), then
+ * common local default names (the spec branch is `spec/*`, so `main`/`master`
+ * are safe candidates), then degrades to the current branch.
+ */
+export async function resolveBaseBranch(dir: string): Promise<string> {
+  const remote = await runGit(dir, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).catch(() => "");
+  if (remote) {
+    const b = remote.replace(/^origin\//, "");
+    if (b) return b;
+  }
+  for (const cand of ["main", "master"]) {
+    const ok = await runGit(dir, ["show-ref", "--verify", "--quiet", `refs/heads/${cand}`])
+      .then(() => true)
+      .catch(() => false);
+    if (ok) return cand;
+  }
+  return (await runGit(dir, ["rev-parse", "--abbrev-ref", "HEAD"]).catch(() => "")) || "HEAD";
+}
+
 /** A spec task's worktree: stable branch `spec/<name>` from the default branch. */
 export interface SpecWorktree {
   directory: string;

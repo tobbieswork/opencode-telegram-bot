@@ -107,6 +107,38 @@ export function computeNotRan(ran: RanCheck[]): string[] {
 }
 
 /**
+ * S4.3: the exact subject of the marker commit that ensureSpecMarkers makes
+ * on the spec branch. The marker is the orchestrator's own commit, not the
+ * worker's work — so it is excluded from "the worker's commits".
+ */
+export function markerCommitSubject(spec: string): string {
+  return `docs: add S4 task markers to ${spec}.md`;
+}
+
+/**
+ * S6.4 — parse `git log --format=%h %s` output (newest first) into
+ * { hash, subject } commits, excluding the S4 marker commit. Blank lines and
+ * hash-only lines are ignored. The caller scopes the range (e.g. `base..HEAD`);
+ * this only filters + parses.
+ */
+export function workerCommitsSinceFork(
+  lines: string[],
+  spec: string,
+): { hash: string; subject: string }[] {
+  const marker = markerCommitSubject(spec);
+  const out: { hash: string; subject: string }[] = [];
+  for (const raw of lines ?? []) {
+    const line = String(raw).trim();
+    const sp = line.indexOf(" ");
+    if (sp < 1) continue;
+    const subject = line.slice(sp + 1).trim();
+    if (subject === marker) continue;
+    out.push({ hash: line.slice(0, sp), subject });
+  }
+  return out;
+}
+
+/**
  * The audit outcome of a run (S6.2 `spec_checkpoint.meta.outcome`):
  * "error" (ended in error) > "no-commit" (no worker commit) > "fail" (a check
  * failed) > "pass".
