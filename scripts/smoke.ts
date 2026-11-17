@@ -624,11 +624,34 @@ async function main(): Promise<void> {
         else {
           // ── Run tap → worker turn → checkpoint card (S4/S5) ───────────────
           const kbBefore = mock.keyboards.length;
+          const outBeforeRun = mock.out.length;
           await bot.handle(tap(runBtn));
           show("s8: Run tapped (worker spawning)");
           // The card is posted by the S5 settlement hook when the (real)
           // worker turn finishes — a real LLM turn, typically 1-4 min.
-          const cardArrived = await waitFor((a) => a.some((m) => m.includes("🧩 Worker:")), mock.out, 480000);
+          // While waiting, answer any question the worker asks: tap the
+          // first option (the form marks it "(Recommended)"), as a real
+          // user would — an unanswered form stalls the turn until the
+          // budget dies (2026-11-17: a scope question ate all 480 s).
+          let cardArrived = false;
+          {
+            const answered = new Set<string>();
+            const t0 = Date.now();
+            while (Date.now() - t0 < 480000) {
+              if (mock.out.slice(outBeforeRun).some((m) => m.includes("🧩 Worker:"))) {
+                cardArrived = true;
+                break;
+              }
+              for (const kb of mock.keyboards.slice(kbBefore)) {
+                const m = JSON.stringify(kb).match(/fq:(frm_[A-Za-z0-9_]+):o0/);
+                if (m && !answered.has(m[1])) {
+                  answered.add(m[1]);
+                  await bot.handle(tap(`fq:${m[1]}:o0`));
+                }
+              }
+              await waitMs(5000);
+            }
+          }
           console.log("s8: checkpoint card arrived:", cardArrived);
           show("s8: checkpoint card");
           if (!cardArrived) s8fail("no checkpoint card within 480 s of the Run tap");
