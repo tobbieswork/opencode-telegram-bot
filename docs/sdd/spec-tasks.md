@@ -127,7 +127,7 @@ spec file" to "a worker run with the right prompt" and back to "task done".
 5. [x] (fae8b17) **S5 Checkpoint card** (S3.1 to S3.3, S3.7). Built from recorded results. *Checkpoint: read a card for a passing run and a failing run.*
 6. [x] **S6 Accept, Redo, Stop** (S3.4 to S3.6, S4.4) (6a38bc0). *Checkpoint: accept one task and check the spec file diff is only a marker and a hash.*
 7. [x] **S7 Pull request** (S5.1 to S5.5) (8c94ad4). Draft PR, body update, ready button, post-merge cleanup offer. *Checkpoint: open a draft PR for a throwaway spec.*
-8. [ ] **S8 End to end.** One extra scenario in `npm run smoke`: run a one-task spec, accept it. Smoke is the last step, as in `AGENTS.md`; restart the service afterwards.
+8. [x] (63b7db2) **S8 End to end.** One extra scenario in `npm run smoke`: run a one-task spec, accept it. Smoke is the last step, as in `AGENTS.md`; restart the service afterwards.
 
 Verification order for every task: `npm run typecheck` and `npm run test:unit` first, `npm run smoke` once at the end.
 
