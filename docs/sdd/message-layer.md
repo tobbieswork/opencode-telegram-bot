@@ -77,13 +77,13 @@ confirmKeyboard(lang, { yes: cb.encode({...}), no: cb.encode({...}) })
 
 ## 4. Tasks (each ends with a human checkpoint)
 
-0. **Usage count.** Read-only: count each repeated shape (error line, ok line, confirm keyboard, picker) with file and line. Keep only shapes with 3 or more uses. Update this spec. *Checkpoint: approve the helper list.*
-1. **Icons and text helpers** (M1, M3, M4.3). `src/ui/icons.ts`, `text.ts`, `scripts/test-ui.ts` added to `test:unit`. No call sites changed. *Checkpoint: review the helper API and wording.*
-2. **Keyboard helpers** (M2). `src/ui/keyboards.ts` and tests. *Checkpoint: review.*
-3. **Pilot migration:** `src/commands/agents.ts` and `src/commands/meta.ts`, byte-identical output. *Checkpoint: see the messages in Telegram.*
-4. **Migrate remaining files**, one commit per file or module (`schedule`, `orchestrator/*`, `bot.ts` sections). *Checkpoint after each group.*
-5. **Consistency check** (M4.4). Add `test:ui-consistency`; list allowed exceptions. *Checkpoint: review the exception list.*
-6. **End-to-end.** `npm run smoke` once at the end, then restart the service and check the journal.
+1. **T1 Usage count.** Read-only: count each repeated shape (error line, ok line, confirm keyboard, picker) with file and line. Keep only shapes with 3 or more uses. Update this spec. *Checkpoint: approve the helper list.*
+2. **T2 Icons and text helpers** (M1, M3, M4.3). `src/ui/icons.ts`, `text.ts`, `scripts/test-ui.ts` added to `test:unit`. No call sites changed. *Checkpoint: review the helper API and wording.*
+3. **T3 Keyboard helpers** (M2). `src/ui/keyboards.ts` and tests. *Checkpoint: review.*
+4. **T4 Pilot migration:** `src/commands/agents.ts` and `src/commands/meta.ts`, byte-identical output. *Checkpoint: see the messages in Telegram.*
+5. **T5 Migrate remaining files**, one commit per file or module (`schedule`, `orchestrator/*`, `bot.ts` sections). *Checkpoint after each group.*
+6. **T6 Consistency check** (M4.4). Add `test:ui-consistency`; list allowed exceptions. *Checkpoint: review the exception list.*
+7. **T7 End-to-end.** `npm run smoke` once at the end, then restart the service and check the journal.
 
 Verification order for every task: `npm run typecheck` and `npm run test:unit` first, `npm run smoke` once at the end.
 

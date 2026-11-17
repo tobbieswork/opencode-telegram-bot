@@ -53,7 +53,7 @@ entries and the `if` chain disappears.
 type: the subset of `Bot` that feature modules touch. `Bot` implements it, so
 no behaviour changes; tests pass a fake.
 
-**Proposed modules** (final list confirmed in task 0 from a real call graph):
+**Proposed modules** (final list confirmed in task 1 from a real call graph):
 
 | Module | Moves out of `bot.ts` |
 |---|---|
@@ -73,7 +73,7 @@ because every other feature calls into it.
 ### Decisions (change any of them)
 - Move code, do not improve it. Improvements (message helpers, typed callbacks) come from the other two specs, applied to a file after it has moved.
 - One PR per 2-3 modules, not one giant PR, so each can be reviewed and reverted alone.
-- Do the split after `callback-registry.md` task 1, so moved modules register themselves instead of adding to the `if` chain.
+- Do the split after `callback-registry.md` task 3, so moved modules register themselves instead of adding to the `if` chain.
 
 ### Risks and open questions
 - **Hidden shared state.** Private fields of `Bot` used from many places (inflight map, draining flag) make some features harder to move. Task 0 lists these; the narrow `BotCtx` exposes them deliberately.
@@ -82,14 +82,14 @@ because every other feature calls into it.
 
 ## 4. Tasks (each ends with a human checkpoint)
 
-0. **Call graph and list.** Read-only: for each candidate module, list the functions, the `Bot` fields they use and the tests that cover them. Write the confirmed module list and move order into this spec. *Checkpoint: approve the list.*
-1. **`BotCtx` and one pilot module** (`rotation`). Add `commands/ctx.ts`; move rotation; no behaviour change. *Checkpoint: review the pattern before repeating it.*
-2. **Small modules:** `permission`, `notes`. *Checkpoint: line count and tests.*
-3. **Medium modules:** `model`, `admin`. *Checkpoint: try the buttons in Telegram.*
-4. **Large modules:** `session`, `browse`. *Checkpoint: try the folder browser and `/new` in Telegram.*
-5. **`prompt-runner`.** Move last. *Checkpoint: run a real turn, queue and stop.*
-6. **Cleanup.** Remove dead imports, check the size targets (S2.4), update `README.md` architecture notes if any.
-7. **End-to-end.** `npm run smoke` once at the end, then restart the service (`systemctl --user restart opencode-bot`) and check the journal.
+1. **T1 Call graph and list.** Read-only: for each candidate module, list the functions, the `Bot` fields they use and the tests that cover them. Write the confirmed module list and move order into this spec. *Checkpoint: approve the list.*
+2. **T2 `BotCtx` and one pilot module** (`rotation`). Add `commands/ctx.ts`; move rotation; no behaviour change. *Checkpoint: review the pattern before repeating it.*
+3. **T3 Small modules:** `permission`, `notes`. *Checkpoint: line count and tests.*
+4. **T4 Medium modules:** `model`, `admin`. *Checkpoint: try the buttons in Telegram.*
+5. **T5 Large modules:** `session`, `browse`. *Checkpoint: try the folder browser and `/new` in Telegram.*
+6. **T6 `prompt-runner`.** Move last. *Checkpoint: run a real turn, queue and stop.*
+7. **T7 Cleanup.** Remove dead imports, check the size targets (S2.4), update `README.md` architecture notes if any.
+8. **T8 End-to-end.** `npm run smoke` once at the end, then restart the service (`systemctl --user restart opencode-bot`) and check the journal.
 
 Verification order for every task: `npm run typecheck` and `npm run test:unit` first, `npm run smoke` once at the end.
 
