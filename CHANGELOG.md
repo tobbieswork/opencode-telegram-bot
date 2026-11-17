@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.41.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.41.0...opencode-telegram-bot-v1.41.1) (2026-11-17)
+
+
+### Bug Fixes
+
+* un-draft spec PRs via gh pr ready ([4cd9b1c](https://github.com/tobbieswork/opencode-telegram-bot/commit/4cd9b1c17b3fce897bbacb46bbd38f192f5aceb2))
+* un-draft spec PRs via gh pr ready (REST PATCH silently ignores draft:false) ([c6551ff](https://github.com/tobbieswork/opencode-telegram-bot/commit/c6551ff99a73d76be010e14c63b6e02d28519f98))
+
 ## [1.41.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.40.1...opencode-telegram-bot-v1.41.0) (2026-11-17)
 
 
