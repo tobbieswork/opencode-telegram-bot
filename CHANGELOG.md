@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.38.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.38.0...opencode-telegram-bot-v1.38.1) (2026-11-17)
+
+
+### Bug Fixes
+
+* spec re-run frees the name of a finished previous worker ([#251](https://github.com/tobbieswork/opencode-telegram-bot/issues/251)) ([798ef0b](https://github.com/tobbieswork/opencode-telegram-bot/commit/798ef0b0ded2ca10f0ae1b0a590e9ac6b1277a80))
+
 ## [1.38.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.37.2...opencode-telegram-bot-v1.38.0) (2026-11-17)
 
 
