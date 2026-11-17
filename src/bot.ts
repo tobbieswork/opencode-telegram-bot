@@ -3995,13 +3995,14 @@ export class Bot {
     }
     if (data.startsWith("kill:")) return this.orch.handleKillCallback(cb, conv, messageId);
     if (await this.orch.handleCallback(cb, conv, messageId)) return;
-    // All spec-to-tasks callbacks (S2 list/detail + S4 Run + S6 controls):
-    // spec:<name>, specrun:<name>:<n> (next-runnable Run),
+    // All spec-to-tasks callbacks (S2 list/detail + S4 Run + S6 controls +
+    // S5 PR flow): spec:<name>, specrun:<name>:<n> (next-runnable Run),
     // specblocked:<name>:<n> (blocked Run, first tap), specrunok:<name>:<n>
     // (blocked "Run anyway", 2nd tap) and the checkpoint-card controls
     // spcacc:<name>:<n> (Accept), spcredo:<name>:<n> (Redo with note) and
-    // spcstop:<name>:<n> (Stop).
-    if (data.startsWith("spec:") || data.startsWith("specrun:") || data.startsWith("specblocked:") || data.startsWith("specrunok:") || data.startsWith("spcacc:") || data.startsWith("spcredo:") || data.startsWith("spcstop:")) {
+    // spcstop:<name>:<n> (Stop), plus the PR controls spcpr:<name> (open
+    // draft PR), spcready:<name> (mark ready) and spcclean:<name> (clean up).
+    if (data.startsWith("spec:") || data.startsWith("specrun:") || data.startsWith("specblocked:") || data.startsWith("specrunok:") || data.startsWith("spcacc:") || data.startsWith("spcredo:") || data.startsWith("spcstop:") || data.startsWith("spcpr:") || data.startsWith("spcready:") || data.startsWith("spcclean:")) {
       await handleSpecCallback(this, cb, conv);
       return;
     }

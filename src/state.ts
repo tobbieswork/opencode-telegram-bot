@@ -95,6 +95,21 @@ export interface SpecRunState {
   since: number;
 }
 
+/** S5 (spec PR): one recorded pull request for a spec, keyed by spec NAME. */
+export interface SpecPrState {
+  /** The `owner/name` GitHub repo slug (from the git root's origin). */
+  repo: string;
+  /** The PR number. */
+  number: number;
+  /** The PR title (`feat: <spec title>`). */
+  title: string;
+  /** Whether the PR is still a draft. */
+  draft: boolean;
+  /** Cache (S5.5): true once we have confirmed the PR is merged — a second /spec
+   * tap then does not re-query GitHub. Cleared by the Clean up action. */
+  merged?: boolean;
+}
+
 /**
  * An advisor thread: one forum topic bound to one agent session (Claude or
  * Gemini/agy) on the advisor daemon's machine (reached over Tailscale). Unlike
@@ -288,6 +303,12 @@ export interface ChatState {
    * oldest insertion first).
    */
   reacted?: Record<string, true>;
+  /**
+   * MACHINE-WIDE (only ever written on the reserved MACHINE_STATE_KEY entry):
+   * the spec-to-tasks PR state (S5), keyed by spec NAME. Survives restarts so a
+   * recorded PR is not re-opened; cleared by the Clean up action (S5.5).
+   */
+  specPr?: Record<string, SpecPrState>;
 }
 
 export type StateMap = Record<string, ChatState>;

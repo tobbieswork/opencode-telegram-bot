@@ -17,13 +17,15 @@
  * pure parser in src/spec.ts. Nothing is persisted.
  */
 import { readdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { Bot } from "../bot.js";
 import type { CallbackQuery } from "../telegram.js";
 import type { ConvKey } from "../conv.js";
 import { chatOf } from "../conv.js";
-import type { Lang } from "../state.js";
-import { gitRoot, ensureSpecWorktree, resolveBaseBranch, runGit, specBranchName } from "../worktree.js";
+import type { Lang, SpecPrState } from "../state.js";
+import { MACHINE_STATE_KEY } from "../state.js";
+import { gitRoot, ensureSpecWorktree, resolveBaseBranch, runGit, specBranchName, specSlug, removeWorktree } from "../worktree.js";
+import { ghApi, githubRepoSlug } from "../github.js";
 import { parseSpec, initMarkers, markTask, type ParsedTask } from "../spec.js";
 import { buildTaskPrompt } from "../spec-prompt.js";
 import { warn } from "../logger.js";
@@ -116,6 +118,48 @@ function nextRunnable(tasks: ParsedTask[]): number {
     if (tasks[i].marker === "todo" && !tasks[i].needs) return i;
   }
   return -1;
+}
+
+// ── S5 (spec PR): state + body helpers ───────────────────────────────────────
+/** The spec worktree's root (where the `spec/<name>` branch is checked out),
+ * computed the same way ensureSpecWorktree does — without creating it. */
+function specWtRoot(repoRoot: string, name: string): string {
+  return join(dirname(repoRoot), `${basename(repoRoot)}.worktrees`, specSlug(name));
+}
+
+/** The recorded PR for a spec (S5), or undefined. Machine-scoped (S5: the PR
+ * belongs to the spec + its repo, not to one conversation). */
+function getSpecPr(bot: Bot, name: string): SpecPrState | undefined {
+  return bot.st.peek(MACHINE_STATE_KEY)?.specPr?.[name];
+}
+
+/** Record (or, with undefined, clear) the PR state for a spec. */
+function setSpecPr(bot: Bot, name: string, pr: SpecPrState | undefined): void {
+  const m = bot.st.peek(MACHINE_STATE_KEY) ?? {};
+  const map = { ...(m.specPr ?? {}) };
+  if (pr) map[name] = pr;
+  else delete map[name];
+  bot.st.set(MACHINE_STATE_KEY, { specPr: map });
+}
+
+/** The PR body: the spec title (H1) + every task with its status. */
+function prBody(tasks: ParsedTask[], title: string): string {
+  const next = nextRunnable(tasks);
+  const lines: string[] = [`# ${title}`, ""];
+  tasks.forEach((t, i) => {
+    const status = t.marker === "done" ? "done" : i === next ? "next" : t.needs ? "blocked" : "todo";
+    const icon = status === "done" ? "✅" : status === "next" ? "▶️" : status === "blocked" ? "⛔" : "○";
+    let l = `- ${icon} ${t.id} ${t.title}`;
+    if (t.marker === "done" && t.commit) l += ` — \`${t.commit}\``;
+    if (t.needs) l += ` — _needs: ${t.needs}_`;
+    lines.push(l);
+  });
+  return lines.join("\n");
+}
+
+/** The PR title (S5.1): `feat: <spec title>`. */
+function prTitle(title: string): string {
+  return `feat: ${title}`;
 }
 
 function taskLine(t: ParsedTask, status: "done" | "next" | "todo" | "blocked"): string {
@@ -607,6 +651,20 @@ async function specAccept(
   const nextRes = parseSpec(readFileSync(file, "utf8"));
   const nextTasks = "error" in nextRes ? [] : nextRes.tasks;
   const next = nextRunnable(nextTasks);
+  // S5.1/S5.2: push the spec branch (explicit refspec — S5.4) BEFORE offering
+  // the PR, because opening one needs the head branch on the remote. The push
+  // is non-fatal: a failure warns and the PR offer is skipped.
+  const branch = w.specRun!.branch;
+  const title = specTitle(md, name);
+  const allDone = nextTasks.length > 0 && nextTasks.every((t) => t.marker === "done");
+  let pushed = false;
+  try {
+    await runGit(dir!, ["push", "origin", `HEAD:refs/heads/${branch}`]);
+    pushed = true;
+  } catch (e) {
+    warn(`spec ${name} push failed: ${(e as Error).message}`);
+  }
+
   const lines2: string[] = [
     tr(
       lang,
@@ -621,6 +679,39 @@ async function specAccept(
     buttons.push({ text: `▶️ Run ${t.id}`, callback_data: `specrun:${name}:${t.n}` });
   } else {
     lines2.push(tr(lang, "✅ Tất cả tasks đã xong.", "✅ All tasks done."));
+  }
+
+  // S5.1/S5.2/S5.3: the PR offer. A recorded PR gets its body refreshed (+
+  // "Mark ready for review" when this accept finished the spec); otherwise a
+  // pushed branch offers "Open draft PR". NEVER merge (no merge path exists).
+  const pr = getSpecPr(bot, name);
+  if (pr) {
+    let ok = true;
+    try {
+      await ghApi(pr.repo, "PATCH", `pulls/${pr.number}`, { body: prBody(nextTasks, title) });
+    } catch (e) {
+      ok = false;
+      warn(`spec ${name} PR body update failed: ${(e as Error).message}`);
+    }
+    lines2.push(
+      ok
+        ? tr(lang, `🔗 PR #${pr.number} — body đã cập nhật.`, `🔗 PR #${pr.number} — body updated.`)
+        : tr(lang, `⚠️ Không cập nhật được body PR #${pr.number}.`, `⚠️ Couldn't update PR #${pr.number}'s body.`),
+    );
+    if (allDone) {
+      buttons.push({ text: tr(lang, "✅ Sẵn sàng review", "✅ Mark ready for review"), callback_data: `spcready:${name}` });
+    }
+  } else if (pushed) {
+    lines2.push(tr(lang, `🌿 Đã đẩy <code>${esc(branch)}</code>.`, `🌿 Pushed <code>${esc(branch)}</code>.`));
+    buttons.push({ text: tr(lang, "📝 Mở draft PR", "📝 Open draft PR"), callback_data: `spcpr:${name}` });
+  } else {
+    lines2.push(
+      tr(
+        lang,
+        `⚠️ Đã accept nhưng KHÔNG đẩy được <code>${esc(branch)}</code> — kiểm tra remote.`,
+        `⚠️ Accepted but could NOT push <code>${esc(branch)}</code> — check the remote.`,
+      ),
+    );
   }
   const keyboard = buttons.length ? { reply_markup: { inline_keyboard: buttons.map((b) => [b]) } } : undefined;
   await bot.sendHtml(conv, lines2.join("\n"), keyboard);
@@ -690,6 +781,226 @@ async function specStop(
     userId: uid != null ? String(uid) : undefined,
     meta: { spec: name, task: w.specRun!.task, worker: w.name, userId: uid ?? null },
   });
+}
+
+// ── S5 (spec PR): Open draft PR / Mark ready / (S5.5) Clean up ───────────────
+/**
+ * S5.1 — "Open draft PR". Reads the spec from the WORKTREE (the spec branch is
+ * the source of truth for task state), opens a DRAFT PR against main via the
+ * gh helper, records the PR state, and offers "Mark ready for review" when
+ * every task is done. Never merges.
+ */
+async function specPrOpen(
+  bot: Bot,
+  cb: CallbackQuery,
+  conv: ConvKey,
+  lang: Lang,
+  uid: number | undefined,
+  name: string,
+): Promise<void> {
+  if (!isUserAllowed(bot.cfg, cb.from?.id)) {
+    await bot.tg.sendMessage(conv, "⛔ <b>Not authorized.</b> You are not on the allowlist.").catch(() => {});
+    return;
+  }
+  if (getSpecPr(bot, name)) {
+    const pr = getSpecPr(bot, name)!;
+    await bot.tg
+      .sendMessage(conv, tr(lang, `ℹ️ Spec ${esc(name)} đã có PR #${pr.number} — không mở lại.`, `ℹ️ Spec ${esc(name)} already has PR #${pr.number} — not opening another.`))
+      .catch(() => {});
+    return;
+  }
+  const root = await gitRoot(convDir(bot, conv));
+  if (!root) {
+    await bot.tg.sendMessage(conv, tr(lang, "📁 Repo không phải git — không mở PR được.", "📁 Not a git repository — can't open a PR.")).catch(() => {});
+    return;
+  }
+  const repo = await githubRepoSlug(root);
+  if (!repo) {
+    await bot.tg
+      .sendMessage(conv, tr(lang, `❌ Không xác định được repo GitHub từ remote origin của ${esc(name)}.`, `❌ Couldn't determine the GitHub repo from ${esc(name)}'s origin remote.`))
+      .catch(() => {});
+    return;
+  }
+  // The spec branch's copy of the spec (worktree), falling back to the checkout.
+  const wtRoot = specWtRoot(root, name);
+  let md: string;
+  try {
+    md = readFileSync(join(wtRoot, "docs", "sdd", `${name}.md`), "utf8");
+  } catch {
+    try {
+      md = readFileSync(join(root, "docs", "sdd", `${name}.md`), "utf8");
+    } catch {
+      await bot.tg.sendMessage(conv, tr(lang, `❌ Không tìm thấy spec ${esc(name)} trong docs/sdd.`, `❌ Spec ${esc(name)} not found in docs/sdd.`)).catch(() => {});
+      return;
+    }
+  }
+  const res = parseSpec(md);
+  if ("error" in res) {
+    await bot.tg.sendMessage(conv, tr(lang, "❌ Spec này không phân tích được — không mở PR được.", "❌ This spec can't be parsed — can't open a PR.")).catch(() => {});
+    return;
+  }
+  const title = specTitle(md, name);
+  const branch = specBranchName(name);
+  let number: number;
+  let url: string;
+  try {
+    const created = await ghApi<{ number: number; html_url?: string }>(repo, "POST", "pulls", {
+      title: prTitle(title),
+      head: branch,
+      base: "main",
+      draft: true,
+      body: prBody(res.tasks, title),
+    });
+    number = created.number;
+    url = created.html_url ?? `https://github.com/${repo}/pull/${number}`;
+  } catch (e) {
+    await bot.tg
+      .sendMessage(conv, tr(lang, `❌ Không mở được draft PR: ${esc((e as Error).message)}`, `❌ Couldn't open the draft PR: ${esc((e as Error).message)}`))
+      .catch(() => {});
+    return;
+  }
+  setSpecPr(bot, name, { repo, number, title: prTitle(title), draft: true });
+  audit({
+    action: "spec_pr_open",
+    chatId: conv,
+    userId: uid != null ? String(uid) : undefined,
+    meta: { spec: name, repo, number, title: prTitle(title), branch, userId: uid ?? null },
+  });
+  const allDone = res.tasks.length > 0 && res.tasks.every((t) => t.marker === "done");
+  const buttons: { text: string; callback_data: string }[] = [];
+  if (allDone) buttons.push({ text: tr(lang, "✅ Sẵn sàng review", "✅ Mark ready for review"), callback_data: `spcready:${name}` });
+  const keyboard = buttons.length ? { reply_markup: { inline_keyboard: buttons.map((b) => [b]) } } : undefined;
+  await bot.sendHtml(
+    conv,
+    tr(lang, `📝 Đã mở draft PR #${number} cho spec ${esc(name)}: ${url}`, `📝 Draft PR #${number} opened for spec ${esc(name)}: ${url}`),
+    keyboard,
+  );
+}
+
+/**
+ * S5.3 — "Mark ready for review". Patches the recorded PR to `draft: false`.
+ * It NEVER merges — there is no merge code path anywhere in this feature.
+ */
+async function specPrReady(
+  bot: Bot,
+  cb: CallbackQuery,
+  conv: ConvKey,
+  lang: Lang,
+  uid: number | undefined,
+  name: string,
+): Promise<void> {
+  if (!isUserAllowed(bot.cfg, cb.from?.id)) {
+    await bot.tg.sendMessage(conv, "⛔ <b>Not authorized.</b> You are not on the allowlist.").catch(() => {});
+    return;
+  }
+  const pr = getSpecPr(bot, name);
+  if (!pr) {
+    await bot.tg.sendMessage(conv, tr(lang, `❌ Chưa có PR nào cho spec ${esc(name)}.`, `❌ No PR recorded for spec ${esc(name)}.`)).catch(() => {});
+    return;
+  }
+  try {
+    await ghApi(pr.repo, "PATCH", `pulls/${pr.number}`, { draft: false });
+  } catch (e) {
+    await bot.tg
+      .sendMessage(conv, tr(lang, `❌ Không đánh dấu sẵn sàng được PR #${pr.number}: ${esc((e as Error).message)}`, `❌ Couldn't mark PR #${pr.number} ready: ${esc((e as Error).message)}`))
+      .catch(() => {});
+    return;
+  }
+  setSpecPr(bot, name, { ...pr, draft: false });
+  audit({
+    action: "spec_pr_ready",
+    chatId: conv,
+    userId: uid != null ? String(uid) : undefined,
+    meta: { spec: name, repo: pr.repo, number: pr.number, userId: uid ?? null },
+  });
+  await bot.tg.sendMessage(conv, tr(lang, `✅ PR #${pr.number} đã sẵn sàng review.`, `✅ PR #${pr.number} is ready for review.`)).catch(() => {});
+}
+
+/**
+ * S5.5 — "Clean up". Offered once the recorded PR is merged. Refuses while the
+ * spec branch has any commit not in main (`git log origin/main..spec/<name>`
+ * non-empty). Otherwise deletes the REMOTE branch (main is never pushed),
+ * removes the worktree, and clears the PR state.
+ */
+async function specCleanUp(
+  bot: Bot,
+  cb: CallbackQuery,
+  conv: ConvKey,
+  lang: Lang,
+  uid: number | undefined,
+  name: string,
+): Promise<void> {
+  if (!isUserAllowed(bot.cfg, cb.from?.id)) {
+    await bot.tg.sendMessage(conv, "⛔ <b>Not authorized.</b> You are not on the allowlist.").catch(() => {});
+    return;
+  }
+  const pr = getSpecPr(bot, name);
+  if (!pr) {
+    await bot.tg.sendMessage(conv, tr(lang, `❌ Chưa có PR nào cho spec ${esc(name)} — không có gì để dọn.`, `❌ No PR recorded for spec ${esc(name)} — nothing to clean up.`)).catch(() => {});
+    return;
+  }
+  const root = await gitRoot(convDir(bot, conv));
+  if (!root) {
+    await bot.tg.sendMessage(conv, tr(lang, "📁 Repo không phải git — không dọn được.", "📁 Not a git repository — can't clean up.")).catch(() => {});
+    return;
+  }
+  const branch = specBranchName(name);
+  const wtRoot = specWtRoot(root, name);
+  // (a) Refuse while the branch has any commit that is not in main.
+  try {
+    await runGit(wtRoot, ["fetch", "origin", "main"]);
+  } catch (e) {
+    await bot.tg.sendMessage(conv, tr(lang, `❌ Không fetch được main: ${esc((e as Error).message)}`, `❌ Couldn't fetch main: ${esc((e as Error).message)}`)).catch(() => {});
+    return;
+  }
+  let extra = "";
+  try {
+    extra = await runGit(wtRoot, ["log", "--format=%h", `origin/main..${branch}`]);
+  } catch {
+    extra = ""; // the branch is gone locally — nothing unmerged to protect
+  }
+  if (extra.trim()) {
+    const first = extra.trim().split("\n")[0];
+    await bot.tg
+      .sendMessage(
+        conv,
+        tr(
+          lang,
+          `❌ Không dọn được — branch <code>${esc(branch)}</code> còn commit chưa có trong main (${esc(first)}…). Hãy merge PR trước.`,
+          `❌ Can't clean up — branch <code>${esc(branch)}</code> still has commits not in main (${esc(first)}…). Merge the PR first.`,
+        ),
+      )
+      .catch(() => {});
+    return;
+  }
+  // (b) Delete the remote branch (allowed — main is never pushed), remove the
+  // worktree (reusing the existing primitive), clear the PR state.
+  await runGit(root, ["push", "origin", "--delete", branch]).catch((e) => {
+    warn(`spec ${name} remote branch delete failed: ${(e as Error).message}`);
+  });
+  let removed = "";
+  try {
+    removed = await removeWorktree(root, { root: wtRoot, branch }, lang);
+  } catch (e) {
+    removed = (e as Error).message;
+  }
+  setSpecPr(bot, name, undefined);
+  audit({
+    action: "spec_cleanup",
+    chatId: conv,
+    userId: uid != null ? String(uid) : undefined,
+    meta: { spec: name, repo: pr.repo, number: pr.number, branch, userId: uid ?? null },
+  });
+  await bot.sendHtml(
+    conv,
+    tr(
+      lang,
+      `🧹 Đã dọn dẹp spec ${esc(name)}: branch + worktree đã xoá.
+${esc(removed)}`,
+      `🧹 Cleaned up spec ${esc(name)}: branch + worktree deleted.
+${esc(removed)}`,
+    ),
+  ).catch(() => {});
 }
 
 /**
@@ -770,6 +1081,34 @@ export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: Conv
     await specStop(bot, cb, conv, lang, cb.from?.id, ref.name, ref.n);
     return;
   }
+  // S5: the PR-flow controls carry the spec NAME only (no task number).
+  if (data.startsWith("spcpr:")) {
+    const nm = data.slice("spcpr:".length);
+    if (!NAME_RE.test(nm)) {
+      await bot.tg.sendMessage(conv, tr(lang, "❌ Không rõ spec nào.", "❌ Unknown spec."));
+      return;
+    }
+    await specPrOpen(bot, cb, conv, lang, cb.from?.id, nm);
+    return;
+  }
+  if (data.startsWith("spcready:")) {
+    const nm = data.slice("spcready:".length);
+    if (!NAME_RE.test(nm)) {
+      await bot.tg.sendMessage(conv, tr(lang, "❌ Không rõ spec nào.", "❌ Unknown spec."));
+      return;
+    }
+    await specPrReady(bot, cb, conv, lang, cb.from?.id, nm);
+    return;
+  }
+  if (data.startsWith("spcclean:")) {
+    const nm = data.slice("spcclean:".length);
+    if (!NAME_RE.test(nm)) {
+      await bot.tg.sendMessage(conv, tr(lang, "❌ Không rõ spec nào.", "❌ Unknown spec."));
+      return;
+    }
+    await specCleanUp(bot, cb, conv, lang, cb.from?.id, nm);
+    return;
+  }
   const name = data.slice("spec:".length);
   if (!NAME_RE.test(name)) {
     await bot.tg.sendMessage(conv, tr(lang, "❌ Không rõ spec nào.", "❌ Unknown spec."));
@@ -805,8 +1144,30 @@ export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: Conv
       buttons.push({ text: `⛔ Run ${t.id}`, callback_data: `specblocked:${name}:${t.n}` });
     }
   }
+  // S5.5: a recorded PR that is merged gets a marker + a "Clean up" button.
+  // The merged result is cached in state so a second /spec tap does not
+  // re-query GitHub; a non-merged result is NOT cached (so a later merge is
+  // still detected on the next /spec).
+  let detail = detailText(lang, title, res.tasks);
+  const pr = getSpecPr(bot, name);
+  if (pr) {
+    let merged = pr.merged === true;
+    if (!merged) {
+      try {
+        const st = await ghApi<{ merged?: boolean; merged_at?: string | null; state?: string }>(pr.repo, "GET", `pulls/${pr.number}`);
+        merged = !!(st && (st.merged === true || st.merged_at != null || st.state === "merged"));
+        if (merged) setSpecPr(bot, name, { ...pr, merged: true });
+      } catch {
+        merged = false; // a transient gh failure must not break the detail view
+      }
+    }
+    if (merged) {
+      detail += "\n" + tr(lang, "🔀 PR đã merge vào main.", "🔀 The PR has been merged into main.");
+      buttons.push({ text: tr(lang, "🧹 Dọn dẹp", "🧹 Clean up"), callback_data: `spcclean:${name}` });
+    }
+  }
   const keyboard = buttons.length
     ? { reply_markup: { inline_keyboard: buttons.map((b) => [b]) } }
     : undefined;
-  await bot.sendHtml(conv, detailText(lang, title, res.tasks), keyboard);
+  await bot.sendHtml(conv, detail, keyboard);
 }
