@@ -25,7 +25,7 @@ import { chatOf } from "../conv.js";
 import type { Lang, SpecPrState } from "../state.js";
 import { MACHINE_STATE_KEY } from "../state.js";
 import { gitRoot, ensureSpecWorktree, resolveBaseBranch, runGit, specBranchName, specSlug, removeWorktree } from "../worktree.js";
-import { ghApi, githubRepoSlug } from "../github.js";
+import { ghApi, githubRepoSlug, ghPrReady } from "../github.js";
 import { parseSpec, initMarkers, markTask, type ParsedTask } from "../spec.js";
 import { buildTaskPrompt } from "../spec-prompt.js";
 import { warn } from "../logger.js";
@@ -878,7 +878,8 @@ async function specPrOpen(
 }
 
 /**
- * S5.3 — "Mark ready for review". Patches the recorded PR to `draft: false`.
+ * S5.3 — "Mark ready for review". Un-drafts the recorded PR via `gh pr ready`
+ * (the REST update endpoint silently ignores `draft:false`).
  * It NEVER merges — there is no merge code path anywhere in this feature.
  */
 async function specPrReady(
@@ -899,7 +900,7 @@ async function specPrReady(
     return;
   }
   try {
-    await ghApi(pr.repo, "PATCH", `pulls/${pr.number}`, { draft: false });
+    await ghPrReady(pr.repo, pr.number);
   } catch (e) {
     await bot.tg
       .sendMessage(conv, tr(lang, `❌ Không đánh dấu sẵn sàng được PR #${pr.number}: ${esc((e as Error).message)}`, `❌ Couldn't mark PR #${pr.number} ready: ${esc((e as Error).message)}`))

@@ -32,7 +32,7 @@ import { Orchestrator } from "../src/orchestrator.js";
 import { Bot } from "../src/bot.js";
 import { StateManager, MACHINE_STATE_KEY } from "../src/state.js";
 import { configureAudit } from "../src/audit.js";
-import { setGhApiImpl, parseRepoUrl } from "../src/github.js";
+import { setGhApiImpl, setGhPrReadyImpl, parseRepoUrl } from "../src/github.js";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: string): void {
@@ -151,10 +151,15 @@ function seedWorker(st: StateManager, wtRoot: string, status: string, task: stri
 // ── the mocked gh transport ─────────────────────────────────────────────────
 const ghCalls: Array<{ repo: string; method: string; path: string; body?: any }> = [];
 let prGetState: any = { state: "open", merged: false };
+const readyCalls: Array<{ repo: string; number: number }> = [];
 function resetGh(): void {
   ghCalls.length = 0;
+  readyCalls.length = 0;
   prGetState = { state: "open", merged: false };
 }
+setGhPrReadyImpl(async (repo, number) => {
+  readyCalls.push({ repo, number });
+})
 setGhApiImpl(async (repo, method, path, body) => {
   ghCalls.push({ repo, method, path, body });
   if (method === "POST" && path === "pulls") return { number: 42, html_url: `https://github.com/${repo}/pull/42` };
@@ -299,15 +304,15 @@ try {
     check(`spcpr(${lang}): no Mark-ready yet (S2/S3 open)`, !kbs.includes("spcready:gamma"), JSON.stringify(kbs));
   }
 
-  // ── S5.3: spcready patches draft:false and NEVER merges ───────────────────
+  // ── S5.3: spcready un-drafts via gh pr ready and NEVER merges ────────────
   for (const lang of ["vi", "en"] as const) {
     resetGh();
     const fx = await newPrFixture();
     const { bot, sent } = mkBot(lang);
     seedPrState(bot.st, "gamma", { draft: true });
     await handleSpecCallback(bot, cb("spcready:gamma"), CONV);
-    const patch = ghCallsWhere((c) => c.method === "PATCH" && c.path === "pulls/42");
-    check(`spcready(${lang}): PATCHed the PR with draft:false`, patch.length === 1 && patch[0].body?.draft === false, JSON.stringify(patch[0]?.body));
+    check(`spcready(${lang}): un-drafted via gh pr ready`, readyCalls.length === 1 && readyCalls[0].repo === "o/r" && readyCalls[0].number === 42, JSON.stringify(readyCalls));
+    check(`spcready(${lang}): NO REST draft-patch (silently ignored by GitHub)`, !ghCalls.some((c) => c.method === "PATCH" && c.body?.draft === false), JSON.stringify(ghCalls.map((c) => c.method + " " + c.path)));
     check(`spcready(${lang}): NO merge call anywhere`, !ghCalls.some((c) => /merge/.test(c.path)), JSON.stringify(ghCalls.map((c) => c.method + " " + c.path)));
     check(`spcready(${lang}): state.draft is now false`, bot.st.peek(MACHINE_STATE_KEY)?.specPr?.gamma?.draft === false);
     const all = sent.map((m) => m.t).join("\n");
@@ -433,15 +438,14 @@ try {
     check("route(spcpr): reached the spec handler (PR opened)", post.length === 1, `gh=${JSON.stringify(ghCalls.map((c) => c.method + " " + c.path))} sent=${JSON.stringify(sent.map((m) => m.t?.slice(0, 80)))}`);
     check("route(spcpr): NOT the detail view", !sent.some((m) => (m.t ?? "").includes("📋 <b>Gamma spec</b>")), sent.map((m) => m.t?.slice(0, 40)).join(" | "));
   }
-  // spcready: routed → patches draft:false.
+  // spcready: routed → un-drafts the PR.
   {
     resetGh();
     const fx = await newPrFixture();
     const { bot, st } = mkRealBot("en", fx.repo);
     seedPrState(st, "gamma", { draft: true });
     await (bot as any).handleCallback(cbFor("spcready:gamma"));
-    const patch = ghCallsWhere((c) => c.method === "PATCH" && c.path === "pulls/42");
-    check("route(spcready): reached the spec handler (draft patched)", patch.length === 1 && patch[0].body?.draft === false, JSON.stringify(ghCalls.map((c) => c.method + " " + c.path)));
+    check("route(spcready): reached the spec handler (un-drafted)", readyCalls.length === 1 && readyCalls[0].repo === "o/r" && readyCalls[0].number === 42, JSON.stringify(readyCalls));
   }
   // spcclean: routed → runs the clean-up (refuses here: branch not merged).
   {
