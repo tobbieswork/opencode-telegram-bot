@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.41.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.40.1...opencode-telegram-bot-v1.41.0) (2026-11-17)
+
+
+### Features
+
+* Throwaway E2E spec ([1a0e9cb](https://github.com/tobbieswork/opencode-telegram-bot/commit/1a0e9cb6a09a40df45b18fe2180a347a1cf95c94))
+
 ## [1.40.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.40.0...opencode-telegram-bot-v1.40.1) (2026-11-17)
 
 
