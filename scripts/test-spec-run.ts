@@ -93,6 +93,10 @@ function mkBot(lang: "vi" | "en", dir: string, allow: { allowAny?: boolean; allo
       orch.releases.push({ chat, spec, worker });
     },
     spawn: async (_chat: string, spec: any) => {
+      // Mimic the orchestrator's name-collision check (findWorker over the chat's convs).
+      if (stState.worker && stState.worker.name === spec.name) {
+        throw new Error(`A worker named ${spec.name} already exists.`);
+      }
       orch.spawns.push(spec);
       return { conv: "worker-conv", worker: { name: spec.name } };
     },
@@ -104,7 +108,7 @@ function mkBot(lang: "vi" | "en", dir: string, allow: { allowAny?: boolean; allo
   const bot: any = {
     cfg: { spec: true, opencodeDirectory: dir, allowAny: allow.allowAny ?? true, allowedUserIds: allow.allowedUserIds ?? [] },
     userPrefs: { getLang: () => lang },
-    st: { peek: () => stState, get: () => stState, findWorker: (_chat: string, name: string) => (stState.worker && stState.worker.name === name ? [CONV, stState] : undefined) },
+    st: { peek: () => stState, get: () => stState, set: (_k: string, patch: any) => void Object.assign(stState, patch), findWorker: (_chat: string, name: string) => (stState.worker && stState.worker.name === name ? [CONV, stState] : undefined) },
     tg: {
       sendMessage: async (c: string, text: string, opts?: any) => void push(c, text, opts),
       answerCallbackQuery: async (_id: string, _t?: string) => {},
@@ -278,6 +282,28 @@ try {
   }
   // ── Bot.handleCallback dispatch routes the new S4 prefixes (regression) ──
   // The handler tests above call handleSpecCallback directly; this drives the
+  // ── Re-run name freeing: a finished previous run must not block the name ──
+  // (live incident: the first E1 run's done entry blocked the re-tap with
+  // "A worker named spec-… already exists")
+  {
+    {
+      const { bot, orch, stState } = mkBot("en", repo);
+      stState.worker = { name: "spec-alpha", status: "done" }; // finished previous run
+      await handleSpecCallback(bot, cb("specrun:alpha:2"), CONV);
+      check("rerun(done): stale entry freed, spawn proceeds", orch.spawns.length === 1, String(orch.spawns.length));
+      check("rerun(done): worker entry cleared (topic/session stay)", stState.worker === undefined, JSON.stringify(stState.worker));
+    }
+    {
+      const { bot, sent, orch, stState } = mkBot("en", repo);
+      stState.worker = { name: "spec-alpha", status: "running" }; // live worker: real collision
+      await handleSpecCallback(bot, cb("specrun:alpha:2"), CONV);
+      check("rerun(busy): no spawn on a real collision", orch.spawns.length === 0, String(orch.spawns.length));
+      check("rerun(busy): error names the worker", sent.some((m) => (m.text ?? "").includes("already exists") && (m.text ?? "").includes("spec-alpha")), JSON.stringify(sent.map((m) => m.text?.slice(0, 90))));
+      check("rerun(busy): claim rolled back", stState.specRunning?.alpha === undefined, JSON.stringify(stState.specRunning));
+      check("rerun(busy): busy entry untouched", stState.worker?.status === "running", JSON.stringify(stState.worker));
+    }
+  }
+
   // REAL Bot dispatcher to prove "specrun:", "specblocked:" and "specrunok:"
   // are actually routed to the spec handler (a missing prefix here means the
   // button tap is silently dropped).
