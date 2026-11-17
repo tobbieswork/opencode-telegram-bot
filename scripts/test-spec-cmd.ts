@@ -119,7 +119,7 @@ function mkBot(lang: "vi" | "en", dir: string, spec = true) {
   const bot: any = {
     cfg: { spec, opencodeDirectory: dir, allowAny: true, allowedUserIds: [] },
     userPrefs: { getLang: () => lang },
-    st: { peek: () => ({ directory: dir }), get: () => ({ directory: dir }) },
+    st: { peek: () => ({ directory: dir }), get: () => ({ directory: dir }), findWorker: () => undefined, set: () => {} },
     tg: {
       sendMessage: async (c: string, text: string, opts?: any) => void push(c, text, opts),
       answerCallbackQuery: async (_id: string, _t?: string) => {},

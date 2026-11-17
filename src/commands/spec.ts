@@ -27,7 +27,7 @@ import { gitRoot, ensureSpecWorktree, runGit, specBranchName } from "../worktree
 import { parseSpec, initMarkers, type ParsedTask } from "../spec.js";
 import { buildTaskPrompt } from "../spec-prompt.js";
 import { warn } from "../logger.js";
-import { NAME_RE as WORKER_NAME_RE } from "../orchestrator.js";
+import { NAME_RE as WORKER_NAME_RE, BUSY } from "../orchestrator.js";
 import { audit } from "../audit.js";
 import { isUserAllowed } from "../schedule.js";
 import { tr } from "../i18n.js";
@@ -245,6 +245,16 @@ async function specRunSpawn(
   const chat = chatOf(conv);
   const workerName = `spec-${name}`;
   const branch = specBranchName(name);
+  // A previous run of this spec leaves its worker entry registered under this
+  // name. A finished one (done/failed/stopped) is a stale registration, not a
+  // collision — free the name so the re-run can spawn. The old topic and its
+  // session stay (the run's record); /prune collects the topic later. A BUSY
+  // worker with this name is a real collision and stays a hard error.
+  const prev = bot.st.findWorker(chat, workerName);
+  if (prev) {
+    const pst = prev[1].worker?.status;
+    if (pst && !BUSY.includes(pst)) bot.st.set(prev[0], { worker: undefined });
+  }
   // The worker name is spec-<name> and must fit the worker-name rules
   // (a-z, 0-9, -; 24 chars total → spec name ≤ 19). Fail early with a clear
   // message instead of tripping the orchestrator's error after claim+worktree.
