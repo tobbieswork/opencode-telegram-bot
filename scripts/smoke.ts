@@ -1,7 +1,7 @@
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { loadConfig } from "../src/config.js";
 import { OpenCodeCtl } from "../src/opencode.js";
@@ -9,6 +9,7 @@ import { StateManager } from "../src/state.js";
 import { Bot } from "../src/bot.js";
 import { Telegram, Update } from "../src/telegram.js";
 import { extractOptionsMarker } from "../src/choices.js";
+import { removeWorktree, specSlug } from "../src/worktree.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -48,6 +49,20 @@ class MockTelegram {
   sendChatAction(): void {}
   async getMe() {
     return { id: 1, username: "Mock" };
+  }
+  // Forum-topic surface for the S8 spec scenario: the orchestrator's spawn
+  // creates one topic per worker (createForumTopic), renames/closes it as the
+  // run settles. The mock hands out thread ids and no-ops the rest.
+  private threadCounter = 0;
+  async createForumTopic(_chatId: number, _name: string, _iconColor?: number): Promise<number> {
+    return ++this.threadCounter;
+  }
+  async editForumTopic(_conv: string, _name: string): Promise<void> {}
+  async openForumTopic(_conv: string): Promise<void> {}
+  async closeForumTopic(_conv: string): Promise<void> {}
+  async deleteForumTopic(_conv: string): Promise<void> {}
+  async botUsername(): Promise<string | undefined> {
+    return "Mock";
   }
 }
 
@@ -101,6 +116,11 @@ async function main(): Promise<void> {
   // comply, so the scenario is a soft check: it reports compliance and fails
   // only if a valid marker was received but not rendered. Test scope only.
   process.env.OPENCODE_TG_SUGGEST = "1";
+  // S8 (spec e2e): the spec worktree is created SIBLING to the repo
+  // (/tmp/opencode/testws.worktrees/<slug>), so the allowed browse roots must
+  // cover the parent — with the default (homedir) vetDirectory would reject
+  // the worktree directory and the Run tap would fail.
+  process.env.OPENCODE_TG_BROWSE_ROOTS = "/tmp/opencode";
   const cfg = loadConfig(root);
 
   const oc = new OpenCodeCtl();
@@ -469,6 +489,201 @@ async function main(): Promise<void> {
   show("queue: drained + ran");
   await bot.handle(upd("/queue"));
   show("queue: /queue after drain (should be empty)");
+
+  // ── spec: run a one-task spec end to end (S8, end-to-end) ─────────────────
+  // The full pipeline on a real worker: /spec list → detail view → Run tap →
+  // the orchestrator spawns a worker in the spec worktree (branch spec/smoke-e2e)
+  // → the worker (a REAL LLM turn, ~1-4 min) creates the file and commits →
+  // the S5 settlement hook posts the checkpoint card → Accept tap → the done
+  // marker [x] (hash) is committed on the spec branch. The git facts are the
+  // source of truth: transient LLM quirks in the card text are not failures as
+  // long as the marker lands.
+  console.log("\n=== SPEC E2E (S8: run one-task spec, accept it) ===");
+  {
+    const ws = "/tmp/opencode/testws";
+    const specName = "smoke-e2e";
+    const slug = specSlug(specName); // spec-smoke-e2e — read the helper, don't guess
+    const branch = `spec/${specName}`;
+    const wtPath = join(dirname(ws), `${basename(ws)}.worktrees`, slug);
+    const specPath = join(ws, "docs", "sdd", `${specName}.md`);
+    const gitA = (...args: string[]): string => execFileSync("git", ["-C", ws, ...args], { encoding: "utf8" }).trim();
+    const gitO = (args: string[]): string | undefined => {
+      try {
+        return gitA(...args);
+      } catch {
+        return undefined;
+      }
+    };
+    const gitVoid = (args: string[]): void => {
+      try {
+        execFileSync("git", ["-C", ws, ...args], { stdio: "pipe" });
+      } catch {
+        /* already gone */
+      }
+    };
+    // testws is a bare `git init` repo and this box has no global/system git
+    // identity: the worker's commit (and the later Accept marker commit) run
+    // inside it with the repository's own identity, so give the hermetic repo
+    // a LOCAL one — deterministic commit chain, and no self-healing worker
+    // writing a `--global` identity into the user's real gitconfig.
+    gitVoid(["config", "user.name", "smoke"]);
+    gitVoid(["config", "user.email", "smoke@testws.local"]);
+
+    // Runtime-written fixture (hermetic — never committed into this repo).
+    // Modeled on docs/sdd/throwaway-e2e.md; parses with the strict S1 parser.
+    const FIXTURE = [
+      "# Smoke E2E spec",
+      "",
+      "*Temporary spec written by `npm run smoke` (S8): re-created at scenario start, deleted at cleanup.*",
+      "",
+      "## 1. Requirements",
+      "- S1.1 The task shall create a file `hello.txt` at the repository root, containing exactly one line: `smoke ok` followed by a newline. No other changes.",
+      "",
+      "## 2. Tasks",
+      "1. [ ] **S1 Create hello.txt** (S1.1). Create the file as described in S1.1. *Checkpoint: `cat hello.txt` prints `smoke ok`.*",
+      "",
+      "## 3. Out of scope",
+      "- Anything besides the single file `hello.txt`.",
+      "",
+    ].join("\n");
+
+    let s8ok = true;
+    const s8fail = (step: string): void => {
+      s8ok = false;
+      console.log(`❌ S8: ${step}`);
+      process.exitCode = 1;
+    };
+
+    try {
+      // ── setup (idempotent): a previous run's leftovers are removed, the
+      // fixture is rewritten fresh, and the base branch is guaranteed to carry
+      // a commit (git worktree add fails from an unborn HEAD, and the smoke
+      // never commits to testws's main otherwise).
+      if (existsSync(wtPath)) {
+        gitVoid(["worktree", "remove", "--force", wtPath]);
+        gitVoid(["worktree", "prune"]);
+      }
+      gitVoid(["branch", "-D", branch]); // -D: a leftover branch may have commits
+      rmSync(specPath, { force: true });
+      mkdirSync(dirname(specPath), { recursive: true });
+      writeFileSync(specPath, FIXTURE);
+      execFileSync("git", ["-C", ws, "add", "--", `docs/sdd/${specName}.md`], { stdio: "pipe" });
+      // exit 0 = nothing staged (file unchanged); non-zero → commit the fixture.
+      if (gitO(["diff", "--cached", "--quiet", "--", `docs/sdd/${specName}.md`]) === undefined) {
+        gitVoid(["-c", "user.name=smoke", "-c", "user.email=smoke@testws.local", "commit", "-q", "-m", "smoke: S8 fixture spec"]);
+      }
+      const baseBranch = gitA("symbolic-ref", "--short", "HEAD");
+      const baseHeadBefore = gitA("rev-parse", "HEAD");
+      console.log(`s8: fixture spec on ${baseBranch} @ ${baseHeadBefore.slice(0, 8)}`);
+
+      // ── /spec list → detail view (S2) ─────────────────────────────────────
+      await bot.handle(upd("/spec"));
+      show("s8: /spec list");
+      let specBtn: string | undefined;
+      for (let i = mock.keyboards.length - 1; i >= 0; i--) {
+        const m = JSON.stringify(mock.keyboards[i]).match(/spec:smoke-e2e/);
+        if (m) {
+          specBtn = m[0];
+          break;
+        }
+      }
+      console.log("s8: spec button in list:", specBtn ?? "NOT FOUND");
+      if (!specBtn) s8fail("/spec list does not offer the smoke-e2e spec");
+      else {
+        await bot.handle(tap(specBtn));
+        show("s8: spec detail view");
+        const detail = mock.out[mock.out.length - 1] ?? "";
+        console.log("s8: detail view shows the S1 task:", /Create hello\.txt/.test(detail) ? "yes" : "NO");
+        const runBtn = JSON.stringify(mock.keyboards[mock.keyboards.length - 1] ?? {}).match(/specrun:smoke-e2e:1/)?.[0];
+        console.log("s8: Run button in detail keyboard:", runBtn ?? "NOT FOUND");
+        if (!/Create hello\.txt/.test(detail)) s8fail("detail view did not show the S1 task");
+        else if (!runBtn) s8fail("detail view has no Run button (specrun:)");
+        else {
+          // ── Run tap → worker turn → checkpoint card (S4/S5) ───────────────
+          const kbBefore = mock.keyboards.length;
+          await bot.handle(tap(runBtn));
+          show("s8: Run tapped (worker spawning)");
+          // The card is posted by the S5 settlement hook when the (real)
+          // worker turn finishes — a real LLM turn, typically 1-4 min.
+          const cardArrived = await waitFor((a) => a.some((m) => m.includes("🧩 Worker:")), mock.out, 480000);
+          console.log("s8: checkpoint card arrived:", cardArrived);
+          show("s8: checkpoint card");
+          if (!cardArrived) s8fail("no checkpoint card within 480 s of the Run tap");
+          else {
+            // A PASS card carries the Accept button; that is the tap target.
+            let acceptBtn: string | undefined;
+            for (const kb of mock.keyboards.slice(kbBefore)) {
+              const m = JSON.stringify(kb).match(/spcacc:[A-Za-z0-9._-]+:\d+/);
+              if (m) {
+                acceptBtn = m[0];
+                break;
+              }
+            }
+            console.log("s8: Accept button on card keyboard:", acceptBtn ?? "NOT FOUND");
+            if (!acceptBtn) s8fail("checkpoint card has no Accept button (spcacc:) — a pass card must");
+            else {
+              // ── Accept tap (S6) → done marker on the spec branch ──────────
+              const outBefore = mock.out.length;
+              await bot.handle(tap(acceptBtn));
+              show("s8: Accept tapped");
+              const accMsg = mock.out.slice(outBefore).find((m) => /accepted|chấp nhận/i.test(m)) ?? "";
+              console.log("s8: accept confirmation:", accMsg ? "yes" : "NO (the git facts below decide)");
+
+              // ── git facts (the source of truth) ───────────────────────────
+              if (s8ok) {
+                const wtThere = existsSync(wtPath);
+                console.log("s8: worktree present:", wtThere ? wtPath : "MISSING");
+                if (!wtThere) s8fail(`worktree ${wtPath} is missing`);
+              }
+              if (s8ok && gitO(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]) === undefined) {
+                s8fail(`branch ${branch} not found in ${ws}`);
+              }
+              if (s8ok) {
+                const fileOnBranch = gitO(["show", `${branch}:docs/sdd/${specName}.md`]) ?? "";
+                const line = fileOnBranch.split("\n").find((l) => l.includes("**S1 Create hello.txt**")) ?? "";
+                const marker = line.match(/\[x\]\s+\(([0-9a-fA-F]{4,12})\)/);
+                console.log("s8: done marker on spec branch:", marker ? `[x] (${marker[1]})` : `NO — ${line || "(task line missing)"}`);
+                if (!marker) s8fail("task not marked done ([x] + commit hash) on the spec branch");
+              }
+              if (s8ok) {
+                const ahead = parseInt(gitA("rev-list", "--count", `${baseBranch}..${branch}`), 10) || 0;
+                console.log("s8: commits ahead of base:", ahead);
+                if (ahead < 1) s8fail(`spec branch ${branch} is not ahead of base ${baseBranch}`);
+              }
+              if (s8ok) {
+                const baseHeadAfter = gitA("rev-parse", "HEAD");
+                const mainUntouched = baseHeadAfter === baseHeadBefore;
+                console.log(
+                  "s8: main branch untouched:",
+                  mainUntouched ? "yes" : `NO (${baseHeadBefore.slice(0, 8)} → ${baseHeadAfter.slice(0, 8)})`,
+                );
+                if (!mainUntouched) s8fail(`main ${baseBranch} moved — the worker must only commit on the spec branch`);
+              }
+              if (s8ok) console.log("✅ S8: end-to-end spec run passed (run → worker → checkpoint → accept → done marker)");
+            }
+          }
+        }
+      }
+    } finally {
+      // ── cleanup (ALWAYS, even on assertion failure) ───────────────────────
+      // Worktree + spec branch + fixture file. The main branch of testws is
+      // never touched (the worker only commits on the spec branch).
+      if (existsSync(wtPath)) {
+        try {
+          console.log("s8 cleanup:", await removeWorktree(ws, { root: wtPath, branch }));
+        } catch (e) {
+          console.log("s8 cleanup: removeWorktree failed —", (e as Error).message);
+          gitVoid(["worktree", "remove", "--force", wtPath]);
+          gitVoid(["worktree", "prune"]);
+        }
+      } else {
+        gitVoid(["worktree", "prune"]);
+      }
+      gitVoid(["branch", "-D", branch]); // -D: the spec branch is intentionally unmerged
+      rmSync(specPath, { force: true });
+      console.log("s8 cleanup: worktree removed · branch deleted · spec file removed");
+    }
+  }
 
   await bot.handle(upd("/clear"));
   show("/clear");
