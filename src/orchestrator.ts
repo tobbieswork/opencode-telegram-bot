@@ -8,7 +8,7 @@ import { tr } from "./i18n.js";
 import { Config } from "./config.js";
 import { ConvKey, chatOf, convKey, parseConv } from "./conv.js";
 import { McpBridge, BridgeTool, makeRunScriptTool } from "./mcp-bridge.js";
-import { addWorktree, diffSummary, gitBoundary, gitRoot, gitStatusBrief, mergeWorktree, removeWorktree, runGit } from "./worktree.js";
+import { addWorktree, diffSummary, gitBoundary, gitRoot, gitStatusBrief, mergeWorktree, removeWorktree, resolveBaseBranch, runGit } from "./worktree.js";
 import { parseSpec, type ParsedTask } from "./spec.js";
 import { classifyShellItems, computeNotRan, renderCheckpointCard, checkpointOutcome } from "./spec-checkpoint.js";
 import { listDirs } from "./fsbrowser.js";
@@ -212,6 +212,8 @@ export class Orchestrator {
   private approvals = new Map<string, Approval>();
   /** Pending /prune confirmations: id → which convs to delete when the user taps "Xoá". */
   prunePending = new Map<string, { chat: ConvKey; convs: ConvKey[] }>();
+  /** S6 (S3.5): pending "redo with note" requests: conv → the run waiting for its note. */
+  redoPending = new Map<ConvKey, { spec: string; task: string; workerConv: ConvKey; uid?: number; since: number }>();
   reports = new Map<ConvKey, string[]>();
   reportTimers = new Map<ConvKey, ReturnType<typeof setTimeout>>();
   /** Remaining Manager dispatches per chat until the user speaks again. */
@@ -886,6 +888,55 @@ export class Orchestrator {
     return `${tr(lang, "⏹ Đã dừng worker", "⏹ Stopped worker")} <b>${esc(w.name)}</b>.${w.worktree ? tr(lang, " Worktree vẫn giữ — dùng /wt trong topic để xem diff / merge / xoá.", " Worktree kept — use /wt in the topic to view diff / merge / delete.") : ""}`;
   }
 
+  /**
+   * S6 (S3.6): stop a BUSY spec worker from its checkpoint card. Same
+   * primitive as /kill (mark stopped FIRST, then interrupt), but the topic is
+   * NOT closed — a Redo can resume there — and the worktree + uncommitted work
+   * are always kept. Returns the bilingual stop notice (HTML).
+   */
+  async stopSpecWorker(workerConv: ConvKey): Promise<string> {
+    return this.stopWorker(workerConv, false);
+  }
+
+  /** S6 (S3.5): how long a redo note stays pending before it is dropped. */
+  static readonly REDO_NOTE_TTL_MS = 10 * 60 * 1000;
+
+  /**
+   * S6 (S3.5): the "redo with note" pending-note flow. The Bot's message path
+   * calls this for every plain-text message: while a redo request is pending
+   * for this conv, the text IS the note — it is consumed and delivered to the
+   * SAME worker session (the worker keeps the run's context). Returns true
+   * when the text was consumed. Commands ("/…") are never consumed — they
+   * pass through to normal dispatch — and a request older than the TTL is
+   * dropped with a notice instead of consuming the text.
+   */
+  async tryConsumeRedoNote(conv: ConvKey, text: string): Promise<boolean> {
+    const p = this.redoPending.get(conv);
+    if (!p) return false;
+    const lang = this.langOf(conv);
+    if (Date.now() - p.since > Orchestrator.REDO_NOTE_TTL_MS) {
+      this.redoPending.delete(conv);
+      await this.h.sendHtml(conv, tr(lang, "⌛ Yêu cầu ghi chú làm lại đã hết hạn (10 phút).", "⌛ The redo-note request has expired (10 minutes).")).catch(() => {});
+      return false;
+    }
+    if (text.startsWith("/")) return false; // commands pass through; the request stays pending
+    this.redoPending.delete(conv);
+    const s = this.h.st.peek(p.workerConv);
+    const w = s?.worker;
+    // The SAME session, so the redo keeps the run's context (S3.5).
+    if (s?.sessionID) await this.h.oc.prompt(s.sessionID, text).catch((e) => warn("redo note:", (e as Error)?.message));
+    await this.h.tg.sendMessage(p.workerConv, text).catch(() => {});
+    if (w) this.setStatus(p.workerConv, "running");
+    await this.h.sendHtml(conv, tr(lang, "📨 Đã gửi ghi chú cho worker.", "📨 Note sent to worker.")).catch(() => {});
+    audit({
+      action: "spec_redo",
+      chatId: conv,
+      userId: p.uid != null ? String(p.uid) : undefined,
+      meta: { spec: p.spec, task: p.task, worker: w?.name, note: text },
+    });
+    return true;
+  }
+
   /** Is a worker of this name under the chat currently running/waiting? (scheduler's busy/skip check) */
   workerBusyByName(chat: ConvKey, name: string): boolean {
     const found = this.h.st.findWorker(chat, name);
@@ -1196,18 +1247,7 @@ export class Orchestrator {
    * to the current branch (a local-only repo with none of the above).
    */
   private async resolveBaseBranch(dir: string): Promise<string> {
-    const remote = await runGit(dir, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).catch(() => "");
-    if (remote) {
-      const b = remote.replace(/^origin\//, "");
-      if (b) return b;
-    }
-    for (const cand of ["main", "master"]) {
-      const ok = await runGit(dir, ["show-ref", "--verify", "--quiet", `refs/heads/${cand}`])
-        .then(() => true)
-        .catch(() => false);
-      if (ok) return cand;
-    }
-    return (await runGit(dir, ["rev-parse", "--abbrev-ref", "HEAD"]).catch(() => "")) || "HEAD";
+    return resolveBaseBranch(dir); // shared with the S6 accept path (worktree.ts)
   }
 
   /**

@@ -1076,6 +1076,10 @@ export class Bot {
       state.directory = top && !top.manager && top.directory ? top.directory : this.cfg.opencodeDirectory;
     }
 
+    // S6 (S3.5): while a redo-note request is pending for this conv, the
+    // user's next plain text IS the note (commands pass through; non-text
+    // messages never reach this point — they return above).
+    if (await this.orch.tryConsumeRedoNote(conv, text)) return;
     if (text.startsWith("/")) await this.handleCommand(conv, text, state, uid);
     else if (state.advisor && this.advisor) {
       // An advisor thread: the user's message is a follow-up question (resumes
@@ -3991,10 +3995,13 @@ export class Bot {
     }
     if (data.startsWith("kill:")) return this.orch.handleKillCallback(cb, conv, messageId);
     if (await this.orch.handleCallback(cb, conv, messageId)) return;
-    // All spec-to-tasks callbacks (S2 list/detail + S4 Run): spec:<name>,
-    // specrun:<name>:<n> (next-runnable Run), specblocked:<name>:<n> (blocked
-    // Run, first tap) and specrunok:<name>:<n> (blocked "Run anyway", 2nd tap).
-    if (data.startsWith("spec:") || data.startsWith("specrun:") || data.startsWith("specblocked:") || data.startsWith("specrunok:")) {
+    // All spec-to-tasks callbacks (S2 list/detail + S4 Run + S6 controls):
+    // spec:<name>, specrun:<name>:<n> (next-runnable Run),
+    // specblocked:<name>:<n> (blocked Run, first tap), specrunok:<name>:<n>
+    // (blocked "Run anyway", 2nd tap) and the checkpoint-card controls
+    // spcacc:<name>:<n> (Accept), spcredo:<name>:<n> (Redo with note) and
+    // spcstop:<name>:<n> (Stop).
+    if (data.startsWith("spec:") || data.startsWith("specrun:") || data.startsWith("specblocked:") || data.startsWith("specrunok:") || data.startsWith("spcacc:") || data.startsWith("spcredo:") || data.startsWith("spcstop:")) {
       await handleSpecCallback(this, cb, conv);
       return;
     }

@@ -23,11 +23,12 @@ import type { CallbackQuery } from "../telegram.js";
 import type { ConvKey } from "../conv.js";
 import { chatOf } from "../conv.js";
 import type { Lang } from "../state.js";
-import { gitRoot, ensureSpecWorktree, runGit, specBranchName } from "../worktree.js";
-import { parseSpec, initMarkers, type ParsedTask } from "../spec.js";
+import { gitRoot, ensureSpecWorktree, resolveBaseBranch, runGit, specBranchName } from "../worktree.js";
+import { parseSpec, initMarkers, markTask, type ParsedTask } from "../spec.js";
 import { buildTaskPrompt } from "../spec-prompt.js";
 import { warn } from "../logger.js";
 import { NAME_RE as WORKER_NAME_RE, BUSY } from "../orchestrator.js";
+import { classifyShellItems, workerCommitsSinceFork } from "../spec-checkpoint.js";
 import { audit } from "../audit.js";
 import { isUserAllowed } from "../schedule.js";
 import { tr } from "../i18n.js";
@@ -471,12 +472,235 @@ async function specRunSecondTap(bot: Bot, cb: CallbackQuery, conv: ConvKey, name
   await specRunSpawn(bot, conv, lang, uid, name, n, task, root, true);
 }
 
+// ── S6 (checkpoint-card controls): Accept / Redo with note / Stop ─────────────
+/**
+ * S6.4 — the worker that owns a run of `name` under this conv's chat, or
+ * undefined (stale card: no worker by that name, or a worker whose run is for
+ * a different spec). All three controls validate against CURRENT state this
+ * way before acting.
+ */
+function specRunWorker(bot: Bot, conv: ConvKey, name: string) {
+  const found = bot.st.findWorker(chatOf(conv), `spec-${name}`);
+  if (!found) return undefined;
+  const w = found[1].worker;
+  if (!w || w.specRun?.spec !== name) return undefined;
+  return found;
+}
+
+async function noRunMessage(bot: Bot, conv: ConvKey, lang: Lang, name: string): Promise<void> {
+  await bot.tg
+    .sendMessage(
+      conv,
+      tr(lang, `❌ Không tìm thấy run nào của spec ${esc(name)} — không có gì để xử lý.`, `❌ No run of spec ${esc(name)} found — nothing to act on.`),
+    )
+    .catch(() => {});
+}
+
+/**
+ * S6 (S3.4/S4.4) — Accept. Re-derives everything from LIVE state (S6.4), never
+ * trusting the card: the worker must still exist for this spec and be done;
+ * the checks are re-classified from the session's ACTUAL shell items (a check
+ * that errored never ran → refuse); the worker's commit is re-read from git
+ * (no commit since the fork → refuse). On success it marks the task done in
+ * the spec file INSIDE THE WORKTREE and commits that single line on the spec
+ * branch only (the user's checkout is never touched — S4.4), then offers the
+ * next runnable task with its Run button.
+ */
+async function specAccept(
+  bot: Bot,
+  cb: CallbackQuery,
+  conv: ConvKey,
+  lang: Lang,
+  uid: number | undefined,
+  name: string,
+  n: number,
+): Promise<void> {
+  const found = specRunWorker(bot, conv, name);
+  if (!found) return noRunMessage(bot, conv, lang, name);
+  const s = found[1];
+  const w = s.worker!;
+  if (BUSY.includes(w.status)) {
+    await bot.tg
+      .sendMessage(conv, tr(lang, `⏳ Worker ${esc(w.name)} đang chạy — chờ nó xong trước khi chấp nhận.`, `⏳ Worker ${esc(w.name)} is still working — wait for it to finish before accepting.`))
+      .catch(() => {});
+    return;
+  }
+  if (w.status !== "done") {
+    const msg =
+      w.status === "failed"
+        ? tr(lang, `❌ Worker ${esc(w.name)} đã thất bại — không thể chấp nhận.`, `❌ The worker failed — it can't be accepted.`)
+        : w.status === "stopped"
+          ? tr(lang, `⏹ Worker ${esc(w.name)} đã bị dừng — không thể chấp nhận.`, `⏹ The worker was stopped — it can't be accepted.`)
+          : tr(lang, `❌ Worker ${esc(w.name)} chưa xong — không thể chấp nhận.`, `❌ The worker is not finished — it can't be accepted.`);
+    await bot.tg.sendMessage(conv, msg).catch(() => {});
+    return;
+  }
+  const dir = s.directory;
+  const relSpec = join("docs", "sdd", `${name}.md`);
+  const file = join(dir ?? "", relSpec);
+  let md: string;
+  try {
+    if (!dir) throw new Error("no worktree directory");
+    md = readFileSync(file, "utf8");
+  } catch {
+    return noRunMessage(bot, conv, lang, name);
+  }
+  const res = parseSpec(md);
+  if ("error" in res) {
+    await bot.sendHtml(conv, errorDetailText(lang, specTitle(md, name), name, res.error));
+    return;
+  }
+  const task = res.tasks.find((t) => t.n === n);
+  if (!task) {
+    await bot.tg
+      .sendMessage(conv, tr(lang, `❌ Task số ${n} không có trong spec ${esc(name)}.`, `❌ Task ${n} not found in the spec ${esc(name)}.`))
+      .catch(() => {});
+    return;
+  }
+  if (task.marker === "done") {
+    await bot.tg
+      .sendMessage(conv, tr(lang, `✅ Task ${esc(task.id)} đã được chấp nhận rồi.`, `✅ Task ${esc(task.id)} is already accepted.`))
+      .catch(() => {});
+    return;
+  }
+  // S3.2: re-classify the checks from the session's ACTUAL shell tool items.
+  const items: Array<{ state?: any }> = [];
+  if (s.sessionID) {
+    const msgs = ((await bot.oc.listMessages(s.sessionID).catch(() => [])) as any[]) ?? [];
+    for (const m of msgs) {
+      for (const c of (m?.content ?? []) as any[]) {
+        if (c?.type === "tool" && c.name === "shell") items.push(c);
+      }
+    }
+  }
+  const ran = classifyShellItems(items).ran;
+  if (ran.some((c) => c.error !== undefined)) {
+    await bot.tg
+      .sendMessage(conv, tr(lang, `❌ Có check đã lỗi (chưa chạy được) — không thể chấp nhận. Hãy dùng "Làm lại kèm ghi chú".`, `❌ A check errored (never ran) — the run can't be accepted. Use "Redo with note".`))
+      .catch(() => {});
+    return;
+  }
+  // S3.1: the worker's commit, re-read from git (since the fork, marker excluded).
+  const base = await resolveBaseBranch(dir!);
+  const lines = (await runGit(dir!, ["log", "--format=%h %s", `${base}..HEAD`]).catch(() => "")).split("\n");
+  const commits = workerCommitsSinceFork(lines, name);
+  if (commits.length === 0) {
+    await bot.tg
+      .sendMessage(conv, tr(lang, `❌ Chưa thể chấp nhận — không có commit nào của worker trên nhánh kể từ khi fork.`, `❌ Can't accept — there is no commit on the branch since the fork.`))
+      .catch(() => {});
+    return;
+  }
+  const commit = commits[0]; // newest first
+  // S4.4: mark the task done in the WORKTREE's spec file, and commit that
+  // single change on the spec branch. The user's checkout is never touched.
+  writeFileSync(file, markTask(md, n, commit.hash));
+  await runGit(dir!, ["add", "--", relSpec]);
+  await runGit(dir!, ["commit", "-m", `docs: mark ${task.id} done`]);
+  // S6.2: audit the accept.
+  audit({
+    action: "spec_accept",
+    chatId: conv,
+    userId: uid != null ? String(uid) : undefined,
+    meta: { spec: name, task: task.id, branch: w.specRun!.branch, worker: w.name, commit: commit.hash, userId: uid ?? null },
+  });
+  // Offer the next runnable task (same pattern as the "spec:" detail branch).
+  const nextRes = parseSpec(readFileSync(file, "utf8"));
+  const nextTasks = "error" in nextRes ? [] : nextRes.tasks;
+  const next = nextRunnable(nextTasks);
+  const lines2: string[] = [
+    tr(
+      lang,
+      `✅ Task ${esc(task.id)} đã được chấp nhận — đã đánh dấu xong (<code>${esc(commit.hash)}</code>).`,
+      `✅ Task ${esc(task.id)} accepted — marked done (<code>${esc(commit.hash)}</code>).`,
+    ),
+  ];
+  const buttons: { text: string; callback_data: string }[] = [];
+  if (next >= 0) {
+    const t = nextTasks[next];
+    lines2.push(`${tr(lang, "Task chạy tiếp:", "Next runnable:")} ▶️ <b>${esc(t.id)} ${esc(t.title)}</b>`);
+    buttons.push({ text: `▶️ Run ${t.id}`, callback_data: `specrun:${name}:${t.n}` });
+  } else {
+    lines2.push(tr(lang, "✅ Tất cả tasks đã xong.", "✅ All tasks done."));
+  }
+  const keyboard = buttons.length ? { reply_markup: { inline_keyboard: buttons.map((b) => [b]) } } : undefined;
+  await bot.sendHtml(conv, lines2.join("\n"), keyboard);
+}
+
+/**
+ * S6 (S3.5) — Redo with note. Pending-note pattern: registers a pending
+ * request for the card's conv and asks the user to send the note; the Bot's
+ * message path then consumes the next plain text (10-minute TTL, commands
+ * pass through) and the orchestrator delivers it to the SAME worker session,
+ * which keeps the run's context.
+ */
+async function specRedo(
+  bot: Bot,
+  cb: CallbackQuery,
+  conv: ConvKey,
+  lang: Lang,
+  uid: number | undefined,
+  name: string,
+  n: number,
+): Promise<void> {
+  const found = specRunWorker(bot, conv, name);
+  if (!found) return noRunMessage(bot, conv, lang, name);
+  const w = found[1].worker!;
+  if (BUSY.includes(w.status)) {
+    await bot.tg
+      .sendMessage(conv, tr(lang, `⏸ Worker ${esc(w.name)} đang chạy — không thể làm lại ngay bây giờ.`, `⏸ Worker ${esc(w.name)} is still working — can't redo right now.`))
+      .catch(() => {});
+    return;
+  }
+  bot.orch.redoPending.set(conv, { spec: name, task: w.specRun!.task, workerConv: found[0], uid, since: Date.now() });
+  await bot.tg
+    .sendMessage(conv, tr(lang, `✍️ Gửi một ghi chú cho worker ${esc(w.name)} — nó sẽ làm lại task ${esc(w.specRun!.task)} kèm ghi chú đó.`, `✍️ Send a note for worker ${esc(w.name)} — it will redo task ${esc(w.specRun!.task)} with it.`))
+    .catch(() => {});
+}
+
+/**
+ * S6 (S3.6) — Stop. Only while the worker is BUSY. Stops it via the same
+ * primitive /kill uses (mark stopped first, then interrupt), but keeps the
+ * worktree and its uncommitted work, and never closes the topic (a Redo can
+ * resume there). No spec-file marker change: the task stays open, and the S5
+ * settlement hook re-posts the errored card (Redo + Stop only).
+ */
+async function specStop(
+  bot: Bot,
+  cb: CallbackQuery,
+  conv: ConvKey,
+  lang: Lang,
+  uid: number | undefined,
+  name: string,
+  n: number,
+): Promise<void> {
+  const found = specRunWorker(bot, conv, name);
+  if (!found) return noRunMessage(bot, conv, lang, name);
+  const w = found[1].worker!;
+  if (!BUSY.includes(w.status)) {
+    await bot.tg
+      .sendMessage(conv, tr(lang, `✅ Worker ${esc(w.name)} đã xong rồi — không có gì để dừng.`, `✅ Worker ${esc(w.name)} has already finished — nothing to stop.`))
+      .catch(() => {});
+    return;
+  }
+  const notice = await bot.orch.stopSpecWorker(found[0]);
+  await bot.sendHtml(conv, `${notice}\n${tr(lang, "🌲 Worktree được giữ lại — công việc chưa commit vẫn còn ở đó.", "🌲 Worktree kept — uncommitted work is still there.")}`).catch(() => {});
+  audit({
+    action: "spec_stop",
+    chatId: conv,
+    userId: uid != null ? String(uid) : undefined,
+    meta: { spec: name, task: w.specRun!.task, worker: w.name, userId: uid ?? null },
+  });
+}
+
 /**
  * Button taps from a /spec list (state rebuilt from disk on every tap, S6.4):
  *  - "spec:<name>"            → the detail view (task list + Run buttons)
  *  - "specrun:<name>:<n>"     → Run tap on the next runnable (non-blocked) → spawn
  *  - "specblocked:<name>:<n>" → Run tap on a blocked task → probe + "Run anyway"
  *  - "specrunok:<name>:<n>"   → the explicit second tap ("Run anyway") → spawn
+ *  - "spcacc:<name>:<n>"      → S6 Accept (re-derives from live state)
+ *  - "spcredo:<name>:<n>"     → S6 Redo with note (pending-note flow)
+ *  - "spcstop:<name>:<n>"     → S6 Stop (busy worker only)
  */
 export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: ConvKey): Promise<void> {
   const lang = bot.userPrefs.getLang(cb.from?.id ?? "");
@@ -517,6 +741,33 @@ export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: Conv
       return;
     }
     await specRunFirstTap(bot, cb, conv, ref.name, ref.n);
+    return;
+  }
+  if (data.startsWith("spcacc:")) {
+    const ref = parseRunRef(data.slice("spcacc:".length));
+    if (!ref) {
+      await bot.tg.sendMessage(conv, tr(lang, "❌ Không rõ task nào.", "❌ Unknown task."));
+      return;
+    }
+    await specAccept(bot, cb, conv, lang, cb.from?.id, ref.name, ref.n);
+    return;
+  }
+  if (data.startsWith("spcredo:")) {
+    const ref = parseRunRef(data.slice("spcredo:".length));
+    if (!ref) {
+      await bot.tg.sendMessage(conv, tr(lang, "❌ Không rõ task nào.", "❌ Unknown task."));
+      return;
+    }
+    await specRedo(bot, cb, conv, lang, cb.from?.id, ref.name, ref.n);
+    return;
+  }
+  if (data.startsWith("spcstop:")) {
+    const ref = parseRunRef(data.slice("spcstop:".length));
+    if (!ref) {
+      await bot.tg.sendMessage(conv, tr(lang, "❌ Không rõ task nào.", "❌ Unknown task."));
+      return;
+    }
+    await specStop(bot, cb, conv, lang, cb.from?.id, ref.name, ref.n);
     return;
   }
   const name = data.slice("spec:".length);
