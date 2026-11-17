@@ -82,6 +82,48 @@ try {
     check("notRan: an expected check with no result IS listed", computeNotRan([]).join(",") === "typecheck,test:unit,smoke", JSON.stringify(computeNotRan([])));
   }
 
+  // ── S3.2: retry-aware — the LAST recorded occurrence per check wins ───────
+  {
+    // (a) failed → fixed env → re-ran green: the card shows the final state.
+    const itemsA = [
+      { type: "tool", name: "shell", state: { status: "completed", input: { command: "npm run typecheck" }, metadata: { exit: 2 } } },
+      { type: "tool", name: "shell", state: { status: "error", input: { command: "npm run typecheck" }, error: { message: "no node_modules" } } },
+      { type: "tool", name: "shell", state: { status: "completed", input: { command: "npm run typecheck" }, metadata: { exit: 0 } } },
+    ];
+    const { ran: ranA } = classifyShellItems(itemsA);
+    check("retry: one entry per check name (last occurrence wins)", ranA.length === 1, JSON.stringify(ranA));
+    check("retry: recovered check is ok=true and carries no error", ranA[0].ok === true && ranA[0].error === undefined, JSON.stringify(ranA[0]));
+    check("retry: recovered run is a pass (with commit)", checkpointOutcome({ hash: "abc", subject: "x" }, ranA, false) === "pass");
+
+    // (b) failed and never re-run: still fails.
+    const itemsB = [
+      { type: "tool", name: "shell", state: { status: "completed", input: { command: "npm run typecheck" }, metadata: { exit: 0 } } },
+      { type: "tool", name: "shell", state: { status: "completed", input: { command: "npm run test:unit" }, metadata: { exit: 1 } } },
+    ];
+    const { ran: ranB } = classifyShellItems(itemsB);
+    check("retry: an unretried failure still fails", checkpointOutcome({ hash: "abc", subject: "x" }, ranB, false) === "fail");
+
+    // (c) retry of one check never hides a failure of another check.
+    const itemsC = [
+      { type: "tool", name: "shell", state: { status: "completed", input: { command: "npm run typecheck" }, metadata: { exit: 2 } } },
+      { type: "tool", name: "shell", state: { status: "completed", input: { command: "npm run test:unit" }, metadata: { exit: 1 } } },
+      { type: "tool", name: "shell", state: { status: "completed", input: { command: "npm run typecheck" }, metadata: { exit: 0 } } },
+    ];
+    const { ran: ranC } = classifyShellItems(itemsC);
+    const cByName = Object.fromEntries(ranC.map((r) => [r.name, r]));
+    check("retry: display keeps first-seen order", ranC.map((r) => r.name).join(",") === "typecheck,test:unit", JSON.stringify(ranC.map((r) => r.name)));
+    check("retry: recovered check ok, sibling failure kept", cByName.typecheck?.ok === true && cByName["test:unit"]?.ok === false, JSON.stringify(ranC));
+    check("retry: sibling failure → fail", checkpointOutcome({ hash: "abc", subject: "x" }, ranC, false) === "fail");
+
+    // (d) a tool-error that is later re-run green is no longer "errored".
+    const itemsD = [
+      { type: "tool", name: "shell", state: { status: "error", input: { command: "npm run smoke" }, error: { message: "cwd gone" } } },
+      { type: "tool", name: "shell", state: { status: "completed", input: { command: "npm run smoke" }, metadata: { exit: 0 } } },
+    ];
+    const { ran: ranD } = classifyShellItems(itemsD);
+    check("retry: re-run after tool error → not errored, ok", ranD.length === 1 && ranD[0].ok === true && ranD[0].error === undefined, JSON.stringify(ranD));
+  }
+
   // ── S3.2: checkNameFromCommand ────────────────────────────────────────────
   {
     check("name: npm run typecheck → typecheck", checkNameFromCommand("npm run typecheck") === "typecheck", checkNameFromCommand("npm run typecheck"));

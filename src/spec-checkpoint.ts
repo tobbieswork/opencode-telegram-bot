@@ -12,6 +12,12 @@
  *   - state.status === "completed", exit === 0    → ran, passed.
  * Anything else (pending/running, or a check with no item at all) is "not run".
  *
+ * Retry-aware (user decision 2026-11-17): for each check name, the LAST
+ * recorded occurrence wins. A worker that fails a verify command, fixes the
+ * environment (e.g. `npm ci`), and re-runs it to green left the task in a
+ * passing state — the card shows the final state, not the first stumble.
+ * A check that failed and was never re-run still fails.
+ *
  * S3.3 — the card carries Accept / Redo with note / Stop buttons.
  * S3.7 — an errored run, or a run without a commit, says so and offers Redo
  * with note + Stop ONLY (never Accept).
@@ -67,23 +73,31 @@ export function checkNameFromCommand(cmd: string): string {
  * non-shell / stateless items are ignored.
  */
 export function classifyShellItems(items: Array<{ state?: any }>): { ran: RanCheck[] } {
-  const ran: RanCheck[] = [];
+  const entries: RanCheck[] = [];
+  const byName = new Map<string, RanCheck>();
   for (const it of items ?? []) {
     const st = it?.state;
     if (!st) continue;
     const cmd = typeof st.input?.command === "string" ? st.input.command : "";
     if (!cmd) continue;
     const name = checkNameFromCommand(cmd);
+    let e: RanCheck;
     if (st.status === "error") {
       const msg = st.error?.message != null ? String(st.error.message) : "tool error";
-      ran.push({ name, ok: false, error: msg });
+      e = { name, ok: false, error: msg };
     } else if (st.status === "completed") {
       // exit 0 → passed; any other exit (incl. a masked wrapper exit) → failed.
-      ran.push({ name, ok: st.metadata?.exit === 0 });
+      e = { name, ok: st.metadata?.exit === 0 };
+    } else {
+      // "pending" / "running" / unknown: no recorded result → not run.
+      continue;
     }
-    // "pending" / "running" / unknown: no recorded result → not run.
+    // Retry-aware: the last recorded occurrence per check name wins; the
+    // display keeps first-seen order.
+    if (byName.has(name)) byName.set(name, e);
+    else { byName.set(name, e); entries.push(e); }
   }
-  return { ran };
+  return { ran: entries.map((x) => byName.get(x.name)!) };
 }
 
 /** S3.2 — the expected checks with no recorded result, in verify order. */
