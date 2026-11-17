@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.41.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.41.1...opencode-telegram-bot-v1.41.2) (2026-11-17)
+
+
+### Bug Fixes
+
+* S8 smoke scenario — re-pin working directory before /spec ([9b32b98](https://github.com/tobbieswork/opencode-telegram-bot/commit/9b32b98662631327ddb143f1a7308277555e9463))
+* S8 smoke scenario — re-pin working directory before /spec ([5947324](https://github.com/tobbieswork/opencode-telegram-bot/commit/5947324bea66d76ece8665d86fcab7b53c514965))
+
 ## [1.41.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.41.0...opencode-telegram-bot-v1.41.1) (2026-11-17)
 
 
