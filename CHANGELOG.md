@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.39.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.38.1...opencode-telegram-bot-v1.39.0) (2026-11-17)
+
+
+### Features
+
+* add S6 checkpoint controls (accept, redo with note, stop) ([#254](https://github.com/tobbieswork/opencode-telegram-bot/issues/254)) ([6a38bc0](https://github.com/tobbieswork/opencode-telegram-bot/commit/6a38bc03f278da5ddd8febcf1671f9de3bb1c135))
+
 ## [1.38.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.38.0...opencode-telegram-bot-v1.38.1) (2026-11-17)
 
 
