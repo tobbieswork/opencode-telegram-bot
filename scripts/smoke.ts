@@ -576,6 +576,14 @@ async function main(): Promise<void> {
       const baseHeadBefore = gitA("rev-parse", "HEAD");
       console.log(`s8: fixture spec on ${baseBranch} @ ${baseHeadBefore.slice(0, 8)}`);
 
+      // The earlier browse scenario moves this conv's working directory to
+      // /tmp/opencode; re-pin it to the smoke workspace so /spec resolves
+      // testws as the git root.
+      await bot.handle(upd(`/dir ${ws}`));
+      show("s8: re-pin working directory to testws");
+      const dirMsg = mock.out[mock.out.length - 1] ?? "";
+      if (!/Directory set to/.test(dirMsg)) s8fail("/dir did not re-pin the working directory");
+
       // ── /spec list → detail view (S2) ─────────────────────────────────────
       await bot.handle(upd("/spec"));
       show("s8: /spec list");
