@@ -98,6 +98,16 @@ async function main(): Promise<void> {
   // git working tree, so the smoke workspace must be a git repo (idempotent).
   mkdirSync("/tmp/opencode/testws", { recursive: true });
   if (!existsSync(join("/tmp/opencode/testws", ".git"))) execFileSync("git", ["init", "-q", "/tmp/opencode/testws"]);
+  // Reset to a pristine working tree: a previous run's leftover artifacts
+  // (e.g. hello.txt) otherwise make an LLM turn see an already-correct file
+  // and ask a question instead of acting — the pending question then stalls
+  // every later section behind it (verified cascade, 2026-11-17).
+  try {
+    execFileSync("git", ["-C", "/tmp/opencode/testws", "checkout", "-q", "--", "."], { stdio: "pipe" });
+  } catch {
+    /* no commits yet — nothing to restore */
+  }
+  execFileSync("git", ["-C", "/tmp/opencode/testws", "clean", "-qfd"], { stdio: "pipe" });
   // Keep the live activity line off: its "✅ … · Ns" text would trip the
   // smoke's prompt-completed heuristics. It has its own unit tests.
   process.env.OPENCODE_TG_ACTIVITY = "0";
@@ -160,8 +170,9 @@ async function main(): Promise<void> {
   await bot.handle(upd("/new"));
   show("/new");
 
+  const helloBefore = mock.out.length;
   await bot.handle(upd("Reply with exactly the single word: HELLO. Nothing else."));
-  const done = await waitFor((a) => a.some((m) => /· \d+(\.\d+)?s/.test(m)), mock.out);
+  const done = await waitFor((a) => a.slice(helloBefore).some((m) => /· \d+(\.\d+)?s/.test(m)), mock.out);
   console.log("\n(prompt task completed:", done, ")");
   show("prompt reply");
 
@@ -325,6 +336,7 @@ async function main(): Promise<void> {
   console.log("\n=== QUESTION RELAY (end-to-end) ===");
   await bot.handle(upd("/new"));
   show("q: new session");
+  const qBefore = mock.out.length;
   await bot.handle(
     upd(
       "Use the `question` tool to ask me EXACTLY ONE multiple-choice question: " +
@@ -332,7 +344,7 @@ async function main(): Promise<void> {
         "Ask only that one question and do nothing else.",
     ),
   );
-  const qok = await waitFor((a) => a.some((m) => /Câu 1\/1/.test(m)), mock.out, 90000);
+  const qok = await waitFor((a) => a.slice(qBefore).some((m) => /Câu 1\/1/.test(m)), mock.out, 90000);
   console.log("question surfaced:", qok);
   show("q: question message");
   const kb = mock.keyboards[mock.keyboards.length - 1];
@@ -459,6 +471,9 @@ async function main(): Promise<void> {
 
   // ── queue: a message sent while a turn is running is queued, then runs after ─
   console.log("\n=== QUEUE (auto-queue during a busy turn, then drains) ===");
+  // Section-local baseline: waiters must only see messages from this section,
+  // or a stale "· Ns" footer / busy reply from an earlier section false-positives.
+  const qsecBefore = mock.out.length;
   await bot.handle(upd("/new"));
   show("queue: new session");
   // A long turn (count to 50, one number per line) keeps the session busy long
@@ -474,14 +489,14 @@ async function main(): Promise<void> {
   };
   await bot.handle(qSecond);
   show("queue: 2nd message while busy (auto-queued)");
-  const queued = await waitFor((a) => a.some((m) => m.includes("Đã thêm vào hàng chờ")), mock.out, 20000);
+  const queued = await waitFor((a) => a.slice(qsecBefore).some((m) => m.includes("Đã thêm vào hàng chờ")), mock.out, 20000);
   console.log("2nd message was auto-queued (queue_add):", queued);
   await bot.handle(upd("/queue"));
   show("queue: /queue list");
   const ql = mock.out[mock.out.length - 1];
   console.log("/queue lists the queued message:", ql.includes("QRUN") ? "yes" : "NO — see /queue output above");
   // Wait for the first (count) turn to finish → its drain runs the queued item.
-  const firstDone = await waitFor((a) => a.some((m) => /· \d+(\.\d+)?s/.test(m)), mock.out, 120000);
+  const firstDone = await waitFor((a) => a.slice(qsecBefore).some((m) => /· \d+(\.\d+)?s/.test(m)), mock.out, 120000);
   console.log("first (count) turn completed:", firstDone);
   // The queued message now runs as its own turn; its relayed reply has the probe.
   const ran = await waitFor((a) => a.some((m) => m.includes(qProbe)), mock.out, 120000);
