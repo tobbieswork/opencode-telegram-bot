@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.40.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.40.0...opencode-telegram-bot-v1.40.1) (2026-11-17)
+
+
+### Bug Fixes
+
+* write gh api request body to a temp file (--input takes a path) ([030888e](https://github.com/tobbieswork/opencode-telegram-bot/commit/030888e86ce254d331732fbf5c04dee05350a89e))
+* write gh api request body to a temp file (--input takes a path) ([5a1189b](https://github.com/tobbieswork/opencode-telegram-bot/commit/5a1189b1016dd9cd250e16f7762bc9cd186315f9))
+
 ## [1.40.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.39.0...opencode-telegram-bot-v1.40.0) (2026-11-17)
 
 
