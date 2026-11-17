@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the OpenCode bot watchdog every 60s
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+Unit=bot-watchdog.service
+
+[Install]
+WantedBy=timers.target

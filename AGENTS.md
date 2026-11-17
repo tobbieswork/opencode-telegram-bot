@@ -10,6 +10,7 @@
   `data/state.json` survives restarts, so existing sessions reattach — do
   not delete it casually. Never run a second `npm start` alongside the
   service (Telegram polling 409 conflicts).
+  A watchdog (`bot-watchdog.timer`, every 60s; script `deploy/bot-watchdog.sh`) revives the bot when it is stopped or wedged (journal silent >15 min). Before any DELIBERATE stop (e.g. editing data/state.json while stopped), create the maintenance lock `touch data/bot-maintenance.lock` and remove it when done — without it the watchdog restarts the bot mid-surgery and the in-memory state resurrects your file edits.
 
 ## Testing & verification
 - Verify in this order: `npm run typecheck` + `npm run test:unit` first
