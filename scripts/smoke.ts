@@ -555,7 +555,7 @@ async function main(): Promise<void> {
       "- S1.1 The task shall create a file `hello.txt` at the repository root, containing exactly one line: `smoke ok` followed by a newline. No other changes.",
       "",
       "## 2. Tasks",
-      "1. [ ] **S1 Create hello.txt** (S1.1). Create the file as described in S1.1. *Checkpoint: `cat hello.txt` prints `smoke ok`.*",
+      "1. [ ] **S1 Create hello.txt** (S1.1). Create the file as described in S1.1. This fixture repo has no test infrastructure (no `package.json`), so the tests-first working rule does not apply here — create the file directly. *Checkpoint: `cat hello.txt` prints `smoke ok`.*",
       "",
       "## 3. Out of scope",
       "- Anything besides the single file `hello.txt`.",
