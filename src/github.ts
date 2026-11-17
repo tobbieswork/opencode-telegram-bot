@@ -48,6 +48,38 @@ async function ghApiDefault(repo: string, method: string, path: string, body?: u
   }
 }
 
+type GhPrReadyFn = (repo: string, number: number) => Promise<void>;
+
+async function ghPrReadyDefault(repo: string, number: number): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    execFile(
+      process.env.OPENCODE_TG_GH_BIN || "gh",
+      ["pr", "ready", String(number), "--repo", repo],
+      { timeout: 20_000, maxBuffer: 4 * 1024 * 1024 },
+      (err, _stdout, stderr) => {
+        if (err) reject(new Error(`gh pr ready ${number}: ${stderr?.trim() || err.message}`));
+        else resolve();
+      },
+    );
+  });
+}
+
+let prReadyImpl: GhPrReadyFn = ghPrReadyDefault;
+
+/** Test seam: replace the `gh pr ready` transport (undefined restores the real one). */
+export function setGhPrReadyImpl(fn: GhPrReadyFn | undefined): void {
+  prReadyImpl = fn ?? ghPrReadyDefault;
+}
+
+/**
+ * Mark a PR ready for review (un-draft). The REST "update pull request"
+ * endpoint silently ignores `draft:false`, so the reliable paths are
+ * `gh pr ready` (GraphQL under the hood) or the GraphQL mutation.
+ */
+export async function ghPrReady(repo: string, number: number): Promise<void> {
+  await prReadyImpl(repo, number);
+}
+
 let impl: GhApiFn = ghApiDefault;
 
 /** Test seam: replace the gh transport (pass undefined to restore the real one). */
