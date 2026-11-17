@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.38.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.37.2...opencode-telegram-bot-v1.38.0) (2026-11-17)
+
+
+### Features
+
+* retry-aware checkpoint classification (last occurrence per check wins) ([#249](https://github.com/tobbieswork/opencode-telegram-bot/issues/249)) ([8387d1e](https://github.com/tobbieswork/opencode-telegram-bot/commit/8387d1e03545b260f4790989c7b3ec1d50c77e87))
+
 ## [1.37.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.37.1...opencode-telegram-bot-v1.37.2) (2026-11-16)
 
 
