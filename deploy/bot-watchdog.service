@@ -1,0 +1,8 @@
+# Oneshot check, driven by bot-watchdog.timer (every 60s).
+# See deploy/bot-watchdog.sh for what it does.
+[Unit]
+Description=OpenCode bot watchdog check
+
+[Service]
+Type=oneshot
+ExecStart=/home/phatnd12/fpt/opencode-telegram-bot/deploy/bot-watchdog.sh
