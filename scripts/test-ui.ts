@@ -126,5 +126,15 @@ function check(name: string, cond: boolean, detail?: string): void {
   check("golden: file-too-large bytes (vi-only message)", warnLine("vi", raw("File quá lớn: 12,3MB (giới hạn 50MB).")) === "⚠️ File quá lớn: 12,3MB (giới hạn 50MB).");
 }
 
+// ── T5 golden bytes (bot.ts subgroup B, byte-identical) ─────────────────────
+{
+  check("golden: rotation-ok bytes (multi-line, raw <code>)", okLine("vi", raw("Đã xoay Manager → session mới <code>s-1</code>\nDir: <code>/x</code>\n📝 (phiên cũ trống)")) === "✅ Đã xoay Manager → session mới <code>s-1</code>\nDir: <code>/x</code>\n📝 (phiên cũ trống)");
+  check("golden: setdir bytes (okLine + raw <code>)", okLine("vi", raw("Đã đặt thư mục làm việc:\n<code>/x</code>")) === "✅ Đã đặt thư mục làm việc:\n<code>/x</code>");
+  check("golden: unknown-model bytes (raw <code>)", errorLine("vi", raw("Unknown model: <code>m</code>")) === "❌ Unknown model: <code>m</code>");
+  check("golden: unknown-mode alert bytes (plain, auto-escaped)", errorLine("vi", "Unknown mode: plan") === "❌ Unknown mode: plan");
+  check("golden: catch-alert bytes keep unescaped err text (raw)", warnLine("vi", raw("boom <x>")) === "⚠️ boom <x>");
+  check("golden: sessions titled list = legacy bytes", titledList("vi", "Sessions (2)", [raw("<code>a</code>"), "", "Chưa có session — gửi /new"]) === "<b>Sessions (2)</b>\n<code>a</code>\n\nChưa có session — gửi /new");
+}
+
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
