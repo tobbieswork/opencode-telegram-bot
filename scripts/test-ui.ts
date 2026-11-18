@@ -136,5 +136,13 @@ function check(name: string, cond: boolean, detail?: string): void {
   check("golden: sessions titled list = legacy bytes", titledList("vi", "Sessions (2)", [raw("<code>a</code>"), "", "Chưa có session — gửi /new"]) === "<b>Sessions (2)</b>\n<code>a</code>\n\nChưa có session — gửi /new");
 }
 
+// ── T5 golden bytes (commands/spec.ts, byte-identical) ─────────────────────
+{
+  check("golden: spec accepted bytes (okLine + raw <code>)", okLine("vi", raw("Task S2 đã được chấp nhận — đã đánh dấu xong (<code>abc123</code>).")) === "✅ Task S2 đã được chấp nhận — đã đánh dấu xong (<code>abc123</code>).");
+  check("golden: spec accept-blocked bytes (statusLine + raw)", statusLine("vi", raw("Worker spec-gamma đang chạy — chờ nó xong trước khi chấp nhận.")) === "⏳ Worker spec-gamma đang chạy — chờ nó xong trước khi chấp nhận.");
+  check("golden: spec error-detail head bytes (warnLine + raw <b>)", warnLine("vi", raw("<b>Không phân tích được spec này</b>")) === "⚠️ <b>Không phân tích được spec này</b>");
+  check("golden: spec cleanup-blocked bytes (errorLine + raw <code>)", errorLine("vi", raw("Không dọn được — branch <code>spec/gamma</code> còn commit chưa có trong main (abc…)…。 Hãy merge PR trước。")) === "❌ Không dọn được — branch <code>spec/gamma</code> còn commit chưa có trong main (abc…)…。 Hãy merge PR trước。");
+}
+
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

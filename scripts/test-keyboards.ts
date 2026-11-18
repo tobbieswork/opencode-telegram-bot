@@ -137,5 +137,8 @@ function check(name: string, cond: boolean, detail?: string): void {
     JSON.stringify(singleButton({ text: "🗑 Xoá", data: "prune:abcd" })) === JSON.stringify({ inline_keyboard: [[{ text: "🗑 Xoá", callback_data: "prune:abcd" }]] }));
 }
 
+// ── T5 golden bytes (commands/spec.ts run-anyway button) ───────────────────
+check("golden: run-anyway single button = legacy bytes", JSON.stringify(singleButton({ text: "▶️ Chạy dù vậy", data: "specrunok:gamma:3" })) === JSON.stringify({ inline_keyboard: [[{ text: "▶️ Chạy dù vậy", callback_data: "specrunok:gamma:3" }]] }));
+
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
