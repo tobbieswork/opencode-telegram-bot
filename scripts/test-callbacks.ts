@@ -14,10 +14,16 @@
  *   or forgets to answer;
  * - C2.2: registered data that fails to decode, and data that matches
  *   nothing (answerExpired), get a short "button expired" toast, warn once
- *   per unique data string, and never throw.
+ *   per unique data string, and never throw;
+ * - T3 (pilot migration of pb/ch/cont/reboot, C3.1/C3.3): the four migrated
+ *   defs round-trip, reject malformed input, enforce the 64-byte cap, and
+ *   decode CAPTURED real callback strings (buttons already in production);
+ *   importing bot.js registers the four prefixes, and dispatch routes them
+ *   to the handler adapters with exactly one answer.
  *
  * No Telegram and no Bot instance involved: the registry only touches
- * `bot.tg.answerCallbackQuery`, which is faked here.
+ * `bot.tg.answerCallbackQuery`, which is faked here. (The T3 section imports
+ * bot.js for the real defs/registration — still no Bot instance, no network.)
  *
  * Run: npx tsx scripts/test-callbacks.ts
  */
@@ -41,7 +47,11 @@ import {
   _resetWarnOnceForTest,
   _setTokenTtlMsForTest,
 } from "../src/callbacks.js";
+import { pbCallback, registerBotCallbacks } from "../src/bot.js";
 import type { Bot } from "../src/bot.js";
+import { choiceCallback, choiceKeyboard, registry as choiceRecords } from "../src/choices.js";
+import { continueCallback, continueCallbackData, parseContinueData } from "../src/continue.js";
+import { rebootCallback, rebootGoData } from "../src/uptime.js";
 import type { CallbackQuery } from "../src/telegram.js";
 
 let failures = 0;
@@ -268,6 +278,131 @@ async function main(): Promise<void> {
     } finally {
       console.warn = origWarn;
     }
+  }
+
+  // ── T3: pilot migration — pb, ch, cont, reboot (C3.1/C3.3) ──────────────
+  {
+    // bot.js's module load registers the four pilot prefixes; the T2 section
+    // above cleared the registry, so restore the real registration.
+    _clearCallbacksForTest();
+    registerBotCallbacks();
+
+    check(
+      "T3: all four pilot prefixes are registered",
+      ["pb", "ch", "cont", "reboot"].every((p) => registeredPrefixes().includes(p)),
+      JSON.stringify(registeredPrefixes()),
+    );
+    check("T3: pb owner", callbackOwner("pb") === "bot.ts (plan-to-build)", callbackOwner("pb"));
+    check("T3: ch owner", callbackOwner("ch") === "choices.ts (choice buttons)", callbackOwner("ch"));
+    check("T3: cont owner", callbackOwner("cont") === "continue.ts (continue button)", callbackOwner("cont"));
+    check("T3: reboot owner", callbackOwner("reboot") === "uptime.ts (reboot flow)", callbackOwner("reboot"));
+
+    // pb — the wire form is the fixed "pb:go" (C3.1).
+    check("T3 pb: encodes as pb:go", pbCallback.encode({ op: "go" }) === "pb:go", pbCallback.encode({ op: "go" }));
+    check("T3 pb: round-trips", JSON.stringify(pbCallback.decode("go")) === JSON.stringify({ op: "go" }));
+    check("T3 pb: a foreign value is malformed", pbCallback.decode("stop") === null);
+    check("T3 pb: empty rest is malformed", pbCallback.decode("") === null);
+    check("T3 pb: extra fields are malformed", pbCallback.decode("go:extra") === null);
+    check("T3 pb: the encoded form fits 64 bytes", Buffer.byteLength(pbCallback.encode({ op: "go" }), "utf8") <= CALLBACK_MAX_BYTES);
+
+    // ch — "ch:<id>:<i>" (4-char base36 registry key + option index) or "ch:inert".
+    const pick = { kind: "pick", id: "ab12", index: 3 };
+    check("T3 ch: pick encodes as ch:ab12:3", choiceCallback.encode(pick) === "ch:ab12:3", choiceCallback.encode(pick));
+    check("T3 ch: pick round-trips", JSON.stringify(choiceCallback.decode("ab12:3")) === JSON.stringify(pick));
+    check("T3 ch: index 0 round-trips", JSON.stringify(choiceCallback.decode("ab12:0")) === JSON.stringify({ kind: "pick", id: "ab12", index: 0 }));
+    check("T3 ch: inert encodes as ch:inert", choiceCallback.encode({ kind: "inert" }) === "ch:inert");
+    check("T3 ch: inert round-trips", JSON.stringify(choiceCallback.decode("inert")) === JSON.stringify({ kind: "inert" }));
+    check("T3 ch: an uppercase id is malformed", choiceCallback.decode("AB12:3") === null);
+    check("T3 ch: a 3-char id is malformed", choiceCallback.decode("ab1:3") === null);
+    check("T3 ch: a 5-char id is malformed", choiceCallback.decode("abcde:3") === null);
+    check("T3 ch: a missing index is malformed", choiceCallback.decode("ab12") === null);
+    check("T3 ch: an empty index is malformed", choiceCallback.decode("ab12:") === null);
+    check("T3 ch: a non-numeric index is malformed", choiceCallback.decode("ab12:x") === null);
+    check("T3 ch: extra fields are malformed", choiceCallback.decode("ab12:3:4") === null);
+    check("T3 ch: empty rest is malformed", choiceCallback.decode("") === null);
+    check("T3 ch: encode rejects a 3-char id", throws(() => choiceCallback.encode({ kind: "pick", id: "ab1", index: 0 })));
+    check("T3 ch: encode rejects a negative index", throws(() => choiceCallback.encode({ kind: "pick", id: "ab12", index: -1 })));
+    check("T3 ch: encode rejects a fractional index", throws(() => choiceCallback.encode({ kind: "pick", id: "ab12", index: 1.5 })));
+
+    // cont — "cont:<sessionID>".
+    check("T3 cont: encodes as cont:<id>", continueCallback.encode("ses_abc123") === "cont:ses_abc123");
+    check("T3 cont: round-trips", continueCallback.decode("ses_abc123") === "ses_abc123");
+    check("T3 cont: empty rest is malformed", continueCallback.decode("") === null);
+    setCallbackStrict(true);
+    try {
+      // the prefix is 5 bytes: a 60-byte id makes 65 B (over), 59 makes 64 (ok).
+      check("T3 cont: a 65-byte encode throws CallbackLimitError", throws(() => continueCallback.encode("s".repeat(60)), CallbackLimitError));
+      check("T3 cont: exactly 64 bytes encodes", continueCallback.encode("s".repeat(59)).length === 64);
+    } finally {
+      setCallbackStrict(false);
+    }
+    check("T3 cont: the producer OMITS (does not throw) over the cap", continueCallbackData("s".repeat(60)) === undefined);
+    check("T3 cont: the producer keeps the 64-byte boundary", continueCallbackData("s".repeat(59)) !== undefined);
+    check("T3 cont: parseContinueData agrees with the def", parseContinueData("cont:ses_abc123") === "ses_abc123" && parseContinueData("cont:") === undefined);
+
+    // reboot — "reboot:<op>" plus "reboot:go:<epoch-ms>".
+    for (const op of ["ask", "snooze", "cancel"] as const) {
+      check(`T3 reboot: ${op} round-trips`, rebootCallback.encode({ op }) === `reboot:${op}` && JSON.stringify(rebootCallback.decode(op)) === JSON.stringify({ op }));
+    }
+    check(
+      "T3 reboot: go round-trips",
+      rebootCallback.encode({ op: "go", issuedMs: 1762969622000 }) === "reboot:go:1762969622000" &&
+        JSON.stringify(rebootCallback.decode("go:1762969622000")) === JSON.stringify({ op: "go", issuedMs: 1762969622000 }),
+    );
+    check("T3 reboot: rebootGoData encodes through the def", rebootGoData(1762969622000) === "reboot:go:1762969622000");
+    check("T3 reboot: a go without timestamp is malformed", rebootCallback.decode("go") === null);
+    check("T3 reboot: a garbled timestamp is malformed", rebootCallback.decode("go:abc") === null);
+    check("T3 reboot: a zero timestamp is malformed", rebootCallback.decode("go:0") === null);
+    check("T3 reboot: a negative timestamp is malformed", rebootCallback.decode("go:-1") === null);
+    check("T3 reboot: an unknown op is malformed", rebootCallback.decode("xyz") === null);
+    check("T3 reboot: an op with extra fields is malformed", rebootCallback.decode("ask:extra") === null);
+    check("T3 reboot: empty rest is malformed", rebootCallback.decode("") === null);
+    check("T3 reboot: encode rejects a fractional issuedMs", throws(() => rebootCallback.encode({ op: "go", issuedMs: 1.5 })));
+    check("T3 reboot: encode rejects a non-positive issuedMs", throws(() => rebootCallback.encode({ op: "go", issuedMs: 0 })));
+
+    // C3.1 — replay CAPTURED real callback strings against the new decoders,
+    // so buttons already sent before this deploy keep working.
+    // pb: "pb:go" is the only wire string this button has ever carried (a
+    // single literal producer), so the captured string is exactly this one.
+    check("T3 C3.1: captured 'pb:go' decodes", JSON.stringify(pbCallback.decode("go")) === JSON.stringify({ op: "go" }));
+    // ch: choice ids live in the bot's memory (they do not survive a
+    // restart), so capture a real one through the real producer — registry.put
+    // (the real id generator) + choiceKeyboard (the real encoder).
+    const chId = choiceRecords.put("c1", "ses_captured", ["one", "two"]);
+    const chWire = choiceKeyboard(chId, ["one", "two"]).inline_keyboard[0][0].callback_data!;
+    check("T3 C3.1: captured ch: has the real wire form", /^ch:[0-9a-z]{4}:0$/.test(chWire), chWire);
+    check("T3 C3.1: captured ch: decodes back to the pick", JSON.stringify(choiceCallback.decode(chWire.slice("ch:".length))) === JSON.stringify({ kind: "pick", id: chId, index: 0 }), chWire);
+    // cont: captured from the live journal (manager rotation line, 2026-11-15).
+    const contCaptured = "cont:ses_e218197a2ffeH3ybgUypvQO7q8";
+    check("T3 C3.1: captured cont: fits 64 bytes", Buffer.byteLength(contCaptured, "utf8") <= CALLBACK_MAX_BYTES);
+    check("T3 C3.1: captured cont: decodes to the real session id", continueCallback.decode(contCaptured.slice("cont:".length)) === "ses_e218197a2ffeH3ybgUypvQO7q8");
+    // reboot: "reboot:ask" is the exact wire string every real uptime reminder
+    // has carried since the feature shipped (a single literal producer).
+    check("T3 C3.1: captured 'reboot:ask' decodes", JSON.stringify(rebootCallback.decode("ask")) === JSON.stringify({ op: "ask" }));
+    // plus the go variant through the real encoder with a real 13-digit ms
+    // (≈ the real confirm tap of 2026-11-12 13:27:02 UTC).
+    const goCaptured = rebootGoData(1762969622000);
+    check("T3 C3.1: captured reboot:go: decodes back", JSON.stringify(rebootCallback.decode(goCaptured.slice("reboot:".length))) === JSON.stringify({ op: "go", issuedMs: 1762969622000 }), goCaptured);
+
+    // Dispatch wiring: the registered prefixes route to the handler adapters
+    // with exactly one answer (C2.1/C2.4) — a fake bot that records the calls.
+    const { bot, answers } = fakeBot();
+    const calls: string[] = [];
+    (bot as Record<string, unknown>).handlePlanToBuildCallback = async (_cb: unknown, _conv: unknown, answer: (t?: string) => void) => { calls.push("pb"); answer("pb-done"); };
+    (bot as Record<string, unknown>).handleChoiceCallback = async (_cb: unknown, _conv: unknown, answer: (t?: string) => void, _mid: unknown) => { calls.push("ch"); };
+    (bot as Record<string, unknown>).handleContinueCallback = async (_cb: unknown, _conv: unknown, answer: (t?: string) => void, _mid: unknown) => { calls.push("cont"); answer("cont-done"); };
+    (bot as Record<string, unknown>).handleRebootCallback = async (_cb: unknown, _conv: unknown, answer: (t?: string) => void, _mid: unknown) => { calls.push("reboot"); };
+    check("T3 dispatch: pb:go routes to the pb handler", (await dispatchCallback(base(bot), cb("pb:go"))) === true && calls.length === 1 && calls[0] === "pb", JSON.stringify(calls));
+    check("T3 dispatch: …answered exactly once, with the handler's toast", answers.length === 1 && answers[0]?.text === "pb-done", JSON.stringify(answers));
+    check("T3 dispatch: ch routes to the ch handler", (await dispatchCallback(base(bot), cb(`ch:${chId}:1`))) === true && calls[1] === "ch", JSON.stringify(calls));
+    check("T3 dispatch: a forgetful handler is answered silently", answers.length === 2 && answers[1]?.text === undefined, JSON.stringify(answers));
+    check("T3 dispatch: the captured cont: string routes", (await dispatchCallback(base(bot), cb(contCaptured))) === true && calls[2] === "cont" && answers[2]?.text === "cont-done", JSON.stringify(calls));
+    check("T3 dispatch: reboot routes", (await dispatchCallback(base(bot), cb("reboot:cancel"))) === true && calls[3] === "reboot" && answers[3]?.text === undefined, JSON.stringify(calls));
+    check(
+      "T3 dispatch: a malformed ch: is answered expired (no fall-through)",
+      (await dispatchCallback(base(bot), cb("ch:AB12:3"))) === true && answers.length === 5 && answers[4]?.text === EXPIRED_TOAST.vi,
+      JSON.stringify(answers),
+    );
   }
 }
 

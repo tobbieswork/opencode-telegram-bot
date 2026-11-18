@@ -96,6 +96,12 @@ function makeBot() {
 }
 
 const tick = () => new Promise<void>((r) => setImmediate(r));
+/**
+ * T3 (callback-registry): the handlers now take an answer() function. For
+ * DIRECT calls (bypassing the registry) route it to the fake tg so the
+ * recorded answers stay exactly what the handler asked for.
+ */
+const tapAnswer = (bot: Bot, cbId: string) => (text?: string): void => { void (bot as any).tg.answerCallbackQuery(cbId, text); };
 function auditLines(): Array<Record<string, any>> {
   try {
     return readFileSync(auditFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
@@ -112,7 +118,7 @@ const tap = () => auditLines().filter((l) => l.action === "suggest_tap").pop();
   st.set(conv, { sessionID: "ses_1" });
   const id = registry.put(conv, "ses_1", ["alpha", "beta"]);
   const before = prompts.length;
-  await (bot as any).handleChoiceCallback({ id: "c1", data: `ch:${id}:0` } as any, conv, 77);
+  await (bot as any).handleChoiceCallback({ id: "c1", data: `ch:${id}:0` } as any, conv, tapAnswer(bot, "c1"), 77);
   await tick();
   check("R3.1 tap routes through runPrompt with the option text", prompts[before]?.via === "runPrompt" && prompts[before]?.text === "alpha" && prompts[before]?.conv === conv, JSON.stringify(prompts.slice(before)));
   check("R3.1 callback answered (no refusal)", answers.pop() === "", JSON.stringify(answers));
@@ -136,7 +142,7 @@ const tap = () => auditLines().filter((l) => l.action === "suggest_tap").pop();
   const conv = "42";
   st.set(conv, { sessionID: "ses_1" });
   const before = prompts.length;
-  await (bot as any).handleChoiceCallback({ id: "c2", data: "ch:inert" } as any, conv, 77);
+  await (bot as any).handleChoiceCallback({ id: "c2", data: "ch:inert" } as any, conv, tapAnswer(bot, "c2"), 77);
   check("inert tap is a no-op (no prompt)", prompts.length === before, JSON.stringify(prompts.slice(before)));
   check("inert tap answers without a refusal", answers.pop() === "", JSON.stringify(answers));
 }
@@ -148,17 +154,17 @@ const tap = () => auditLines().filter((l) => l.action === "suggest_tap").pop();
   st.set(conv, { sessionID: "ses_1" });
   const id = registry.put(conv, "ses_1", ["one", "two"]);
   const before = prompts.length;
-  await (bot as any).handleChoiceCallback({ id: "c3", data: `ch:${id}:1` } as any, conv, 77);
+  await (bot as any).handleChoiceCallback({ id: "c3", data: `ch:${id}:1` } as any, conv, tapAnswer(bot, "c3"), 77);
   await tick();
   check("first tap fires the choice", prompts[before]?.text === "two", JSON.stringify(prompts.slice(before)));
-  await (bot as any).handleChoiceCallback({ id: "c4", data: `ch:${id}:1` } as any, conv, 77);
+  await (bot as any).handleChoiceCallback({ id: "c4", data: `ch:${id}:1` } as any, conv, tapAnswer(bot, "c4"), 77);
   check("re-tap of a consumed button is refused", prompts.length === before + 1);
   check("re-tap answers 'expired'", /hết hạn|expired/i.test(answers[answers.length - 1]), answers[answers.length - 1]);
-  await (bot as any).handleChoiceCallback({ id: "c5", data: "ch:zzzz:0" } as any, conv, 77);
+  await (bot as any).handleChoiceCallback({ id: "c5", data: "ch:zzzz:0" } as any, conv, tapAnswer(bot, "c5"), 77);
   check("unknown id answers 'expired'", /hết hạn|expired/i.test(answers[answers.length - 1]), answers[answers.length - 1]);
   const id2 = registry.put(conv, "ses_1", ["a", "b"]);
   st.set(conv, { sessionID: "ses_2" }); // /new — the session changed
-  await (bot as any).handleChoiceCallback({ id: "c6", data: `ch:${id2}:0` } as any, conv, 77);
+  await (bot as any).handleChoiceCallback({ id: "c6", data: `ch:${id2}:0` } as any, conv, tapAnswer(bot, "c6"), 77);
   check("session change answers 'no longer applies'", /không còn áp dụng|no longer applies/i.test(answers[answers.length - 1]), answers[answers.length - 1]);
   check("a stale tap fires no prompt", prompts.length === before + 1);
 }
@@ -171,7 +177,7 @@ const tap = () => auditLines().filter((l) => l.action === "suggest_tap").pop();
   (bot as any).inflight.set(conv, new AbortController());
   const id = registry.put(conv, "ses_1", ["x", "y"]);
   const before = prompts.length;
-  await (bot as any).handleChoiceCallback({ id: "c7", data: `ch:${id}:0` } as any, conv, 77);
+  await (bot as any).handleChoiceCallback({ id: "c7", data: `ch:${id}:0` } as any, conv, tapAnswer(bot, "c7"), 77);
   check("R3.2 busy tap fires no prompt", prompts.length === before);
   check("R3.2 busy tap answers 'running'", /Đang chạy|running/i.test(answers[answers.length - 1]), answers[answers.length - 1]);
   check("R3.2 busy tap sends no message", sent.length === 0, JSON.stringify(sent));
@@ -188,13 +194,13 @@ const tap = () => auditLines().filter((l) => l.action === "suggest_tap").pop();
   (bot as any).orch.managerBusy.add(conv);
   const id = registry.put(conv, "ses_m", ["m1", "m2"]);
   const before = prompts.length;
-  await (bot as any).handleChoiceCallback({ id: "c8", data: `ch:${id}:0` } as any, conv, 88);
+  await (bot as any).handleChoiceCallback({ id: "c8", data: `ch:${id}:0` } as any, conv, tapAnswer(bot, "c8"), 88);
   check("R3.2 busy Manager tap fires no prompt", prompts.length === before);
   check("R3.2 busy Manager tap answers 'running'", /Đang chạy|running/i.test(answers[answers.length - 1]), answers[answers.length - 1]);
   check("R3.2 busy Manager tap keeps the buttons", edits.length === 0);
   (bot as any).orch.managerBusy.delete(conv);
   const after = prompts.length;
-  await (bot as any).handleChoiceCallback({ id: "c9", data: `ch:${id}:0` } as any, conv, 88);
+  await (bot as any).handleChoiceCallback({ id: "c9", data: `ch:${id}:0` } as any, conv, tapAnswer(bot, "c9"), 88);
   await tick();
   check("R3.1 idle Manager tap routes via promptManager with the option text", prompts[after]?.via === "promptManager" && prompts[after]?.text === "m1", JSON.stringify(prompts.slice(after)));
 }

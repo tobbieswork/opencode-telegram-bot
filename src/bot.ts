@@ -8,7 +8,7 @@ import { Telegram, Update, CallbackQuery, Message, MessageGenerationStopped, Mes
 import { OpenCodeCtl, newMessageID, assistantText, ModelInfo, SessionBrief } from "./opencode.js";
 import { StateManager, ChatState, MsgPurpose, MACHINE_STATE_KEY, UserPrefsStore, Lang } from "./state.js";
 import { ConvKey, convKey, chatOf, parseConv } from "./conv.js";
-import { answerExpired, dispatchCallback } from "./callbacks.js";
+import { answerExpired, defineCallback, dispatchCallback, registerCallback } from "./callbacks.js";
 import { Orchestrator, BUSY } from "./orchestrator.js";
 import { closeFinishedTopicsAtStartup, deleteOrphanTopicsAtStartup } from "./orchestrator/topics.js";
 import { ScheduleStore, Scheduler } from "./scheduler.js";
@@ -30,7 +30,7 @@ import {
 } from "./uploads.js";
 import { richMarkdownChunks } from "./rich.js";
 import { redactSecrets } from "./redact.js";
-import { extractTrailingChoices, extractOptionsMarker, choiceKeyboard, registry } from "./choices.js";
+import { extractTrailingChoices, extractOptionsMarker, choiceCallback, choiceKeyboard, registry } from "./choices.js";
 import { scheduleForRegistration, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
 import { isAlreadyResolvedPermissionError } from "./perm.js";
 import {
@@ -49,9 +49,9 @@ import {
   REACTION_CELEBRATE,
   REACTION_FAIL,
 } from "./reactions.js";
-import { continuePrompt, continueButtonLabel, shouldOfferContinue, continueCallbackData, parseContinueData, alreadyOfferedContinue } from "./continue.js";
+import { continuePrompt, continueButtonLabel, shouldOfferContinue, continueCallback, continueCallbackData, parseContinueData, alreadyOfferedContinue } from "./continue.js";
 import { GhPrLike, PrSnapshot, PrState, diffSnapshots, renderEvent, updatePrSnapshot } from "./pr-watch.js";
-import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, SAFE_REBOOT_BIN, rebootTokenFile, buildTokenLine, rebootGoData, isRebootConfirmFresh } from "./uptime.js";
+import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, SAFE_REBOOT_BIN, rebootTokenFile, buildTokenLine, rebootCallback, rebootGoData, isRebootConfirmFresh } from "./uptime.js";
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
 import { DraftState, DraftAction, onTextDelta, onToolStart, isDmConv, EDIT_BUDGET } from "./stream.js";
 import { myCommands } from "./commands.js";
@@ -785,8 +785,8 @@ export class Bot {
     const kb: Keyboard = {
       inline_keyboard: [
         [
-          { text: tr(lang, "🔄 Reboot máy ngay", "🔄 Reboot now"), callback_data: "reboot:ask" },
-          { text: tr(lang, "🔕 Nhắc lại sau", "🔕 Remind me later"), callback_data: "reboot:snooze" },
+          { text: tr(lang, "🔄 Reboot máy ngay", "🔄 Reboot now"), callback_data: rebootCallback.encode({ op: "ask" }) },
+          { text: tr(lang, "🔕 Nhắc lại sau", "🔕 Remind me later"), callback_data: rebootCallback.encode({ op: "snooze" }) },
         ],
       ],
     };
@@ -804,7 +804,7 @@ export class Bot {
       inline_keyboard: [
         [
           { text: tr(lang, "✅ Xác nhận reboot", "✅ Confirm reboot"), callback_data: rebootGoData(Date.now()) },
-          { text: tr(lang, "❌ Huỷ", "❌ Cancel"), callback_data: "reboot:cancel" },
+          { text: tr(lang, "❌ Huỷ", "❌ Cancel"), callback_data: rebootCallback.encode({ op: "cancel" }) },
         ],
       ],
     };
@@ -828,28 +828,28 @@ export class Bot {
    *   reboot:cancel  → abort
    *   reboot:snooze  (from the uptime reminder)→ re-arm the snooze interval
    */
-  private async handleRebootCallback(cb: CallbackQuery, conv: ConvKey, messageId: number | undefined): Promise<void> {
+  public async handleRebootCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
     const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     const action = (cb.data ?? "").slice("reboot:".length).split(":")[0];
     if (action === "snooze") {
       this.st.set(MACHINE_STATE_KEY, { lastRebootReminderMs: Date.now() });
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "OK, sẽ nhắc lại sau.", "OK, will remind you later."));
+      answer(tr(lang, "OK, sẽ nhắc lại sau.", "OK, will remind you later."));
       if (messageId !== undefined) await this.tg.editMessageReplyMarkup(conv, messageId, {}).catch(() => {});
       return;
     }
     if (action === "ask") {
-      await this.tg.answerCallbackQuery(cb.id);
+      answer();
       if (messageId !== undefined) await this.tg.editMessageReplyMarkup(conv, messageId, {}).catch(() => {});
       await this.sendRebootConfirm(conv);
       return;
     }
     if (action === "cancel") {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Đã huỷ.", "Cancelled."));
+      answer(tr(lang, "Đã huỷ.", "Cancelled."));
       if (messageId !== undefined) await this.tg.editMessageReplyMarkup(conv, messageId, {}).catch(() => {});
       return;
     }
     if (action === "go") {
-      await this.tg.answerCallbackQuery(cb.id);
+      answer();
       if (messageId !== undefined) await this.tg.editMessageReplyMarkup(conv, messageId, {}).catch(() => {});
       if (!isRebootConfirmFresh(cb.data, Date.now())) {
         await this.tg.sendMessage(conv, tr(lang, "⌛ Xác nhận reboot đã hết hạn — gửi /reboot để xác nhận lại.", "⌛ The reboot confirmation expired — send /reboot to confirm again.")).catch(() => {});
@@ -887,7 +887,7 @@ export class Bot {
       }, this.cfg.rebootDelayMs).unref?.();
       return;
     }
-    await this.tg.answerCallbackQuery(cb.id);
+    answer();
   }
 
   /**
@@ -2893,7 +2893,7 @@ export class Bot {
     if ([...this.questionForms.values()].some((q) => q.conv === conv)) return;
     const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
     const kb: Keyboard = {
-      inline_keyboard: [[{ text: tr(lang, "🔨 Sang build & thực thi", "🔨 Switch to build & execute"), callback_data: "pb:go" }]],
+      inline_keyboard: [[{ text: tr(lang, "🔨 Sang build & thực thi", "🔨 Switch to build & execute"), callback_data: pbCallback.encode({ op: "go" }) }]],
     };
     await this.tg
       .sendMessage(conv, tr(lang, "📐 <b>Kế hoạch đã sẵn sàng</b> — bấm để chuyển sang build và thực thi.", "📐 <b>Plan is ready</b> — tap to switch to build and execute."), { reply_markup: kb })
@@ -3934,7 +3934,7 @@ export class Bot {
     // (allow-list, no-conv) are the single C2.3 spot.
     if (await dispatchCallback({ bot: this, conv, messageId, lang }, cb)) return;
     if (data.startsWith("ch:")) {
-      await this.handleChoiceCallback(cb, conv, messageId);
+      await this.handleChoiceCallback(cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
       return;
     }
     if (data.startsWith("w:")) {
@@ -3964,11 +3964,11 @@ export class Bot {
       return;
     }
     if (data.startsWith("pb:")) {
-      await this.handlePlanToBuildCallback(cb, conv);
+      await this.handlePlanToBuildCallback(cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t));
       return;
     }
     if (data.startsWith("cont:")) {
-      await this.handleContinueCallback(cb, conv, messageId);
+      await this.handleContinueCallback(cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
       return;
     }
     if (data.startsWith(NOTE_CB_PREFIX)) {
@@ -3980,7 +3980,7 @@ export class Bot {
       return;
     }
     if (data.startsWith("reboot:")) {
-      await this.handleRebootCallback(cb, conv, messageId);
+      await this.handleRebootCallback(cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
       return;
     }
     if (data.startsWith("rot:")) {
@@ -4435,19 +4435,19 @@ export class Bot {
   }
 
   /** Handle a tap on the plan-to-build button (data = `pb:go`). */
-  private async handlePlanToBuildCallback(cb: CallbackQuery, conv: ConvKey): Promise<void> {
+  public async handlePlanToBuildCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void): Promise<void> {
     const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     const state = this.st.get(conv);
     if (this.inflight.has(conv)) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Đang chạy task — hẵng thử lại sau.", "A task is running — try again later."));
+      answer(tr(lang, "Đang chạy task — hẵng thử lại sau.", "A task is running — try again later."));
       return;
     }
     if (!state.sessionID) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Chưa có session — hãy gửi một tin nhắn trước.", "No session yet — send a message first."));
+      answer(tr(lang, "Chưa có session — hãy gửi một tin nhắn trước.", "No session yet — send a message first."));
       return;
     }
     await this.applyMode(conv, state, "build");
-    await this.tg.answerCallbackQuery(cb.id, "Mode → build");
+    answer("Mode → build");
     await this.tg.sendMessage(conv, tr(lang, "Đã chuyển sang <b>build</b> — bắt đầu thực thi kế hoạch.", "Switched to <b>build</b> — starting to execute the plan.")).catch(() => {});
     const prompt = tr(lang,
       "Đã chuyển sang chế độ build. Hãy thực thi kế hoạch vừa được lập trong cuộc hội thoại này: bắt đầu từ bước 1, làm tuần tự, và dừng lại để hỏi nếu thiếu thông tin quan trọng. Nếu không có kế hoạch nào chưa thực thi, chỉ cần xác nhận đã sẵn sàng.",
@@ -4459,7 +4459,7 @@ export class Bot {
   }
 
   /** Handle a tap on the "⏯ Chạy tiếp" button (data = `cont:<sessionID>`). */
-  private async handleContinueCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+  public async handleContinueCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
     const target = parseContinueData(cb.data);
     // The button is one-shot: drop it immediately so a re-tap (or a stale button
     // left over after a /new) can never fire a second continue.
@@ -4472,14 +4472,14 @@ export class Bot {
     // Reject malformed data, or a conv whose session is no longer the one that
     // failed (a /new or /use replaced it) — continuing would hit the wrong session.
     if (!target || !state?.sessionID || state.sessionID !== target) {
-      await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Nút này không còn áp dụng cho phiên hiện tại.", "This button no longer applies to the current session."));
+      answer(tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Nút này không còn áp dụng cho phiên hiện tại.", "This button no longer applies to the current session."));
       return;
     }
     if (this.inflight.has(conv)) {
-      await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Đang chạy task — hẵng thử lại sau.", "A task is running — try again in a moment."));
+      answer(tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Đang chạy task — hẵng thử lại sau.", "A task is running — try again in a moment."));
       return;
     }
-    await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "⏯ Đang chạy tiếp…", "⏯ Continuing…"));
+    answer(tr(this.userPrefs.getLang(cb.from?.id ?? ""), "⏯ Đang chạy tiếp…", "⏯ Continuing…"));
     this.startTyping(conv);
     const ac = new AbortController();
     this.inflight.set(conv, ac);
@@ -4497,12 +4497,12 @@ export class Bot {
    * choice list). The keyboard is one-shot: it is dropped immediately so a
    * re-tap or a stale button (e.g. after a /new) can never fire a second turn.
    */
-  private async handleChoiceCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+  public async handleChoiceCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
     const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     // R3.3: the inert "chosen" button (replaces the keyboard after an accepted
     // tap) — re-tapping it does nothing; it only shows what was sent.
     if ((cb.data ?? "") === "ch:inert") {
-      await this.tg.answerCallbackQuery(cb.id);
+      answer();
       return;
     }
     const parts = (cb.data ?? "").split(":");
@@ -4513,7 +4513,7 @@ export class Bot {
     // R3.4: unknown id (the registry is in-memory — it outlived a restart) or
     // TTL-expired → "expired".
     if (!rec) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Nút này đã hết hạn.", "This button has expired."));
+      answer(tr(lang, "Nút này đã hết hạn.", "This button has expired."));
       return;
     }
     const choice = rec.options[idx];
@@ -4521,14 +4521,14 @@ export class Bot {
     // changed (a /new / /use / Manager rotation) → "no longer applies".
     if (!rec.sessionID || choice === undefined || !state || (state.sessionID && state.sessionID !== rec.sessionID)) {
       registry.delete(id);
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Nút này không còn áp dụng.", "This button is no longer applicable."));
+      answer(tr(lang, "Nút này không còn áp dụng.", "This button is no longer applicable."));
       return;
     }
     // R3.2: a turn is running → refuse, KEEP the buttons, send nothing. (This
     // changes today's behaviour, where a tap silently steered into the running
     // turn; R5.1 extends the refusal to the existing lettered-list buttons.)
     if (state.manager ? this.orch.managerInflight : this.inflight.has(conv)) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Đang chạy task — hẵng thử lại sau.", "A task is running — try again later."));
+      answer(tr(lang, "Đang chạy task — hẵng thử lại sau.", "A task is running — try again later."));
       return;
     }
     // Consume BEFORE any await so a double-tap can never double-fire (R3.4).
@@ -4546,15 +4546,15 @@ export class Bot {
       : this.runPrompt(conv, choice, state, messageId, lang);
     void turn.catch(async (e) => {
       warn("choice prompt:", (e as Error)?.message);
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "❌ Không thể xử lý — thử nhập lại.", "❌ Couldn't process that — try typing it again.")).catch(() => {});
+      answer(tr(lang, "❌ Không thể xử lý — thử nhập lại.", "❌ Couldn't process that — try typing it again."));
     });
-    await this.tg.answerCallbackQuery(cb.id);
+    answer();
     // R3.3: replace the keyboard with a single inert button showing the chosen
     // text + a check mark, so the chat shows what was sent.
     if (messageId) {
       const label = "✓ " + (choice.length > 60 ? choice.slice(0, 60) : choice);
       await this.tg
-        .editMessageReplyMarkup(conv, messageId, { reply_markup: { inline_keyboard: [[{ text: label, callback_data: "ch:inert" }]] } })
+        .editMessageReplyMarkup(conv, messageId, { reply_markup: { inline_keyboard: [[{ text: label, callback_data: choiceCallback.encode({ kind: "inert" }) }]] } })
         .catch(() => {});
     }
   }
@@ -5260,3 +5260,45 @@ export class Bot {
     }
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Callback-registry (docs/sdd/callback-registry.md) — T3 pilot migration.
+//
+// The four pilot prefixes (pb, ch, cont, reboot) are registered here at module
+// load, and bot.ts is the ONLY place that imports this. The defs live with
+// their producers (the pb def here; choiceCallback in choices.ts;
+// continueCallback in continue.ts; rebootCallback in uptime.ts). The handlers
+// take an `answer` fn injected by the dispatcher's adapter, so every tap —
+// registry path or legacy chain — is answered exactly once (C2.1) and a decode
+// failure gets the C2.2 "expired" toast with no fall-through (C3.2).
+//
+// The `ch:`/`cont:`/`reboot:` branches of the legacy chain below are RETAINED
+// for this pilot: they cover (a) `ch:` data whose id no longer matches the
+// 4-char shape — which the new def cannot even decode — and (b) any data the
+// dispatcher's decode rejects. Their handlers are the same functions the
+// registry calls.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The `pb:` callback def (docs/sdd/callback-registry.md — T3 pilot migration).
+ * Wire form: the fixed "pb:go" — the only value this button has ever carried,
+ * so decode is strict (a foreign value is malformed, not "some other op").
+ */
+export const pbCallback = defineCallback<{ op: "go" }>({
+  prefix: "pb",
+  encode: (a) => `pb:${a.op}`,
+  decode: (rest) => (rest === "go" ? { op: "go" } : null),
+});
+
+/**
+ * Register the four pilot prefixes with their handlers (T3). Called once at
+ * module load; scripts re-call it after `_clearCallbacksForTest()`.
+ */
+export function registerBotCallbacks(): void {
+  registerCallback(pbCallback, (ctx, cb) => ctx.bot.handlePlanToBuildCallback(cb, ctx.conv, ctx.answer), "bot.ts (plan-to-build)");
+  registerCallback(choiceCallback, (ctx, cb) => ctx.bot.handleChoiceCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "choices.ts (choice buttons)");
+  registerCallback(continueCallback, (ctx, cb) => ctx.bot.handleContinueCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "continue.ts (continue button)");
+  registerCallback(rebootCallback, (ctx, cb) => ctx.bot.handleRebootCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "uptime.ts (reboot flow)");
+}
+
+registerBotCallbacks();
