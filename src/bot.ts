@@ -8,6 +8,7 @@ import { Telegram, Update, CallbackQuery, Message, MessageGenerationStopped, Mes
 import { OpenCodeCtl, newMessageID, assistantText, ModelInfo, SessionBrief } from "./opencode.js";
 import { StateManager, ChatState, MsgPurpose, MACHINE_STATE_KEY, UserPrefsStore, Lang } from "./state.js";
 import { ConvKey, convKey, chatOf, parseConv } from "./conv.js";
+import { answerExpired, dispatchCallback } from "./callbacks.js";
 import { Orchestrator, BUSY } from "./orchestrator.js";
 import { closeFinishedTopicsAtStartup, deleteOrphanTopicsAtStartup } from "./orchestrator/topics.js";
 import { ScheduleStore, Scheduler } from "./scheduler.js";
@@ -3913,10 +3914,11 @@ export class Bot {
     };
   }
 
-  /** Handle a button tap on the browser message. */
+  /** Handle any inline-button tap: the typed registry first (C2.1), then the legacy chain (C3.2). */
   private async handleCallback(cb: CallbackQuery): Promise<void> {
+    const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     if (!this.allowed(cb.from?.id)) {
-      await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "⛔ Không được phép", "⛔ Not allowed"));
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, "⛔ Không được phép", "⛔ Not allowed"));
       return;
     }
     const conv = cb.message ? this.convOf(cb.message) : undefined;
@@ -3926,6 +3928,11 @@ export class Bot {
       await this.tg.answerCallbackQuery(cb.id);
       return;
     }
+    // Typed callback registry first (C2.1/C3.2): a registered prefix is
+    // decoded and answered by src/callbacks.ts; everything else falls
+    // through to the legacy startsWith chain below. The two gates above
+    // (allow-list, no-conv) are the single C2.3 spot.
+    if (await dispatchCallback({ bot: this, conv, messageId, lang }, cb)) return;
     if (data.startsWith("ch:")) {
       await this.handleChoiceCallback(cb, conv, messageId);
       return;
@@ -4022,7 +4029,9 @@ export class Bot {
       return;
     }
     if (!data.startsWith("bs:")) {
-      await this.tg.answerCallbackQuery(cb.id);
+      // C2.2: matched neither the registry nor the legacy chain — a stale
+      // or mistyped button. Toast it (warned once) instead of vanishing.
+      await answerExpired(this, cb, lang, data);
       return;
     }
     const b = this.browsers.get(conv);
