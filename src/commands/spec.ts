@@ -803,15 +803,19 @@ async function specAuto(
   uid: number | undefined,
   name: string,
   n: number,
-): Promise<void> {
+): Promise<AcceptResult> {
   const found = specRunWorker(bot, conv, name);
   const w = found?.[1].worker;
   const sr = w?.specRun;
-  if (!found || !w || !sr) return noRunMessage(bot, conv, lang, name);
+  if (!found || !w || !sr) {
+    void noRunMessage(bot, conv, lang, name);
+    return { ok: false };
+  }
   if (!sr.auto) bot.st.set(found[0], { worker: { ...w, specRun: { ...sr, auto: true } } });
   const dir = found[1].directory;
   const res = await specAccept(bot, conv, lang, uid, name, n);
   if (res.ok && dir) await autoContinueFrom(bot, conv, lang, uid, name, dir);
+  return res;
 }
 
 /**
@@ -1469,6 +1473,8 @@ export async function managerSpecAuto(bot: Bot, conv: ConvKey, name: string, tas
   if (!bot.st.findWorker(chatOf(conv), `spec-${name}`)) throw new Error(`no run of spec "${name}" found`);
   const md = await managerSpecFile(bot, conv, name);
   const { n } = taskNumberFromRef(md, name, taskRef);
-  await specAuto(bot, conv, managerLang(bot, uid), uid, name, n);
-  return `Auto started for "${name}" task ${n}: it accepts, then the next task runs with auto-continue armed (it stops at a blocked or failing task).`;
+  const r = await specAuto(bot, conv, managerLang(bot, uid), uid, name, n);
+  return r.ok
+    ? `Auto started for "${name}" task ${n}: it accepts, then the next task runs with auto-continue armed (it stops at a blocked or failing task).`
+    : `Accept of "${name}" task ${n} was refused — the reason is posted in the conversation (nothing auto-ran).`;
 }

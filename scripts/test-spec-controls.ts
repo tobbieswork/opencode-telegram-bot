@@ -669,6 +669,18 @@ try {
     let e3 = "";
     try { await managerSpecAuto(r5.bot as any, CONV, "gamma", "S2"); } catch (e) { e3 = (e as Error).message; }
     check("m(auto): no run → clear error", e3 === 'no run of spec "gamma" found', e3);
+
+    // auto: refused accept (errored check) → reports the refusal, nothing marked
+    const fx3 = await newRunFixture();
+    const r6 = mkBot("en", ERROR_ITEMS);
+    r6.st.set(CONV, { directory: fx3.repo });
+    seedWorker(r6.st, fx3.wt.root, "done");
+    const a3 = await (r6.orch as any).toolsFor(CONV).find((t: any) => t.name === "spec_auto").run({ spec: "gamma", task: "S2" });
+    check("m(auto): refused accept → says refused (not 'started')", a3.startsWith("Accept of"), a3);
+    const md3 = readFileSync(join(fx3.wt.root, "docs", "sdd", "gamma.md"), "utf8");
+    const s2line3 = md3.split("\n").find((l) => l.includes("**S2 Second.**")) ?? "";
+    check("m(auto): refusal leaves the marker untouched", s2line3.includes("[ ]"), s2line3);
+    check("m(auto): refusal clears nothing / no auto flag persisted", (r6.st.peek(WORKER_CONV)?.worker as any)?.specRun?.auto === true, JSON.stringify((r6.st.peek(WORKER_CONV)?.worker as any)?.specRun));
   }
 } finally {
   rmSync(tmp, { recursive: true, force: true });
