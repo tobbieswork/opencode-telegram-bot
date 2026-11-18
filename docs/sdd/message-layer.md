@@ -191,7 +191,7 @@ Plus the `working_indicator` string (`i18n.ts:162`) behind the
 `bot.ts:3841` (file browser, grid + paging), `orchestrator.ts:511` (kill).
 
 Recurring sub-shapes inside pickers:
-- **Close row** `❌ Đóng` / `❌ Close` — 11 sites → **keep `backCloseRow`**:
+- **Close row** `❌ Đóng` / `❌ Close` — 10 sites → **keep `backCloseRow`**:
   `commands/agents.ts:60`, `bot.ts:3741`, `bot.ts:3850`, `bot.ts:3861`,
   `bot.ts:3894`, `bot.ts:4267`, `bot.ts:4351`, `bot.ts:4727`,
   `orchestrator.ts:518`, `watch.ts:433`.
@@ -199,7 +199,7 @@ Recurring sub-shapes inside pickers:
   `commands/agents.ts:63`, `bot.ts:3745`, `bot.ts:4269`, `bot.ts:4730`,
   `orchestrator.ts:521`.
 
-### 6.8 Single button (one button, or one button per row) — 12 uses → **keep `singleButton`**
+### 6.8 Single button (one button, or one button per row) — 14 uses (7 + 7) → **keep `singleButton`**
 
 Exactly-one-button keyboards: `bot.ts:1691` (👁 watch on the working line),
 `bot.ts:2888` (🔨 plan→build), `bot.ts:3136` (⏯ continue), `bot.ts:4541`
@@ -226,6 +226,6 @@ The `<pre><code>` in `format.ts:215,262` is inside `mdToHtmlChunks` itself
 | `titledList` | bold title + lines | 6 | keep |
 | `confirmKeyboard` | action + cancel | 7 | keep |
 | `pickerKeyboard` | options + paging + close | 7 | keep (renamed from `choiceKeyboard` — name clash with `src/choices.ts:223`) |
-| `backCloseRow` | `❌ Đóng` / `❌ Close` row | 11 | keep |
-| `singleButton` | one button / one per row | 12 | keep |
+| `backCloseRow` | `❌ Đóng` / `❌ Close` row | 10 | keep (2026-11-18 recount: prose said 11, the list of sites — and the code — has 10) |
+| `singleButton` | one button / one per row | 14 | keep (2026-11-18 recount: prose said 12, the list of sites — and the code — has 14) |
 | `codeBlock` | `<pre>` block | 1 | **drop** |
