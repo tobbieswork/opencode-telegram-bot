@@ -105,12 +105,12 @@ Cost: about 130 tokens in the session's system context.
 
 ## 5. Tasks (each ends with a human checkpoint)
 
-0. **R0 Spike.** `scripts/spike-suggest.ts` (manual, not in `test:unit`): run about six representative prompts (a design question, a code change, a trivial question, a greeting, an error, a Manager-style request) against the live OpenCode service with the instruction attached, and record for each: marker present, valid, option lengths, relevance noted by hand. Costs a handful of real model prompts. Write the result into "Findings" here. Also confirm that a session instruction applies to Manager sessions. *Checkpoint: decide the default and tune the instruction text.*
-1. **R1 Parser** (R1). `extractOptionsMarker` with tests: valid forms, 2 and 4 options, limits, fences, marker not last, malformed, over-long option, precedence over lettered lists. *Checkpoint: review the cases.*
-2. **R2 Config and instruction** (R2, R5.1, R5.3). `src/suggest.ts`, config, README, `.env.example`, tests for apply, re-apply, remove and idempotence. *Checkpoint: review the final instruction text.*
-3. **R3 Tap routing** (R3, R4). Rewire `handleChoiceCallback`; busy refusal; chosen-button state; precedence over rule buttons; extend `test-multi` and `test-choices`. *Checkpoint: tap each kind of button from the phone, including while a turn runs.*
-4. **R4 Audit** (R5.2). The three events and an extension of `scripts/nextstep-tap-rate.ts` to report tap rate and compliance. *Checkpoint: read a sample report.*
-5. **R5 End-to-end.** A soft check in `npm run smoke` with the setting on: it cannot force the model to comply, so it reports compliance and fails only if a valid marker was received but not rendered. Smoke runs last, as in `AGENTS.md`.
+0. [x] (f6d41bb) **R0 Spike.** `scripts/spike-suggest.ts` (manual, not in `test:unit`): run about six representative prompts (a design question, a code change, a trivial question, a greeting, an error, a Manager-style request) against the live OpenCode service with the instruction attached, and record for each: marker present, valid, option lengths, relevance noted by hand. Costs a handful of real model prompts. Write the result into "Findings" here. Also confirm that a session instruction applies to Manager sessions. *Checkpoint: decide the default and tune the instruction text.*
+1. [x] (00cc030) **R1 Parser** (R1). `extractOptionsMarker` with tests: valid forms, 2 and 4 options, limits, fences, marker not last, malformed, over-long option, precedence over lettered lists. *Checkpoint: review the cases.*
+2. [x] (5d8a950) **R2 Config and instruction** (R2, R5.1, R5.3). `src/suggest.ts`, config, README, `.env.example`, tests for apply, re-apply, remove and idempotence. *Checkpoint: review the final instruction text.*
+3. [x] (b71524c) **R3 Tap routing** (R3, R4). Rewire `handleChoiceCallback`; busy refusal; chosen-button state; precedence over rule buttons; extend `test-multi` and `test-choices`. *Checkpoint: tap each kind of button from the phone, including while a turn runs.*
+4. [x] (f662f21) **R4 Audit** (R5.2). The three events and an extension of `scripts/nextstep-tap-rate.ts` to report tap rate and compliance. *Checkpoint: read a sample report.*
+5. [x] (b51df3c) **R5 End-to-end.** A soft check in `npm run smoke` with the setting on: it cannot force the model to comply, so it reports compliance and fails only if a valid marker was received but not rendered. Smoke runs last, as in `AGENTS.md`.
 
 Verification order for every task: `npm run typecheck` and `npm run test:unit` first, `npm run smoke` once at the end.
 

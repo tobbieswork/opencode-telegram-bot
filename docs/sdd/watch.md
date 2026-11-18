@@ -112,12 +112,12 @@ default (`OPENCODE_TG_STREAM`). Neither helps in three cases:
 
 ## 5. Tasks (each ends with a human checkpoint)
 
-0. **W0 Read-only check.** Without any model call, confirm: which fields the session events carry (session id, text part, tool name), whether events arrive for a turn driven from outside the bot, and that `deleteMessage` works on a message that has an inline keyboard. Write the result into a "Findings" section here. *Checkpoint: confirm the design holds.*
-1. **W1 Core** (W1.3, W1.4, W2.1 to W2.4, W3.1). `src/watch.ts` with `scripts/test-watch.ts`: rendering and length limit, escaping, change detection, throttle, backoff, final states. *Checkpoint: review a sample card in both languages.*
-2. **W2 Command and config** (W1.1, W1.2, W1.5, W1.6, W6.1, W6.4, W6.7, W6.8). `/watch`, config with the derived `watchActive`, README, `.env.example`, command catalog and golden set; config test for all four on/off combinations of `OPENCODE_TG_WATCH` and `OPENCODE_TG_STREAM`. *Checkpoint: review the wording of the "inactive" replies.*
-3. **W3 Live updates** (W2, W3, W5). Event hooks, edit loop, fallback poll, idle and time limits, automatic stops. *Checkpoint: watch a real turn from the phone, in a DM and in a topic.*
-4. **W4 Buttons** (W4). Close, Stop task, Watch again, session binding, restart behaviour. *Checkpoint: tap each one during a running turn.*
-5. **W5 `/history` button and audit** (W6.2, W6.3, W6.5). The 🔴 Live button and the audit events. *Checkpoint: read a sample audit log.*
+0. [x] (3e3548b) **W0 Read-only check.** Without any model call, confirm: which fields the session events carry (session id, text part, tool name), whether events arrive for a turn driven from outside the bot, and that `deleteMessage` works on a message that has an inline keyboard. Write the result into a "Findings" section here. *Checkpoint: confirm the design holds.*
+1. [x] (3e3548b) **W1 Core** (W1.3, W1.4, W2.1 to W2.4, W3.1). `src/watch.ts` with `scripts/test-watch.ts`: rendering and length limit, escaping, change detection, throttle, backoff, final states. *Checkpoint: review a sample card in both languages.*
+2. [x] (a68af4b) **W2 Command and config** (W1.1, W1.2, W1.5, W1.6, W6.1, W6.4, W6.7, W6.8). `/watch`, config with the derived `watchActive`, README, `.env.example`, command catalog and golden set; config test for all four on/off combinations of `OPENCODE_TG_WATCH` and `OPENCODE_TG_STREAM`. *Checkpoint: review the wording of the "inactive" replies.*
+3. [x] (e82cc12) **W3 Live updates** (W2, W3, W5). Event hooks, edit loop, fallback poll, idle and time limits, automatic stops. *Checkpoint: watch a real turn from the phone, in a DM and in a topic.*
+4. [x] (ca9de90) **W4 Buttons** (W4). Close, Stop task, Watch again, session binding, restart behaviour. *Checkpoint: tap each one during a running turn.*
+5. [x] (e82cc12) **W5 `/history` button and audit** (W6.2, W6.3, W6.5). The 🔴 Live button and the audit events. *Checkpoint: read a sample audit log.*
 6. **W6 End-to-end.** One scenario in `npm run smoke`: start `/watch` during a turn, see the card change, see it freeze with the outcome. Smoke runs last, as in `AGENTS.md`; restart the service afterwards.
 
 Verification order for every task: `npm run typecheck` and `npm run test:unit` first, `npm run smoke` once at the end.

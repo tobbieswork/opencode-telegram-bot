@@ -93,14 +93,14 @@ We borrow the behaviour, not any implementation.
 
 ## 4. Tasks (each ends with a human checkpoint)
 
-0. **Q0 Spike.** Add `scripts/spike-busy-prompt.ts` (manual, not in `test:unit`). Against the live OpenCode service, in a throwaway session and directory, start a short slow turn, send a second prompt while it runs, and record: error, queued after, or folded in. Also record whether `interrupt` keeps the partial reply. Write the result into a "Findings" section here. Costs a few real LLM prompts. *Checkpoint: choose S-native or S-pivot.*
-1. **Q1 Queue store** (Q1.2, Q1.6). `src/queue.ts` with unit tests: order, cap, expiry, clear, per-conv isolation. *Checkpoint: review the API.*
-2. **Q2 Busy UI** (Q1.1, Q1.7, Q1.10, Q3.1, Q3.4, Q3.5). `src/busy.ts`, config, README and `.env.example`, callbacks. In `off` mode behaviour must be identical to today. *Checkpoint: try the buttons in Telegram.*
-3. **Q3 Drain** (Q1.3, Q1.4, Q1.5, Q1.8, Q1.9 for plain and worker). Hook into `runPromptTask` and `stopCurrent`, shutdown notice. Extend the drain tests. *Checkpoint: review failure and stop behaviour.*
-4. **Q4 Manager drain** (Q1.9, Q2.5). Outcome through `dropManagerTurn`; test in `test:multi`. *Checkpoint: review with a running worker.*
-5. **Q5 Steer** (Q2.x). Implement the mechanism chosen in Q0, with the fallback to Queue. *Checkpoint: steer a real turn from the phone.*
-6. **Q6 `/queue` and audit** (Q3.2, Q3.3). Command, golden set, README row, audit events. *Checkpoint: read a sample audit log.*
-7. **Q7 End-to-end.** One extra scenario in `npm run smoke`: queue a message during a turn and see it run after. Smoke is the last step, as in `AGENTS.md`; restart the service afterwards.
+0. [x] (9d2baa2) **Q0 Spike.** Add `scripts/spike-busy-prompt.ts` (manual, not in `test:unit`). Against the live OpenCode service, in a throwaway session and directory, start a short slow turn, send a second prompt while it runs, and record: error, queued after, or folded in. Also record whether `interrupt` keeps the partial reply. Write the result into a "Findings" section here. Costs a few real LLM prompts. *Checkpoint: choose S-native or S-pivot.*
+1. [x] (9d2baa2) **Q1 Queue store** (Q1.2, Q1.6). `src/queue.ts` with unit tests: order, cap, expiry, clear, per-conv isolation. *Checkpoint: review the API.*
+2. [x] (9d2baa2) **Q2 Busy UI** (Q1.1, Q1.7, Q1.10, Q3.1, Q3.4, Q3.5). `src/busy.ts`, config, README and `.env.example`, callbacks. In `off` mode behaviour must be identical to today. *Checkpoint: try the buttons in Telegram.*
+3. [x] (9d2baa2) **Q3 Drain** (Q1.3, Q1.4, Q1.5, Q1.8, Q1.9 for plain and worker). Hook into `runPromptTask` and `stopCurrent`, shutdown notice. Extend the drain tests. *Checkpoint: review failure and stop behaviour.*
+4. [x] (9d2baa2) **Q4 Manager drain** (Q1.9, Q2.5). Outcome through `dropManagerTurn`; test in `test:multi`. *Checkpoint: review with a running worker.*
+5. [x] (9d2baa2) **Q5 Steer** (Q2.x). Implement the mechanism chosen in Q0, with the fallback to Queue. *Checkpoint: steer a real turn from the phone.*
+6. [x] (9d2baa2) **Q6 `/queue` and audit** (Q3.2, Q3.3). Command, golden set, README row, audit events. *Checkpoint: read a sample audit log.*
+7. [x] (9d2baa2) **Q7 End-to-end.** One extra scenario in `npm run smoke`: queue a message during a turn and see it run after. Smoke is the last step, as in `AGENTS.md`; restart the service afterwards.
 
 Verification order for every task: `npm run typecheck` and `npm run test:unit` first, `npm run smoke` once at the end.
 
