@@ -71,8 +71,8 @@ export function dispatchCallback(ctx, cb): Promise<boolean>; // false = not in r
 
 ## 4. Tasks (each ends with a human checkpoint)
 
-1. [x] **T1 Inventory.** Read-only: list every `callback_data` producer and every consumer, with prefix, arguments and max length. Add the list to this spec. Flag any that can exceed 64 bytes. *Checkpoint: review the inventory.*
-2. [x] **T2 Registry core** (C1, C2.1-C2.4). `src/callbacks.ts`, `scripts/test-callbacks.ts` added to `test:unit`. Dispatcher tries registry, then old chain (C3.2). No prefix migrated yet. *Checkpoint: review the API.*
+1. [x] (896abb3) **T1 Inventory.** Read-only: list every `callback_data` producer and every consumer, with prefix, arguments and max length. Add the list to this spec. Flag any that can exceed 64 bytes. *Checkpoint: review the inventory.*
+2. [x] (55acd8d) **T2 Registry core** (C1, C2.1-C2.4). `src/callbacks.ts`, `scripts/test-callbacks.ts` added to `test:unit`. Dispatcher tries registry, then old chain (C3.2). No prefix migrated yet. *Checkpoint: review the API.*
 3. [ ] **T3 Pilot migration:** `pb`, `ch`, `cont`, `reboot` with round-trip tests including a captured real callback string each. *Checkpoint: try the buttons in Telegram.*
 4. [ ] **T4 Migrate the rest** in groups of 3-4 prefixes (`mode`, `agent`, `variant`, `mdl`; then `perm`, `rot`, `kill`, `prune`; then `nw`, `use`, `fq`, `cmd`, `sch`, `wt`, `ap`, `q`). *Checkpoint after each group.*
 5. [ ] **T5 Migrate `bs:`** (the browser menu and its sub-actions). *Checkpoint: browse folders and pick a session in Telegram.*
