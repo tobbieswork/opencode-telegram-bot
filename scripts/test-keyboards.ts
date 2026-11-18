@@ -123,5 +123,19 @@ function check(name: string, cond: boolean, detail?: string): void {
   check("golden: agent picker en, no current", JSON.stringify(helper("en", undefined)) === JSON.stringify(legacy("en", undefined)));
 }
 
+// ── T5 golden bytes (worktree-delete confirm, orchestrator.ts; 🗑 delete, purge.ts) ──
+{
+  const confirmGolden = confirmKeyboard("vi",
+    { text: "🗑 Xoá thật", data: "wt:alice:rmok" },
+    { text: "Thôi", data: "wt:alice:keep" });
+  check("golden: worktree-delete confirm = legacy bytes",
+    JSON.stringify(confirmGolden) === JSON.stringify({ inline_keyboard: [[
+      { text: "🗑 Xoá thật", callback_data: "wt:alice:rmok" },
+      { text: "Thôi", callback_data: "wt:alice:keep" },
+    ]] }));
+  check("golden: purge 🗑 delete single button = legacy bytes",
+    JSON.stringify(singleButton({ text: "🗑 Xoá", data: "prune:abcd" })) === JSON.stringify({ inline_keyboard: [[{ text: "🗑 Xoá", callback_data: "prune:abcd" }]] }));
+}
+
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

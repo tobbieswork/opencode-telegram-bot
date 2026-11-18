@@ -107,5 +107,15 @@ function check(name: string, cond: boolean, detail?: string): void {
   check("golden: warnLine = legacy cannot-identify-user bytes", warnLine("vi", "Cannot identify user.") === "⚠️ Cannot identify user.");
 }
 
+// ── T5 golden bytes (orchestrator.ts, byte-identical) ──────────────────────
+{
+  check("golden: errorLine = legacy spawn-error bytes (plain msg auto-escaped)", errorLine("vi", "spawn <w> failed") === "❌ spawn &lt;w&gt; failed");
+  check("golden: errorLine = legacy manager-on-error bytes (raw tr)", errorLine("vi", raw("Không bật được Manager: boom")) === "❌ Không bật được Manager: boom");
+  check("golden: okLine = legacy done-review bytes", okLine("vi", raw("Xong — xem lại thay đổi của worker:")) === "✅ Xong — xem lại thay đổi của worker:");
+  check("golden: okLine = legacy approved+auto bytes (multi-line)", okLine("vi", raw("Đã duyệt: tạo worker a.\n⚡ Auto đã bật — các lần sau không hỏi nữa (/auto off để tắt).")) === "✅ Đã duyệt: tạo worker a.\n⚡ Auto đã bật — các lần sau không hỏi nữa (/auto off để tắt).");
+  check("golden: warnLine = legacy shared-worktree bytes", warnLine("vi", raw("Worktree đang dùng chung với worker b — xoá/merge ở đây sẽ làm mất thư mục của worker đó. Hãy thao tác từ topic của nó.")) === "⚠️ Worktree đang dùng chung với worker b — xoá/merge ở đây sẽ làm mất thư mục của worker đó. Hãy thao tác từ topic của nó.");
+  check("golden: warnLine = legacy worktree-delete-ask bytes (raw <b>)", warnLine("vi", raw("Xoá worktree sẽ <b>commit các thay đổi chưa commit vào nhánh</b> của worker rồi xoá thư mục worktree (nhánh chưa merge vẫn được giữ — không mất gì). Chắc chắn?")) === "⚠️ Xoá worktree sẽ <b>commit các thay đổi chưa commit vào nhánh</b> của worker rồi xoá thư mục worktree (nhánh chưa merge vẫn được giữ — không mất gì). Chắc chắn?");
+}
+
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
