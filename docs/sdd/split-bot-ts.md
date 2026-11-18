@@ -82,14 +82,14 @@ because every other feature calls into it.
 
 ## 4. Tasks (each ends with a human checkpoint)
 
-1. **T1 Call graph and list.** Read-only: for each candidate module, list the functions, the `Bot` fields they use and the tests that cover them. Write the confirmed module list and move order into this spec. *Checkpoint: approve the list.*
-2. **T2 `BotCtx` and one pilot module** (`rotation`). Add `commands/ctx.ts`; move rotation; no behaviour change. *Checkpoint: review the pattern before repeating it.*
-3. **T3 Small modules:** `permission`, `notes`. *Checkpoint: line count and tests.*
-4. **T4 Medium modules:** `model`, `admin`. *Checkpoint: try the buttons in Telegram.*
-5. **T5 Large modules:** `session`, `browse`. *Checkpoint: try the folder browser and `/new` in Telegram.*
-6. **T6 `prompt-runner`.** Move last. *Checkpoint: run a real turn, queue and stop.*
-7. **T7 Cleanup.** Remove dead imports, check the size targets (S2.4), update `README.md` architecture notes if any.
-8. **T8 End-to-end.** `npm run smoke` once at the end, then restart the service (`systemctl --user restart opencode-bot`) and check the journal.
+1. [ ] **T1 Call graph and list.** Read-only: for each candidate module, list the functions, the `Bot` fields they use and the tests that cover them. Write the confirmed module list and move order into this spec. *Checkpoint: approve the list.*
+2. [ ] **T2 `BotCtx` and one pilot module** (`rotation`). Add `commands/ctx.ts`; move rotation; no behaviour change. *Checkpoint: review the pattern before repeating it.*
+3. [ ] **T3 Small modules:** `permission`, `notes`. *Checkpoint: line count and tests.*
+4. [ ] **T4 Medium modules:** `model`, `admin`. *Checkpoint: try the buttons in Telegram.*
+5. [ ] **T5 Large modules:** `session`, `browse`. *Checkpoint: try the folder browser and `/new` in Telegram.*
+6. [ ] **T6 `prompt-runner`.** Move last. *Checkpoint: run a real turn, queue and stop.*
+7. [ ] **T7 Cleanup.** Remove dead imports, check the size targets (S2.4), update `README.md` architecture notes if any.
+8. [ ] **T8 End-to-end.** `npm run smoke` once at the end, then restart the service (`systemctl --user restart opencode-bot`) and check the journal.
 
 Verification order for every task: `npm run typecheck` and `npm run test:unit` first, `npm run smoke` once at the end.
 
