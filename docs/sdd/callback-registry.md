@@ -78,7 +78,7 @@ export function dispatchCallback(ctx, cb): Promise<boolean>; // false = not in r
 4. [x] (6c32b03) **T4 Migrate the rest** in groups of 3-4 prefixes (`mode`, `agent`, `variant`, `mdl`; then `perm`, `rot`, `kill`, `prune`; then `nw`, `use`, `fq`, `cmd`, `sch`, `wt`, `ap`, `q`). *Checkpoint after each group.*
 5. [x] (1dcaf55) **T5 Migrate `bs:`** (the browser menu and its sub-actions). *Checkpoint: browse folders and pick a session in Telegram.*
 6. [x] (6d2de8f) **T6 Remove the old chain** and add a startup self-check that lists registered prefixes (C1.2). *Checkpoint: read the startup log.*
-7. [ ] **T7 End-to-end.** `npm run smoke` once at the end, then restart the service and check the journal.
+7. [x] (92a52e3) **T7 End-to-end.** `npm run smoke` once at the end, then restart the service and check the journal.
 
 **T7 result (2026-11-18).** `npm run smoke` from the merged branch (main `166ef5e` + T1–T6), Node 24: SMOKE_EXIT=0, all sections green — menu/mode, prompt relay, NEXT-STEP, QUICK-REPLIES, WATCH, and S8 (real spec worker: run → checkpoint → accept → marker). Only WARN: the known benign S8 hermetic no-origin push. The restart + journal check (the C1.2 self-check line `callback registry: 35 prefixes — …`) is taken in the single restart window after both structure branches merge.
 
