@@ -229,10 +229,23 @@ export async function cmdSpec(bot: Bot, conv: ConvKey, uid?: number): Promise<vo
     await bot.tg.sendMessage(conv, tr(lang, "📁 Không có spec nào có mục Tasks trong docs/sdd.", "📁 No spec with a Tasks section in docs/sdd."));
     return;
   }
+  // Two groups: in-progress specs first (any task still open — including a
+  // spec whose worker is running now), then finished ones; parse failures
+  // (⚠️) come last, ungrouped. Buttons follow the same order.
+  const active = entries.filter((e) => !("error" in e) && e.done < e.total);
+  const finished = entries.filter((e) => !("error" in e) && e.done >= e.total);
+  const broken = entries.filter((e) => "error" in e);
+  const line = (e: SpecEntry) => ("error" in e ? `⚠️ ${esc(e.title)}` : `• ${esc(e.title)} — ${e.done}/${e.total}`);
+  const section = (title: string, list: SpecEntry[]) =>
+    `<b>${title}</b>\n${list.map(line).join("\n")}`;
+  const parts: string[] = [];
+  if (active.length) parts.push(section(tr(lang, `🔄 Đang tiến hành (${active.length})`, `In progress (${active.length})`), active));
+  if (finished.length) parts.push(section(tr(lang, `✅ Đã xong (${finished.length})`, `Done (${finished.length})`), finished));
+  if (broken.length) parts.push(section(tr(lang, `⚠️ Lỗi parse (${broken.length})`, `Parse errors (${broken.length})`), broken));
   await bot.sendHtml(
     conv,
-    tr(lang, "📋 <b>Specs</b> — <code>docs/sdd</code>", "📋 <b>Specs</b> — <code>docs/sdd</code>"),
-    { reply_markup: { inline_keyboard: entries.map((e) => [entryButton(e)]) } }
+    tr(lang, "📋 <b>Specs</b> — <code>docs/sdd</code>", "📋 <b>Specs</b> — <code>docs/sdd</code>") + "\n\n" + parts.join("\n\n"),
+    { reply_markup: { inline_keyboard: [...active, ...finished, ...broken].map((e) => [entryButton(e)]) } }
   );
 }
 
