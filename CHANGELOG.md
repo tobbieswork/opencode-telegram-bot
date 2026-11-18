@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.46.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.45.1...opencode-telegram-bot-v1.46.0) (2026-11-18)
+
+
+### Features
+
+* auto-hide stale quick-reply keyboards ([0102fd0](https://github.com/tobbieswork/opencode-telegram-bot/commit/0102fd0eee5853f4b43058167243311afcf28f66))
+* auto-hide stale quick-reply keyboards ([d0ac632](https://github.com/tobbieswork/opencode-telegram-bot/commit/d0ac63240d2e231e21367a2a678822536320975b))
+
 ## [1.45.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.45.0...opencode-telegram-bot-v1.45.1) (2026-11-18)
 
 
