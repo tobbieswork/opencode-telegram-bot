@@ -193,14 +193,14 @@ the pure-helper test + a live run (no direct `bot.ts` unit test).
 - Do the split after `callback-registry.md` task 3, so moved modules register themselves instead of adding to the `if` chain.
 
 ### Risks and open questions
-- **Hidden shared state.** Private fields of `Bot` used from many places (inflight map, draining flag) make some features harder to move. Task 0 lists these; the narrow `BotCtx` exposes them deliberately.
+- **Hidden shared state.** Private fields of `Bot` used from many places (inflight map, draining flag) make some features harder to move. Task 1 lists these; the narrow `BotCtx` exposes them deliberately.
 - **Merge conflicts** with open PRs that edit `bot.ts`. Mitigation: check open PRs before each move and move modules nobody is editing.
 - **Tests that import `Bot` internals** may need small import path updates. Allowed; assertions must not change.
 
 ## 4. Tasks (each ends with a human checkpoint)
 
 1. [x] **T1 Call graph and list.** Read-only: for each candidate module, list the functions, the `Bot` fields they use and the tests that cover them. Write the confirmed module list and move order into this spec. *Checkpoint: approve the list.*
-2. [ ] **T2 `BotCtx` and one pilot module** (`rotation`). Add `commands/ctx.ts`; move rotation; no behaviour change. *Checkpoint: review the pattern before repeating it.*
+2. [ ] **T2 `BotCtx` and one pilot module** (`permission`). Add `commands/ctx.ts`; move permission; no behaviour change. *Checkpoint: review the pattern before repeating it.*
 3. [ ] **T3 Small modules:** `permission`, `notes`. *Checkpoint: line count and tests.*
 4. [ ] **T4 Medium modules:** `model`, `admin`. *Checkpoint: try the buttons in Telegram.*
 5. [ ] **T5 Large modules:** `session`, `browse`. *Checkpoint: try the folder browser and `/new` in Telegram.*
