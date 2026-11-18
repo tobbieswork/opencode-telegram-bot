@@ -1,10 +1,10 @@
-import { isAbsolute, resolve, dirname, join } from "node:path";
-import { existsSync, statSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
 import { writeFile, unlink } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { Telegram, Update, CallbackQuery, Message, MessageGenerationStopped, MessageReactionUpdated } from "./telegram.js";
-import { OpenCodeCtl, newMessageID, assistantText, ModelInfo, SessionBrief } from "./opencode.js";
+import { OpenCodeCtl, newMessageID, assistantText, ModelInfo } from "./opencode.js";
 import { StateManager, ChatState, MsgPurpose, MACHINE_STATE_KEY, UserPrefsStore, Lang } from "./state.js";
 import { ConvKey, convKey, chatOf, parseConv } from "./conv.js";
 import { Orchestrator, BUSY } from "./orchestrator.js";
@@ -32,6 +32,19 @@ import { extractTrailingChoices, extractOptionsMarker, choiceKeyboard, registry 
 import { scheduleForRegistration, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
 import { isAlreadyResolvedPermissionError } from "./perm.js";
 import { onPermissionAsked, onPermissionResolved, handlePermissionCallback } from "./commands/permission.js";
+import {
+  cmdNew,
+  handleNewConfirmCallback,
+  cmdList,
+  cmdUse,
+  handleUseCallback,
+  stopTaskFor,
+  cmdStop,
+  cmdClear,
+  cmdHistory,
+} from "./commands/session.js";
+import { cmdDir, cmdBrowse, handleBrowseCallback } from "./commands/browse.js";
+import type { BrowseState } from "./commands/browse.js";
 import { handleBusyCallback, handleContinueCallback, prepareNotesTurn } from "./commands/notes.js";
 import type { PermissionPrompt } from "./commands/ctx.js";
 import {
@@ -56,16 +69,15 @@ import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, 
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
 import { DraftState, DraftAction, onTextDelta, onToolStart, isDmConv, EDIT_BUDGET } from "./stream.js";
 import { myCommands } from "./commands.js";
-import { dropNotes, NOTE_CB_PREFIX, BusyNoteStore } from "./notes.js";
+import { NOTE_CB_PREFIX, BusyNoteStore } from "./notes.js";
 import { QueueStore } from "./queue.js";
 import { buildBusyReply, busyKeyboard, queueFullReply } from "./busy.js";
 import type { BusyReply } from "./busy.js";
-import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
 import { log, warn, error } from "./logger.js";
 import { audit } from "./audit.js";
 import { advisorHealth } from "./advisor/advisor-client.js";
 import type { HealthSources } from "./health-probes.js";
-import { QUESTIONS_PREAMBLE } from "./shared.js";
+import { QUESTIONS_PREAMBLE, CARRYOVER_KEY } from "./shared.js";
 import type { Btn, Keyboard } from "./shared.js";
 import { cmdAgents, cmdAgent, handleAgentCallback } from "./commands/agents.js";
 import {
@@ -84,7 +96,7 @@ import {
 import { cmdReboot, handleRebootCallback, cmdStatus, cmdContext, cmdUsage } from "./commands/admin.js";
 import { cmdSchedule, handleScheduleCallback } from "./commands/schedule.js";
 import { Advisor } from "./advisor/advisor.js";
-import { cmdHelp, cmdHealth, cmdHistory, cmdNote, cmdRotation, handleNoteCallback, cmdLang, cmdStyle } from "./commands/meta.js";
+import { cmdHelp, cmdHealth, cmdNote, cmdRotation, handleNoteCallback, cmdLang, cmdStyle } from "./commands/meta.js";
 import { cmdSpec, handleSpecCallback } from "./commands/spec.js";
 import {
   clampWatchInterval,
@@ -152,17 +164,11 @@ const MODES: Record<string, { agent: string; hint: string; hintEn: string }> = {
   explore: { agent: "explore", hint: "duyệt codebase nhanh (tìm file/keyword)", hintEn: "fast codebase scan (find files/keywords)" },
 };
 
-/** Directory buttons shown per page in the folder browser. */
-const BROWSE_PAGE_SIZE = 12;
-/** Directory buttons per row in the folder browser. */
-const BROWSE_COLUMNS = 2;
 /** Models shown per page in the /model button picker. */
 const MODEL_PAGE_SIZE = 10;
 
 /** Key under which the per-session language instruction is stored (namespaced `api/<key>`). */
 const LANGUAGE_INSTRUCTION_KEY = "tgbot.language";
-/** Instruction key for the /new "Clear + keep context" carry-over (recent-thread summary injected into the fresh session). */
-const CARRYOVER_KEY = "tgbot.carryover";
 /** Injected per-session so the model keeps the user's language and does not leak CJK. */
 const LANGUAGE_INSTRUCTION =
   "Always reply in the SAME language the user wrote in, throughout the entire answer. Do NOT " +
@@ -177,25 +183,6 @@ function isTransportError(e: any): boolean {
   return /fetch failed|ECONNRESET|ECONNREFUSED|EPIPE|EPROTO|ETIMEDOUT|EAI_AGAIN|socket hang up|network .*unreachable|UND_ERR_[A-Z]+/i.test(
     msg,
   );
-}
-
-/** In-memory state of the folder browser, one per chat. */
-interface BrowseState {
-  path: string;
-  showHidden: boolean;
-  items: DirItem[];
-  page: number;
-  view: "list" | "choose" | "done";
-  /** Language for the rendered labels (captured when the browser opened). */
-  lang: Lang;
-  /** One-off message shown above the listing (e.g. a clamped path). */
-  note?: string;
-  /** Set when the directory could not be read. */
-  error?: string;
-  /** Result of the last "open this folder" action. */
-  result?: string;
-  /** True once a session was started from this folder. */
-  opened: boolean;
 }
 
 /** A single visible field of a question form, as we relay it to Telegram. */
@@ -273,7 +260,7 @@ interface WatchLive {
 }
 
 /** watch_end reasons (W6.3). */
-type WatchStopReason = "done" | "idle" | "timeout" | "closed" | "replaced" | "session-changed" | "edit-failed" | "shutdown";
+export type WatchStopReason = "done" | "idle" | "timeout" | "closed" | "replaced" | "session-changed" | "edit-failed" | "shutdown";
 
 /** Shown on a live stream preview while the bot drains at shutdown. */
 const DRAIN_PREVIEW_TEXT = "⏳ Đang khởi động lại… kết quả sẽ gửi sau.";
@@ -360,8 +347,8 @@ export class Bot {
   public inflight = new Map<ConvKey, AbortController>();
   /** Convs with a /btw side question running (one at a time per conv). */
   public btwRunning = new Set<ConvKey>();
-  private browsers = new Map<ConvKey, BrowseState>();
-  private questionForms = new Map<string, QuestionFormState>();
+  public browsers = new Map<ConvKey, BrowseState>();
+  public questionForms = new Map<string, QuestionFormState>();
   public permissionPrompts = new Map<string, PermissionPrompt>();
   /** Repeating "typing…" timers, one per chat, so the indicator lasts until the reply is sent. */
   private typing = new Map<ConvKey, ReturnType<typeof setInterval>>();
@@ -1867,7 +1854,7 @@ export class Bot {
   }
 
   /** Stop nudging ALL pending prompts of a conv (used by /new, /use, /stop, /clear). */
-  private cancelAllReminders(conv: ConvKey): void {
+  public cancelAllReminders(conv: ConvKey): void {
     for (const id of Object.keys(this.st.get(conv).pendingPrompts ?? {})) this.cancelReminder(conv, id);
   }
 
@@ -1999,17 +1986,17 @@ export class Bot {
       case "/help":
         return cmdHelp(this, conv, this.userPrefs.getLang(uid ?? ""));
       case "/new":
-        return this.cmdNew(conv);
+        return cmdNew(this, conv);
       case "/ls":
       case "/sessions":
-        return this.cmdList(conv);
+        return cmdList(this, conv);
       case "/use":
-        return this.cmdUse(conv, arg, state);
+        return cmdUse(this, conv, arg, state);
       case "/dir":
-        return this.cmdDir(conv, arg, state);
+        return cmdDir(this, conv, arg, state);
       case "/browse":
       case "/b":
-        return this.cmdBrowse(conv, arg, state);
+        return cmdBrowse(this, conv, arg, state);
       case "/models":
         return cmdModels(this, conv);
       case "/model":
@@ -2026,7 +2013,7 @@ export class Bot {
       case "/variant":
         return cmdVariantSet(this, conv, arg, state);
       case "/stop":
-        return this.cmdStop(conv, state);
+        return cmdStop(this, conv, state);
       case "/reboot":
         return cmdReboot(this, conv);
       case "/status":
@@ -2046,7 +2033,7 @@ export class Bot {
       case "/rotation":
         return cmdRotation(this, conv);
       case "/clear":
-        return this.cmdClear(conv, state);
+        return cmdClear(this, conv, state);
       case "/queue":
         return this.cmdQueue(conv, arg);
       case "/note":
@@ -2308,7 +2295,7 @@ export class Bot {
    * when asked) and write the watch_end audit line (W6.3). Safe to call when
    * there is no watch (off-mode, or an already-stopped one).
    */
-  private stopWatch(conv: ConvKey, reason: WatchStopReason, opts?: { deleteCard?: boolean }): void {
+  public stopWatch(conv: ConvKey, reason: WatchStopReason, opts?: { deleteCard?: boolean }): void {
     const w = this.watches.get(conv);
     if (!w) return;
     this.watches.delete(conv);
@@ -2510,7 +2497,7 @@ export class Bot {
       w.frozen = true;
       w.polling = false;
       await this.tg.answerCallbackQuery(cb.id);
-      await this.stopTaskFor(conv, rec.sessionID);
+      await stopTaskFor(this, conv, rec.sessionID);
       audit({ action: "watch_stop_task", chatId: conv, session: rec.sessionID, userId: cb.from?.id });
       if (r.edit) await this.pushWatchEdit(w, r.edit); // the ONE final "Stopped" edit (W4.2)
       return;
@@ -3055,7 +3042,7 @@ export class Bot {
    * interrupt that turn on the server — otherwise switching away (/new, /clear,
    * opening another session) left the old session running and spending tokens.
    */
-  private async stopCurrent(conv: ConvKey, interrupt = false): Promise<void> {
+  public async stopCurrent(conv: ConvKey, interrupt = false): Promise<void> {
     this.stopTyping(conv);
     this.clearActivity(conv);
     this.busyNotes.clear(conv); // /stop (and /new, /clear) end the turn: drop the note-button retention
@@ -3110,26 +3097,6 @@ export class Bot {
   private registerCommands(): void {
     const lang = this.userPrefs.anyExplicitLang() ?? "vi";
     void this.tg.setMyCommands(myCommands(lang)).catch((e) => warn("setMyCommands:", e?.message));
-  }
-
-  private async cmdNew(conv: ConvKey): Promise<void> {
-    // Destructive — a fast mistyped /new just shows this card instead of nuking
-    // the session. Three choices: clear (drop context), clear + keep the recent
-    // context, or cancel. (The old /new --keep flag was removed; "keep" is now
-    // a button.)
-    const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
-    const kb: Keyboard = {
-      inline_keyboard: [
-        [{ text: "🗑️ Clear", callback_data: "nw:clear" }],
-        [{ text: tr(lang, "💾 Clear + giữ ngữ cảnh", "💾 Clear + keep context"), callback_data: "nw:keep" }],
-        [{ text: tr(lang, "↩️ Huỷ", "↩️ Cancel"), callback_data: "nw:cancel" }],
-      ],
-    };
-    await this.tg.sendMessage(
-      conv,
-      tr(lang, "⚠️ <b>/new</b> — chọn cách tạo phiên mới:", "⚠️ <b>/new</b> — choose how to create a new session:"),
-      { reply_markup: kb },
-    );
   }
 
   /**
@@ -3408,318 +3375,6 @@ export class Bot {
     await this.doManagerRotation(conv, "confirm", floor / 1000);
   }
 
-  /** Actually create the fresh session (from the /new card's Clear / Clear+keep buttons). */
-  private async doNewSession(conv: ConvKey, state: ChatState, keep: boolean): Promise<void> {
-    // --keep: capture a short handoff summary of the CURRENT session before
-    // replacing it, then inject it into the fresh session's context so the new
-    // session continues with the recent thread (decisions, in-progress work)
-    // instead of starting cold. Rules (project-memory) persist by default;
-    // the recent conversation is what --keep carries over.
-    const oldSID = state.sessionID;
-    let carryover = "";
-    if (keep && oldSID) {
-      const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
-      await this.tg.sendMessage(conv, tr(lang, "🔁 Đang tóm tắt session cũ để giữ mạch…", "🔁 Summarizing the old session to keep the thread…"));
-      carryover = await this.summarizeForHandoff(oldSID);
-    }
-    await this.stopCurrent(conv, true);
-    this.cancelAllReminders(conv); // abandoning the current session's pending prompts
-    const dir = state.directory || this.cfg.opencodeDirectory;
-    const sessionID = await this.oc.createSession(dir);
-    await this.applyModelAndVariant(sessionID, state);
-    if (state.agent) await this.oc.setAgent(sessionID, state.agent).catch((e) => warn("setAgent:", e?.message));
-    if (carryover) {
-      // Inject the carry-over as a system-context instruction (no turn consumed),
-      // so the fresh session "remembers" the recent thread for its whole life.
-      await this.oc
-        .setInstruction(
-          sessionID,
-          CARRYOVER_KEY,
-          `You are continuing from a previous session. Carry-over context (recent decisions, in-progress work, open threads):\n${carryover}\nContinue from here, picking up where the previous session left off.`,
-        )
-        .catch((e) => warn("carryover instruction:", (e as Error).message));
-    }
-    this.st.set(conv, { sessionID, directory: dir, ...dropNotes() }); // a fresh session must not inherit pending notes
-    this.stopWatch(conv, "session-changed"); // W5.1: the old session's watch is over
-    await this.tg.sendMessage(
-      conv,
-      tr(this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? ""), `🆕 New session <code>${sessionID}</code>\ndir: <code>${esc(dir)}</code>${keep ? `\n🔁 carry-over: ${carryover ? "✓" : "(session cũ trống)"}` : ""}`, `🆕 New session <code>${sessionID}</code>\ndir: <code>${esc(dir)}</code>${keep ? `\n🔁 carry-over: ${carryover ? "✓" : "(old session empty)"}` : ""}`),
-    );
-  }
-
-  /** nw:clear / nw:keep / nw:cancel — the bare /new card (see cmdNew). Each
-   *  settles the card in place: removes its buttons (empty inline_keyboard) and
-   *  updates the message, so it can't be tapped twice. */
-  private async handleNewConfirmCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
-    const lang = this.userPrefs.getLang(cb.from?.id ?? "");
-    const op = (cb.data ?? "").split(":")[1];
-    const settle = (text: string) =>
-      messageId
-        ? this.tg.editMessageText(conv, messageId, text, { reply_markup: { inline_keyboard: [] } }).catch(() => {})
-        : Promise.resolve();
-    if (op === "clear") {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "🗑️ Đang tạo phiên mới…", "🗑️ Creating a new session…"));
-      await settle("🗑️ " + tr(lang, "Đã chọn: Clear", "Chosen: Clear"));
-      await this.doNewSession(conv, this.st.get(conv), false); // fresh state at confirm time
-      return;
-    }
-    if (op === "keep") {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "💾 Đang tạo phiên mới…", "💾 Creating a new session…"));
-      await settle("💾 " + tr(lang, "Đã chọn: Clear + giữ ngữ cảnh", "Chosen: Clear + keep context"));
-      await this.doNewSession(conv, this.st.get(conv), true);
-      return;
-    }
-    // nw:cancel (or any unknown op) — keep the current session, just settle the card.
-    await this.tg.answerCallbackQuery(cb.id, tr(lang, "↩️ Đã huỷ", "↩️ Cancelled"));
-    await settle(tr(lang, "↩️ Đã huỷ — phiên cũ vẫn nguyên vẹn.", "↩️ Cancelled — the old session is intact."));
-  }
-
-  /**
-   * Ask the (soon-to-be-replaced) session for a concise handoff summary of the
-   * recent thread. Runs as one hidden turn in that session; the reply stays in
-   * the (abandoned) session, so it never reaches the user's chat.
-   */
-  private async summarizeForHandoff(sessionID: string): Promise<string> {
-    try {
-      const r = await this.oc.promptAndWait(
-        sessionID,
-        "Summarize the recent conversation for handoff to a fresh session: key decisions, in-progress work, important facts, and open threads. Be concise (≤ 300 words). Do NOT summarize this summarization request itself.",
-      );
-      const t = (r.reply ?? "").trim();
-      return t.length > 4000 ? `${t.slice(0, 4000)}…` : t;
-    } catch (e) {
-      warn("handoff summary:", (e as Error).message);
-      return "";
-    }
-  }
-
-  private async cmdList(conv: ConvKey): Promise<void> {
-    const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
-    const sessions = await this.oc.listSessions();
-    if (!sessions.length) return this.tg.sendMessage(conv, tr(lang, "Chưa có session — gửi /new để tạo.", "No sessions yet. Send /new."));
-    const cur = this.st.get(conv).sessionID;
-    const lines = sessions
-      .slice(0, 15)
-      .map((s) => `${s.id === cur ? "▶️ " : ""}<code>${s.id}</code>${s.title ? " — " + esc(s.title) : ""}`);
-    const active = cur ? `\n\n${tr(lang, "Hiện tại", "Current")}: <code>${cur}</code>` : tr(lang, "\n\nChưa có session — gửi /new", "\n\nNo current session — send /new");
-    await this.sendHtml(conv, `<b>Sessions (${sessions.length})</b>\n${lines.join("\n")}${active}`);
-  }
-
-  /**
-   * `/use [session-id]` — switch to a session. Without a valid argument the
-   * user gets a button picker of the 10 newest sessions instead of a usage line.
-   */
-  private async cmdUse(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
-    void state;
-    const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
-    let sessions: SessionBrief[] | undefined;
-    try {
-      sessions = await this.oc.listSessions();
-    } catch (e) {
-      warn("listSessions:", (e as Error).message);
-    }
-    if (!arg) {
-      if (!sessions) return this.tg.sendMessage(conv, tr(lang, "⚠️ Không liệt kê được session — kiểm tra OpenCode rồi thử lại.", "⚠️ Couldn't list sessions — check OpenCode and try again."));
-      if (!sessions.length) return this.tg.sendMessage(conv, tr(lang, "Chưa có session — gửi /new để tạo.", "No sessions yet. Send /new."));
-      return this.sendUsePicker(conv, sessions, undefined, lang);
-    }
-    // Unknown id (and the listing succeeded) → show the picker too; a failed
-    // listing keeps the old behaviour of trusting the typed id.
-    if (sessions && !sessions.some((s) => s.id === arg)) {
-      return this.sendUsePicker(conv, sessions, tr(lang, `❌ Không có session <code>${esc(arg)}</code>`, `❌ No session <code>${esc(arg)}</code>`), lang);
-    }
-    await this.stopCurrent(conv, true); // stop the running turn before switching (same as /new, /clear)
-    this.applyUseState(conv, arg);
-    await this.tg.sendMessage(conv, tr(lang, `✅ Đang dùng session <code>${esc(arg)}</code>`, `✅ Now using session <code>${esc(arg)}</code>`));
-  }
-
-  /** Apply the /use switch: remember the session and drop its predecessor's pending prompts. */
-  private applyUseState(conv: ConvKey, sessionID: string): void {
-    const prev = this.st.peek(conv)?.sessionID;
-    this.st.set(conv, { sessionID, ...dropNotes() }); // a switched-to session must not inherit the old session's pending notes (same as /new)
-    if (prev && prev !== sessionID) this.stopWatch(conv, "session-changed"); // W5.1
-    this.cancelAllReminders(conv); // switching sessions abandons the old pending prompts
-    const droppedQueue = this.queue.clear(conv); // a session switch clears the queue (Q1.5)
-    if (droppedQueue > 0) audit({ action: "queue_drop", chatId: conv, meta: { count: droppedQueue, reason: "clear" } });
-  }
-
-  /** The /use picker card: newest 10 sessions as buttons + a "type it instead" hint. */
-  private sendUsePicker(conv: ConvKey, sessions: SessionBrief[], errorNote?: string, lang: Lang = "vi"): Promise<void> {
-    const cur = this.st.get(conv).sessionID;
-    const newest = [...sessions].sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0)).slice(0, 10);
-    const rows: Btn[][] = newest.map((s) => [
-      { text: `${s.id === cur ? "▶️ " : ""}${s.title ? trunc(s.title, 40) : trunc(s.id, 14)}`, callback_data: `use:${s.id}` },
-    ]);
-    rows.push([
-      { text: tr(lang, "📄 Xem tất cả", "📄 View all"), callback_data: "use:ls" },
-      { text: tr(lang, "❌ Đóng", "❌ Close"), callback_data: "use:close" },
-    ]);
-    return this.tg.sendMessage(
-      conv,
-      [errorNote ?? tr(lang, "❓ <b>/use</b> cần session-id", "❓ <b>/use</b> needs a session-id"), tr(lang, "Bấm để chọn session (mới nhất trước):", "Tap to pick a session (newest first):"), "Hoặc gửi: <code>/use &lt;session-id&gt;</code>"].join("\n"),
-      { reply_markup: { inline_keyboard: rows } },
-    );
-  }
-
-  /** Handle a tap on the /use picker (data = `use:<id|ls|close>`). */
-  private async handleUseCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
-    const lang = this.userPrefs.getLang(cb.from?.id ?? "");
-    const id = (cb.data ?? "").slice("use:".length);
-    if (id === "close" || id === "ls") {
-      await this.tg.answerCallbackQuery(cb.id);
-      if (messageId) await this.tg.deleteMessage(conv, messageId).catch(() => {});
-      if (id === "ls") await this.cmdList(conv);
-      return;
-    }
-    // A stale picker button may reference a session that no longer exists —
-    // validate before switching (a failed listing keeps the /use fallback: trust the id).
-    const sessions = await this.oc.listSessions().catch((e) => {
-      warn("listSessions:", (e as Error).message);
-      return undefined;
-    });
-    if (sessions && !sessions.some((s) => s.id === id)) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, `❌ Không có session: ${trunc(id, 30)}`, `❌ No session: ${trunc(id, 30)}`));
-      if (messageId)
-        await this.tg.editMessageText(conv, messageId, tr(lang, `❌ Không có session <code>${esc(id)}</code>`, `❌ No session <code>${esc(id)}</code>`)).catch(() => {});
-      return;
-    }
-    await this.stopCurrent(conv, true); // stop the running turn before switching (same as /new, /clear)
-    this.applyUseState(conv, id);
-    await this.tg.answerCallbackQuery(cb.id, tr(lang, `Dùng ${trunc(id, 30)}`, `Using ${trunc(id, 30)}`));
-    if (messageId) await this.tg.editMessageText(conv, messageId, tr(lang, `✅ Đang dùng session <code>${esc(id)}</code>`, `✅ Now using session <code>${esc(id)}</code>`)).catch(() => {});
-  }
-
-  private async cmdDir(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
-    if (!arg) {
-      return this.tg.sendMessage(conv, `📁 Current directory:\n<code>${esc(state.directory || this.cfg.opencodeDirectory)}</code>`);
-    }
-    const p = isAbsolute(arg) ? arg : resolve(this.cfg.opencodeDirectory, arg);
-    if (!existsSync(p)) return this.tg.sendMessage(conv, `❌ No such directory: <code>${esc(p)}</code>`);
-    this.st.set(conv, { directory: p });
-    await this.tg.sendMessage(
-      conv,
-      `📁 Directory set to <code>${esc(p)}</code>\n(used for the next /new)\nTip: /browse to pick a folder with buttons.`,
-    );
-  }
-
-  // ── folder browser ───────────────────────────────────────────────────────
-  /**
-   * Open the folder browser at `arg` (or the chat's current directory). The
-   * browser lives in a single message: every button tap edits that message
-   * instead of posting new ones, so the chat stays readable.
-   */
-  private async cmdBrowse(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
-    const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
-    const roots = this.cfg.browseRoots;
-    if (!roots.length) return this.tg.sendMessage(conv, tr(lang, "❌ Không có thư mục nào được phép duyệt.", "❌ No directories are allowed to browse."));
-    const requested = arg
-      ? resolve(this.cfg.opencodeDirectory, arg)
-      : state.directory || this.cfg.opencodeDirectory;
-    let path = resolve(requested);
-    let note: string | undefined;
-    if (!isUnderRoot(path, roots)) {
-      const owner = roots.find((r) => isUnderRoot(path, [r]));
-      path = owner ?? roots[0];
-      note = tr(lang, `⚠️ <code>${esc(requested)}</code> nằm ngoài vùng được duyệt — đã mở tại <code>${esc(path)}</code>.`, `⚠️ <code>${esc(requested)}</code> is outside the allowed roots — opened at <code>${esc(path)}</code> instead.`);
-    }
-    let isDir = false;
-    try {
-      isDir = statSync(path).isDirectory();
-    } catch {
-      isDir = false;
-    }
-    if (!isDir) return this.tg.sendMessage(conv, tr(lang, `❌ Không phải thư mục: <code>${esc(path)}</code>`, `❌ Not a directory: <code>${esc(path)}</code>`));
-
-    const b: BrowseState = { path, showHidden: false, items: [], page: 0, view: "list", opened: false, note, lang };
-    await this.reloadBrowse(b);
-    this.browsers.set(conv, b);
-    const v = this.renderBrowse(b);
-    await this.tg.sendMessage(conv, v.text, { reply_markup: v.keyboard });
-  }
-
-  /** Re-read the current directory and keep the page index in range. */
-  private async reloadBrowse(b: BrowseState): Promise<void> {
-    try {
-      b.items = await listDirs(b.path, b.showHidden);
-      b.error = undefined;
-    } catch (e) {
-      b.items = [];
-      b.error = tr(b.lang, `⚠️ Không đọc được thư mục: ${esc((e as Error).message)}`, `⚠️ Couldn't read the directory: ${esc((e as Error).message)}`);
-    }
-    const maxPage = Math.max(0, Math.ceil(b.items.length / BROWSE_PAGE_SIZE) - 1);
-    if (b.page > maxPage) b.page = maxPage;
-  }
-
-  /** Build the text + inline keyboard for the current browser view. */
-  private renderBrowse(b: BrowseState): { text: string; keyboard: Keyboard } {
-    if (b.view === "choose") {
-      return {
-        text: [`<b>📂 ${esc(shortPath(b.path, 70))}</b>`, "", tr(b.lang, "<b>Chọn cách mở thư mục này:</b>", "<b>Choose how to open this folder:</b>")].join("\n"),
-        keyboard: {
-          inline_keyboard: [
-            [{ text: tr(b.lang, "📁 Chỉ đặt thư mục", "📁 Set directory only"), callback_data: "bs:setdir" }],
-            [{ text: tr(b.lang, "🚀 Đặt + mở session mới", "🚀 Set + open new session"), callback_data: "bs:setsess" }],
-            [
-              { text: tr(b.lang, "↩️ Quay lại", "↩️ Back"), callback_data: "bs:list" },
-              { text: tr(b.lang, "❌ Đóng", "❌ Close"), callback_data: "bs:close" },
-            ],
-          ],
-        },
-      };
-    }
-
-    if (b.view === "done") {
-      const rows: Btn[][] = [];
-      if (!b.opened) rows.push([{ text: tr(b.lang, "🚀 Mở session mới tại đây", "🚀 Open a new session here"), callback_data: "bs:setsess" }]);
-      rows.push([{ text: tr(b.lang, "📂 Duyệt tiếp", "📂 Keep browsing"), callback_data: "bs:list" }]);
-      rows.push([{ text: tr(b.lang, "❌ Đóng", "❌ Close"), callback_data: "bs:close" }]);
-      return { text: b.result ?? tr(b.lang, "✅ Xong", "✅ Done"), keyboard: { inline_keyboard: rows } };
-    }
-
-    // list view
-    const pageCount = Math.max(1, Math.ceil(b.items.length / BROWSE_PAGE_SIZE));
-    const start = b.page * BROWSE_PAGE_SIZE;
-    const slice = b.items.slice(start, start + BROWSE_PAGE_SIZE);
-    const rows: Btn[][] = [];
-    for (let i = 0; i < slice.length; i += BROWSE_COLUMNS) {
-      rows.push(
-        slice.slice(i, i + BROWSE_COLUMNS).map((it, j) => ({
-          text: `📂 ${trunc(it.name, 18)}`,
-          callback_data: `bs:nav:${start + i + j}`,
-        })),
-      );
-    }
-
-    const nav: Btn[] = [];
-    if (parentWithin(b.path, this.cfg.browseRoots)) {
-      nav.push({ text: tr(b.lang, "⬆️ Lên", "⬆️ Up"), callback_data: "bs:up" });
-    }
-    nav.push({ text: b.showHidden ? tr(b.lang, "🙈 Ẩn file ẩn", "🙈 Hide hidden files") : tr(b.lang, "👁 Hiện file ẩn", "👁 Show hidden files"), callback_data: "bs:hid" });
-    nav.push({ text: tr(b.lang, "✅ Mở tại đây", "✅ Open here"), callback_data: "bs:open" });
-    rows.push(nav);
-
-    if (pageCount > 1) {
-      rows.push([
-        { text: "◀️", callback_data: `bs:pg:${b.page - 1}` },
-        { text: `${b.page + 1}/${pageCount}`, callback_data: "bs:noop" },
-        { text: "▶️", callback_data: `bs:pg:${b.page + 1}` },
-      ]);
-    }
-    rows.push([{ text: tr(b.lang, "❌ Đóng", "❌ Close"), callback_data: "bs:close" }]);
-
-    const meta: string[] = [];
-    if (b.note) meta.push(b.note);
-    if (b.error) meta.push(b.error);
-    meta.push(
-      `<i>${b.items.length} ${tr(b.lang, "thư mục con", "subdirectories")}${pageCount > 1 ? ` · ${tr(b.lang, "trang", "page")} ${b.page + 1}/${pageCount}` : ""}</i>`,
-    );
-    meta.push(tr(b.lang, "Chạm một thư mục để vào · ✅ để mở OpenCode tại đây", "Tap a folder to enter · ✅ to open OpenCode here"));
-    return {
-      text: [`<b>📂 ${esc(shortPath(b.path, 70))}</b>`, ...meta].join("\n"),
-      keyboard: { inline_keyboard: rows },
-    };
-  }
-
   /** Handle a button tap on the browser message. */
   private async handleCallback(cb: CallbackQuery): Promise<void> {
     if (!this.allowed(cb.from?.id)) {
@@ -3788,11 +3443,11 @@ export class Bot {
       return;
     }
     if (data.startsWith("nw:")) {
-      await this.handleNewConfirmCallback(cb, conv, messageId);
+      await handleNewConfirmCallback(this, cb, conv, messageId);
       return;
     }
     if (data.startsWith("use:")) {
-      await this.handleUseCallback(cb, conv, messageId);
+      await handleUseCallback(this, cb, conv, messageId);
       return;
     }
     if (data.startsWith("agent:")) {
@@ -3832,106 +3487,7 @@ export class Bot {
       await this.tg.answerCallbackQuery(cb.id);
       return;
     }
-    const b = this.browsers.get(conv);
-    if (!b) {
-      await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Phiên duyệt đã đóng — gửi /browse", "The browser was closed — send /browse"));
-      return;
-    }
-
-    const [, action, arg] = data.split(":");
-    let close = false;
-    try {
-      switch (action) {
-        case "nav": {
-          const item = b.items[Number(arg)];
-          if (!item) throw new Error(tr(b.lang, "Mục không còn tồn tại — gửi /browse để tải lại.", "The entry no longer exists — send /browse to reload."));
-          b.path = item.path;
-          b.page = 0;
-          b.view = "list";
-          b.note = undefined;
-          await this.reloadBrowse(b);
-          break;
-        }
-        case "up": {
-          const parent = parentWithin(b.path, this.cfg.browseRoots);
-          if (parent) {
-            b.path = parent;
-            b.page = 0;
-            b.view = "list";
-            await this.reloadBrowse(b);
-          }
-          break;
-        }
-        case "pg": {
-          b.page = Math.max(0, Number(arg) || 0);
-          break;
-        }
-        case "hid": {
-          b.showHidden = !b.showHidden;
-          b.page = 0;
-          await this.reloadBrowse(b);
-          break;
-        }
-        case "open": {
-          b.view = "choose";
-          break;
-        }
-        case "list": {
-          b.view = "list";
-          break;
-        }
-        case "setdir": {
-          this.st.set(conv, { directory: b.path });
-          b.view = "done";
-          b.opened = false;
-          b.result = [
-            tr(b.lang, `✅ Đã đặt thư mục làm việc:`, `✅ Working directory set:`) + `\n<code>${esc(b.path)}</code>`,
-            "",
-            tr(b.lang, "Session mới sẽ chạy ở đây. Gõ /new hoặc bấm “🚀 Mở session mới tại đây”.", "New sessions will run here. Send /new or tap “🚀 Open a new session here”."),
-          ].join("\n");
-          break;
-        }
-        case "setsess": {
-          const state = this.st.get(conv);
-          await this.stopCurrent(conv, true);
-          const sessionID = await this.oc.createSession(b.path);
-          await this.applyModelAndVariant(sessionID, state);
-          if (state.agent) {
-            await this.oc.setAgent(sessionID, state.agent).catch((e) => warn("setAgent:", e?.message));
-          }
-          this.st.set(conv, { sessionID, directory: b.path });
-          this.stopWatch(conv, "session-changed"); // W5.1: the conversation moved to a new session
-          b.view = "done";
-          b.opened = true;
-          b.result = [
-            tr(b.lang, `🚀 Đã mở session <code>${esc(sessionID)}</code>`, `🚀 Opened session <code>${esc(sessionID)}</code>`),
-            `📁 <code>${esc(b.path)}</code>`,
-            "",
-            tr(b.lang, "Gửi tin nhắn để bắt đầu làm việc.", "Send a message to start working."),
-          ].join("\n");
-          break;
-        }
-        case "close": {
-          close = true;
-          break;
-        }
-        default:
-          break; // "noop" and anything unknown
-      }
-    } catch (e) {
-      await this.tg.answerCallbackQuery(cb.id, `⚠️ ${(e as Error).message}`);
-      return;
-    }
-
-    await this.tg.answerCallbackQuery(cb.id);
-    if (close) {
-      this.browsers.delete(conv);
-      if (messageId) await this.tg.deleteMessage(conv, messageId);
-      return;
-    }
-    if (!messageId) return;
-    const v = this.renderBrowse(b);
-    await this.tg.editMessageText(conv, messageId, v.text, { reply_markup: v.keyboard });
+    await handleBrowseCallback(this, cb, conv, messageId);
   }
 
   /** Run a bot command from an inline button (the /help menu). */
@@ -3940,16 +3496,16 @@ export class Bot {
     try {
       switch (name) {
         case "new":
-          await this.cmdNew(conv);
+          await cmdNew(this, conv);
           break;
         case "ls":
-          await this.cmdList(conv);
+          await cmdList(this, conv);
           break;
         case "dir":
-          await this.cmdDir(conv, "", state);
+          await cmdDir(this, conv, "", state);
           break;
         case "browse":
-          await this.cmdBrowse(conv, "", state);
+          await cmdBrowse(this, conv, "", state);
           break;
         case "mode":
           await cmdMode(this, conv, "", state);
@@ -3964,7 +3520,7 @@ export class Bot {
           await cmdAgents(this, conv);
           break;
         case "stop":
-          await this.cmdStop(conv, state);
+          await cmdStop(this, conv, state);
           break;
         case "reboot":
           await cmdReboot(this, conv);
@@ -3985,7 +3541,7 @@ export class Bot {
           await cmdHistory(this, conv, state);
           break;
         case "clear":
-          await this.cmdClear(conv, state);
+          await cmdClear(this, conv, state);
           break;
         case "schedule":
           await cmdSchedule(this, conv, "", state, cb.from?.id);
@@ -4174,7 +3730,7 @@ export class Bot {
     // "new-keep": open the /new confirm card (nw: flow) — it asks before
     // doing anything (N3.4: the label says what happens).
     await this.tg.answerCallbackQuery(cb.id);
-    await this.cmdNew(conv);
+    await cmdNew(this, conv);
   }
 
   /**
@@ -4228,37 +3784,6 @@ export class Bot {
     }
     const lines = items.map((it, i) => "#" + (i + 1) + " · " + esc(trunc(it.text, 40)) + " · " + formatQueueAge(it.ageMs));
     await this.tg.sendMessage(conv, tr(lang, "📥 Hàng chờ (" + items.length + "):", "📥 Queue (" + items.length + "):") + "\n" + lines.join("\n"));
-  }
-
-  /**
-   * Stop the conversation's running turn — the shared /stop mechanism: stop
-   * waiting (stopCurrent: abort the inflight controller, clear the queue, drop
-   * the preview, clear the manager's busy flag) + interrupt the turn on the
-   * server. /stop uses this and replies in chat; the watch card's "Stop task"
-   * button (W4.2) uses the same path without a chat reply — the card itself
-   * shows "Stopped".
-   */
-  private async stopTaskFor(conv: ConvKey, sessionID?: string): Promise<void> {
-    await this.stopCurrent(conv);
-    this.cancelAllReminders(conv);
-    if (sessionID) await this.oc.interrupt(sessionID).catch(() => {});
-  }
-
-  private async cmdStop(conv: ConvKey, state: ChatState): Promise<void> {
-    await this.stopTaskFor(conv, state.sessionID);
-    await this.tg.sendMessage(conv, "⏹️ Interrupted.");
-  }
-
-  private async cmdClear(conv: ConvKey, state: ChatState): Promise<void> {
-    await this.stopCurrent(conv, true);
-    this.cancelAllReminders(conv); // stop nudging + clear schedules before wiping state
-    void state;
-    this.st.clear(conv);
-    this.stopWatch(conv, "session-changed"); // W5.1
-    for (const [formId, qf] of this.questionForms) {
-      if (qf.conv === conv) this.questionForms.delete(formId);
-    }
-    await this.tg.sendMessage(conv, "🧹 State cleared. Next message starts a fresh session.");
   }
 
   // ── question forms (the agent's `question` tool) ──────────────────────────

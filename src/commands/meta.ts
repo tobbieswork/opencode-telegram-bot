@@ -1,8 +1,7 @@
 import type { Bot } from "../bot.js";
 import type { CallbackQuery } from "../telegram.js";
-import type { ChatState } from "../state.js";
 import type { ConvKey } from "../conv.js";
-import { esc, trunc, stripTags } from "../format.js";
+import { esc } from "../format.js";
 import { helpText, commandGrid, myCommands } from "../commands.js";
 import { appendNote, noteEntryText, showNotes, BUSY_REPLY_TEXT, parseNoteCallback } from "../notes.js";
 import { warn } from "../logger.js";
@@ -100,21 +99,6 @@ export async function cmdHealth(bot: Bot, conv: ConvKey, uid: number | string | 
   await bot.sendHtml(conv, formatHealth(lines, lang, now));
 }
 
-export async function cmdHistory(bot: Bot, conv: ConvKey, state: ChatState): Promise<void> {
-  if (!state.sessionID) return bot.tg.sendMessage(conv, "No current session. Send /new.");
-  const msgs = await bot.oc.listMessages(state.sessionID).catch(() => [] as any[]);
-  const sorted = [...msgs].sort((a: any, b: any) => (a.time?.created ?? 0) - (b.time?.created ?? 0));
-  const recent = sorted.slice(-6);
-  const lines = recent.map((m) => {
-    if (m.type === "user") return "👤 " + esc(trunc(stripTags(m.text ?? ""), 300));
-    if (m.type === "assistant") {
-      const t = (m.content ?? []).filter((c: any) => c?.type === "text").map((c: any) => c.text).join("\n");
-      return "🤖 " + esc(trunc(stripTags(t), 400));
-    }
-    return "· " + m.type;
-  });
-  await bot.sendHtml(conv, `<b>Recent messages</b>\n${lines.join("\n")}`);
-}
 
 
 /**

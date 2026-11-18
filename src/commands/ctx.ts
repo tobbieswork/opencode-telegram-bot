@@ -19,6 +19,8 @@ import type { QueueStore } from "../queue.js";
 import type { Orchestrator } from "../orchestrator.js";
 import type { ConvKey } from "../conv.js";
 import type { Keyboard } from "../shared.js";
+import type { WatchStopReason } from "../bot.js";
+import type { BrowseState } from "./browse.js";
 
 /** A pending OpenCode permission request relayed to Telegram (buttons to answer it). */
 export interface PermissionPrompt {
@@ -78,4 +80,14 @@ export interface BotCtx {
   managerFloor(sessionID: string, now?: number): Promise<number | null>;
   /** The rotation health snapshot (rotation feature) — /usage's footer. */
   rotationHealthSnapshot(): RotationHealthSnapshot | null;
+  /** Stop the running turn (abort the inflight controller + clear the queue); with `interrupt` also interrupt on the server. */
+  stopCurrent(conv: ConvKey, interrupt?: boolean): Promise<void>;
+  /** Stop nudging all of the conv's pending prompts and drop their reminder schedules. */
+  cancelAllReminders(conv: ConvKey): void;
+  /** Stop the conv's /watch card (W5.1) — no-op when no watch is live. */
+  stopWatch(conv: ConvKey, reason: WatchStopReason, opts?: { deleteCard?: boolean }): void;
+  /** In-memory folder browsers, one per conv (owned by the browse feature). */
+  browsers: Map<ConvKey, BrowseState>;
+  /** In-flight question forms, keyed by form id (owned by the form subsystem; /clear drops its conv's). */
+  questionForms: Map<string, { conv: ConvKey }>;
 }

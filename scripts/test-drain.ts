@@ -17,6 +17,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { drainInflightCore, Bot } from "../src/bot.js";
+import { applyUseState } from "../src/commands/session.js";
 import { StateManager } from "../src/state.js";
 
 let failures = 0;
@@ -248,7 +249,7 @@ const tick = () => new Promise<void>((r) => setImmediate(r));
   const { bot } = makeBot();
   bot.st.set("1", { sessionID: "ses_old" });
   bot.queue.push("1", { text: "a" });
-  (bot as any).applyUseState("1", "ses_new");
+  applyUseState(bot as any, "1", "ses_new");
   check("session switch clears the queue", bot.queue.size("1") === 0, String(bot.queue.size("1")));
 }
 
