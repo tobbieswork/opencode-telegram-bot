@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.43.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.42.1...opencode-telegram-bot-v1.43.0) (2026-11-18)
+
+
+### Features
+
+* /spec list — split specs into in-progress and done groups ([da97219](https://github.com/tobbieswork/opencode-telegram-bot/commit/da9721903dbadcd5340ca050e7e15273c58751af))
+* /spec list — split specs into in-progress and done groups ([599202d](https://github.com/tobbieswork/opencode-telegram-bot/commit/599202df6c439210358c1acf3263828dfecc0324))
+
 ## [1.42.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.42.0...opencode-telegram-bot-v1.42.1) (2026-11-18)
 
 
