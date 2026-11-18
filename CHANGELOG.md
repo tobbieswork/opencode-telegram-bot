@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.45.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.44.3...opencode-telegram-bot-v1.45.0) (2026-11-18)
+
+
+### Features
+
+* T2 — typed callback registry with registry-first dispatch ([2994d21](https://github.com/tobbieswork/opencode-telegram-bot/commit/2994d21db58ff7b8cfac1e0454e3df7b6f9730fd))
+
 ## [1.44.3](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.44.2...opencode-telegram-bot-v1.44.3) (2026-11-18)
 
 
