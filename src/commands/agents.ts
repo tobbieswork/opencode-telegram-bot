@@ -7,7 +7,7 @@ import { warn, error } from "../logger.js";
 import { tr } from "../i18n.js";
 import { AGENT_WHITELIST } from "../shared.js";
 import { pickerKeyboard } from "../ui/keyboards.js";
-import { okLine, raw } from "../ui/text.js";
+import { errorLine, okLine, raw, warnLine } from "../ui/text.js";
 
 export async function cmdAgents(bot: Bot, conv: ConvKey): Promise<void> {
   const agents = await bot.oc.listAgents();
@@ -33,7 +33,7 @@ export async function cmdAgent(bot: Bot, conv: ConvKey, arg: string, state: Chat
   if (!arg) return sendAgentPicker(bot, conv, undefined, bot.userPrefs.getLang(bot.st.peek(conv)?.createdBy ?? ""));
   // Unknown id (and the listing succeeded) → show the picker too; a failed
   // listing keeps the old behaviour of trusting the typed id.
-  if (agents && !agents.some((a) => a.id === arg)) return sendAgentPicker(bot, conv, `❌ Unknown agent: <code>${esc(arg)}</code>`, bot.userPrefs.getLang(bot.st.peek(conv)?.createdBy ?? ""));
+  if (agents && !agents.some((a) => a.id === arg)) return sendAgentPicker(bot, conv, errorLine(bot.userPrefs.getLang(bot.st.peek(conv)?.createdBy ?? ""), raw(`Unknown agent: <code>${esc(arg)}</code>`)), bot.userPrefs.getLang(bot.st.peek(conv)?.createdBy ?? ""));
   const how = await applyAgent(bot, conv, arg);
   const lang = bot.userPrefs.getLang(bot.st.peek(conv)?.createdBy ?? "");
   await bot.tg.sendMessage(conv, okLine(lang, raw(`Agent → <code>${esc(arg)}</code> (${how === "applied" ? "applied to current session" : "applies on /new"})`)));
@@ -81,6 +81,6 @@ export async function handleAgentCallback(bot: Bot, cb: CallbackQuery, conv: Con
     await bot.tg.answerCallbackQuery(cb.id, `Agent → ${id}`);
     if (messageId) await bot.tg.editMessageText(conv, messageId, okLine(lang, raw(`Agent → <code>${esc(id)}</code> (${how})`))).catch(() => {});
   } catch (e) {
-    await bot.tg.answerCallbackQuery(cb.id, `⚠️ ${(e as Error).message}`);
+    await bot.tg.answerCallbackQuery(cb.id, warnLine(bot.userPrefs.getLang(cb.from?.id ?? ""), raw((e as Error).message)));
   }
 }

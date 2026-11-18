@@ -1,5 +1,6 @@
 import type { Lang } from "./state.js";
 import { tr } from "./i18n.js";
+import { errorLine, raw, statusLine, warnLine } from "./ui/text.js";
 
 /** Worker status → icon (lives in src/ui/icons.ts now; re-exported until the
  * call sites move there — message-layer spec, M1.1). */
@@ -83,34 +84,20 @@ export function formatTurnFailure(
   lang: Lang = "vi",
 ): string {
   const secs = (elapsedMs / 1000).toFixed(1);
-  const raw = (error?.message ?? "").trim();
-  const text = `${error?.type ?? ""}\n${raw}`;
-  const detail = raw ? `\n<i>${esc(trunc(raw, 200))}</i>` : "";
+  const rawMsg = (error?.message ?? "").trim();
+  const text = `${error?.type ?? ""}\n${rawMsg}`;
+  const detail = rawMsg ? `\n<i>${esc(trunc(rawMsg, 200))}</i>` : "";
   // A rate/usage cap is not a full context — tell the user to wait, not /clear.
   switch (classifyFailure(text)) {
     case "rate-limit":
-      return tr(
-        lang,
-        `⏳ Provider đang giới hạn tốc độ (rate limit) — không phải lỗi context, chờ vài giây rồi thử lại.${detail}`,
-        `⏳ The provider is rate limiting — not a context error; wait a few seconds and try again.${detail}`,
-      );
+      return statusLine(lang, raw(tr(lang, `Provider đang giới hạn tốc độ (rate limit) — không phải lỗi context, chờ vài giây rồi thử lại.${detail}`, `The provider is rate limiting — not a context error; wait a few seconds and try again.${detail}`)));
     case "provider-down":
-      return tr(
-        lang,
-        `⚠️ <b>Provider báo lỗi phía server</b> (5xx, có thể provider đang gặp sự cố) — không phải lỗi context hay rate limit. Chờ một lúc rồi thử lại.${detail}`,
-        `⚠️ <b>Provider server error</b> (5xx, e.g. the provider is down) — not a context or rate-limit problem. Wait a moment and retry.${detail}`,
-      );
+      return warnLine(lang, raw(tr(lang, `<b>Provider báo lỗi phía server</b> (5xx, có thể provider đang gặp sự cố) — không phải lỗi context hay rate limit. Chờ một lúc rồi thử lại.${detail}`, `<b>Provider server error</b> (5xx, e.g. the provider is down) — not a context or rate-limit problem. Wait a moment and retry.${detail}`)));
     case "overflow":
       // Since OpenCode 2.2.5 an overflow triggers auto-compaction (and a
       // shrink-retry) before the turn can fail — so reaching this message
       // means the session is still too large even after that.
-      return tr(
-        lang,
-        "⚠️ <b>Session đã đầy context</b> — vượt giới hạn token của model; OpenCode đã tự nén context nhưng vẫn không chạy tiếp được.\n" +
-          "Gõ <code>/clear</code> để bắt đầu phiên mới.",
-        "⚠️ <b>Session out of context</b> — the model's token limit was reached and auto-compaction couldn't bring it back down.\n" +
-          "Send <code>/clear</code> to start a fresh session.",
-      );
+      return warnLine(lang, raw(tr(lang, "<b>Session đã đầy context</b> — vượt giới hạn token của model; OpenCode đã tự nén context nhưng vẫn không chạy tiếp được.\n" + "Gõ <code>/clear</code> để bắt đầu phiên mới.", "<b>Session out of context</b> — the model's token limit was reached and auto-compaction couldn't bring it back down.\n" + "Send <code>/clear</code> to start a fresh session.")));
     case "usage-cap":
       return tr(
         lang,
@@ -118,11 +105,11 @@ export function formatTurnFailure(
         `🚫 The provider/model usage quota is exhausted — wait for the quota to reset or switch models with /model.${detail}`,
       );
   }
-  if (raw) {
+  if (rawMsg) {
     const type = error?.type ? ` <code>${esc(error.type)}</code>` : "";
-    return tr(lang, `❌ <b>Turn lỗi</b>${type}: ${esc(trunc(raw, 400))}\n<i>${secs}s</i>`, `❌ <b>Turn error</b>${type}: ${esc(trunc(raw, 400))}\n<i>${secs}s</i>`);
+    return errorLine(lang, raw(tr(lang, `<b>Turn lỗi</b>${type}: ${esc(trunc(rawMsg, 400))}\n<i>${secs}s</i>`, `<b>Turn error</b>${type}: ${esc(trunc(rawMsg, 400))}\n<i>${secs}s</i>`)));
   }
-  return tr(lang, "❌ <b>Turn bị lỗi</b> (${secs}s) — không có thông tin chi tiết. Nếu lặp lại, thử <code>/clear</code>.", "❌ <b>Turn failed</b> (${secs}s) — no details available. If it repeats, try <code>/clear</code>.");
+  return errorLine(lang, raw(tr(lang, `<b>Turn bị lỗi</b> (${secs}s) — không có thông tin chi tiết. Nếu lặp lại, thử <code>/clear</code>.`, `<b>Turn failed</b> (${secs}s) — no details available. If it repeats, try <code>/clear</code>.`)));
 }
 
 /** Compact number for display: "1.2K" / "3.4M" (plain if < 1000). */
