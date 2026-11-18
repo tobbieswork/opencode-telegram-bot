@@ -11,6 +11,8 @@ import { McpBridge, BridgeTool, makeRunScriptTool } from "./mcp-bridge.js";
 import { addWorktree, diffSummary, gitBoundary, gitRoot, gitStatusBrief, mergeWorktree, removeWorktree, resolveBaseBranch, runGit } from "./worktree.js";
 import { parseSpec, type ParsedTask } from "./spec.js";
 import { classifyShellItems, computeNotRan, renderCheckpointCard, checkpointOutcome } from "./spec-checkpoint.js";
+import { managerSpecAccept, managerSpecAuto, managerSpecList, managerSpecRun } from "./commands/spec.js";
+import type { Bot } from "./bot.js";
 import { listDirs } from "./fsbrowser.js";
 import { spawnRequestBody } from "./reactions.js";
 import { buildHandoffPrompt, followUpsFromMessages, respawnName, respawnNotice, shouldRespawnWorker } from "./recovery.js";
@@ -1905,6 +1907,9 @@ export class Orchestrator {
       const r = this.h.cfg.browseRoots.find((root) => p === root || p.startsWith(root + sep));
       return r ? `${p} (root ${r}${p === r ? "" : ", rel " + relative(r, p)})` : p;
     };
+    // The spec tools want the full Bot (Host is the orchestrator's subset);
+    // at runtime this.h IS the Bot.
+    const specBot = this.h as unknown as Bot;
     const tools: BridgeTool[] = [
       {
         name: "list_directories",
@@ -2026,6 +2031,54 @@ export class Orchestrator {
           await this.h.sendHtml(conv, "⏹ " + tr(this.langOf(conv), "Manager đã dừng worker này.", "The Manager stopped this worker.")).catch(() => {});
           return `Stopped "${this.h.st.get(conv).worker!.name}".`;
         },
+      },
+      // ── Spec pipeline (same path as the Telegram taps, acting as the owner) ──
+      {
+        name: "spec_list",
+        description:
+          "List this chat's specs (docs/sdd): done/total, the running spec worker, and the next task (with its block condition).",
+        inputSchema: { type: "object", properties: {} },
+        run: async () => managerSpecList(specBot, chat),
+      },
+      {
+        name: "spec_run",
+        description:
+          "Run one task of a spec (same path as the Telegram Run tap; the checkpoint card is posted when the worker finishes). " +
+          "Blocked tasks probe first — call again with runAnyway=true to spawn.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            spec: { type: "string", description: "Spec name (docs/sdd/<spec>.md)" },
+            task: { type: "string", description: "Task number or id (6 or T6)" },
+            runAnyway: { type: "boolean", description: "Spawn a blocked task without the probe (the second tap)" },
+          },
+          required: ["spec", "task"],
+        },
+        run: async (a) =>
+          managerSpecRun(specBot, chat, String(a.spec ?? ""), String(a.task ?? ""), a.runAnyway === true),
+      },
+      {
+        name: "spec_accept",
+        description:
+          "Accept a finished spec task (same path as the Accept button: live-state re-derivation, marker commit, branch push).",
+        inputSchema: {
+          type: "object",
+          properties: { spec: { type: "string" }, task: { type: "string", description: "Task number or id (6 or T6)" } },
+          required: ["spec", "task"],
+        },
+        run: async (a) => managerSpecAccept(specBot, chat, String(a.spec ?? ""), String(a.task ?? "")),
+      },
+      {
+        name: "spec_auto",
+        description:
+          "Accept a finished spec task AND arm auto-continue (same path as the Auto-run-next button): the next task runs, " +
+          "and each green checkpoint is accepted and continued until a task is blocked or fails.",
+        inputSchema: {
+          type: "object",
+          properties: { spec: { type: "string" }, task: { type: "string", description: "Task number or id (6 or T6)" } },
+          required: ["spec", "task"],
+        },
+        run: async (a) => managerSpecAuto(specBot, chat, String(a.spec ?? ""), String(a.task ?? "")),
       },
       // Zero-context sandbox: runs a script and returns only its final result.
       // The bridge has no per-session scoping, so it is offered to every caller
