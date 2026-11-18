@@ -654,6 +654,21 @@ async function specAccept(
     return { ok: false };
   }
   const commit = commits[0]; // newest first
+  // Guard (2026-11-18 split-bot-ts T6 incident): the worker's commit must be
+  // NEWER than the run start. A worker that ends its turn WITHOUT committing
+  // (e.g. waiting on a background smoke) must not be accepted on pre-run
+  // history — that stamps a stale hash and the next task would spawn into a
+  // dirty worktree. Tolerance: 5s (committer dates are second-resolution).
+  const commitTs = (await runGit(dir!, ["show", "-s", "--format=%ct", commit.hash]).catch(() => "")).trim();
+  const runStartMs = (w as any).createdAt ?? 0;
+  if (runStartMs > 0 && commitTs !== "" && Number(commitTs) * 1000 + 5000 < runStartMs) {
+    await bot.tg
+      .sendMessage(conv, errorLine(lang, tr(lang,
+        `Không thể chấp nhận — commit mới nhất của worker (${commit.hash}) cũ hơn thời điểm run bắt đầu: có thể worker chưa commit thay đổi. Kiểm tra worktree, commit rồi thử lại.`,
+        `Can't accept — the worker's newest commit (${commit.hash}) predates this run's start: the worker may not have committed its work. Check the worktree, commit it, then retry.`)))
+      .catch(() => {});
+    return { ok: false };
+  }
   // S4.4: mark the task done in the WORKTREE's spec file, and commit that
   // single change on the spec branch. The user's checkout is never touched.
   writeFileSync(file, markTask(md, n, commit.hash));

@@ -332,6 +332,26 @@ try {
     check("accept-refuse(bad-n): task not found (en)", sent.map((m) => m.t).join("\n").includes("not found in the spec"), sent.map((m) => m.t).join("\n"));
   }
 
+  {
+    // (i) stale commit (2026-11-18 split-bot-ts T6 incident): the newest worker
+    // commit PREDATES the run start — the worker ended its turn without
+    // committing. Accept must refuse instead of stamping a stale hash.
+    const fx = await newRunFixture();
+    const commitTs = Number(git(fx.wt.root, ["show", "-s", "--format=%ct"]));
+    const { bot, sent } = mkBot("en");
+    seedWorker(bot.st, fx.wt.root, "done", { createdAt: commitTs * 1000 + 60_000, updatedAt: commitTs * 1000 + 60_000 });
+    const before = git(fx.wt.root, ["rev-list", "--count", "HEAD"]);
+    const accBefore = auditLines().filter((e) => e.action === "spec_accept").length;
+    await handleSpecCallback(bot, cb("spcacc:gamma:2"), CONV);
+    check("accept-refuse(stale-commit): no marker commit made", git(fx.wt.root, ["rev-list", "--count", "HEAD"]) === before);
+    check("accept-refuse(stale-commit): en message names the stale commit", sent.map((m) => m.t).join("\n").includes("predates this run"), sent.map((m) => m.t).join("\n"));
+    check("accept-refuse(stale-commit): no spec_accept audit", auditLines().filter((e) => e.action === "spec_accept").length === accBefore, JSON.stringify(auditLines().map((l) => l.action)));
+    const { bot: botVi, sent: sentVi } = mkBot("vi");
+    seedWorker(botVi.st, fx.wt.root, "done", { createdAt: commitTs * 1000 + 60_000, updatedAt: commitTs * 1000 + 60_000 });
+    await handleSpecCallback(botVi, cb("spcacc:gamma:2"), CONV);
+    check("accept-refuse(stale-commit): vi message", sentVi.map((m) => m.t).join("\n").includes("cũ hơn thời điểm run bắt đầu"), sentVi.map((m) => m.t).join("\n"));
+  }
+
   // ── Redo with note — the pending-note flow (both languages) ──────────────
   for (const lang of ["vi", "en"] as const) {
     const fx = await newRunFixture();
