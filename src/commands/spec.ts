@@ -22,7 +22,7 @@ import type { Bot } from "../bot.js";
 import type { CallbackQuery } from "../telegram.js";
 import type { ConvKey } from "../conv.js";
 import { chatOf } from "../conv.js";
-import type { Lang, SpecPrState } from "../state.js";
+import type { Lang, SpecPrState, WorkerStatus } from "../state.js";
 import { MACHINE_STATE_KEY } from "../state.js";
 import { gitRoot, ensureSpecWorktree, resolveBaseBranch, runGit, specBranchName, specSlug, removeWorktree } from "../worktree.js";
 import { ghApi, githubRepoSlug, ghPrReady } from "../github.js";
@@ -286,6 +286,8 @@ async function specRunSpawn(
   task: ParsedTask,
   root: string,
   runAnyway: boolean,
+  /** S6.5: carry the auto run-next flag onto the new run (autoContinueFrom passes true). */
+  auto?: boolean,
 ): Promise<void> {
   const chat = chatOf(conv);
   const workerName = `spec-${name}`;
@@ -367,7 +369,7 @@ async function specRunSpawn(
         isolate: false,
         // S5: conv = the conv the Run tap happened in (where the checkpoint card
         // is posted); uid = the tapping user (S6.2 tapped_by).
-        specRun: { spec: name, branch: wt.branch, task: task.id, conv, uid: uid ?? 0 },
+        specRun: { spec: name, branch: wt.branch, task: task.id, conv, uid: uid ?? 0, ...(auto ? { auto: true } : {}) },
       });
       // S6.2: audit the run — who tapped, which spec, which task.
       audit({
@@ -549,25 +551,30 @@ async function noRunMessage(bot: Bot, conv: ConvKey, lang: Lang, name: string): 
  * the spec file INSIDE THE WORKTREE and commits that single line on the spec
  * branch only (the user's checkout is never touched — S4.4), then offers the
  * next runnable task with its Run button.
+ * Returns { ok } so the S6.5 auto path can act on the outcome.
  */
+type AcceptResult = { ok: boolean };
+
 async function specAccept(
   bot: Bot,
-  cb: CallbackQuery,
   conv: ConvKey,
   lang: Lang,
   uid: number | undefined,
   name: string,
   n: number,
-): Promise<void> {
+): Promise<AcceptResult> {
   const found = specRunWorker(bot, conv, name);
-  if (!found) return noRunMessage(bot, conv, lang, name);
+  if (!found) {
+    await noRunMessage(bot, conv, lang, name);
+    return { ok: false };
+  }
   const s = found[1];
   const w = s.worker!;
   if (BUSY.includes(w.status)) {
     await bot.tg
       .sendMessage(conv, tr(lang, `⏳ Worker ${esc(w.name)} đang chạy — chờ nó xong trước khi chấp nhận.`, `⏳ Worker ${esc(w.name)} is still working — wait for it to finish before accepting.`))
       .catch(() => {});
-    return;
+    return { ok: false };
   }
   if (w.status !== "done") {
     const msg =
@@ -577,7 +584,7 @@ async function specAccept(
           ? tr(lang, `⏹ Worker ${esc(w.name)} đã bị dừng — không thể chấp nhận.`, `⏹ The worker was stopped — it can't be accepted.`)
           : tr(lang, `❌ Worker ${esc(w.name)} chưa xong — không thể chấp nhận.`, `❌ The worker is not finished — it can't be accepted.`);
     await bot.tg.sendMessage(conv, msg).catch(() => {});
-    return;
+    return { ok: false };
   }
   const dir = s.directory;
   const relSpec = join("docs", "sdd", `${name}.md`);
@@ -587,25 +594,26 @@ async function specAccept(
     if (!dir) throw new Error("no worktree directory");
     md = readFileSync(file, "utf8");
   } catch {
-    return noRunMessage(bot, conv, lang, name);
+    await noRunMessage(bot, conv, lang, name);
+    return { ok: false };
   }
   const res = parseSpec(md);
   if ("error" in res) {
     await bot.sendHtml(conv, errorDetailText(lang, specTitle(md, name), name, res.error));
-    return;
+    return { ok: false };
   }
   const task = res.tasks.find((t) => t.n === n);
   if (!task) {
     await bot.tg
       .sendMessage(conv, tr(lang, `❌ Task số ${n} không có trong spec ${esc(name)}.`, `❌ Task ${n} not found in the spec ${esc(name)}.`))
       .catch(() => {});
-    return;
+    return { ok: false };
   }
   if (task.marker === "done") {
     await bot.tg
       .sendMessage(conv, tr(lang, `✅ Task ${esc(task.id)} đã được chấp nhận rồi.`, `✅ Task ${esc(task.id)} is already accepted.`))
       .catch(() => {});
-    return;
+    return { ok: false };
   }
   // S3.2: re-classify the checks from the session's ACTUAL shell tool items.
   const items: Array<{ state?: any }> = [];
@@ -622,7 +630,7 @@ async function specAccept(
     await bot.tg
       .sendMessage(conv, tr(lang, `❌ Có check đã lỗi (chưa chạy được) — không thể chấp nhận. Hãy dùng "Làm lại kèm ghi chú".`, `❌ A check errored (never ran) — the run can't be accepted. Use "Redo with note".`))
       .catch(() => {});
-    return;
+    return { ok: false };
   }
   // S3.1: the worker's commit, re-read from git (since the fork, marker excluded).
   const base = await resolveBaseBranch(dir!);
@@ -632,7 +640,7 @@ async function specAccept(
     await bot.tg
       .sendMessage(conv, tr(lang, `❌ Chưa thể chấp nhận — không có commit nào của worker trên nhánh kể từ khi fork.`, `❌ Can't accept — there is no commit on the branch since the fork.`))
       .catch(() => {});
-    return;
+    return { ok: false };
   }
   const commit = commits[0]; // newest first
   // S4.4: mark the task done in the WORKTREE's spec file, and commit that
@@ -715,6 +723,158 @@ async function specAccept(
   }
   const keyboard = buttons.length ? { reply_markup: { inline_keyboard: buttons.map((b) => [b]) } } : undefined;
   await bot.sendHtml(conv, lines2.join("\n"), keyboard);
+  return { ok: true };
+}
+
+// ── S6.5 (auto run-next) ───────────────────────────────────────────────────
+/**
+ * S6.5 — the next task the auto chain must handle: the FIRST undone task in
+ * order. Unlike nextRunnable (which skips blocked tasks — a human can choose
+ * to run around them), the auto chain NEVER jumps over a task: a blocked one
+ * stops the chain (its "Needs:" condition is a human/external gate).
+ */
+function nextAutoTask(tasks: ParsedTask[]): ParsedTask | undefined {
+  return tasks.find((t) => t.marker !== "done");
+}
+
+/**
+ * S6.5 — after a successful accept: look up the next task the chain must
+ * handle (fresh spec state from the worktree) and either spawn it WITHOUT a
+ * tap or stop at a blocked task (offering the explicit "run anyway" two-tap
+ * flow). A no-op when every task is done.
+ */
+async function autoContinueFrom(
+  bot: Bot,
+  conv: ConvKey,
+  lang: Lang,
+  uid: number | undefined,
+  name: string,
+  dir: string,
+): Promise<void> {
+  let md: string;
+  try {
+    md = readFileSync(join(dir, "docs", "sdd", `${name}.md`), "utf8");
+  } catch {
+    return;
+  }
+  const res = parseSpec(md);
+  const nxt = "error" in res ? undefined : nextAutoTask(res.tasks);
+  if (!nxt) return; // all done — the accept's card offers the PR
+  if (nxt.needs) {
+    await bot
+      .sendHtml(
+        conv,
+        tr(
+          lang,
+          `⛔ Task tiếp theo <b>${esc(nxt.id)}</b> đang bị chặn: <i>${esc(nxt.needs)}</i> — auto run dừng.`,
+          `⛔ The next task <b>${esc(nxt.id)}</b> is blocked: <i>${esc(nxt.needs)}</i> — auto run stops.`,
+        ),
+        {
+          reply_markup: {
+            inline_keyboard: [[{ text: `⛔ Run ${nxt.id}`, callback_data: `specblocked:${name}:${nxt.n}` }]],
+          },
+        },
+      )
+      .catch(() => {});
+    return;
+  }
+  const root = await gitRoot(convDir(bot, conv));
+  if (!root) return;
+  await specRunSpawn(bot, conv, lang, uid, name, nxt.n, nxt, root, false, true);
+}
+
+async function specAuto(
+  bot: Bot,
+  conv: ConvKey,
+  lang: Lang,
+  uid: number | undefined,
+  name: string,
+  n: number,
+): Promise<void> {
+  const found = specRunWorker(bot, conv, name);
+  const w = found?.[1].worker;
+  const sr = w?.specRun;
+  if (!found || !w || !sr) return noRunMessage(bot, conv, lang, name);
+  if (!sr.auto) bot.st.set(found[0], { worker: { ...w, specRun: { ...sr, auto: true } } });
+  const dir = found[1].directory;
+  const res = await specAccept(bot, conv, lang, uid, name, n);
+  if (res.ok && dir) await autoContinueFrom(bot, conv, lang, uid, name, dir);
+}
+
+/**
+ * S6.5 (auto run-next) — terminal hook, called by the orchestrator AFTER the
+ * checkpoint card is posted when a spec worker reaches a terminal status.
+ * Re-derives everything from LIVE state (S6.4) exactly like Accept does —
+ * worker done, no errored check, a commit since the fork — then accepts and
+ * spawns the next task with no tap. Any deviation (red finish, blocked next
+ * task, unreadable spec) clears the auto flag and says so; the normal card
+ * (with Redo / Stop) was already posted and stays the way back in.
+ * Best-effort: never throws into the worker's finish path.
+ */
+export async function specAutoContinue(bot: Bot, workerConv: ConvKey, status: WorkerStatus): Promise<void> {
+  try {
+    const s = bot.st.peek(workerConv);
+    const w = s?.worker;
+    if (!w?.specRun?.auto || !w.specRun.conv || !s?.directory) return;
+    const { spec: name, task: taskId, conv, uid } = w.specRun;
+    const lang = bot.userPrefs.getLang(uid ? String(uid) : "");
+    const clearAuto = (): void => {
+      const cur = bot.st.peek(workerConv)?.worker;
+      if (cur?.specRun?.auto) bot.st.set(workerConv, { worker: { ...cur, specRun: { ...cur.specRun, auto: false } } });
+    };
+    if (status !== "done") {
+      clearAuto();
+      await bot
+        .sendHtml(
+          conv,
+          tr(
+            lang,
+            "⛔ Auto run dừng — task vừa kết thúc không xanh (lỗi hoặc không có commit). Xem card bên trên để làm lại.",
+            "⛔ Auto run stopped — the task ended not green (error or no commit). See the card above to redo.",
+          ),
+        )
+        .catch(() => {});
+      return;
+    }
+    const file = join(s.directory, "docs", "sdd", `${name}.md`);
+    let md: string;
+    try {
+      md = readFileSync(file, "utf8");
+    } catch {
+      clearAuto();
+      return;
+    }
+    const res = parseSpec(md);
+    if ("error" in res) {
+      clearAuto();
+      return;
+    }
+    const task = res.tasks.find((t) => t.id === taskId);
+    if (!task) {
+      clearAuto();
+      return;
+    }
+    const acc = await specAccept(bot, conv, lang, uid, name, task.n);
+    if (!acc.ok) {
+      clearAuto();
+      await bot
+        .sendHtml(
+          conv,
+          tr(
+            lang,
+            `⛔ Auto run dừng — không chấp nhận được <b>${esc(task.id)}</b>. Xem card bên trên.`,
+            `⛔ Auto run stopped — couldn't accept <b>${esc(task.id)}</b>. See the card above.`,
+          ),
+        )
+        .catch(() => {});
+      return;
+    }
+    await autoContinueFrom(bot, conv, lang, uid, name, s.directory);
+    // all-done / blocked are no-ops inside autoContinueFrom; the flag is
+    // harmless either way (no more runnable task to trigger it).
+  } catch (e) {
+    warn(`specAutoContinue: ${(e as Error).message}`);
+  }
 }
 
 /**
@@ -1011,6 +1171,7 @@ ${esc(removed)}`,
  *  - "specblocked:<name>:<n>" → Run tap on a blocked task → probe + "Run anyway"
  *  - "specrunok:<name>:<n>"   → the explicit second tap ("Run anyway") → spawn
  *  - "spcacc:<name>:<n>"      → S6 Accept (re-derives from live state)
+ *  - "spcauto:<name>:<n>"     → S6.5 Accept + auto run-next (then spawn if runnable)
  *  - "spcredo:<name>:<n>"     → S6 Redo with note (pending-note flow)
  *  - "spcstop:<name>:<n>"     → S6 Stop (busy worker only)
  */
@@ -1061,7 +1222,16 @@ export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: Conv
       await bot.tg.sendMessage(conv, tr(lang, "❌ Không rõ task nào.", "❌ Unknown task."));
       return;
     }
-    await specAccept(bot, cb, conv, lang, cb.from?.id, ref.name, ref.n);
+    await specAccept(bot, conv, lang, cb.from?.id, ref.name, ref.n);
+    return;
+  }
+  if (data.startsWith("spcauto:")) {
+    const ref = parseRunRef(data.slice("spcauto:".length));
+    if (!ref) {
+      await bot.tg.sendMessage(conv, tr(lang, "❌ Không rõ task nào.", "❌ Unknown task."));
+      return;
+    }
+    await specAuto(bot, conv, lang, cb.from?.id, ref.name, ref.n);
     return;
   }
   if (data.startsWith("spcredo:")) {

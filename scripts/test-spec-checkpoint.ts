@@ -185,6 +185,17 @@ try {
     check("card(no-commit): says no commit", /no commit/i.test(noc.text), noc.text);
     check("card(no-commit): omits the commit section", !noc.text.includes("abc1234"), noc.text);
 
+    // S6.5: auto mode on → the card says so and does NOT offer the auto button.
+    const autoCard = renderCheckpointCard({ ...base, auto: true });
+    const autoKb = autoCard.keyboard.inline_keyboard.flat().map((b) => b.callback_data ?? "");
+    check("card(auto): carries the auto banner", /Auto-run/i.test(autoCard.text), autoCard.text);
+    check("card(auto): no auto button", !autoKb.some((d) => d.startsWith("spcauto:")), JSON.stringify(autoKb));
+    check("card(auto): Accept still present", autoKb.includes("spcacc:alpha:2"), JSON.stringify(autoKb));
+    // S6.5: normal card → offers the auto opt-in button.
+    check("card(normal): offers the auto opt-in button", kbs.includes("spcauto:alpha:2"), JSON.stringify(kbs));
+    // S6.5: errored card (no Accept) → no auto button either.
+    check("card(errored): no auto button", !errKb.some((d) => d.startsWith("spcauto:")), JSON.stringify(errKb));
+
     // i18n: the Vietnamese variant renders (different label set, still bilingual-safe).
     const vi = renderCheckpointCard({ ...base, lang: "vi" });
     check("card(vi): renders the Vietnamese Accept label", vi.keyboard.inline_keyboard.flat().some((b) => b.text === "✅ Chấp nhận"), JSON.stringify(vi.keyboard));

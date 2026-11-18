@@ -69,7 +69,7 @@ import { cmdAgents, cmdAgent, handleAgentCallback } from "./commands/agents.js";
 import { cmdSchedule, handleScheduleCallback } from "./commands/schedule.js";
 import { Advisor } from "./advisor/advisor.js";
 import { cmdHelp, cmdStatus, cmdHealth, cmdContext, cmdUsage, cmdHistory, cmdNote, cmdRotation, handleNoteCallback, cmdLang, cmdStyle } from "./commands/meta.js";
-import { cmdSpec, handleSpecCallback } from "./commands/spec.js";
+import { cmdSpec, handleSpecCallback, specAutoContinue } from "./commands/spec.js";
 import {
   clampWatchInterval,
   createWatch,
@@ -529,6 +529,9 @@ export class Bot {
       advisor: this.advisor,
       userPrefs: this.userPrefs,
       sendHtml: (conv, html, opts) => this.sendHtml(conv, html, opts),
+      onSpecCheckpoint: (wc, st) => {
+        void specAutoContinue(this, wc, st);
+      },
       noteNextStepMessage: (conv, id, residual) => this.noteNextStepMessage(conv, id, residual),
       applyModelAndVariant: (sid, state) => this.applyModelAndVariant(sid, state),
       prepareNotes: (conv, sid) => this.prepareNotesTurn(conv, sid),

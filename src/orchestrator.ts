@@ -86,6 +86,13 @@ export interface Host {
    * removeWorktree). Lets the concurrency test count real purges deterministically.
    */
   removeWorktree?: (repoRoot: string, wt: { root: string; branch: string }) => Promise<string>;
+  /**
+   * S6.5 (auto run-next): a spec worker just reached a terminal status and its
+   * checkpoint card was posted. The Bot wires this to specAutoContinue, which
+   * accepts + spawns the next task when the run's auto flag is on (no-op
+   * otherwise).
+   */
+  onSpecCheckpoint?: (workerConv: ConvKey, status: WorkerStatus) => void;
 }
 
 export const MANAGER_AGENT = "tg-manager";
@@ -1232,11 +1239,19 @@ export class Orchestrator {
       files: files.length ? files : undefined,
       checks: { ran, notRan },
       errored,
+      auto: w.specRun.auto,
       lang,
     });
     await this.h.sendHtml(conv, card.text, { reply_markup: card.keyboard }).catch((e) => {
       warn("postSpecCheckpoint send:", (e as Error)?.message);
     });
+
+    // S6.5: auto run-next — no-op unless this run's auto flag is on.
+    try {
+      this.h.onSpecCheckpoint?.(workerConv, status);
+    } catch (e) {
+      warn("onSpecCheckpoint:", (e as Error)?.message);
+    }
   }
 
   /**
