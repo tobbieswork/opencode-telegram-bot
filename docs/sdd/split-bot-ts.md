@@ -206,7 +206,7 @@ the pure-helper test + a live run (no direct `bot.ts` unit test).
 5. [x] (a9c6a84) **T5 Large modules:** `session`, `browse`. *Checkpoint: try the folder browser and `/new` in Telegram.*
 6. [x] (7f7cb89) **T6 `prompt-runner`.** Move last. *Checkpoint: run a real turn, queue and stop.*
 7. [x] (d9aa43b) **T7 Cleanup.** Remove dead imports, check the size targets (S2.4), update `README.md` architecture notes if any.
-8. [ ] **T8 End-to-end.** `npm run smoke` once at the end, then restart the service (`systemctl --user restart opencode-bot`) and check the journal.
+8. [x] (9d58fb9) **T8 End-to-end.** `npm run smoke` once at the end, then restart the service (`systemctl --user restart opencode-bot`) and check the journal.
 
 **T8 result (2026-11-18).** `npm run smoke` from the merged branch (main `87ad169`/v1.47.0 + T1–T7), Node 24: SMOKE_EXIT=0, all sections green — menu/mode, prompt relay, NEXT-STEP, QUICK-REPLIES, QUEUE (auto-queue → drain → empty), WATCH, and S8 (real spec worker: run → checkpoint → accept → marker). Service restarted on v1.47.0; journal is clean (0 WARN/ERROR on startup) and shows the callback-registry self-check line `callback registry: 35 prefixes — …` (C1.2), confirming the registry dispatch is live.
 
