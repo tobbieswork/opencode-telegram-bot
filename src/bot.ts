@@ -4434,7 +4434,7 @@ export class Bot {
     const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     const state = this.st.get(conv);
     if (this.inflight.has(conv)) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Đang chạy task — hẵng thử lại sau.", "A task is running — try again later."));
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Đang chạy task — hãy thử lại sau.", "A task is running — try again later."));
       return;
     }
     if (!state.sessionID) {
@@ -4471,7 +4471,7 @@ export class Bot {
       return;
     }
     if (this.inflight.has(conv)) {
-      await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Đang chạy task — hẵng thử lại sau.", "A task is running — try again in a moment."));
+      await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Đang chạy task — hãy thử lại sau.", "A task is running — try again in a moment."));
       return;
     }
     await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "⏯ Đang chạy tiếp…", "⏯ Continuing…"));
@@ -4523,7 +4523,7 @@ export class Bot {
     // changes today's behaviour, where a tap silently steered into the running
     // turn; R5.1 extends the refusal to the existing lettered-list buttons.)
     if (state.manager ? this.orch.managerInflight : this.inflight.has(conv)) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Đang chạy task — hẵng thử lại sau.", "A task is running — try again later."));
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Đang chạy task — hãy thử lại sau.", "A task is running — try again later."));
       return;
     }
     // Consume BEFORE any await so a double-tap can never double-fire (R3.4).
@@ -4587,7 +4587,7 @@ export class Bot {
     // (Manager turns have no inflight entry — fire-and-forget — but the board
     // action is read-only, so a busy Manager never blocks a /board tap.)
     if (this.inflight.has(conv)) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Đang chạy task — hẵng thử lại sau.", "A task is running — try again later."));
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Đang chạy task — hãy thử lại sau.", "A task is running — try again later."));
       return;
     }
     if (rec.rule === "review" && state.manager) {
