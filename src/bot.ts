@@ -228,6 +228,23 @@ const formCb = defineCallback<{ formID: string; op: string }>({
   },
 });
 
+/**
+ * The `bs:` callback def (docs/sdd/callback-registry.md — T5 migration).
+ * Wire form: `bs:<op>[:<n>]` — op = nav/up/pg/hid/open/list/setdir/
+ * setsess/close/noop; nav:<idx> (folder index) and pg:<n> (page) carry a
+ * numeric arg, the rest are bare. Same shape as modelCb (mdl:).
+ */
+export const bsCallback = defineCallback<{ op: string; arg?: string }>({
+  prefix: "bs",
+  encode: (a) => (a.arg === undefined ? `bs:${a.op}` : `bs:${a.op}:${a.arg}`),
+  decode: (rest) => {
+    const parts = rest.split(":");
+    if (parts[0] === "") return null;
+    const arg = parts.slice(1).join(":");
+    return { op: parts[0], arg: arg === "" ? undefined : arg };
+  },
+});
+
 /** Key under which the per-session language instruction is stored (namespaced `api/<key>`). */
 const LANGUAGE_INSTRUCTION_KEY = "tgbot.language";
 /** Instruction key for the /new "Clear + keep context" carry-over (recent-thread summary injected into the fresh session). */
@@ -3934,11 +3951,11 @@ export class Bot {
         text: [`<b>📂 ${esc(shortPath(b.path, 70))}</b>`, "", tr(b.lang, "<b>Chọn cách mở thư mục này:</b>", "<b>Choose how to open this folder:</b>")].join("\n"),
         keyboard: {
           inline_keyboard: [
-            [{ text: tr(b.lang, "📁 Chỉ đặt thư mục", "📁 Set directory only"), callback_data: "bs:setdir" }],
-            [{ text: tr(b.lang, "🚀 Đặt + mở session mới", "🚀 Set + open new session"), callback_data: "bs:setsess" }],
+            [{ text: tr(b.lang, "📁 Chỉ đặt thư mục", "📁 Set directory only"), callback_data: bsCallback.encode({ op: "setdir" }) }],
+            [{ text: tr(b.lang, "🚀 Đặt + mở session mới", "🚀 Set + open new session"), callback_data: bsCallback.encode({ op: "setsess" }) }],
             [
-              { text: tr(b.lang, "↩️ Quay lại", "↩️ Back"), callback_data: "bs:list" },
-              { text: tr(b.lang, "❌ Đóng", "❌ Close"), callback_data: "bs:close" },
+              { text: tr(b.lang, "↩️ Quay lại", "↩️ Back"), callback_data: bsCallback.encode({ op: "list" }) },
+              { text: tr(b.lang, "❌ Đóng", "❌ Close"), callback_data: bsCallback.encode({ op: "close" }) },
             ],
           ],
         },
@@ -3947,9 +3964,9 @@ export class Bot {
 
     if (b.view === "done") {
       const rows: Btn[][] = [];
-      if (!b.opened) rows.push([{ text: tr(b.lang, "🚀 Mở session mới tại đây", "🚀 Open a new session here"), callback_data: "bs:setsess" }]);
-      rows.push([{ text: tr(b.lang, "📂 Duyệt tiếp", "📂 Keep browsing"), callback_data: "bs:list" }]);
-      rows.push([{ text: tr(b.lang, "❌ Đóng", "❌ Close"), callback_data: "bs:close" }]);
+      if (!b.opened) rows.push([{ text: tr(b.lang, "🚀 Mở session mới tại đây", "🚀 Open a new session here"), callback_data: bsCallback.encode({ op: "setsess" }) }]);
+      rows.push([{ text: tr(b.lang, "📂 Duyệt tiếp", "📂 Keep browsing"), callback_data: bsCallback.encode({ op: "list" }) }]);
+      rows.push([{ text: tr(b.lang, "❌ Đóng", "❌ Close"), callback_data: bsCallback.encode({ op: "close" }) }]);
       return { text: b.result ?? tr(b.lang, "✅ Xong", "✅ Done"), keyboard: { inline_keyboard: rows } };
     }
 
@@ -3962,27 +3979,27 @@ export class Bot {
       rows.push(
         slice.slice(i, i + BROWSE_COLUMNS).map((it, j) => ({
           text: `📂 ${trunc(it.name, 18)}`,
-          callback_data: `bs:nav:${start + i + j}`,
+          callback_data: bsCallback.encode({ op: "nav", arg: String(start + i + j) }),
         })),
       );
     }
 
     const nav: Btn[] = [];
     if (parentWithin(b.path, this.cfg.browseRoots)) {
-      nav.push({ text: tr(b.lang, "⬆️ Lên", "⬆️ Up"), callback_data: "bs:up" });
+      nav.push({ text: tr(b.lang, "⬆️ Lên", "⬆️ Up"), callback_data: bsCallback.encode({ op: "up" }) });
     }
-    nav.push({ text: b.showHidden ? tr(b.lang, "🙈 Ẩn file ẩn", "🙈 Hide hidden files") : tr(b.lang, "👁 Hiện file ẩn", "👁 Show hidden files"), callback_data: "bs:hid" });
-    nav.push({ text: tr(b.lang, "✅ Mở tại đây", "✅ Open here"), callback_data: "bs:open" });
+    nav.push({ text: b.showHidden ? tr(b.lang, "🙈 Ẩn file ẩn", "🙈 Hide hidden files") : tr(b.lang, "👁 Hiện file ẩn", "👁 Show hidden files"), callback_data: bsCallback.encode({ op: "hid" }) });
+    nav.push({ text: tr(b.lang, "✅ Mở tại đây", "✅ Open here"), callback_data: bsCallback.encode({ op: "open" }) });
     rows.push(nav);
 
     if (pageCount > 1) {
       rows.push([
-        { text: "◀️", callback_data: `bs:pg:${b.page - 1}` },
-        { text: `${b.page + 1}/${pageCount}`, callback_data: "bs:noop" },
-        { text: "▶️", callback_data: `bs:pg:${b.page + 1}` },
+        { text: "◀️", callback_data: bsCallback.encode({ op: "pg", arg: String(b.page - 1) }) },
+        { text: `${b.page + 1}/${pageCount}`, callback_data: bsCallback.encode({ op: "noop" }) },
+        { text: "▶️", callback_data: bsCallback.encode({ op: "pg", arg: String(b.page + 1) }) },
       ]);
     }
-    rows.push([{ text: tr(b.lang, "❌ Đóng", "❌ Close"), callback_data: "bs:close" }]);
+    rows.push([{ text: tr(b.lang, "❌ Đóng", "❌ Close"), callback_data: bsCallback.encode({ op: "close" }) }]);
 
     const meta: string[] = [];
     if (b.note) meta.push(b.note);
@@ -3995,6 +4012,113 @@ export class Bot {
       text: [`<b>📂 ${esc(shortPath(b.path, 70))}</b>`, ...meta].join("\n"),
       keyboard: { inline_keyboard: rows },
     };
+  }
+
+  /**
+   * Handle a tap on the folder browser (data = `bs:<op>[:<n>]`). Every tap
+   * edits the single browser message in place.
+   */
+  public async handleBrowseCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
+    const b = this.browsers.get(conv);
+    if (!b) {
+      answer(tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Phiên duyệt đã đóng — gửi /browse", "The browser was closed — send /browse"));
+      return;
+    }
+
+    const [, action, arg] = (cb.data ?? "").split(":");
+    let close = false;
+    try {
+      switch (action) {
+        case "nav": {
+          const item = b.items[Number(arg)];
+          if (!item) throw new Error(tr(b.lang, "Mục không còn tồn tại — gửi /browse để tải lại.", "The entry no longer exists — send /browse to reload."));
+          b.path = item.path;
+          b.page = 0;
+          b.view = "list";
+          b.note = undefined;
+          await this.reloadBrowse(b);
+          break;
+        }
+        case "up": {
+          const parent = parentWithin(b.path, this.cfg.browseRoots);
+          if (parent) {
+            b.path = parent;
+            b.page = 0;
+            b.view = "list";
+            await this.reloadBrowse(b);
+          }
+          break;
+        }
+        case "pg": {
+          b.page = Math.max(0, Number(arg) || 0);
+          break;
+        }
+        case "hid": {
+          b.showHidden = !b.showHidden;
+          b.page = 0;
+          await this.reloadBrowse(b);
+          break;
+        }
+        case "open": {
+          b.view = "choose";
+          break;
+        }
+        case "list": {
+          b.view = "list";
+          break;
+        }
+        case "setdir": {
+          this.st.set(conv, { directory: b.path });
+          b.view = "done";
+          b.opened = false;
+          b.result = [
+            tr(b.lang, `✅ Đã đặt thư mục làm việc:`, `✅ Working directory set:`) + `\n<code>${esc(b.path)}</code>`,
+            "",
+            tr(b.lang, "Session mới sẽ chạy ở đây. Gõ /new hoặc bấm “🚀 Mở session mới tại đây”.", "New sessions will run here. Send /new or tap “🚀 Open a new session here”."),
+          ].join("\n");
+          break;
+        }
+        case "setsess": {
+          const state = this.st.get(conv);
+          await this.stopCurrent(conv, true);
+          const sessionID = await this.oc.createSession(b.path);
+          await this.applyModelAndVariant(sessionID, state);
+          if (state.agent) {
+            await this.oc.setAgent(sessionID, state.agent).catch((e) => warn("setAgent:", e?.message));
+          }
+          this.st.set(conv, { sessionID, directory: b.path });
+          this.stopWatch(conv, "session-changed"); // W5.1: the conversation moved to a new session
+          b.view = "done";
+          b.opened = true;
+          b.result = [
+            tr(b.lang, `🚀 Đã mở session <code>${esc(sessionID)}</code>`, `🚀 Opened session <code>${esc(sessionID)}</code>`),
+            `📁 <code>${esc(b.path)}</code>`,
+            "",
+            tr(b.lang, "Gửi tin nhắn để bắt đầu làm việc.", "Send a message to start working."),
+          ].join("\n");
+          break;
+        }
+        case "close": {
+          close = true;
+          break;
+        }
+        default:
+          break; // "noop" and anything unknown
+      }
+    } catch (e) {
+      answer(`⚠️ ${(e as Error).message}`);
+      return;
+    }
+
+    answer();
+    if (close) {
+      this.browsers.delete(conv);
+      if (messageId) await this.tg.deleteMessage(conv, messageId);
+      return;
+    }
+    if (!messageId) return;
+    const v = this.renderBrowse(b);
+    await this.tg.editMessageText(conv, messageId, v.text, { reply_markup: v.keyboard });
   }
 
   /** Handle any inline-button tap: the typed registry first (C2.1), then the legacy chain (C3.2). */
@@ -4111,112 +4235,13 @@ export class Bot {
       await handleScheduleCallback(this, cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
       return;
     }
-    if (!data.startsWith("bs:")) {
-      // C2.2: matched neither the registry nor the legacy chain — a stale
-      // or mistyped button. Toast it (warned once) instead of vanishing.
-      await answerExpired(this, cb, lang, data);
+    if (data.startsWith("bs:")) {
+      await this.handleBrowseCallback(cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
       return;
     }
-    const b = this.browsers.get(conv);
-    if (!b) {
-      await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Phiên duyệt đã đóng — gửi /browse", "The browser was closed — send /browse"));
-      return;
-    }
-
-    const [, action, arg] = data.split(":");
-    let close = false;
-    try {
-      switch (action) {
-        case "nav": {
-          const item = b.items[Number(arg)];
-          if (!item) throw new Error(tr(b.lang, "Mục không còn tồn tại — gửi /browse để tải lại.", "The entry no longer exists — send /browse to reload."));
-          b.path = item.path;
-          b.page = 0;
-          b.view = "list";
-          b.note = undefined;
-          await this.reloadBrowse(b);
-          break;
-        }
-        case "up": {
-          const parent = parentWithin(b.path, this.cfg.browseRoots);
-          if (parent) {
-            b.path = parent;
-            b.page = 0;
-            b.view = "list";
-            await this.reloadBrowse(b);
-          }
-          break;
-        }
-        case "pg": {
-          b.page = Math.max(0, Number(arg) || 0);
-          break;
-        }
-        case "hid": {
-          b.showHidden = !b.showHidden;
-          b.page = 0;
-          await this.reloadBrowse(b);
-          break;
-        }
-        case "open": {
-          b.view = "choose";
-          break;
-        }
-        case "list": {
-          b.view = "list";
-          break;
-        }
-        case "setdir": {
-          this.st.set(conv, { directory: b.path });
-          b.view = "done";
-          b.opened = false;
-          b.result = [
-            tr(b.lang, `✅ Đã đặt thư mục làm việc:`, `✅ Working directory set:`) + `\n<code>${esc(b.path)}</code>`,
-            "",
-            tr(b.lang, "Session mới sẽ chạy ở đây. Gõ /new hoặc bấm “🚀 Mở session mới tại đây”.", "New sessions will run here. Send /new or tap “🚀 Open a new session here”."),
-          ].join("\n");
-          break;
-        }
-        case "setsess": {
-          const state = this.st.get(conv);
-          await this.stopCurrent(conv, true);
-          const sessionID = await this.oc.createSession(b.path);
-          await this.applyModelAndVariant(sessionID, state);
-          if (state.agent) {
-            await this.oc.setAgent(sessionID, state.agent).catch((e) => warn("setAgent:", e?.message));
-          }
-          this.st.set(conv, { sessionID, directory: b.path });
-          this.stopWatch(conv, "session-changed"); // W5.1: the conversation moved to a new session
-          b.view = "done";
-          b.opened = true;
-          b.result = [
-            tr(b.lang, `🚀 Đã mở session <code>${esc(sessionID)}</code>`, `🚀 Opened session <code>${esc(sessionID)}</code>`),
-            `📁 <code>${esc(b.path)}</code>`,
-            "",
-            tr(b.lang, "Gửi tin nhắn để bắt đầu làm việc.", "Send a message to start working."),
-          ].join("\n");
-          break;
-        }
-        case "close": {
-          close = true;
-          break;
-        }
-        default:
-          break; // "noop" and anything unknown
-      }
-    } catch (e) {
-      await this.tg.answerCallbackQuery(cb.id, `⚠️ ${(e as Error).message}`);
-      return;
-    }
-
-    await this.tg.answerCallbackQuery(cb.id);
-    if (close) {
-      this.browsers.delete(conv);
-      if (messageId) await this.tg.deleteMessage(conv, messageId);
-      return;
-    }
-    if (!messageId) return;
-    const v = this.renderBrowse(b);
-    await this.tg.editMessageText(conv, messageId, v.text, { reply_markup: v.keyboard });
+    // C2.2: matched neither the registry nor the legacy chain — a stale or
+    // mistyped button. Toast it (warned once) instead of vanishing.
+    await answerExpired(this, cb, lang, data);
   }
 
   /** Run a bot command from an inline button (the /help menu). */
@@ -5398,6 +5423,8 @@ export function registerBotCallbacks(): void {
   registerCallback(agentCb, (ctx, cb) => handleAgentCallback(ctx.bot, cb, ctx.conv, ctx.answer, ctx.messageId), "agents.ts (agent picker)");
   registerCallback(variantCb, (ctx, cb) => ctx.bot.handleVariantCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "bot.ts (variant picker)");
   registerCallback(modelCb, (ctx, cb) => ctx.bot.handleModelCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "bot.ts (model picker)");
+  // T5 — the folder browser menu and its sub-actions.
+  registerCallback(bsCallback, (ctx, cb) => ctx.bot.handleBrowseCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "bot.ts (folder browser)");
 }
 
 registerBotCallbacks();

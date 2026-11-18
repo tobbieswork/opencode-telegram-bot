@@ -47,7 +47,7 @@ import {
   _resetWarnOnceForTest,
   _setTokenTtlMsForTest,
 } from "../src/callbacks.js";
-import { pbCallback, registerBotCallbacks } from "../src/bot.js";
+import { bsCallback, pbCallback, registerBotCallbacks } from "../src/bot.js";
 import type { Bot } from "../src/bot.js";
 import { choiceCallback, choiceKeyboard, registry as choiceRecords } from "../src/choices.js";
 import { continueCallback, continueCallbackData, parseContinueData } from "../src/continue.js";
@@ -403,6 +403,62 @@ async function main(): Promise<void> {
       (await dispatchCallback(base(bot), cb("ch:AB12:3"))) === true && answers.length === 5 && answers[4]?.text === EXPIRED_TOAST.vi,
       JSON.stringify(answers),
     );
+  }
+  // ── T5: bs: migration — folder browser (C3.1/C3.3) ─────────────────────
+  {
+    // bot.js's module load registers the prefixes; the sections above cleared
+    // the registry, so restore the real registration.
+    _clearCallbacksForTest();
+    registerBotCallbacks();
+
+    check("T5: bs is registered", registeredPrefixes().includes("bs"), JSON.stringify(registeredPrefixes()));
+    check("T5: bs owner", callbackOwner("bs") === "bot.ts (folder browser)", callbackOwner("bs"));
+
+    // Round-trip: the bare ops (no numeric arg).
+    for (const op of ["up", "hid", "open", "list", "setdir", "setsess", "close", "noop"] as const) {
+      check(`T5 bs: ${op} encodes as bs:${op}`, bsCallback.encode({ op }) === `bs:${op}`, bsCallback.encode({ op }));
+      check(`T5 bs: ${op} round-trips`, JSON.stringify(bsCallback.decode(op)) === JSON.stringify({ op }), JSON.stringify(bsCallback.decode(op)));
+    }
+    // Round-trip: the ops that carry a numeric arg (folder index / page).
+    check(
+      "T5 bs: nav:5 round-trips",
+      bsCallback.encode({ op: "nav", arg: "5" }) === "bs:nav:5" && JSON.stringify(bsCallback.decode("nav:5")) === JSON.stringify({ op: "nav", arg: "5" }),
+    );
+    check(
+      "T5 bs: pg:0 round-trips",
+      bsCallback.encode({ op: "pg", arg: "0" }) === "bs:pg:0" && JSON.stringify(bsCallback.decode("pg:0")) === JSON.stringify({ op: "pg", arg: "0" }),
+    );
+    // Malformed: an empty op can't round-trip.
+    check("T5 bs: empty rest is malformed", bsCallback.decode("") === null);
+    check("T5 bs: an arg with no op is malformed", bsCallback.decode(":5") === null);
+    // C1.3: the 64-byte cap is enforced in bytes (every real bs: op is short,
+    // so a realistic encode fits; an over-long op is refused in strict mode).
+    check("T5 bs: the longest real op fits 64 bytes", Buffer.byteLength(bsCallback.encode({ op: "setsess" }), "utf8") <= CALLBACK_MAX_BYTES);
+    setCallbackStrict(true);
+    try {
+      check("T5 bs: an over-long op is refused (strict)", throws(() => bsCallback.encode({ op: "x".repeat(62) }), CallbackLimitError));
+    } finally {
+      setCallbackStrict(false);
+    }
+
+    // C3.1 — replay captured real callback strings against the new decoder,
+    // so buttons already sent before this deploy keep working. bs: strings are
+    // structurally bounded (a fixed op set + a small page/index integer), so
+    // representative captured values are the exact wire form.
+    check("T5 C3.1: captured 'bs:nav:3' decodes", JSON.stringify(bsCallback.decode("nav:3")) === JSON.stringify({ op: "nav", arg: "3" }));
+    check("T5 C3.1: captured 'bs:pg:1' decodes", JSON.stringify(bsCallback.decode("pg:1")) === JSON.stringify({ op: "pg", arg: "1" }));
+    check("T5 C3.1: captured 'bs:setdir' decodes", JSON.stringify(bsCallback.decode("setdir")) === JSON.stringify({ op: "setdir" }));
+    check("T5 C3.1: captured 'bs:close' decodes", JSON.stringify(bsCallback.decode("close")) === JSON.stringify({ op: "close" }));
+    check("T5 C3.1: captured 'bs:setsess' decodes", JSON.stringify(bsCallback.decode("setsess")) === JSON.stringify({ op: "setsess" }));
+
+    // Dispatch wiring: the registered prefix routes to the handler adapter with
+    // exactly one answer (C2.1/C2.4) — a fake bot that records the calls.
+    const { bot, answers } = fakeBot();
+    const calls: string[] = [];
+    (bot as Record<string, unknown>).handleBrowseCallback = async (_cb: unknown, _conv: unknown, answer: (t?: string) => void, _mid: unknown) => { calls.push("bs"); answer("bs-done"); };
+    check("T5 dispatch: bs:close routes to the browse handler", (await dispatchCallback(base(bot), cb("bs:close"))) === true && calls.length === 1 && calls[0] === "bs", JSON.stringify(calls));
+    check("T5 dispatch: …answered exactly once, with the handler's toast", answers.length === 1 && answers[0]?.text === "bs-done", JSON.stringify(answers));
+    check("T5 dispatch: bs:nav:2 routes (arg form)", (await dispatchCallback(base(bot), cb("bs:nav:2"))) === true && calls.length === 2 && calls[1] === "bs", JSON.stringify(calls));
   }
 }
 
