@@ -118,7 +118,7 @@ default (`OPENCODE_TG_STREAM`). Neither helps in three cases:
 3. [x] (e82cc12) **W3 Live updates** (W2, W3, W5). Event hooks, edit loop, fallback poll, idle and time limits, automatic stops. *Checkpoint: watch a real turn from the phone, in a DM and in a topic.*
 4. [x] (ca9de90) **W4 Buttons** (W4). Close, Stop task, Watch again, session binding, restart behaviour. *Checkpoint: tap each one during a running turn.*
 5. [x] (e82cc12) **W5 `/history` button and audit** (W6.2, W6.3, W6.5). The 🔴 Live button and the audit events. *Checkpoint: read a sample audit log.*
-6. **W6 End-to-end.** One scenario in `npm run smoke`: start `/watch` during a turn, see the card change, see it freeze with the outcome. Smoke runs last, as in `AGENTS.md`; restart the service afterwards.
+6. [x] (664ca22) **W6 End-to-end.** One scenario in `npm run smoke`: start `/watch` during a turn, see the card change, see it freeze with the outcome. Smoke runs last, as in `AGENTS.md`; restart the service afterwards.
 
 Verification order for every task: `npm run typecheck` and `npm run test:unit` first, `npm run smoke` once at the end.
 
