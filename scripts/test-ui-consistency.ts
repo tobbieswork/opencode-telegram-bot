@@ -232,6 +232,30 @@ const EXCEPTIONS: Exc[] = [
     text: '{ text: "❌ Huỷ", callback_data: `ap:${id}:no` }',
     why: "button label (assign: cancel)",
   },
+
+  // src/callbacks.ts — registry error toast (added post-T6 by the callback-registry spec)
+  {
+    file: "src/callbacks.ts",
+    text: 'vi: "❌ Lỗi: nút không phản hồi"',
+    why: "error toast constant (C2.4: handler threw — button failed)",
+  },
+  {
+    file: "src/callbacks.ts",
+    text: 'en: "❌ Error: the button failed"',
+    why: "error toast constant (C2.4: handler threw — button failed)",
+  },
+
+  // src/commands/spec.ts — /spec group header + manager-tool error (added post-T6)
+  {
+    file: "src/commands/spec.ts",
+    text: "✅ Đã xong (${finished.length})",
+    why: "section header (✅ Đã xong group, /spec 2-group display)",
+  },
+  {
+    file: "src/commands/spec.ts",
+    text: 'tr(lang, "❌ Không rõ task nào.", "❌ Unknown task.")',
+    why: "inline ❌ error (manager spec tool: unparseable run ref)",
+  },
 ];
 
 // ── scanner ─────────────────────────────────────────────────────────────────
