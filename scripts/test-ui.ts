@@ -117,5 +117,14 @@ function check(name: string, cond: boolean, detail?: string): void {
   check("golden: warnLine = legacy worktree-delete-ask bytes (raw <b>)", warnLine("vi", raw("Xoá worktree sẽ <b>commit các thay đổi chưa commit vào nhánh</b> của worker rồi xoá thư mục worktree (nhánh chưa merge vẫn được giữ — không mất gì). Chắc chắn?")) === "⚠️ Xoá worktree sẽ <b>commit các thay đổi chưa commit vào nhánh</b> của worker rồi xoá thư mục worktree (nhánh chưa merge vẫn được giữ — không mất gì). Chắc chắn?");
 }
 
+// ── T5 golden bytes (bot.ts subgroup A, byte-identical) ─────────────────────
+{
+  check("golden: the ONE labelled error site keeps its label via raw", errorLine("en", raw("Error: boom")) === "❌ Error: boom");
+  check("golden: drain preview bytes", statusLine("vi", raw("Đang khởi động lại… kết quả sẽ gửi sau.")) === "⏳ Đang khởi động lại… kết quả sẽ gửi sau.");
+  check("golden: worker-still-running bytes", statusLine("vi", raw("worker vẫn đang chạy")) === "⏳ worker vẫn đang chạy");
+  check("golden: worker approved bytes", okLine("vi", raw("alice approved — dọn xong.")) === "✅ alice approved — dọn xong.");
+  check("golden: file-too-large bytes (vi-only message)", warnLine("vi", raw("File quá lớn: 12,3MB (giới hạn 50MB).")) === "⚠️ File quá lớn: 12,3MB (giới hạn 50MB).");
+}
+
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

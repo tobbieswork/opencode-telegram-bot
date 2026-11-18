@@ -15,6 +15,8 @@ import { ScheduleStore, Scheduler } from "./scheduler.js";
 import { isUserAllowed } from "./schedule.js";
 import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, formatTurnFailure, isOverflowError } from "./format.js";
+import { confirmKeyboard, singleButton } from "./ui/keyboards.js";
+import { errorLine, okLine, raw, statusLine, warnLine } from "./ui/text.js";
 import { tr, STRINGS } from "./i18n.js";
 import { applyLanguagePin } from "./language.js";
 import { applySuggestPin } from "./suggest.js";
@@ -270,8 +272,8 @@ interface WatchLive {
 /** watch_end reasons (W6.3). */
 type WatchStopReason = "done" | "idle" | "timeout" | "closed" | "replaced" | "session-changed" | "edit-failed" | "shutdown";
 
-/** Shown on a live stream preview while the bot drains at shutdown. */
-const DRAIN_PREVIEW_TEXT = "⏳ Đang khởi động lại… kết quả sẽ gửi sau.";
+/** Shown on a live stream preview while the bot drains at shutdown (⏳ added by statusLine). */
+const DRAIN_PREVIEW_TEXT = "Đang khởi động lại… kết quả sẽ gửi sau.";
 
 /**
  * Core of the graceful-shutdown drain, split out so it can be unit-tested with
@@ -704,7 +706,7 @@ export class Bot {
       if (w.previewMsgId && w.previewMsgId !== 0) {
         edits.push(
           this.tg
-            .editMessageText(conv, w.previewMsgId, tr(this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? ""), DRAIN_PREVIEW_TEXT, "⏳ Restarting… the result will be sent after."), { parse_mode: undefined })
+            .editMessageText(conv, w.previewMsgId, statusLine(this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? ""), raw(tr(this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? ""), DRAIN_PREVIEW_TEXT, "Restarting… the result will be sent after."))), { parse_mode: undefined })
             .catch(() => {}),
         );
       }
@@ -733,7 +735,7 @@ export class Bot {
       audit({ action: "queue_drop", chatId: conv, meta: { count: n, reason: "shutdown" } });
       const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
       void this.tg
-        .sendMessage(conv, tr(lang, `⚠️ Bot đang tắt — ${n} tin trong hàng chờ sẽ không chạy.`, `⚠️ Bot is shutting down — ${n} queued message(s) will not run.`))
+        .sendMessage(conv, warnLine(lang, raw(tr(lang, `Bot đang tắt — ${n} tin trong hàng chờ sẽ không chạy.`, `Bot is shutting down — ${n} queued message(s) will not run.`))))
         .catch(() => {});
     }
   }
@@ -782,16 +784,13 @@ export class Bot {
     const chat = this.cfg.allowedUserIds[0];
     if (!chat) return;
     const lang = this.userPrefs.getLang(chat);
-    const kb: Keyboard = {
-      inline_keyboard: [
-        [
-          { text: tr(lang, "🔄 Reboot máy ngay", "🔄 Reboot now"), callback_data: "reboot:ask" },
-          { text: tr(lang, "🔕 Nhắc lại sau", "🔕 Remind me later"), callback_data: "reboot:snooze" },
-        ],
-      ],
-    };
+    const kb: Keyboard = confirmKeyboard(
+      lang,
+      { text: tr(lang, "🔄 Reboot máy ngay", "🔄 Reboot now"), data: "reboot:ask" },
+      { text: tr(lang, "🔕 Nhắc lại sau", "🔕 Remind me later"), data: "reboot:snooze" },
+    );
     const text =
-      tr(lang, `⏳ Máy đã chạy liên tục <b>${formatUptimeHuman(uptimeSec, lang)}</b>. `, `⏳ The box has been up for <b>${formatUptimeHuman(uptimeSec, lang)}</b>. `) +
+      statusLine(lang, raw(tr(lang, `Máy đã chạy liên tục <b>${formatUptimeHuman(uptimeSec, lang)}</b>. `, `The box has been up for <b>${formatUptimeHuman(uptimeSec, lang)}</b>. `))) +
       tr(lang, `Kernel security updates chỉ áp dụng sau reboot — nên reboot định kỳ ~${this.cfg.uptimeThresholdDays} ngày. `, `Kernel security updates only apply after a reboot — reboot regularly, ~${this.cfg.uptimeThresholdDays} days. `) +
       tr(lang, "Bấm nút để reboot (xác nhận 2 bước) hoặc chọn nhắc lại sau.", "Tap a button to reboot (2-step confirm) or choose to be reminded later.");
     await this.tg.sendMessage(chat, text, { reply_markup: kb }).catch((e) => warn("uptime reminder:", e?.message ?? e));
@@ -800,17 +799,14 @@ export class Bot {
   /** The two-step confirmation message + keyboard for an actual reboot. */
   private async sendRebootConfirm(conv: ConvKey): Promise<void> {
     const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
-    const kb: Keyboard = {
-      inline_keyboard: [
-        [
-          { text: tr(lang, "✅ Xác nhận reboot", "✅ Confirm reboot"), callback_data: rebootGoData(Date.now()) },
-          { text: tr(lang, "❌ Huỷ", "❌ Cancel"), callback_data: "reboot:cancel" },
-        ],
-      ],
-    };
+    const kb: Keyboard = confirmKeyboard(
+      lang,
+      { text: tr(lang, "✅ Xác nhận reboot", "✅ Confirm reboot"), data: rebootGoData(Date.now()) },
+      { text: tr(lang, "❌ Huỷ", "❌ Cancel"), data: "reboot:cancel" },
+    );
     const secs = Math.round(this.cfg.rebootDelayMs / 1000);
     const text =
-      tr(lang, `⚠️ <b>Chắc reboot máy không?</b>\n`, `⚠️ <b>Reboot the box?</b>\n`) +
+      warnLine(lang, raw(tr(lang, `<b>Chắc reboot máy không?</b>\n`, `<b>Reboot the box?</b>\n`))) +
       tr(lang, `Máy sẽ khởi động lại trong ~${secs} giây; bot + OpenCode sẽ tắt và tự chạy lại sau (linger). `, `The box reboots in ~${secs}s; the bot + OpenCode stop and self-resume after (linger). `) +
       tr(lang, "Bấm <b>Xác nhận</b> nếu bạn chắc chắn, hoặc <b>Huỷ</b>.", "Tap <b>Confirm</b> if you're sure, or <b>Cancel</b>.");
     await this.tg.sendMessage(conv, text, { reply_markup: kb });
@@ -857,7 +853,7 @@ export class Bot {
       }
       if (this.rebootArmed) return; // double-tap: one reboot is already pending
       if (!existsSync(SAFE_REBOOT_BIN)) {
-        await this.tg.sendMessage(conv, tr(lang, "⚠️ Wrapper <b>safe-reboot</b> chưa được cài trên máy. Chạy khối sudo trong PR #11 trước.", "⚠️ The <b>safe-reboot</b> wrapper isn't installed on this box. Apply the sudo block from PR #11 first.")).catch(() => {});
+        await this.tg.sendMessage(conv, warnLine(lang, raw(tr(lang, "Wrapper <b>safe-reboot</b> chưa được cài trên máy. Chạy khối sudo trong PR #11 trước.", "The <b>safe-reboot</b> wrapper isn't installed on this box. Apply the sudo block from PR #11 first.")))).catch(() => {});
         return;
       }
       this.rebootArmed = true;
@@ -877,7 +873,7 @@ export class Bot {
         } catch (e) {
           this.rebootArmed = false;
           error("reboot arm failed:", (e as Error)?.message ?? e);
-          void this.tg.sendMessage(conv, tr(this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? ""), "⚠️ Không tạo được token reboot — xem log bot.", "⚠️ Could not create the reboot token — check the bot log.")).catch(() => {});
+          void this.tg.sendMessage(conv, warnLine(this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? ""), raw(tr(this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? ""), "Không tạo được token reboot — xem log bot.", "Could not create the reboot token — check the bot log.")))).catch(() => {});
           return;
         }
         execFile("sudo", ["-n", SAFE_REBOOT_BIN, token], (err) => {
@@ -1505,7 +1501,7 @@ export class Bot {
     const chat = chatOf(entry.conv);
     if (!this.orch.isManagerConv(chat)) {
       const lang = this.userPrefs.getLang(this.st.peek(chat)?.createdBy ?? "");
-      await this.tg.sendMessage(chat, tr(lang, "⚠️ 🔥 cần Manager đang bật (/manager on) để soạn task cho worker.", "⚠️ 🔥 needs the Manager on (/manager on) to draft the worker task.")).catch(() => {});
+      await this.tg.sendMessage(chat, warnLine(lang, raw(tr(lang, "🔥 cần Manager đang bật (/manager on) để soạn task cho worker.", "🔥 needs the Manager on (/manager on) to draft the worker task.")))).catch(() => {});
       return;
     }
     const lang2 = this.userPrefs.getLang(this.st.peek(chat)?.createdBy ?? "");
@@ -1526,20 +1522,20 @@ export class Bot {
     const chat = chatOf(workerConv);
     const lang = this.userPrefs.getLang(this.st.peek(chat)?.createdBy ?? "");
     if (decision === "busy") {
-      await this.tg.sendMessage(chat, tr(lang, "⏳ worker vẫn đang chạy", "⏳ the worker is still running")).catch(() => {});
+      await this.tg.sendMessage(chat, statusLine(lang, raw(tr(lang, "worker vẫn đang chạy", "the worker is still running")))).catch(() => {});
       return;
     }
     if (decision === "invalid") return;
     const res = await this.orch.approveWorkerReport(workerConv);
     if (res.busy) {
-      await this.tg.sendMessage(chat, tr(lang, "⏳ worker vẫn đang chạy", "⏳ the worker is still running")).catch(() => {});
+      await this.tg.sendMessage(chat, statusLine(lang, raw(tr(lang, "worker vẫn đang chạy", "the worker is still running")))).catch(() => {});
       return;
     }
     if (!res.ok) {
-      await this.tg.sendMessage(chat, tr(lang, "⚠️ Chưa dọn xong worker (worktree chưa xoá được — thử /prune sau).", "⚠️ Worker not fully cleaned up (worktree couldn't be deleted — try /prune later.")).catch(() => {});
+      await this.tg.sendMessage(chat, warnLine(lang, raw(tr(lang, "Chưa dọn xong worker (worktree chưa xoá được — thử /prune sau).", "Worker not fully cleaned up (worktree couldn't be deleted — try /prune later.")))).catch(() => {});
       return;
     }
-    await this.tg.sendMessage(chat, tr(lang, `✅ ${esc(res.name ?? "worker")} approved — dọn xong.`, `✅ ${esc(res.name ?? "worker")} approved — cleaned up.`)).catch(() => {});
+    await this.tg.sendMessage(chat, okLine(lang, raw(tr(lang, `${esc(res.name ?? "worker")} approved — dọn xong.`, `${esc(res.name ?? "worker")} approved — cleaned up.`)))).catch(() => {});
   }
 
   /**
@@ -1582,7 +1578,7 @@ export class Bot {
       await this.tg
         .sendMessage(
           conv,
-          `⚠️ File quá lớn: ${humanBytes(media.fileSize)} (giới hạn ${Math.round(this.cfg.uploadMaxBytes / (1024 * 1024))}MB).`,
+          warnLine(this.userPrefs.getLang(uid ?? ""), raw(`File quá lớn: ${humanBytes(media.fileSize)} (giới hạn ${Math.round(this.cfg.uploadMaxBytes / (1024 * 1024))}MB).`)),
         )
         .catch(() => {});
       return;
@@ -1614,7 +1610,7 @@ export class Bot {
         await this.tg.sendMessage(conv, tr(this.userPrefs.getLang(uid ?? ""), `📎 Đã lưu ${esc(name)} (${humanBytes(bytes)}).`, `📎 Saved ${esc(name)} (${humanBytes(bytes)}).`)).catch(() => {});
       } catch (e) {
         warn(`upload from uid=${uid} chat=${conv} failed: ${(e as Error)?.message ?? e}`);
-        await this.tg.sendMessage(conv, tr(this.userPrefs.getLang(uid ?? ""), "⚠️ Không tải được file — thử lại sau.", "⚠️ Couldn't download the file — try again later.")).catch(() => {});
+        await this.tg.sendMessage(conv, warnLine(this.userPrefs.getLang(uid ?? ""), raw(tr(this.userPrefs.getLang(uid ?? ""), "Không tải được file — thử lại sau.", "Couldn't download the file — try again later.")))).catch(() => {});
         return;
       }
     }
@@ -1696,7 +1692,7 @@ export class Bot {
     // the Working line stays byte-identical to off-mode and the ww: branch is
     // unreachable (the button is never rendered).
     const watchKb: Record<string, unknown> | undefined = this.cfg.watchActive
-      ? { inline_keyboard: [[{ text: tr(lang ?? "vi", STRINGS.working_watch_button.vi, STRINGS.working_watch_button.en), callback_data: "ww:go" }]] }
+      ? singleButton({ text: tr(lang ?? "vi", STRINGS.working_watch_button.vi, STRINGS.working_watch_button.en), data: "ww:go" })
       : undefined;
     this.working.set(conv, { msgId: undefined, startedAt, timer: undefined, base, watchKb }); // sync marker (race-safe)
     void this.tg
@@ -2830,8 +2826,8 @@ export class Bot {
       error("prompt error:", (e as Error)?.message);
       const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
       const msg = isTransportError(e)
-        ? tr(lang, "⚠️ Không thể nối tới OpenCode (service có thể đang restart / chưa chạy). Hẵng thử lại sau, hoặc kiểm tra `opencode service status`.", "⚠️ Can't reach OpenCode (the service may be restarting / not running). Try again later, or check `opencode service status`.")
-        : `❌ Error: ${esc((e as Error).message)}`;
+        ? warnLine(lang, raw(tr(lang, "Không thể nối tới OpenCode (service có thể đang restart / chưa chạy). Hẵng thử lại sau, hoặc kiểm tra `opencode service status`.", "Can't reach OpenCode (the service may be restarting / not running). Try again later, or check `opencode service status`.")))
+        : errorLine(lang, raw(`Error: ${esc((e as Error).message)}`));
       await this.tg.sendMessage(conv, msg).catch(() => {});
       // Body language (feature C): the bot dislikes the turn that failed.
       this.bodyReact(conv, userMsgId, REACTION_FAIL);
@@ -2892,9 +2888,7 @@ export class Bot {
     if (st.agent !== "plan") return;
     if ([...this.questionForms.values()].some((q) => q.conv === conv)) return;
     const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
-    const kb: Keyboard = {
-      inline_keyboard: [[{ text: tr(lang, "🔨 Sang build & thực thi", "🔨 Switch to build & execute"), callback_data: "pb:go" }]],
-    };
+    const kb: Keyboard = singleButton({ text: tr(lang, "🔨 Sang build & thực thi", "🔨 Switch to build & execute"), data: "pb:go" });
     await this.tg
       .sendMessage(conv, tr(lang, "📐 <b>Kế hoạch đã sẵn sàng</b> — bấm để chuyển sang build và thực thi.", "📐 <b>Plan is ready</b> — tap to switch to build and execute."), { reply_markup: kb })
       .catch(() => {});
@@ -3141,7 +3135,7 @@ export class Bot {
     if (!data) return undefined; // too long to ship — omit the button
     if (alreadyOfferedContinue(this.st.peek(conv)?.continueOfferedTurn, turnId)) return undefined;
     this.st.set(conv, { continueOfferedTurn: turnId });
-    return { inline_keyboard: [[{ text: continueButtonLabel(lang), callback_data: data }]] };
+    return singleButton({ text: continueButtonLabel(lang), data });
   }
 
   /**
