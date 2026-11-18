@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.46.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.46.0...opencode-telegram-bot-v1.46.1) (2026-11-18)
+
+
+### Bug Fixes
+
+* scope checkpoint outcome to canonical verify checks ([2471e1a](https://github.com/tobbieswork/opencode-telegram-bot/commit/2471e1aaa13579d86a04f3962276c04daec33227))
+* scope checkpoint outcome to canonical verify checks ([7433b76](https://github.com/tobbieswork/opencode-telegram-bot/commit/7433b761b5fdd7e3040897fb691165f389ad9ef8))
+
 ## [1.46.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.45.1...opencode-telegram-bot-v1.46.0) (2026-11-18)
 
 
