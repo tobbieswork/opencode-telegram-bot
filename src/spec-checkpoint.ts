@@ -167,6 +167,8 @@ export interface CheckpointCardArgs {
   checks: { ran: RanCheck[]; notRan: string[] };
   /** S3.7: the run ended in error (failed/stopped, or an errored shell item). */
   errored: boolean;
+  /** S6.5: auto run-next is on for this run (the card says so; no auto button). */
+  auto?: boolean;
   lang: Lang;
 }
 
@@ -176,9 +178,10 @@ export interface CheckpointCard {
 }
 
 /** S3.3 button labels (bilingual). */
-function buttonLabels(lang: Lang): { accept: string; redo: string; stop: string } {
+function buttonLabels(lang: Lang): { accept: string; auto: string; redo: string; stop: string } {
   return {
     accept: tr(lang, "✅ Chấp nhận", "✅ Accept"),
+    auto: tr(lang, "🤖 Tự chạy tiếp", "🤖 Auto-run next"),
     redo: tr(lang, "🔁 Làm lại kèm ghi chú", "🔁 Redo with note"),
     stop: tr(lang, "⏹ Dừng", "⏹ Stop"),
   };
@@ -192,7 +195,7 @@ function buttonLabels(lang: Lang): { accept: string; redo: string; stop: string 
  * and offers Redo with note + Stop ONLY (no Accept).
  */
 export function renderCheckpointCard(args: CheckpointCardArgs): CheckpointCard {
-  const { task, workerName, branch, commit, files, checks, errored, lang } = args;
+  const { task, workerName, branch, commit, files, checks, errored, auto, lang } = args;
   const spec = branch.startsWith("spec/") ? branch.slice("spec/".length) : branch;
   const canAccept = !errored && !!commit; // S3.7: never offer Accept otherwise
   const lines: string[] = [];
@@ -212,6 +215,16 @@ export function renderCheckpointCard(args: CheckpointCardArgs): CheckpointCard {
       `🧩 Worker: <b>${esc(workerName)}</b> · <code>${esc(branch)}</code>`,
     ),
   );
+  // S6.5 — auto mode is visible on the card it applies to.
+  if (auto) {
+    lines.push(
+      tr(
+        lang,
+        "🤖 Auto-run đang bật — task sẽ được chấp nhận và chạy tiếp tự động (nếu xanh).",
+        "🤖 Auto-run is on — the task will be accepted and the next started automatically (if green).",
+      ),
+    );
+  }
 
   // S3.7 — say it explicitly.
   if (errored) {
@@ -262,6 +275,7 @@ export function renderCheckpointCard(args: CheckpointCardArgs): CheckpointCard {
   const labels = buttonLabels(lang);
   const buttons: Btn[] = [];
   if (canAccept) buttons.push({ text: labels.accept, callback_data: `spcacc:${spec}:${task.n}` });
+  if (canAccept && !auto) buttons.push({ text: labels.auto, callback_data: `spcauto:${spec}:${task.n}` });
   buttons.push({ text: labels.redo, callback_data: `spcredo:${spec}:${task.n}` });
   buttons.push({ text: labels.stop, callback_data: `spcstop:${spec}:${task.n}` });
 
