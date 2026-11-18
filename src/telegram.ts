@@ -154,6 +154,95 @@ const THREAD_TARGETING_METHODS = new Set([
  * Minimal Telegram Bot API client using long polling over global fetch.
  * No framework dependency — the whole transport is visible in this file.
  */
+/**
+ * Telegram's sendMessage hard-limits text at 4096 chars, and each message is
+ * parsed as HTML independently — a chunk with an unbalanced <b>/<code>/<pre>
+ * is a 400 Bad Request. This splits long text into chunks of `limit` chars
+ * (default 4000 — headroom under 4096), choosing the cut as:
+ *   1. a newline at tag depth 0 (preferred — line/paragraph boundary);
+ *   2. any position at tag depth 0;
+ *   3. a forced cut (the whole window sits inside one open tag, e.g. a giant
+ *      <pre>): close every open tag at the chunk's end and re-open them with
+ *      their original attributes at the next chunk's start, so every chunk
+ *      stays well-formed HTML.
+ * Escaped user text never contains a raw "<" (esc()), so only the bot's own
+ * tags are ever seen here.
+ */
+const TG_TAG_RE = /<\/?([a-zA-Z][a-zA-Z0-9]*)((?:\s+[\w-]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?)\s*(\/?)>/g;
+
+export function splitTelegramChunks(text: string, limit: number = 4000): string[] {
+  if (text.length <= limit) return [text];
+  const out: string[] = [];
+  let rest = text;
+  for (;;) {
+    if (rest.length <= limit) {
+      out.push(rest);
+      break;
+    }
+    // Scan rest[0, limit) tracking tag depth; remember the best depth-0 cut.
+    let newlineCut = -1; // cut index just AFTER a depth-0 newline
+    let anyCut = -1; // any depth-0 cut position
+    const stack: { name: string; tag: string }[] = [];
+    let regionStart = 0; // start of the current depth-0 region
+    let inDepth0 = true;
+    let lastTagEnd = 0;
+    TG_TAG_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = TG_TAG_RE.exec(rest)) !== null && m.index < limit) {
+      if (inDepth0 && m.index > regionStart) {
+        const nl = rest.lastIndexOf("\n", m.index - 1);
+        if (nl >= regionStart) newlineCut = Math.max(newlineCut, nl + 1);
+        anyCut = Math.max(anyCut, m.index);
+      }
+      const name = m[1].toLowerCase();
+      if (m[0].startsWith("</")) {
+        for (let i = stack.length - 1; i >= 0; i--) {
+          if (stack[i].name === name) {
+            stack.length = i;
+            break;
+          }
+        }
+      } else if (m[3] !== "/") {
+        stack.push({ name, tag: m[0] });
+      }
+      inDepth0 = stack.length === 0;
+      if (inDepth0) regionStart = m.index + m[0].length;
+      lastTagEnd = m.index + m[0].length;
+      if (lastTagEnd >= limit && !inDepth0) break; // cut window ends inside a tag run
+    }
+    if (inDepth0) {
+      const regionEnd = Math.min(rest.length, limit);
+      const nl = rest.lastIndexOf("\n", regionEnd - 1);
+      if (nl >= regionStart) newlineCut = Math.max(newlineCut, nl + 1);
+      anyCut = Math.max(anyCut, regionEnd);
+    }
+    // Cut selection: prefer a depth-0 position near `limit`; take a depth-0
+    // NEWLINE when it sits within 300 chars of the largest depth-0 position
+    // (a nearby line boundary beats a mid-word cut, a far one doesn't). A
+    // depth-0 cut that would produce a stub chunk (< limit/2 — the rest of
+    // the window is one giant open tag) is skipped in favour of the forced
+    // repair cut, which balances the chunks better.
+    let cut = -1;
+    if (anyCut >= limit / 2) {
+      cut = newlineCut > 0 && anyCut - newlineCut < 300 ? newlineCut : anyCut;
+    } else if (newlineCut >= limit / 2) {
+      cut = newlineCut;
+    }
+    if (cut > 0) {
+      out.push(rest.slice(0, cut));
+      rest = rest.slice(cut);
+      continue;
+    }
+    // Forced: no usable depth-0 cut — the window sits inside open tag(s). If
+    // a tag token itself spans `limit`, extend the cut to its end (tag tokens
+    // are short; the 4000→4096 headroom absorbs them).
+    const fcut = Math.max(limit, lastTagEnd);
+    out.push(rest.slice(0, fcut) + stack.map((t) => `</${t.name}>`).join(""));
+    rest = stack.map((t) => t.tag).join("") + rest.slice(fcut);
+  }
+  return out;
+}
+
 export class Telegram {
   /**
    * Delays between transport-level retries in api() (ms). Total attempts
@@ -389,13 +478,22 @@ export class Telegram {
   }
 
   async sendMessage(to: ConvKey | number, text: string, opts: Record<string, unknown> = {}): Promise<void> {
-    await this.api("sendMessage", {
-      ...dest(to),
-      text: redactSecrets(text),
-      parse_mode: "HTML",
-      disable_web_page_preview: true,
-      ...opts,
-    });
+    // >4096-char text would 400: split it into well-formed chunks. opts go on
+    // every chunk (thread routing, reply-to); the keyboard rides the LAST
+    // chunk so the buttons follow the text.
+    const chunks = splitTelegramChunks(text);
+    const { reply_markup, ...rest } = opts as { reply_markup?: unknown } & Record<string, unknown>;
+    for (let i = 0; i < chunks.length; i++) {
+      const last = i === chunks.length - 1;
+      await this.api("sendMessage", {
+        ...dest(to),
+        text: redactSecrets(chunks[i]),
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+        ...rest,
+        ...(last && reply_markup !== undefined ? { reply_markup } : {}),
+      });
+    }
   }
 
   /** Like sendMessage but resolves to the Telegram message_id (for editing later). */
