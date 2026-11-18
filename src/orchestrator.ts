@@ -56,6 +56,8 @@ export interface Host {
   advisor?: Advisor;
   /** Per-user preferences (language). Optional so legacy test-mock Hosts still type-check; the real Bot always sets it. */
   userPrefs?: UserPrefsStore;
+  /** The Bot itself (back-reference) — for tools that need the full Bot surface (the spec tools). */
+  bot?: Bot;
   sendHtml(conv: ConvKey, html: string, opts?: { reply_markup?: Keyboard }): Promise<void>;
   /**
    * S4 (next-step buttons): a message in this conv now carries the conv's
@@ -1907,9 +1909,9 @@ export class Orchestrator {
       const r = this.h.cfg.browseRoots.find((root) => p === root || p.startsWith(root + sep));
       return r ? `${p} (root ${r}${p === r ? "" : ", rel " + relative(r, p)})` : p;
     };
-    // The spec tools want the full Bot (Host is the orchestrator's subset);
-    // at runtime this.h IS the Bot.
-    const specBot = this.h as unknown as Bot;
+    // The spec tools want the full Bot (Host is the orchestrator's subset).
+    // The real Bot passes itself as h.bot; test-mock Hosts ARE the bot object.
+    const specBot = this.h.bot ?? (this.h as unknown as Bot);
     const tools: BridgeTool[] = [
       {
         name: "list_directories",

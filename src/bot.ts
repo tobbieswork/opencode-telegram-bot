@@ -527,6 +527,7 @@ export class Bot {
       oc,
       st,
       cfg,
+      bot: this,
       busyNotes: this.busyNotes,
       queue: this.queue,
       advisor: this.advisor,
