@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.44.3](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.44.2...opencode-telegram-bot-v1.44.3) (2026-11-18)
+
+
+### Bug Fixes
+
+* watch smoke scenario races fast turns (tap /watch mid-turn) ([67bda46](https://github.com/tobbieswork/opencode-telegram-bot/commit/67bda46fd4b7dbf5708f2a0faecdae33331a1b9d))
+* watch smoke scenario taps /watch mid-turn (poll sessionState, not a fixed 2.5s sleep) ([b9e006b](https://github.com/tobbieswork/opencode-telegram-bot/commit/b9e006bb1d1c039522ced92da7a402ccd4310359))
+
 ## [1.44.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.44.1...opencode-telegram-bot-v1.44.2) (2026-11-18)
 
 
