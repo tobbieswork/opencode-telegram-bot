@@ -5024,7 +5024,7 @@ export class Bot {
         this.questionForms.delete(formID);
         this.cancelReminder(qf.conv, formID); // the form is really cancelled → stop nudging (schedule lives under the worker conv)
         await this.tg.answerCallbackQuery(cb.id);
-        if (messageId) await this.tg.editMessageText(conv, messageId, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "❌ Đã huỷ câu hỏi.", "❌ Question cancelled.")).catch(() => {});
+        if (messageId) await this.tg.editMessageText(conv, messageId, errorLine(this.userPrefs.getLang(cb.from?.id ?? ""), tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Đã huỷ câu hỏi.", "Question cancelled."))).catch(() => {});
         return;
       }
       if (op === "c") {
@@ -5087,7 +5087,7 @@ export class Bot {
         return `• ${esc(trunc(q, 80))} → ${esc(trunc(a, 80))}`;
       });
       await this.tg
-        .editMessageText(cardConv, messageId, tr(lang, "✅ Đã gửi câu trả lời cho OpenCode.", "✅ Answer sent to OpenCode.") + (lines.length ? "\n" + lines.join("\n") : ""))
+        .editMessageText(cardConv, messageId, okLine(lang, raw(tr(lang, "Đã gửi câu trả lời cho OpenCode.", "Answer sent to OpenCode.") + (lines.length ? "\n" + lines.join("\n") : ""))))
         .catch(() => {});
     }
   }
@@ -5222,9 +5222,9 @@ export class Bot {
     }
     const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     const labels: Record<string, string> = {
-      once: tr(lang, "✅ Đã duyệt (1 lần).", "✅ Allowed (once)."),
+      once: okLine(lang, tr(lang, "Đã duyệt (1 lần).", "Allowed (once).")),
       always: tr(lang, "♾️ Đã duyệt luôn — quyền này được lưu, không hỏi lại.", "♾️ Always allowed — this permission is saved and won't be asked again."),
-      reject: tr(lang, "❌ Đã từ chối.", "❌ Denied."),
+      reject: errorLine(lang, tr(lang, "Đã từ chối.", "Denied.")),
     };
     try {
       if (!labels[decision]) throw new Error(tr(lang, "Lựa chọn không hợp lệ.", "Invalid choice."));
@@ -5253,7 +5253,7 @@ export class Bot {
       warn(`permission reply failed for ${requestID} (still pending, buttons kept): ${msg}`);
       await this.tg.answerCallbackQuery(
         cb.id,
-        `${tr(lang, "⚠️ Chưa trả lời được — vẫn đang chờ, thử bấm lại.", "⚠️ Couldn't answer — still pending, tap again to retry.")} ${msg.slice(0, 100)}`,
+        warnLine(lang, raw(tr(lang, "Chưa trả lời được — vẫn đang chờ, thử bấm lại.", "Couldn't answer — still pending, tap again to retry.") + " " + msg.slice(0, 100))),
       );
     }
   }
