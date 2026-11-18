@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
+import { defineCallback } from "./callbacks.js";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Telegram, CallbackQuery, TOPIC_COLORS } from "./telegram.js";
 import { OpenCodeCtl, userText } from "./opencode.js";
@@ -10,13 +11,17 @@ import { ConvKey, chatOf, convKey, parseConv } from "./conv.js";
 import { McpBridge, BridgeTool, makeRunScriptTool } from "./mcp-bridge.js";
 import { addWorktree, diffSummary, gitBoundary, gitRoot, gitStatusBrief, mergeWorktree, removeWorktree, resolveBaseBranch, runGit } from "./worktree.js";
 import { parseSpec, type ParsedTask } from "./spec.js";
-import { classifyShellItems, computeNotRan, renderCheckpointCard, checkpointOutcome } from "./spec-checkpoint.js";
+import { classifyShellItems, computeNotRan, renderCheckpointCard, checkpointOutcome, EXPECTED_CHECKS } from "./spec-checkpoint.js";
+import { managerSpecAccept, managerSpecAuto, managerSpecList, managerSpecRun } from "./commands/spec.js";
+import type { Bot } from "./bot.js";
 import { listDirs } from "./fsbrowser.js";
 import { spawnRequestBody } from "./reactions.js";
 import { buildHandoffPrompt, followUpsFromMessages, respawnName, respawnNotice, shouldRespawnWorker } from "./recovery.js";
 import { scriptInstruction } from "./sandbox/scriptPreamble.js";
 import { topicDeepLink } from "./shared.js";
 import { ICON, esc, trunc, timeAgo, stripTags, mdToHtmlChunks } from "./format.js";
+import { confirmKeyboard } from "./ui/keyboards.js";
+import { errorLine, okLine, raw, warnLine } from "./ui/text.js";
 import { log, warn } from "./logger.js";
 import { audit } from "./audit.js";
 import { BusyNoteStore } from "./notes.js";
@@ -54,6 +59,8 @@ export interface Host {
   advisor?: Advisor;
   /** Per-user preferences (language). Optional so legacy test-mock Hosts still type-check; the real Bot always sets it. */
   userPrefs?: UserPrefsStore;
+  /** The Bot itself (back-reference) — for tools that need the full Bot surface (the spec tools). */
+  bot?: Bot;
   sendHtml(conv: ConvKey, html: string, opts?: { reply_markup?: Keyboard }): Promise<void>;
   /**
    * S4 (next-step buttons): a message in this conv now carries the conv's
@@ -86,6 +93,13 @@ export interface Host {
    * removeWorktree). Lets the concurrency test count real purges deterministically.
    */
   removeWorktree?: (repoRoot: string, wt: { root: string; branch: string }) => Promise<string>;
+  /**
+   * S6.5 (auto run-next): a spec worker just reached a terminal status and its
+   * checkpoint card was posted. The Bot wires this to specAutoContinue, which
+   * accepts + spawns the next task when the run's auto flag is on (no-op
+   * otherwise).
+   */
+  onSpecCheckpoint?: (workerConv: ConvKey, status: WorkerStatus) => void;
 }
 
 export const MANAGER_AGENT = "tg-manager";
@@ -207,6 +221,50 @@ interface Approval {
  * src/orchestrator/*, which take the Orchestrator as their first argument. Don't use
  * them elsewhere.
  */
+/**
+ * The `kill:` callback def (docs/sdd/callback-registry.md — T4 migration).
+ * Wire form: `kill:<name|close>` (name = a worker name; the whole tail after
+ * the prefix is the name, so a name containing ":" still round-trips, as
+ * with the legacy slice-based decode).
+ */
+export const killCb = defineCallback<string>({
+  prefix: "kill",
+  encode: (name) => `kill:${name}`,
+  decode: (rest) => (rest === "" ? null : rest),
+});
+
+/**
+ * The `ap:` callback def (docs/sdd/callback-registry.md — T4 migration).
+ * Wire form: `ap:<id>:<ok|no|auto>` (id = the 10-hex approval key).
+ */
+export const apCb = defineCallback<{ id: string; op: "ok" | "no" | "auto" }>({
+  prefix: "ap",
+  encode: (a) => `ap:${a.id}:${a.op}`,
+  decode: (rest) => {
+    const i = rest.lastIndexOf(":");
+    if (i <= 0) return null;
+    const op = rest.slice(i + 1);
+    if (op !== "ok" && op !== "no" && op !== "auto") return null;
+    return { id: rest.slice(0, i), op };
+  },
+});
+
+/**
+ * The `wt:` callback def (docs/sdd/callback-registry.md — T4 migration).
+ * Wire form: `wt:<name>:<op>` (op = diff/merge/rm/rmok/keep; name = worker
+ * name — the op is split at the LAST colon, a strict superset of the legacy
+ * first-segment parse).
+ */
+export const wtCb = defineCallback<{ name: string; op: string }>({
+  prefix: "wt",
+  encode: (a) => `wt:${a.name}:${a.op}`,
+  decode: (rest) => {
+    const i = rest.lastIndexOf(":");
+    if (i <= 0) return null;
+    return { name: rest.slice(0, i), op: rest.slice(i + 1) };
+  },
+});
+
 export class Orchestrator {
   private bridge?: McpBridge;
   private approvals = new Map<string, Approval>();
@@ -466,7 +524,7 @@ export class Orchestrator {
       const r = await this.spawn(chatOf(conv), { name, directory: dir, spawnedBy: "user", writes: true });
       await this.h.sendHtml(conv, tr(lang, `🧩 Đã tạo worker <b>${esc(name)}</b> — mở topic “${esc(this.topicName(r.worker))}” để làm việc.`, `🧩 Worker <b>${esc(name)}</b> created — open topic “${esc(this.topicName(r.worker))}” to work.`));
     } catch (e) {
-      await this.h.sendHtml(conv, `❌ ${esc((e as Error).message)}`);
+      await this.h.sendHtml(conv, errorLine(lang, (e as Error).message));
     }
   }
 
@@ -503,7 +561,7 @@ export class Orchestrator {
       await this.h.sendHtml(conv, msg);
       return;
     }
-    await this.showKillPicker(conv, name ? tr(this.langOf(conv), `❌ Không có worker <code>${esc(name)}</code>`, `❌ No worker <code>${esc(name)}</code>`) : undefined);
+    await this.showKillPicker(conv, name ? errorLine(this.langOf(conv), raw(tr(this.langOf(conv), `Không có worker <code>${esc(name)}</code>`, `No worker <code>${esc(name)}</code>`))) : undefined);
   }
 
   /** The /kill picker card: one stop-button per worker + a hint line. */
@@ -514,8 +572,8 @@ export class Orchestrator {
       await this.h.sendHtml(conv, tr(lang, "Không có worker nào — /spawn để tạo.", "No workers — /spawn to create one."));
       return;
     }
-    const rows: Btn[][] = workers.map((w) => [{ text: `${ICON[w.status]} ${w.name}`, callback_data: `kill:${w.name}` }]);
-    rows.push([{ text: tr(lang, "❌ Đóng", "❌ Close"), callback_data: "kill:close" }]);
+    const rows: Btn[][] = workers.map((w) => [{ text: `${ICON[w.status]} ${w.name}`, callback_data: killCb.encode(w.name) }]);
+    rows.push([{ text: tr(lang, "❌ Đóng", "❌ Close"), callback_data: killCb.encode("close") }]);
     await this.h.sendHtml(
       conv,
       [errorNote ?? tr(lang, "❓ <b>/kill</b> cần tên worker", "❓ <b>/kill</b> needs a worker name"), tr(lang, "Bấm để dừng worker:", "Tap to stop a worker:"), tr(lang, "Hoặc gửi: <code>/kill &lt;tên&gt;</code>", "Or send: <code>/kill &lt;name&gt;</code>")].join("\n"),
@@ -527,21 +585,21 @@ export class Orchestrator {
    * Handle a tap on the /kill picker (data = `kill:<name|close>`). Public because
    * it is dispatched from Bot.handleCallback, like the other orchestrator callbacks.
    */
-  async handleKillCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+  async handleKillCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
     const lang = this.h.userPrefs?.getLang(cb.from?.id ?? "") ?? "vi";
     const name = (cb.data ?? "").slice("kill:".length);
     if (name === "close") {
-      await this.h.tg.answerCallbackQuery(cb.id);
+      answer();
       if (messageId) await this.h.tg.deleteMessage(conv, messageId).catch(() => {});
       return;
     }
     const found = this.h.st.findWorker(chatOf(conv), name);
     if (!found) {
-      await this.h.tg.answerCallbackQuery(cb.id, tr(lang, "Worker không còn tồn tại.", "The worker no longer exists."));
+      answer(tr(lang, "Worker không còn tồn tại.", "The worker no longer exists."));
       if (messageId) await this.h.tg.editMessageText(conv, messageId, tr(lang, "⌛ Worker không còn tồn tại — /board để xem lại.", "⌛ The worker no longer exists — /board to refresh."), { reply_markup: { inline_keyboard: [] } }).catch(() => {});
       return;
     }
-    await this.h.tg.answerCallbackQuery(cb.id, tr(lang, `Dừng ${name}`, `Stopping ${name}`));
+    answer(tr(lang, `Dừng ${name}`, `Stopping ${name}`));
     const msg = await this.stopWorker(found[0], true);
     if (messageId) await this.h.tg.editMessageText(conv, messageId, msg).catch(() => {});
   }
@@ -597,7 +655,7 @@ export class Orchestrator {
         ].join("\n"),
       );
     } catch (e) {
-      await this.h.sendHtml(conv, tr(lang, `❌ Không bật được Manager: ${esc((e as Error).message)}`, `❌ Can't turn on the Manager: ${esc((e as Error).message)}`));
+      await this.h.sendHtml(conv, errorLine(lang, raw(tr(lang, `Không bật được Manager: ${esc((e as Error).message)}`, `Can't turn on the Manager: ${esc((e as Error).message)}`))));
     }
   }
 
@@ -1192,7 +1250,11 @@ export class Orchestrator {
         }
       }
     }
-    const ran = classifyShellItems(items).ran;
+    // S3.2: the checkpoint's checks are the canonical verify checks
+    // (typecheck / test:unit / smoke) — the worker's exploratory shell calls
+    // are not checks, so a failing grep must not fail the run (2026-11-18:
+    // callback-registry T4 was checkpointed "fail" this way).
+    const ran = classifyShellItems(items, EXPECTED_CHECKS).ran;
     const notRan = computeNotRan(ran);
     const errored = status === "failed" || status === "stopped" || ran.some((c) => c.error !== undefined);
 
@@ -1232,11 +1294,19 @@ export class Orchestrator {
       files: files.length ? files : undefined,
       checks: { ran, notRan },
       errored,
+      auto: w.specRun.auto,
       lang,
     });
     await this.h.sendHtml(conv, card.text, { reply_markup: card.keyboard }).catch((e) => {
       warn("postSpecCheckpoint send:", (e as Error)?.message);
     });
+
+    // S6.5: auto run-next — no-op unless this run's auto flag is on.
+    try {
+      this.h.onSpecCheckpoint?.(workerConv, status);
+    } catch (e) {
+      warn("onSpecCheckpoint:", (e as Error)?.message);
+    }
   }
 
   /**
@@ -1389,7 +1459,7 @@ export class Orchestrator {
           const lineId = await this.h
             .tg.sendMessageId(
               conv,
-              tr(lang, "✅ Xong — xem lại thay đổi của worker:", "✅ Done — review the worker's changes:"),
+              okLine(lang, raw(tr(lang, "Xong — xem lại thay đổi của worker:", "Done — review the worker's changes:"))),
               { reply_markup: { inline_keyboard: [reviewRow] } },
             )
             .catch(() => -1);
@@ -1470,7 +1540,7 @@ export class Orchestrator {
         isolate: false, // reuse the dead worker's directory/worktree as-is
       });
     } catch (e) {
-      await this.h.sendHtml(conv, tr(this.langOf(conv), `⚠️ Không tự tạo worker thay thế được: ${esc((e as Error).message)}`, `⚠️ Couldn't auto-create a replacement worker: ${esc((e as Error).message)}`)).catch(() => {});
+      await this.h.sendHtml(conv, warnLine(this.langOf(conv), raw(tr(this.langOf(conv), `Không tự tạo worker thay thế được: ${esc((e as Error).message)}`, `Couldn't auto-create a replacement worker: ${esc((e as Error).message)}`)))).catch(() => {});
       return undefined;
     }
     // Attach lineage + carry the worktree/repoRoot so /wt (diff/merge/remove)
@@ -1616,10 +1686,10 @@ export class Orchestrator {
       reply_markup: {
         inline_keyboard: [
           [
-            { text: "✅ Giao", callback_data: `ap:${id}:ok` },
-            { text: "❌ Huỷ", callback_data: `ap:${id}:no` },
+            { text: "✅ Giao", callback_data: apCb.encode({ id, op: "ok" }) },
+            { text: "❌ Huỷ", callback_data: apCb.encode({ id, op: "no" }) },
           ],
-          [{ text: "⚡ Giao + bật auto", callback_data: `ap:${id}:auto` }],
+          [{ text: "⚡ Giao + bật auto", callback_data: apCb.encode({ id, op: "auto" }) }],
         ],
       },
     });
@@ -1645,15 +1715,15 @@ export class Orchestrator {
   async handleCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<boolean> {
     const data = cb.data ?? "";
     if (data.startsWith("ap:")) {
-      await this.handleApprovalCallback(cb, conv, messageId);
+      await this.handleApprovalCallback(cb, conv, (t) => void this.h.tg.answerCallbackQuery(cb.id, t), messageId);
       return true;
     }
     if (data.startsWith("wt:")) {
-      await this.handleWorktreeCallback(cb, conv, messageId);
+      await this.handleWorktreeCallback(cb, conv, (t) => void this.h.tg.answerCallbackQuery(cb.id, t), messageId);
       return true;
     }
     if (data.startsWith("prune:")) {
-      await handlePruneCallback(this, cb, conv, messageId);
+      await handlePruneCallback(this, cb, conv, (t) => void this.h.tg.answerCallbackQuery(cb.id, t), messageId);
       return true;
     }
     return false;
@@ -1682,22 +1752,22 @@ export class Orchestrator {
   /** Delegates to ./orchestrator/topics.ts (kept as a method: tests call it directly). */
   async reapPendingTopicDeletes(): Promise<void> { return reapPendingTopicDeletes(this); }
 
-  private async handleApprovalCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+  public async handleApprovalCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
     const lang = this.h.userPrefs?.getLang(cb.from?.id ?? "") ?? "vi";
     const [, id, op] = (cb.data ?? "").split(":");
     const a = this.approvals.get(id);
     if (!a || a.chat !== chatOf(conv)) {
-      await this.h.tg.answerCallbackQuery(cb.id, tr(lang, "Yêu cầu này đã hết hạn.", "This request has expired."));
+      answer(tr(lang, "Yêu cầu này đã hết hạn.", "This request has expired."));
       if (messageId) await this.h.tg.editMessageText(conv, messageId, tr(lang, "⌛ Yêu cầu này đã hết hạn (bot đã khởi động lại hoặc đã xử lý).", "⌛ This request has expired (the bot restarted or already handled it)."), { reply_markup: { inline_keyboard: [] } }).catch(() => {});
       return;
     }
     this.approvals.delete(id);
-    await this.h.tg.answerCallbackQuery(cb.id);
+    answer();
     const what = a.kind === "spawn" ? tr(lang, `tạo worker ${a.spawn?.name}`, `create worker ${a.spawn?.name}`) : tr(lang, `gửi việc cho ${a.send?.name}`, `assign work to ${a.send?.name}`);
     const auditText = a.kind === "spawn" ? `spawn ${a.spawn?.name}: ${a.spawn?.task ?? ""}` : `send ${a.send?.name}: ${a.send?.message ?? ""}`;
     if (op === "no") {
       audit({ action: "dispatch_reject", userId: cb.from?.id, chatId: a.chat, outcome: "rejected", text: auditText });
-      if (messageId) await this.h.tg.editMessageText(conv, messageId, tr(lang, `❌ Đã huỷ: ${esc(what)}.`, `❌ Cancelled: ${esc(what)}.`)).catch(() => {});
+      if (messageId) await this.h.tg.editMessageText(conv, messageId, errorLine(lang, raw(tr(lang, `Đã huỷ: ${esc(what)}.`, `Cancelled: ${esc(what)}.`)))).catch(() => {});
       queueReport(this, a.chat, `[approval #${id}] REJECTED by the user: ${what}. Do not retry it; ask the user what to do instead if needed.`);
       return;
     }
@@ -1707,14 +1777,14 @@ export class Orchestrator {
       audit({ action: "dispatch_approve", userId: cb.from?.id, chatId: a.chat, outcome: op === "auto" ? "ok+auto_on" : "ok", text: auditText });
       if (messageId) {
         await this.h.tg
-          .editMessageText(conv, messageId, tr(lang, `✅ Đã duyệt: ${esc(what)}.${op === "auto" ? "\n⚡ Auto đã bật — các lần sau không hỏi nữa (/auto off để tắt)." : ""}`, `✅ Approved: ${esc(what)}.${op === "auto" ? "\n⚡ Auto mode on — no more prompts (/auto off to disable)." : ""}`))
+          .editMessageText(conv, messageId, okLine(lang, raw(tr(lang, `Đã duyệt: ${esc(what)}.${op === "auto" ? "\n⚡ Auto đã bật — các lần sau không hỏi nữa (/auto off để tắt)." : ""}`, `Approved: ${esc(what)}.${op === "auto" ? "\n⚡ Auto mode on — no more prompts (/auto off to disable)." : ""}`))))
           .catch(() => {});
       }
       queueReport(this, a.chat, `[approval #${id}] APPROVED by the user: ${result}.${op === "auto" ? " Auto mode is now on." : ""}`);
     } catch (e) {
       const msg = (e as Error).message;
       audit({ action: "dispatch_approve", userId: cb.from?.id, chatId: a.chat, outcome: `error: ${msg}`, text: auditText });
-      if (messageId) await this.h.tg.editMessageText(conv, messageId, tr(lang, `⚠️ Duyệt nhưng thất bại: ${esc(msg)}`, `⚠️ Approved but failed: ${esc(msg)}`)).catch(() => {});
+      if (messageId) await this.h.tg.editMessageText(conv, messageId, warnLine(lang, raw(tr(lang, `Duyệt nhưng thất bại: ${esc(msg)}`, `Approved but failed: ${esc(msg)}`)))).catch(() => {});
       queueReport(this, a.chat, `[approval #${id}] approved but FAILED: ${msg}`);
     }
   }
@@ -1798,21 +1868,21 @@ export class Orchestrator {
     return {
       inline_keyboard: [
         [
-          { text: "📄 Diff", callback_data: `wt:${w.name}:diff` },
-          { text: "🔀 Merge", callback_data: `wt:${w.name}:merge` },
+          { text: "📄 Diff", callback_data: wtCb.encode({ name: w.name, op: "diff" }) },
+          { text: "🔀 Merge", callback_data: wtCb.encode({ name: w.name, op: "merge" }) },
         ],
-        [{ text: tr(lang, "🗑 Xoá worktree", "🗑 Delete worktree"), callback_data: `wt:${w.name}:rm` }],
+        [{ text: tr(lang, "🗑 Xoá worktree", "🗑 Delete worktree"), callback_data: wtCb.encode({ name: w.name, op: "rm" }) }],
       ],
     };
   }
 
-  private async handleWorktreeCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+  public async handleWorktreeCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
     const lang = this.h.userPrefs?.getLang(cb.from?.id ?? "") ?? "vi";
     const [, name, op] = (cb.data ?? "").split(":");
     const found = this.h.st.findWorker(conv, name);
     const w = found?.[1].worker;
     if (!found || !w?.worktree || !w.repoRoot) {
-      await this.h.tg.answerCallbackQuery(cb.id, tr(lang, "Worktree không còn.", "The worktree no longer exists."));
+      answer(tr(lang, "Worktree không còn.", "The worktree no longer exists."));
       return;
     }
     const wt = w.worktree;
@@ -1824,18 +1894,18 @@ export class Orchestrator {
       const shared = worktreeSharedBy(this.h.st, conv, wt.root);
       if (shared.length) {
         const names = shared.map((k) => this.h.st.peek(k)?.worker?.name ?? k).join(", ");
-        await this.h.tg.answerCallbackQuery(cb.id, tr(lang,
-          `⚠️ Worktree đang dùng chung với worker ${names} — xoá/merge ở đây sẽ làm mất thư mục của worker đó. Hãy thao tác từ topic của nó.`,
-          `⚠️ This worktree is shared with worker ${names} — removing or merging it here would delete that worker's directory. Manage it from that worker's topic instead.`,
-        ));
+        answer(warnLine(lang, raw(tr(lang,
+          `Worktree đang dùng chung với worker ${names} — xoá/merge ở đây sẽ làm mất thư mục của worker đó. Hãy thao tác từ topic của nó.`,
+          `This worktree is shared with worker ${names} — removing or merging it here would delete that worker's directory. Manage it from that worker's topic instead.`,
+        ))));
         return;
       }
     }
     if (BUSY.includes(w.status) && op !== "diff") {
-      await this.h.tg.answerCallbackQuery(cb.id, tr(lang, "Worker đang chạy — /kill hoặc chờ xong rồi thử lại.", "The worker is running — /kill or wait for it to finish and try again."));
+      answer(tr(lang, "Worker đang chạy — /kill hoặc chờ xong rồi thử lại.", "The worker is running — /kill or wait for it to finish and try again."));
       return;
     }
-    await this.h.tg.answerCallbackQuery(cb.id);
+    answer();
     try {
       if (op === "diff") {
         await this.h.sendHtml(conv, `${tr(lang, `📄 <b>Diff ${esc(wt.branch)}</b> so với`, `📄 <b>Diff ${esc(wt.branch)}</b> vs`)} <code>${esc(wt.base)}</code>\n<pre>${esc(await diffSummary(wt))}</pre>`);
@@ -1845,8 +1915,8 @@ export class Orchestrator {
         // Uncommitted work is COMMITTED to the worker branch first (not lost) —
         // only the worktree directory is removed; an unmerged branch is kept.
         // So the user loses nothing here, which the warning must say correctly.
-        await this.h.sendHtml(conv, tr(lang, "⚠️ Xoá worktree sẽ <b>commit các thay đổi chưa commit vào nhánh</b> của worker rồi xoá thư mục worktree (nhánh chưa merge vẫn được giữ — không mất gì). Chắc chắn?", "⚠️ Deleting the worktree will <b>commit uncommitted changes to the worker branch</b>, then remove the worktree directory (the unmerged branch is kept — nothing lost). Sure?"), {
-          reply_markup: { inline_keyboard: [[{ text: tr(lang, "🗑 Xoá thật", "🗑 Delete for real"), callback_data: `wt:${w.name}:rmok` }, { text: tr(lang, "Thôi", "No, keep"), callback_data: `wt:${w.name}:keep` }]] },
+        await this.h.sendHtml(conv, warnLine(lang, raw(tr(lang, "Xoá worktree sẽ <b>commit các thay đổi chưa commit vào nhánh</b> của worker rồi xoá thư mục worktree (nhánh chưa merge vẫn được giữ — không mất gì). Chắc chắn?", "Deleting the worktree will <b>commit uncommitted changes to the worker branch</b>, then remove the worktree directory (the unmerged branch is kept — nothing lost). Sure?"))), {
+          reply_markup: confirmKeyboard(lang, { text: tr(lang, "🗑 Xoá thật", "🗑 Delete for real"), data: wtCb.encode({ name: w.name, op: "rmok" }) }, { text: tr(lang, "Thôi", "No, keep"), data: wtCb.encode({ name: w.name, op: "keep" }) }),
         });
       } else if (op === "rmok") {
         let msg: string;
@@ -1874,7 +1944,7 @@ export class Orchestrator {
         await this.h.tg.deleteMessage(conv, messageId);
       }
     } catch (e) {
-      await this.h.sendHtml(conv, `❌ ${esc((e as Error).message)}`);
+      await this.h.sendHtml(conv, errorLine(lang, (e as Error).message));
     }
   }
 
@@ -1890,6 +1960,9 @@ export class Orchestrator {
       const r = this.h.cfg.browseRoots.find((root) => p === root || p.startsWith(root + sep));
       return r ? `${p} (root ${r}${p === r ? "" : ", rel " + relative(r, p)})` : p;
     };
+    // The spec tools want the full Bot (Host is the orchestrator's subset).
+    // The real Bot passes itself as h.bot; test-mock Hosts ARE the bot object.
+    const specBot = this.h.bot ?? (this.h as unknown as Bot);
     const tools: BridgeTool[] = [
       {
         name: "list_directories",
@@ -2011,6 +2084,54 @@ export class Orchestrator {
           await this.h.sendHtml(conv, "⏹ " + tr(this.langOf(conv), "Manager đã dừng worker này.", "The Manager stopped this worker.")).catch(() => {});
           return `Stopped "${this.h.st.get(conv).worker!.name}".`;
         },
+      },
+      // ── Spec pipeline (same path as the Telegram taps, acting as the owner) ──
+      {
+        name: "spec_list",
+        description:
+          "List this chat's specs (docs/sdd): done/total, the running spec worker, and the next task (with its block condition).",
+        inputSchema: { type: "object", properties: {} },
+        run: async () => managerSpecList(specBot, chat),
+      },
+      {
+        name: "spec_run",
+        description:
+          "Run one task of a spec (same path as the Telegram Run tap; the checkpoint card is posted when the worker finishes). " +
+          "Blocked tasks probe first — call again with runAnyway=true to spawn.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            spec: { type: "string", description: "Spec name (docs/sdd/<spec>.md)" },
+            task: { type: "string", description: "Task number or id (6 or T6)" },
+            runAnyway: { type: "boolean", description: "Spawn a blocked task without the probe (the second tap)" },
+          },
+          required: ["spec", "task"],
+        },
+        run: async (a) =>
+          managerSpecRun(specBot, chat, String(a.spec ?? ""), String(a.task ?? ""), a.runAnyway === true),
+      },
+      {
+        name: "spec_accept",
+        description:
+          "Accept a finished spec task (same path as the Accept button: live-state re-derivation, marker commit, branch push).",
+        inputSchema: {
+          type: "object",
+          properties: { spec: { type: "string" }, task: { type: "string", description: "Task number or id (6 or T6)" } },
+          required: ["spec", "task"],
+        },
+        run: async (a) => managerSpecAccept(specBot, chat, String(a.spec ?? ""), String(a.task ?? "")),
+      },
+      {
+        name: "spec_auto",
+        description:
+          "Accept a finished spec task AND arm auto-continue (same path as the Auto-run-next button): the next task runs, " +
+          "and each green checkpoint is accepted and continued until a task is blocked or fails.",
+        inputSchema: {
+          type: "object",
+          properties: { spec: { type: "string" }, task: { type: "string", description: "Task number or id (6 or T6)" } },
+          required: ["spec", "task"],
+        },
+        run: async (a) => managerSpecAuto(specBot, chat, String(a.spec ?? ""), String(a.task ?? "")),
       },
       // Zero-context sandbox: runs a script and returns only its final result.
       // The bridge has no per-session scoping, so it is offered to every caller

@@ -1,5 +1,100 @@
 # Changelog
 
+## [1.46.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.46.1...opencode-telegram-bot-v1.46.2) (2026-11-18)
+
+
+### Bug Fixes
+
+* specAccept refuses runs whose newest worker commit predates the run start ([7562fd3](https://github.com/tobbieswork/opencode-telegram-bot/commit/7562fd3361b5a3e1b4dacd374cfb7f07b3fa61d3))
+* specAccept refuses runs whose newest worker commit predates the run start ([858fd78](https://github.com/tobbieswork/opencode-telegram-bot/commit/858fd78f7305ccdd4943e1e309e4b6190c5a1e8a))
+
+## [1.46.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.46.0...opencode-telegram-bot-v1.46.1) (2026-11-18)
+
+
+### Bug Fixes
+
+* scope checkpoint outcome to canonical verify checks ([2471e1a](https://github.com/tobbieswork/opencode-telegram-bot/commit/2471e1aaa13579d86a04f3962276c04daec33227))
+* scope checkpoint outcome to canonical verify checks ([7433b76](https://github.com/tobbieswork/opencode-telegram-bot/commit/7433b761b5fdd7e3040897fb691165f389ad9ef8))
+
+## [1.46.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.45.1...opencode-telegram-bot-v1.46.0) (2026-11-18)
+
+
+### Features
+
+* auto-hide stale quick-reply keyboards ([0102fd0](https://github.com/tobbieswork/opencode-telegram-bot/commit/0102fd0eee5853f4b43058167243311afcf28f66))
+* auto-hide stale quick-reply keyboards ([d0ac632](https://github.com/tobbieswork/opencode-telegram-bot/commit/d0ac63240d2e231e21367a2a678822536320975b))
+
+## [1.45.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.45.0...opencode-telegram-bot-v1.45.1) (2026-11-18)
+
+
+### Bug Fixes
+
+* correct Vietnamese wording "hẵng" to "hãy" ([5157517](https://github.com/tobbieswork/opencode-telegram-bot/commit/51575173e8aadb83073b9732b017b06d920ee254))
+* correct Vietnamese wording "hẵng" to "hãy" in task-running toasts ([696e456](https://github.com/tobbieswork/opencode-telegram-bot/commit/696e4562aeac60dbb5511c6d8ef3e6475f68112b))
+
+## [1.45.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.44.3...opencode-telegram-bot-v1.45.0) (2026-11-18)
+
+
+### Features
+
+* T2 — typed callback registry with registry-first dispatch ([2994d21](https://github.com/tobbieswork/opencode-telegram-bot/commit/2994d21db58ff7b8cfac1e0454e3df7b6f9730fd))
+
+## [1.44.3](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.44.2...opencode-telegram-bot-v1.44.3) (2026-11-18)
+
+
+### Bug Fixes
+
+* watch smoke scenario races fast turns (tap /watch mid-turn) ([67bda46](https://github.com/tobbieswork/opencode-telegram-bot/commit/67bda46fd4b7dbf5708f2a0faecdae33331a1b9d))
+* watch smoke scenario taps /watch mid-turn (poll sessionState, not a fixed 2.5s sleep) ([b9e006b](https://github.com/tobbieswork/opencode-telegram-bot/commit/b9e006bb1d1c039522ced92da7a402ccd4310359))
+
+## [1.44.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.44.1...opencode-telegram-bot-v1.44.2) (2026-11-18)
+
+
+### Bug Fixes
+
+* spec_auto tool reports refused accepts ([9c120df](https://github.com/tobbieswork/opencode-telegram-bot/commit/9c120df9e679c4dd8a6f0870e4461926068d2c75))
+* spec_auto tool reports refused accepts (specAuto returns the accept result) ([0f422f8](https://github.com/tobbieswork/opencode-telegram-bot/commit/0f422f82c191a19b0e492ea73eae2a37b0e8bf15))
+
+## [1.44.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.44.0...opencode-telegram-bot-v1.44.1) (2026-11-18)
+
+
+### Bug Fixes
+
+* spec manager tools get the real Bot via a Host back-reference (this.h is a Host object, not the Bot) ([dc68eb6](https://github.com/tobbieswork/opencode-telegram-bot/commit/dc68eb6884edb00d3469d00c1c4be450cca89237))
+* spec manager tools need the real Bot (Host back-reference) ([df60dc3](https://github.com/tobbieswork/opencode-telegram-bot/commit/df60dc3eb510227b63e34f26d39266c6f704fbb0))
+
+## [1.44.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.43.0...opencode-telegram-bot-v1.44.0) (2026-11-18)
+
+
+### Features
+
+* expose the spec pipeline to the Manager via MCP tools ([7ff69b5](https://github.com/tobbieswork/opencode-telegram-bot/commit/7ff69b560ee851e8a390ee47f93d869b4474d4de))
+* expose the spec pipeline to the Manager via MCP tools (spec_list, spec_run, spec_accept, spec_auto) ([bcf9ef9](https://github.com/tobbieswork/opencode-telegram-bot/commit/bcf9ef9a29003ef5ed156762e107e0c2f386ce43))
+
+## [1.43.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.42.1...opencode-telegram-bot-v1.43.0) (2026-11-18)
+
+
+### Features
+
+* /spec list — split specs into in-progress and done groups ([da97219](https://github.com/tobbieswork/opencode-telegram-bot/commit/da9721903dbadcd5340ca050e7e15273c58751af))
+* /spec list — split specs into in-progress and done groups ([599202d](https://github.com/tobbieswork/opencode-telegram-bot/commit/599202df6c439210358c1acf3263828dfecc0324))
+
+## [1.42.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.42.0...opencode-telegram-bot-v1.42.1) (2026-11-18)
+
+
+### Bug Fixes
+
+* question relay — submit card keeps questions + labels; typed answer no longer requires a reply ([7b7fc00](https://github.com/tobbieswork/opencode-telegram-bot/commit/7b7fc001e98be57f4e1ad2169063a5d49900ba5b))
+* question relay — submit card keeps questions + labels; typed answer no longer requires a reply ([85a3f48](https://github.com/tobbieswork/opencode-telegram-bot/commit/85a3f489361429dc20bbebf151ec37dbc04f61c5))
+
+## [1.42.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.41.2...opencode-telegram-bot-v1.42.0) (2026-11-18)
+
+
+### Features
+
+* auto run-next mode for spec checkpoints (S6.5) ([f638f62](https://github.com/tobbieswork/opencode-telegram-bot/commit/f638f626ef2a0c9562bdb63c2fe59701aed8e48d))
+* auto run-next mode for spec checkpoints (S6.5) ([6f35e1c](https://github.com/tobbieswork/opencode-telegram-bot/commit/6f35e1c94bbeb295a033bb5ce2709eec3289553e))
+
 ## [1.41.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.41.1...opencode-telegram-bot-v1.41.2) (2026-11-17)
 
 

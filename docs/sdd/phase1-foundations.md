@@ -1,6 +1,6 @@
 # Spec: Phase 1 Foundations (doc-sync, /health, audit log, token storage)
 
-- **Status:** Draft, awaiting review (no code written)
+- **Status:** Done (all tasks implemented, verified 2026-11-18)
 - **Date:** 2026-11-10
 - **Scope:** `opencode-telegram-bot`
 - **Format:** requirements (EARS) -> design -> tasks, with a human checkpoint after each task
@@ -58,12 +58,12 @@ regressions hard to spot.
 
 ## 4. Tasks (each ends with a human checkpoint)
 
-1. **T1 Doc-sync test** (R1). Add the test; fix the README drift it reveals. Verify: it fails before the README fix and passes after. *Checkpoint: review README diff.*
-2. **T2 Audit module** (R3). Add `src/audit.ts` with a unit test for redaction, truncation, rotation and write-failure. *Checkpoint: review the entry schema.*
-3. **T3 Audit wiring** (R3). Add the call sites. Verify with an existing flow test. *Checkpoint: review a sample log.*
-4. **T4 Health collector** (R2). Add `src/health.ts` and unit tests with fake subsystems, including the "off" case. *Checkpoint: review output wording.*
-5. **T5 /health command** (R2). Register in the catalog and wire the handler; extend `test:commands` and `test:i18n`. *Checkpoint: try it in Telegram.*
-6. **T6 Token source** (R4). Done for Linux: `src/secrets.ts` + `test:secrets`, the opt-in drop-in, README section. *Checkpoint: run the README steps on the box and confirm the log says `Telegram token source: systemd-credential`.*
+1. [x] (89218a5) **T1 Doc-sync test** (R1). Add the test; fix the README drift it reveals. Verify: it fails before the README fix and passes after. *Checkpoint: review README diff.*
+2. [x] (a572833) **T2 Audit module** (R3). Add `src/audit.ts` with a unit test for redaction, truncation, rotation and write-failure. *Checkpoint: review the entry schema.*
+3. [x] (a572833) **T3 Audit wiring** (R3). Add the call sites. Verify with an existing flow test. *Checkpoint: review a sample log.*
+4. [x] (7667cb4) **T4 Health collector** (R2). Add `src/health.ts` and unit tests with fake subsystems, including the "off" case. *Checkpoint: review output wording.*
+5. [x] (7667cb4) **T5 /health command** (R2). Register in the catalog and wire the handler; extend `test:commands` and `test:i18n`. *Checkpoint: try it in Telegram.*
+6. [x] (55a706d) **T6 Token source** (R4). Done for Linux: `src/secrets.ts` + `test:secrets`, the opt-in drop-in, README section. *Checkpoint: run the README steps on the box and confirm the log says `Telegram token source: systemd-credential`.*
 
 Verification order for every task, per `AGENTS.md`: `npm run typecheck` and `npm run test:unit` first, `npm run smoke` once at the end. After editing `src/`, restart the service with `systemctl --user restart opencode-bot`.
 

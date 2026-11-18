@@ -9,8 +9,11 @@ import { Schedule, SchedSpec, formatSchedule, nextRunAfter, parseScheduleSpec } 
 import { esc } from "../format.js";
 import { errorText, tr } from "../i18n.js";
 import { isUnderRoot } from "../fsbrowser.js";
+import { defineCallback } from "../callbacks.js";
 import { AGENT_WHITELIST } from "../shared.js";
 import type { Keyboard } from "../shared.js";
+import { confirmKeyboard } from "../ui/keyboards.js";
+import { errorLine, raw, titledList, warnLine } from "../ui/text.js";
 
 // ── /schedule ────────────────────────────────────────────────────────────
 // Schedules live in a SEPARATE file (data/schedules.json), never in
@@ -35,6 +38,23 @@ function creatorAllowed(bot: Bot, sch: Schedule): boolean {
   return bot.cfg.allowedUserIds.includes(sch.createdBy);
 }
 
+/**
+ * The `sch:` callback def (docs/sdd/callback-registry.md — T4 migration).
+ * Wire form: `sch:<op>:<id>` (op = p/r/run/d/dy, id = 4-char base36 schedule
+ * id) and `sch:ls` (re-list; no id).
+ */
+export const schCb = defineCallback<{ op: string; id?: string }>({
+  prefix: "sch",
+  encode: (a) => (a.id === undefined ? `sch:${a.op}` : `sch:${a.op}:${a.id}`),
+  decode: (rest) => {
+    const i = rest.indexOf(":");
+    const op = i === -1 ? rest : rest.slice(0, i);
+    if (op === "") return null;
+    const id = i === -1 ? "" : rest.slice(i + 1);
+    return { op, id: id === "" ? undefined : id };
+  },
+});
+
 /** The list view: one line + one button row per schedule (⏸/▶ · ▶▶ · 🗑). */
 function scheduleListMarkup(bot: Bot, mine: Schedule[], lang: Lang): { html: string; kb: Keyboard } {
   const fmtNext = (ms: number) =>
@@ -46,11 +66,13 @@ function scheduleListMarkup(bot: Bot, mine: Schedule[], lang: Lang): { html: str
     return `${paused}${formatSchedule(s)}${status}${next}`;
   });
   const rows = mine.map((s) => [
-    { text: s.enabled ? "⏸" : "▶", callback_data: `sch:${s.enabled ? "p" : "r"}:${s.id}` },
-    { text: "▶▶", callback_data: `sch:run:${s.id}` },
-    { text: "🗑", callback_data: `sch:d:${s.id}` },
+    { text: s.enabled ? "⏸" : "▶", callback_data: schCb.encode({ op: s.enabled ? "p" : "r", id: s.id }) },
+    { text: "▶▶", callback_data: schCb.encode({ op: "run", id: s.id }) },
+    { text: "🗑", callback_data: schCb.encode({ op: "d", id: s.id }) },
   ]);
-  return { html: `<b>⏰ ${tr(lang, "Lịch", "Schedules")} (${mine.length})</b>\n${lines.join("\n")}`, kb: { inline_keyboard: rows } };
+  // The lines are already-safe (no untrusted user text) — raw() keeps the
+  // pre-migration no-escape behaviour byte-identical.
+  return { html: titledList(lang, raw(`⏰ ${tr(lang, "Lịch", "Schedules")} (${mine.length})`), lines.map(raw)), kb: { inline_keyboard: rows } };
 }
 
 /** The /schedule usage card, HTML-escaped (sendMessage is parse_mode HTML). Localized by lang. */
@@ -128,11 +150,11 @@ async function cmdScheduleInner(bot: Bot, conv: ConvKey, arg: string, state: Cha
   try {
     ({ spec, prompt } = parseScheduleSpec(arg, Date.now(), lang));
   } catch (e) {
-    await bot.tg.sendMessage(conv, `❌ ${(e as Error).message.replace(/^schedule:\s*/, "")}`);
+    await bot.tg.sendMessage(conv, errorLine(lang, raw((e as Error).message.replace(/^schedule:\s*/, ""))));
     return;
   }
   if (!prompt) {
-    await bot.tg.sendMessage(conv, tr(lang, "❌ Thiếu prompt — ví dụ: /schedule daily 08:00 Review commit 24h qua", "❌ Missing prompt — e.g.: /schedule daily 08:00 Review commits from the last 24h"));
+    await bot.tg.sendMessage(conv, errorLine(lang, tr(lang, "Thiếu prompt — ví dụ: /schedule daily 08:00 Review commit 24h qua", "Missing prompt — e.g.: /schedule daily 08:00 Review commits from the last 24h")));
     return;
   }
   // Option tokens — parseScheduleSpec strips them from the prompt itself.
@@ -143,20 +165,20 @@ async function cmdScheduleInner(bot: Bot, conv: ConvKey, arg: string, state: Cha
     else if (/^agent=/i.test(t)) agent = t.slice(6).toLowerCase();
   }
   if (!AGENT_WHITELIST.includes(agent)) {
-    await bot.tg.sendMessage(conv, tr(lang, `❌ Agent không hợp lệ — chọn: ${AGENT_WHITELIST.join(", ")}`, `❌ Invalid agent — choose: ${AGENT_WHITELIST.join(", ")}`));
+    await bot.tg.sendMessage(conv, errorLine(lang, tr(lang, `Agent không hợp lệ — chọn: ${AGENT_WHITELIST.join(", ")}`, `Invalid agent — choose: ${AGENT_WHITELIST.join(", ")}`)));
     return;
   }
   if (!isAbsolute(dir)) dir = resolve(bot.cfg.opencodeDirectory, dir);
   if (!existsSync(dir) || !statSync(dir).isDirectory()) {
-    await bot.tg.sendMessage(conv, tr(lang, `❌ Không tìm thấy thư mục: <code>${esc(dir)}</code>`, `❌ Directory not found: <code>${esc(dir)}</code>`));
+    await bot.tg.sendMessage(conv, errorLine(lang, raw(tr(lang, `Không tìm thấy thư mục: <code>${esc(dir)}</code>`, `Directory not found: <code>${esc(dir)}</code>`))));
     return;
   }
   if (bot.cfg.browseRoots.length && !isUnderRoot(dir, bot.cfg.browseRoots)) {
-    await bot.tg.sendMessage(conv, tr(lang, `❌ Thư mục ngoài vùng cho phép (OPENCODE_TG_BROWSE_ROOTS): <code>${esc(dir)}</code>`, `❌ Directory outside the allowed area (OPENCODE_TG_BROWSE_ROOTS): <code>${esc(dir)}</code>`));
+    await bot.tg.sendMessage(conv, errorLine(lang, raw(tr(lang, `Thư mục ngoài vùng cho phép (OPENCODE_TG_BROWSE_ROOTS): <code>${esc(dir)}</code>`, `Directory outside the allowed area (OPENCODE_TG_BROWSE_ROOTS): <code>${esc(dir)}</code>`))));
     return;
   }
   if (bot.scheduleStore.load().length >= bot.cfg.maxSchedules) {
-    await bot.tg.sendMessage(conv, tr(lang, `❌ Đã đủ ${bot.cfg.maxSchedules} lịch (giới hạn). Xoá bớt trước khi thêm.`, `❌ Schedule limit (${bot.cfg.maxSchedules}) reached. Delete some first.`));
+    await bot.tg.sendMessage(conv, errorLine(lang, tr(lang, `Đã đủ ${bot.cfg.maxSchedules} lịch (giới hạn). Xoá bớt trước khi thêm.`, `Schedule limit (${bot.cfg.maxSchedules}) reached. Delete some first.`)));
     return;
   }
   const now = Date.now();
@@ -186,13 +208,13 @@ async function cmdScheduleInner(bot: Bot, conv: ConvKey, arg: string, state: Cha
           ? `\n→ Add dir= (a folder outside data/manager). E.g.: dir=${bot.cfg.opencodeDirectory}`
           : `\n→ Thêm dir= (thư mục ngoài data/manager). VD: dir=${bot.cfg.opencodeDirectory}`
         : "";
-    await bot.tg.sendMessage(conv, `❌ ${m}${hint}`);
+    await bot.tg.sendMessage(conv, errorLine(lang, raw(`${m}${hint}`)));
     return;
   }
   try {
     bot.scheduleStore.add(sch, lang);
   } catch (e) {
-    await bot.tg.sendMessage(conv, `❌ ${(e as Error).message}`);
+    await bot.tg.sendMessage(conv, errorLine(lang, raw((e as Error).message)));
     return;
   }
   await bot.tg.sendMessage(
@@ -242,17 +264,17 @@ async function scheduleRun(bot: Bot, conv: ConvKey, id: string): Promise<void> {
     await bot.orch.runScheduled(conv, sch);
     await bot.tg.sendMessage(conv, tr(lang, `▶▶ Đã chạy lịch #${id} — kết quả sẽ hiện trong topic sch-${id}.`, `▶▶ Ran schedule #${id} — results will show in topic sch-${id}.`));
   } catch (e) {
-    await bot.tg.sendMessage(conv, tr(lang, `❌ Lịch #${id} không chạy được: ${(e as Error).message}`, `❌ Schedule #${id} can't run: ${(e as Error).message}`));
+    await bot.tg.sendMessage(conv, errorLine(lang, raw(tr(lang, `Lịch #${id} không chạy được: ${(e as Error).message}`, `Schedule #${id} can't run: ${(e as Error).message}`))));
   }
 }
 
 /** Schedule button taps: sch:p/sch:r (pause/resume) · sch:run · sch:d/sch:dy (rm, 2-step) · sch:ls (re-list). */
-export async function handleScheduleCallback(bot: Bot, cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+export async function handleScheduleCallback(bot: Bot, cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
   const lang = bot.userPrefs.getLang(cb.from?.id ?? "");
   const [, op, id] = (cb.data ?? "").split(":");
   // Re-list after a confirm/cancel — no schedule id involved.
   if (op === "ls") {
-    await bot.tg.answerCallbackQuery(cb.id);
+    answer();
     if (!messageId) return;
     const mine = bot.scheduleStore.load().filter((s) => s.conv === conv);
     const v = mine.length
@@ -262,16 +284,16 @@ export async function handleScheduleCallback(bot: Bot, cb: CallbackQuery, conv: 
     return;
   }
   if (!/^[a-z0-9]{4}$/.test(id ?? "")) {
-    await bot.tg.answerCallbackQuery(cb.id, tr(lang, "⏰ Id không hợp lệ", "⏰ Invalid id"));
+    answer(tr(lang, "⏰ Id không hợp lệ", "⏰ Invalid id"));
     return;
   }
   const sch = bot.scheduleStore.get(id);
   if (!sch || sch.conv !== conv) {
-    await bot.tg.answerCallbackQuery(cb.id, tr(lang, "⏰ Không tìm thấy lịch này của chat", "⏰ No such schedule in this chat"));
+    answer(tr(lang, "⏰ Không tìm thấy lịch này của chat", "⏰ No such schedule in this chat"));
     return;
   }
   if (!creatorAllowed(bot, sch)) {
-    await bot.tg.answerCallbackQuery(cb.id, tr(lang, "⛔ Người tạo không còn trong allowlist", "⛔ Creator no longer on the allowlist"));
+    answer(tr(lang, "⛔ Người tạo không còn trong allowlist", "⛔ Creator no longer on the allowlist"));
     return;
   }
   switch (op) {
@@ -279,7 +301,7 @@ export async function handleScheduleCallback(bot: Bot, cb: CallbackQuery, conv: 
     case "r": {
       const enable = op === "r";
       bot.scheduleStore.set(id, { enabled: enable });
-      await bot.tg.answerCallbackQuery(cb.id, enable ? tr(lang, `▶ Đã bật lại #${id}`, `▶ Resumed #${id}`) : tr(lang, `⏸ Đã dừng #${id}`, `⏸ Paused #${id}`));
+      answer(enable ? tr(lang, `▶ Đã bật lại #${id}`, `▶ Resumed #${id}`) : tr(lang, `⏸ Đã dừng #${id}`, `⏸ Paused #${id}`));
       if (messageId) {
         const mine = bot.scheduleStore.load().filter((s) => s.conv === conv);
         const v = mine.length
@@ -290,34 +312,31 @@ export async function handleScheduleCallback(bot: Bot, cb: CallbackQuery, conv: 
       return;
     }
     case "run": {
-      await bot.tg.answerCallbackQuery(cb.id, tr(lang, `▶▶ Đang chạy #${id}…`, `▶▶ Running #${id}…`));
+      answer(tr(lang, "▶▶ Đang chạy #${id}…", "▶▶ Running #${id}…"));
       try {
         await bot.orch.runScheduled(conv, sch);
       } catch (e) {
-        await bot.tg.sendMessage(conv, tr(lang, `❌ Lịch #${id} không chạy được: ${(e as Error).message}`, `❌ Schedule #${id} can't run: ${(e as Error).message}`)).catch(() => {});
+        await bot.tg.sendMessage(conv, errorLine(lang, raw(tr(lang, `Lịch #${id} không chạy được: ${(e as Error).message}`, `Schedule #${id} can't run: ${(e as Error).message}`)))).catch(() => {});
       }
       return;
     }
     case "d": {
       // Destructive — two-step confirm (like /reboot).
-      await bot.tg.answerCallbackQuery(cb.id);
+      answer();
       if (!messageId) return;
-      const kb: Keyboard = {
-        inline_keyboard: [
-          [
-            { text: tr(lang, `🗑 Xoá #${id}`, `🗑 Delete #${id}`), callback_data: `sch:dy:${id}` },
-            { text: tr(lang, "↩️ Quay lại", "↩️ Back"), callback_data: "sch:ls" },
-          ],
-        ],
-      };
+      const kb: Keyboard = confirmKeyboard(
+        lang,
+        { text: tr(lang, `🗑 Xoá #${id}`, `🗑 Delete #${id}`), data: schCb.encode({ op: "dy", id }) },
+        { text: tr(lang, "↩️ Quay lại", "↩️ Back"), data: schCb.encode({ op: "ls" }) },
+      );
       await bot.tg
-        .editMessageText(conv, messageId, tr(lang, `⚠️ Xoá lịch <b>#${id}</b> (${formatSchedule(sch)})? Topic + lịch sử vẫn giữ.`, `⚠️ Delete schedule <b>#${id}</b> (${formatSchedule(sch)})? Topic + history kept.`), { reply_markup: kb })
+        .editMessageText(conv, messageId, warnLine(lang, raw(tr(lang, `Xoá lịch <b>#${id}</b> (${formatSchedule(sch)})? Topic + lịch sử vẫn giữ.`, `Delete schedule <b>#${id}</b> (${formatSchedule(sch)})? Topic + history kept.`))), { reply_markup: kb })
         .catch(() => {});
       return;
     }
     case "dy": {
       bot.scheduleStore.remove(id);
-      await bot.tg.answerCallbackQuery(cb.id, tr(lang, `🗑 Đã xoá #${id}`, `🗑 Deleted #${id}`));
+      answer(tr(lang, "🗑 Đã xoá #${id}", "🗑 Deleted #${id}"));
       if (messageId) {
         await bot.tg
           .editMessageText(conv, messageId, tr(lang, `🗑 Đã xoá lịch <b>#${id}</b>. Dọn topic mồ côi bằng /prune.`, `🗑 Deleted schedule <b>#${id}</b>. Clean up the orphaned topic with /prune.`), { reply_markup: { inline_keyboard: [] } })
@@ -326,6 +345,6 @@ export async function handleScheduleCallback(bot: Bot, cb: CallbackQuery, conv: 
       return;
     }
     default:
-      await bot.tg.answerCallbackQuery(cb.id);
+      answer();
   }
 }

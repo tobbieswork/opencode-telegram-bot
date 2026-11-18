@@ -114,13 +114,13 @@ export async function onPermissionResolved(ctx: BotCtx, requestID: string, reply
 }
 
 /** Handle a tap on a permission button (data = `perm:<requestID>:<once|always|reject>`). */
-export async function handlePermissionCallback(ctx: BotCtx, cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+export async function handlePermissionCallback(ctx: BotCtx, cb: CallbackQuery, conv: ConvKey, messageId?: number, answer: (toast?: string) => void = (t) => { void ctx.tg.answerCallbackQuery(cb.id, t).catch(() => {}); }): Promise<void> {
   const parts = (cb.data ?? "").split(":");
   const requestID = parts[1];
   const decision = parts[2];
   const p = ctx.permissionPrompts.get(requestID);
   if (!p) {
-    await ctx.tg.answerCallbackQuery(cb.id, tr(ctx.userPrefs.getLang(cb.from?.id ?? ""), "Yêu cầu quyền này đã hết hạn.", "This permission request has expired."));
+    answer(tr(ctx.userPrefs.getLang(cb.from?.id ?? ""), "Yêu cầu quyền này đã hết hạn.", "This permission request has expired."));
     return;
   }
   const lang = ctx.userPrefs.getLang(cb.from?.id ?? "");
@@ -134,7 +134,7 @@ export async function handlePermissionCallback(ctx: BotCtx, cb: CallbackQuery, c
     await ctx.oc.replyPermission(p.sessionID, p.requestID, decision as "once" | "always" | "reject");
     ctx.permissionPrompts.delete(requestID);
     ctx.cancelReminder(p.conv, requestID); // answered → stop nudging (schedule lives under the worker conv)
-    await ctx.tg.answerCallbackQuery(cb.id);
+    answer();
     if (messageId) await ctx.tg.editMessageText(conv, messageId, labels[decision]).catch(() => {});
   } catch (e) {
     if (isAlreadyResolvedPermissionError(e)) {
@@ -143,7 +143,7 @@ export async function handlePermissionCallback(ctx: BotCtx, cb: CallbackQuery, c
       // nudging.
       ctx.permissionPrompts.delete(requestID);
       ctx.cancelReminder(p.conv, requestID); // answered elsewhere → stop nudging (schedule lives under the worker conv)
-      await ctx.tg.answerCallbackQuery(cb.id, tr(lang, "Yêu cầu này đã được xử lý ở nơi khác.", "This request was handled elsewhere."));
+      answer(tr(lang, "Yêu cầu này đã được xử lý ở nơi khác.", "This request was handled elsewhere."));
       if (messageId) {
         await ctx.tg.editMessageText(conv, messageId, tr(lang, "ℹ️ Quyền đã được xử lý ở nơi khác.", "ℹ️ Permission was handled elsewhere.")).catch(() => {});
       }
@@ -154,8 +154,7 @@ export async function handlePermissionCallback(ctx: BotCtx, cb: CallbackQuery, c
     // the prompt and its buttons so the user can tap again to retry.
     const msg = (e as Error)?.message ?? "";
     warn(`permission reply failed for ${requestID} (still pending, buttons kept): ${msg}`);
-    await ctx.tg.answerCallbackQuery(
-      cb.id,
+    answer(
       `${tr(lang, "⚠️ Chưa trả lời được — vẫn đang chờ, thử bấm lại.", "⚠️ Couldn't answer — still pending, tap again to retry.")} ${msg.slice(0, 100)}`,
     );
   }

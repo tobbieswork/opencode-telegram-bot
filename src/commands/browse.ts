@@ -178,10 +178,10 @@ export function renderBrowse(ctx: BotCtx, b: BrowseState): { text: string; keybo
  * Every action edits the browser message in place; `close` deletes it and
  * drops the browser state.
  */
-export async function handleBrowseCallback(ctx: BotCtx, cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+export async function handleBrowseCallback(ctx: BotCtx, cb: CallbackQuery, conv: ConvKey, messageId?: number, answer: (toast?: string) => void = (t) => { void ctx.tg.answerCallbackQuery(cb.id, t).catch(() => {}); }): Promise<void> {
   const b = ctx.browsers.get(conv);
   if (!b) {
-    await ctx.tg.answerCallbackQuery(cb.id, tr(ctx.userPrefs.getLang(cb.from?.id ?? ""), "Phiên duyệt đã đóng — gửi /browse", "The browser was closed — send /browse"));
+    answer(tr(ctx.userPrefs.getLang(cb.from?.id ?? ""), "Phiên duyệt đã đóng — gửi /browse", "The browser was closed — send /browse"));
     return;
   }
 
@@ -266,11 +266,11 @@ export async function handleBrowseCallback(ctx: BotCtx, cb: CallbackQuery, conv:
         break; // "noop" and anything unknown
     }
   } catch (e) {
-    await ctx.tg.answerCallbackQuery(cb.id, `⚠️ ${(e as Error).message}`);
+    answer(`⚠️ ${(e as Error).message}`);
     return;
   }
 
-  await ctx.tg.answerCallbackQuery(cb.id);
+  answer();
   if (close) {
     ctx.browsers.delete(conv);
     if (messageId) await ctx.tg.deleteMessage(conv, messageId);

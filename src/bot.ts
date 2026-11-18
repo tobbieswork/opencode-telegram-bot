@@ -7,12 +7,16 @@ import { Telegram, Update, CallbackQuery, Message, MessageGenerationStopped, Mes
 import { OpenCodeCtl, assistantText, ModelInfo } from "./opencode.js";
 import { StateManager, ChatState, MsgPurpose, MACHINE_STATE_KEY, UserPrefsStore, Lang } from "./state.js";
 import { ConvKey, convKey, chatOf, parseConv } from "./conv.js";
-import { Orchestrator, BUSY } from "./orchestrator.js";
+import { answerExpired, defineCallback, dispatchCallback, oneArg, registerCallback } from "./callbacks.js";
+import { Orchestrator, BUSY, apCb, killCb, wtCb } from "./orchestrator.js";
+import { handlePruneCallback, pruneCb } from "./orchestrator/purge.js";
 import { closeFinishedTopicsAtStartup, deleteOrphanTopicsAtStartup } from "./orchestrator/topics.js";
 import { ScheduleStore, Scheduler } from "./scheduler.js";
 import { isUserAllowed } from "./schedule.js";
 import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, formatTurnFailure, isOverflowError } from "./format.js";
+import { backCloseRow, confirmKeyboard, singleButton } from "./ui/keyboards.js";
+import { errorLine, okLine, raw, statusLine, titledList, warnLine } from "./ui/text.js";
 import { tr, STRINGS } from "./i18n.js";
 import {
   extractMedia,
@@ -25,7 +29,7 @@ import {
 } from "./uploads.js";
 import { richMarkdownChunks } from "./rich.js";
 import { redactSecrets } from "./redact.js";
-import { extractTrailingChoices, extractOptionsMarker, choiceKeyboard, registry } from "./choices.js";
+import { extractTrailingChoices, extractOptionsMarker, choiceCallback, choiceKeyboard, registry } from "./choices.js";
 import { scheduleForRegistration, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
 import { onPermissionAsked, onPermissionResolved, handlePermissionCallback } from "./commands/permission.js";
 import {
@@ -58,21 +62,24 @@ import {
   REACT_TEXT_MAX,
   REACTION_CELEBRATE,
 } from "./reactions.js";
-import { continueButtonLabel, shouldOfferContinue, continueCallbackData, alreadyOfferedContinue } from "./continue.js";
+import { continuePrompt, continueButtonLabel, shouldOfferContinue, continueCallback, continueCallbackData, parseContinueData, alreadyOfferedContinue } from "./continue.js";
 import { GhPrLike, PrSnapshot, PrState, diffSnapshots, renderEvent, updatePrSnapshot } from "./pr-watch.js";
-import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay } from "./uptime.js";
+import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, SAFE_REBOOT_BIN, rebootTokenFile, buildTokenLine, rebootCallback, rebootGoData, isRebootConfirmFresh } from "./uptime.js";
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
-import { DraftState, onTextDelta, onToolStart, isDmConv, EDIT_BUDGET } from "./stream.js";
-import { myCommands } from "./commands.js";
-import { NOTE_CB_PREFIX, BusyNoteStore } from "./notes.js";
+import { DraftState, DraftAction, onTextDelta, onToolStart, isDmConv, EDIT_BUDGET } from "./stream.js";
+import { cmdCb, myCommands } from "./commands.js";
+import { dropNotes, prepareNotes, NOTE_CB_PREFIX, BusyNoteStore, noteCb } from "./notes.js";
 import { QueueStore } from "./queue.js";
+import { buildBusyReply, busyCb, busyKeyboard, queueFullReply, parseBusyCallback } from "./busy.js";
+import type { BusyReply } from "./busy.js";
+import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
 import { log, warn, error } from "./logger.js";
 import { audit } from "./audit.js";
 import { advisorHealth } from "./advisor/advisor-client.js";
 import type { HealthSources } from "./health-probes.js";
 import { CARRYOVER_KEY } from "./shared.js";
 import type { Btn, Keyboard } from "./shared.js";
-import { cmdAgents, cmdAgent, handleAgentCallback } from "./commands/agents.js";
+import { cmdAgents, cmdAgent, handleAgentCallback, agentCb } from "./commands/agents.js";
 import {
   cmdModels,
   cmdModel,
@@ -87,10 +94,10 @@ import {
   applyModelAndVariant as applyModelAndVariantFree,
 } from "./commands/model.js";
 import { cmdReboot, handleRebootCallback, cmdStatus, cmdContext, cmdUsage } from "./commands/admin.js";
-import { cmdSchedule, handleScheduleCallback } from "./commands/schedule.js";
+import { cmdSchedule, handleScheduleCallback, schCb } from "./commands/schedule.js";
 import { Advisor } from "./advisor/advisor.js";
 import { cmdHelp, cmdHealth, cmdNote, cmdRotation, handleNoteCallback, cmdLang, cmdStyle } from "./commands/meta.js";
-import { cmdSpec, handleSpecCallback } from "./commands/spec.js";
+import { cmdSpec, handleSpecCallback, specAutoContinue, specCb, specrunCb, specblockedCb, specrunokCb, spcaccCb, spcredoCb, spcstopCb, spcprCb, spcreadyCb, spccleanCb } from "./commands/spec.js";
 import { trackPending as trackPendingFree, drainInflight as drainInflightFree, notifyQueuedNotRunning as notifyQueuedNotRunningFree, runPrompt as runPromptFree, runPromptTask as runPromptTaskFree, drainQueue as drainQueueFree, stopCurrent as stopCurrentFree } from "./commands/prompt-runner.js";
 import {
   clampWatchInterval,
@@ -110,11 +117,12 @@ import {
   WATCH_POLL_GAP_MS,
   type WatchEvent,
   type WatchState,
+  watchCb,
 } from "./watch.js";
 import { cmdBtw } from "./btw.js";
 import { cmdAsk } from "./ask.js";
 import { reviewPrompt, reviewUsage } from "./review.js";
-import { decide, callbackFor, parseCallback, computeFilesNew, registry as nsRegistry } from "./nextsteps.js";
+import { decide, callbackFor, parseCallback, computeFilesNew, registry as nsRegistry, nsCb } from "./nextsteps.js";
 import { gitFingerprint } from "./gitstate.js";
 import type { NextStepFacts } from "./nextsteps.js";
 import { managerFloorFromMessages, runRotationHandoff, rotationGate } from "./rotation.js";
@@ -158,9 +166,123 @@ const MODES: Record<string, { agent: string; hint: string; hintEn: string }> = {
   explore: { agent: "explore", hint: "duyệt codebase nhanh (tìm file/keyword)", hintEn: "fast codebase scan (find files/keywords)" },
 };
 
-/** Models shown per page in the /model button picker. */
-const MODEL_PAGE_SIZE = 10;
+/**
+ * The `mode:` callback def (docs/sdd/callback-registry.md — T4 migration).
+ * Wire form: `mode:<id|info|close>` (id = a MODES key).
+ */
+const modeCb = oneArg("mode");
 
+/**
+ * The `mdl:` callback def (docs/sdd/callback-registry.md — T4 migration).
+ * Wire form: `mdl:sel:<i>` / `mdl:pg:<n>` / `mdl:noop` / `mdl:close`.
+ */
+const modelCb = defineCallback<{ op: string; arg?: string }>({
+  prefix: "mdl",
+  encode: (a) => (a.arg === undefined ? `mdl:${a.op}` : `mdl:${a.op}:${a.arg}`),
+  decode: (rest) => {
+    const parts = rest.split(":");
+    if (parts[0] === "") return null;
+    const arg = parts.slice(1).join(":");
+    return { op: parts[0], arg: arg === "" ? undefined : arg };
+  },
+});
+
+/**
+ * The `variant:` callback def (docs/sdd/callback-registry.md — T4 migration).
+ * Wire form: `variant:<id|close>` (id = a model variant name).
+ */
+const variantCb = oneArg("variant");
+
+/**
+ * The `rot:` callback def (docs/sdd/callback-registry.md — T4 migration).
+ * Wire form: `rot:cf` / `rot:cx` (confirm / cancel a manager rotation).
+ */
+const rotCb = defineCallback<{ op: "cf" | "cx" }>({
+  prefix: "rot",
+  encode: (a) => `rot:${a.op}`,
+  decode: (rest) => (rest === "cf" || rest === "cx" ? { op: rest } : null),
+});
+
+/**
+ * The `perm:` callback def (docs/sdd/callback-registry.md — T4 migration).
+ * Wire form: `perm:<requestID>:<once|always|reject>`. The requestID is split
+ * at the LAST colon, so an id containing ":" still round-trips (the legacy
+ * split only took the first segment).
+ */
+const permCb = defineCallback<{ requestID: string; decision: "once" | "always" | "reject" }>({
+  prefix: "perm",
+  encode: (a) => `perm:${a.requestID}:${a.decision}`,
+  decode: (rest) => {
+    const i = rest.lastIndexOf(":");
+    if (i <= 0) return null;
+    const decision = rest.slice(i + 1);
+    if (decision !== "once" && decision !== "always" && decision !== "reject") return null;
+    return { requestID: rest.slice(0, i), decision };
+  },
+});
+
+/**
+ * The `nw:` callback def (docs/sdd/callback-registry.md — T4 migration).
+ * Wire form: `nw:<op>` (op = clear/keep/cancel — the bare /new card).
+ */
+const nwCb = oneArg("nw");
+
+/**
+ * The `use:` callback def (docs/sdd/callback-registry.md — T4 migration).
+ * Wire form: `use:<id|ls|close>` (id = an OpenCode session id).
+ */
+const useCb = oneArg("use");
+
+/**
+ * The `fq:` callback def (docs/sdd/callback-registry.md — T4 migration).
+ * Wire form: `fq:<formId>:<op>` (op = x / c / o<i>; formId = the OpenCode
+ * server-generated form id — split at the LAST colon, a strict superset of
+ * the legacy first-segment parse).
+ */
+const formCb = defineCallback<{ formID: string; op: string }>({
+  prefix: "fq",
+  encode: (a) => `fq:${a.formID}:${a.op}`,
+  decode: (rest) => {
+    const i = rest.lastIndexOf(":");
+    if (i <= 0) return null;
+    return { formID: rest.slice(0, i), op: rest.slice(i + 1) };
+  },
+});
+
+/**
+ * The `bs:` callback def (docs/sdd/callback-registry.md — T5 migration).
+ * Wire form: `bs:<op>[:<n>]` — op = nav/up/pg/hid/open/list/setdir/
+ * setsess/close/noop; nav:<idx> (folder index) and pg:<n> (page) carry a
+ * numeric arg, the rest are bare. Same shape as modelCb (mdl:).
+ */
+export const bsCallback = defineCallback<{ op: string; arg?: string }>({
+  prefix: "bs",
+  encode: (a) => (a.arg === undefined ? `bs:${a.op}` : `bs:${a.op}:${a.arg}`),
+  decode: (rest) => {
+    const parts = rest.split(":");
+    if (parts[0] === "") return null;
+    const arg = parts.slice(1).join(":");
+    return { op: parts[0], arg: arg === "" ? undefined : arg };
+  },
+});
+
+/**
+ * The "ww:" callback def (docs/sdd/callback-registry.md — T6 migration).
+ * Wire form: the fixed "ww:go" — the only value the Working-line watch
+ * button has ever carried, so decode is strict (a foreign value is
+ * malformed, not "some other op").
+ */
+export const wwCb = oneArg("ww");
+
+/** True when an error is a network-level "Transport: fetch failed" blip. */
+function isTransportError(e: any): boolean {
+  if (!e) return false;
+  if (e.reason === "Transport" || e.cause?.reason === "Transport") return true;
+  const msg = `${e.cause?.message ?? ""} ${e.message ?? ""}`;
+  return /fetch failed|ECONNRESET|ECONNREFUSED|EPIPE|EPROTO|ETIMEDOUT|EAI_AGAIN|socket hang up|network .*unreachable|UND_ERR_[A-Z]+/i.test(
+    msg,
+  );
+}
 /** A single visible field of a question form, as we relay it to Telegram. */
 interface QField {
   key: string;
@@ -260,8 +382,11 @@ export function formAcceptsTypedAnswer(
   if (qf.waitingCustom === undefined) return false;
   // The worker's own topic: the user is clearly talking to the worker.
   if (qf.conv === conv) return true;
-  // The shared main channel: only when the user replied to the question card.
-  if (qf.relayConv === conv) return qf.messageId !== undefined && replyToMessageId === qf.messageId;
+  // The shared main channel: the user opted into a typed answer, so the next
+  // plain message is consumed for the worker even without replying to the card
+  // (trade-off: a manager prompt typed meanwhile goes to the worker — the form
+  // can be dismissed with ❌ Huỷ). A missing card id (send failed) still refuses.
+  if (qf.relayConv === conv) return qf.messageId !== undefined;
   return false;
 }
 
@@ -290,6 +415,15 @@ export class Bot {
   public inflight = new Map<ConvKey, AbortController>();
   /** Convs with a /btw side question running (one at a time per conv). */
   public btwRunning = new Set<ConvKey>();
+  /**
+   * Quick-replies auto-hide: the one still-active (untapped) choices keyboard
+   * per conv — the message id that carries it + its registry id. A fresh
+   * choices reply retires the previous one (retireActiveChoice); an accepted
+   * tap clears it so its ✓ history is never clobbered. In-memory, like the
+   * choice registry: a restart drops it and stale keyboards answer
+   * "expired" exactly as before.
+   */
+  private activeChoice = new Map<ConvKey, { messageId: number; regId: string }>();
   public browsers = new Map<ConvKey, BrowseState>();
   public questionForms = new Map<string, QuestionFormState>();
   public permissionPrompts = new Map<string, PermissionPrompt>();
@@ -461,11 +595,15 @@ export class Bot {
       oc,
       st,
       cfg,
+      bot: this,
       busyNotes: this.busyNotes,
       queue: this.queue,
       advisor: this.advisor,
       userPrefs: this.userPrefs,
       sendHtml: (conv, html, opts) => this.sendHtml(conv, html, opts),
+      onSpecCheckpoint: (wc, st) => {
+        void specAutoContinue(this, wc, st);
+      },
       noteNextStepMessage: (conv, id, residual) => this.noteNextStepMessage(conv, id, residual),
       applyModelAndVariant: (sid, state) => this.applyModelAndVariant(sid, state),
       prepareNotes: (conv, sid) => prepareNotesTurn(this, conv, sid),
@@ -638,6 +776,21 @@ export class Bot {
     return notifyQueuedNotRunningFree(this);
   }
 
+  /** Registry delegate — the browse handler lives in commands/browse.ts. */
+  public handleBrowseCallback(cb: CallbackQuery, conv: ConvKey, answer: (t?: string) => void, messageId?: number): Promise<void> {
+    return handleBrowseCallback(this, cb, conv, messageId, answer);
+  }
+
+  /** Registry delegate — the continue handler lives in commands/notes.ts. */
+  public handleContinueCallback(cb: CallbackQuery, conv: ConvKey, answer: (t?: string) => void, messageId?: number): Promise<void> {
+    return handleContinueCallback(this, cb, conv, messageId, answer);
+  }
+
+  /** Registry delegate — the reboot handler lives in commands/admin.ts. */
+  public handleRebootCallback(cb: CallbackQuery, conv: ConvKey, answer: (t?: string) => void, messageId?: number): Promise<void> {
+    return handleRebootCallback(this, cb, conv, messageId, answer);
+  }
+
   // ── Uptime monitor + reboot ─────────────────────────────────────────────────
   /**
    * Kick off the machine-uptime watcher: check now, then re-check every 6 hours. The
@@ -682,16 +835,13 @@ export class Bot {
     const chat = this.cfg.allowedUserIds[0];
     if (!chat) return;
     const lang = this.userPrefs.getLang(chat);
-    const kb: Keyboard = {
-      inline_keyboard: [
-        [
-          { text: tr(lang, "🔄 Reboot máy ngay", "🔄 Reboot now"), callback_data: "reboot:ask" },
-          { text: tr(lang, "🔕 Nhắc lại sau", "🔕 Remind me later"), callback_data: "reboot:snooze" },
-        ],
-      ],
-    };
+    const kb: Keyboard = confirmKeyboard(
+      lang,
+      { text: tr(lang, "🔄 Reboot máy ngay", "🔄 Reboot now"), data: rebootCallback.encode({ op: "ask" }) },
+      { text: tr(lang, "🔕 Nhắc lại sau", "🔕 Remind me later"), data: rebootCallback.encode({ op: "snooze" }) },
+    );
     const text =
-      tr(lang, `⏳ Máy đã chạy liên tục <b>${formatUptimeHuman(uptimeSec, lang)}</b>. `, `⏳ The box has been up for <b>${formatUptimeHuman(uptimeSec, lang)}</b>. `) +
+      statusLine(lang, raw(tr(lang, `Máy đã chạy liên tục <b>${formatUptimeHuman(uptimeSec, lang)}</b>. `, `The box has been up for <b>${formatUptimeHuman(uptimeSec, lang)}</b>. `))) +
       tr(lang, `Kernel security updates chỉ áp dụng sau reboot — nên reboot định kỳ ~${this.cfg.uptimeThresholdDays} ngày. `, `Kernel security updates only apply after a reboot — reboot regularly, ~${this.cfg.uptimeThresholdDays} days. `) +
       tr(lang, "Bấm nút để reboot (xác nhận 2 bước) hoặc chọn nhắc lại sau.", "Tap a button to reboot (2-step confirm) or choose to be reminded later.");
     await this.tg.sendMessage(chat, text, { reply_markup: kb }).catch((e) => warn("uptime reminder:", e?.message ?? e));
@@ -1120,10 +1270,12 @@ export class Bot {
     const marker = this.cfg.suggest ? extractOptionsMarker(clean) : null;
     const ch = marker ? null : extractTrailingChoices(clean);
     const opts: string[] | undefined = marker ? marker.options : ch?.options;
-    const kb: Keyboard | undefined =
-      opts && opts.length > 0
-        ? choiceKeyboard(registry.put(conv, this.st.peek(conv)?.sessionID, opts), opts, marker !== null)
-        : undefined;
+    let choiceRegId: string | undefined;
+    let kb: Keyboard | undefined;
+    if (opts && opts.length > 0) {
+      choiceRegId = registry.put(conv, this.st.peek(conv)?.sessionID, opts);
+      kb = choiceKeyboard(choiceRegId, opts, marker !== null);
+    }
     const body = marker ? marker.body : ch ? ch.body : clean;
     const worker = this.st.peek(conv)?.worker;
     const purpose: MsgPurpose = worker ? "worker-done" : "reply";
@@ -1175,6 +1327,7 @@ export class Bot {
         }
         this.indexSent(conv, lastId, c, purpose);
       }
+      if (kb && choiceRegId) await this.retireActiveChoice(conv, lastId, choiceRegId);
       this.celebrateWorkerDone(conv, lastId, celebrate);
       return;
     }
@@ -1183,7 +1336,29 @@ export class Bot {
       lastId = await this.tg.sendMessageId(conv, chunks[i], i === chunks.length - 1 && kb ? { reply_markup: kb } : {});
       this.indexSent(conv, lastId, chunks[i], purpose);
     }
+    if (kb && choiceRegId) await this.retireActiveChoice(conv, lastId, choiceRegId);
     this.celebrateWorkerDone(conv, lastId, celebrate);
+  }
+
+  /**
+   * Quick-replies auto-hide: retire the conv's previous still-active choices
+   * keyboard, then record the fresh one. Removing the record first means a
+   * tap racing the edit answers "expired" rather than firing a stale prompt;
+   * the markup edit is best-effort (a failed edit never breaks the reply).
+   * Records the new keyboard only when we captured its message id (the
+   * richReplies→HTML fallback path does not).
+   */
+  private async retireActiveChoice(conv: ConvKey, newMsgId: number, newRegId: string | undefined): Promise<void> {
+    const prev = this.activeChoice.get(conv);
+    if (prev) {
+      registry.delete(prev.regId);
+      await this.tg.editMessageReplyMarkup(conv, prev.messageId, {}).catch(() => {});
+    }
+    if (newRegId && Number.isInteger(newMsgId) && newMsgId > 0) {
+      this.activeChoice.set(conv, { messageId: newMsgId, regId: newRegId });
+    } else {
+      this.activeChoice.delete(conv);
+    }
   }
 
   /**
@@ -1312,7 +1487,7 @@ export class Bot {
     const chat = chatOf(entry.conv);
     if (!this.orch.isManagerConv(chat)) {
       const lang = this.userPrefs.getLang(this.st.peek(chat)?.createdBy ?? "");
-      await this.tg.sendMessage(chat, tr(lang, "⚠️ 🔥 cần Manager đang bật (/manager on) để soạn task cho worker.", "⚠️ 🔥 needs the Manager on (/manager on) to draft the worker task.")).catch(() => {});
+      await this.tg.sendMessage(chat, warnLine(lang, raw(tr(lang, "🔥 cần Manager đang bật (/manager on) để soạn task cho worker.", "🔥 needs the Manager on (/manager on) to draft the worker task.")))).catch(() => {});
       return;
     }
     const lang2 = this.userPrefs.getLang(this.st.peek(chat)?.createdBy ?? "");
@@ -1333,20 +1508,20 @@ export class Bot {
     const chat = chatOf(workerConv);
     const lang = this.userPrefs.getLang(this.st.peek(chat)?.createdBy ?? "");
     if (decision === "busy") {
-      await this.tg.sendMessage(chat, tr(lang, "⏳ worker vẫn đang chạy", "⏳ the worker is still running")).catch(() => {});
+      await this.tg.sendMessage(chat, statusLine(lang, raw(tr(lang, "worker vẫn đang chạy", "the worker is still running")))).catch(() => {});
       return;
     }
     if (decision === "invalid") return;
     const res = await this.orch.approveWorkerReport(workerConv);
     if (res.busy) {
-      await this.tg.sendMessage(chat, tr(lang, "⏳ worker vẫn đang chạy", "⏳ the worker is still running")).catch(() => {});
+      await this.tg.sendMessage(chat, statusLine(lang, raw(tr(lang, "worker vẫn đang chạy", "the worker is still running")))).catch(() => {});
       return;
     }
     if (!res.ok) {
-      await this.tg.sendMessage(chat, tr(lang, "⚠️ Chưa dọn xong worker (worktree chưa xoá được — thử /prune sau).", "⚠️ Worker not fully cleaned up (worktree couldn't be deleted — try /prune later.")).catch(() => {});
+      await this.tg.sendMessage(chat, warnLine(lang, raw(tr(lang, "Chưa dọn xong worker (worktree chưa xoá được — thử /prune sau).", "Worker not fully cleaned up (worktree couldn't be deleted — try /prune later.")))).catch(() => {});
       return;
     }
-    await this.tg.sendMessage(chat, tr(lang, `✅ ${esc(res.name ?? "worker")} approved — dọn xong.`, `✅ ${esc(res.name ?? "worker")} approved — cleaned up.`)).catch(() => {});
+    await this.tg.sendMessage(chat, okLine(lang, raw(tr(lang, `${esc(res.name ?? "worker")} approved — dọn xong.`, `${esc(res.name ?? "worker")} approved — cleaned up.`)))).catch(() => {});
   }
 
   /**
@@ -1389,7 +1564,7 @@ export class Bot {
       await this.tg
         .sendMessage(
           conv,
-          `⚠️ File quá lớn: ${humanBytes(media.fileSize)} (giới hạn ${Math.round(this.cfg.uploadMaxBytes / (1024 * 1024))}MB).`,
+          warnLine(this.userPrefs.getLang(uid ?? ""), raw(`File quá lớn: ${humanBytes(media.fileSize)} (giới hạn ${Math.round(this.cfg.uploadMaxBytes / (1024 * 1024))}MB).`)),
         )
         .catch(() => {});
       return;
@@ -1421,7 +1596,7 @@ export class Bot {
         await this.tg.sendMessage(conv, tr(this.userPrefs.getLang(uid ?? ""), `📎 Đã lưu ${esc(name)} (${humanBytes(bytes)}).`, `📎 Saved ${esc(name)} (${humanBytes(bytes)}).`)).catch(() => {});
       } catch (e) {
         warn(`upload from uid=${uid} chat=${conv} failed: ${(e as Error)?.message ?? e}`);
-        await this.tg.sendMessage(conv, tr(this.userPrefs.getLang(uid ?? ""), "⚠️ Không tải được file — thử lại sau.", "⚠️ Couldn't download the file — try again later.")).catch(() => {});
+        await this.tg.sendMessage(conv, warnLine(this.userPrefs.getLang(uid ?? ""), raw(tr(this.userPrefs.getLang(uid ?? ""), "Không tải được file — thử lại sau.", "Couldn't download the file — try again later.")))).catch(() => {});
         return;
       }
     }
@@ -1503,7 +1678,7 @@ export class Bot {
     // the Working line stays byte-identical to off-mode and the ww: branch is
     // unreachable (the button is never rendered).
     const watchKb: Record<string, unknown> | undefined = this.cfg.watchActive
-      ? { inline_keyboard: [[{ text: tr(lang ?? "vi", STRINGS.working_watch_button.vi, STRINGS.working_watch_button.en), callback_data: "ww:go" }]] }
+      ? singleButton({ text: tr(lang ?? "vi", STRINGS.working_watch_button.vi, STRINGS.working_watch_button.en), data: "ww:go" })
       : undefined;
     this.working.set(conv, { msgId: undefined, startedAt, timer: undefined, base, watchKb }); // sync marker (race-safe)
     void this.tg
@@ -2330,20 +2505,20 @@ export class Bot {
    * there's no current session, otherwise hand off to startWatch (which is
    * safe against double-invocation: it closes any prior watch card first).
    */
-  private async handleWorkingWatchButton(cb: CallbackQuery, conv: ConvKey): Promise<void> {
+  public async handleWorkingWatchButton(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void = (toast) => { void this.tg.answerCallbackQuery(cb.id, toast).catch(() => {}); }): Promise<void> {
     const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     // Same gate as /watch (cmdWatch): only available while watchActive.
     if (!this.cfg.watchActive) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, STRINGS.working_watch_inactive.vi, STRINGS.working_watch_inactive.en));
+      await answer(tr(lang, STRINGS.working_watch_inactive.vi, STRINGS.working_watch_inactive.en));
       return;
     }
     // No current session → say so (same wording style as cmdWatch's watchNoSession).
     const state = this.st.peek(conv);
     if (!state?.sessionID) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, STRINGS.working_watch_no_session.vi, STRINGS.working_watch_no_session.en));
+      await answer(tr(lang, STRINGS.working_watch_no_session.vi, STRINGS.working_watch_no_session.en));
       return;
     }
-    await this.tg.answerCallbackQuery(cb.id);
+    await answer();
     await this.startWatch(conv, state, cb.from?.id);
   }
 
@@ -2355,34 +2530,34 @@ export class Bot {
    * a card whose conversation has moved to another session is refused, and an
    * unknown id (a restart dropped the registry) answers "expired" (W4.4).
    */
-  private async handleWatchCallback(cb: CallbackQuery, conv: ConvKey): Promise<void> {
+  public async handleWatchCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void = (toast) => { void this.tg.answerCallbackQuery(cb.id, toast).catch(() => {}); }): Promise<void> {
     const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     const [, id, action] = (cb.data ?? "").split(":");
     const rec = watchRegistry.get(id);
     if (!rec || rec.conv !== conv) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Hết hiệu lực.", "Expired."));
+      await answer(tr(lang, "Hết hiệu lực.", "Expired."));
       return;
     }
     const cur = this.st.peek(conv)?.sessionID;
     if (cur && cur !== rec.sessionID) {
       // W4.3: the conversation moved to another session — refuse, do nothing.
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Phiên đã đổi — bấm này hết hiệu lực.", "The conversation moved to another session — this tap is refused."));
+      await answer(tr(lang, "Phiên đã đổi — bấm này hết hiệu lực.", "The conversation moved to another session — this tap is refused."));
       return;
     }
     if (action === "c") {
       // Close (W4.1): stop updating and delete the card; the agent is untouched.
       this.stopWatch(conv, "closed", { deleteCard: true });
-      await this.tg.answerCallbackQuery(cb.id);
+      await answer();
       return;
     }
     if (action === "r") {
       // Watch again (W3.3): behaves as a new /watch on the current session.
       const state = this.st.get(conv);
       if (!state.sessionID) {
-        await this.tg.answerCallbackQuery(cb.id, tr(lang, "Chưa có phiên hiện tại.", "No current session."));
+        await answer(tr(lang, "Chưa có phiên hiện tại.", "No current session."));
         return;
       }
-      await this.tg.answerCallbackQuery(cb.id);
+      await answer();
       await this.startWatch(conv, state, cb.from?.id);
       return;
     }
@@ -2395,7 +2570,7 @@ export class Bot {
       // "not running", no state change.
       const w = this.watches.get(conv);
       if (!w || w.frozen || w.state.phase !== "working") {
-        await this.tg.answerCallbackQuery(cb.id, tr(lang, "Không có tác vụ nào đang chạy.", "Nothing is running."));
+        await answer(tr(lang, "Không có tác vụ nào đang chạy.", "Nothing is running."));
         return;
       }
       // Claim the stop synchronously, BEFORE any await: the state is already
@@ -2410,13 +2585,13 @@ export class Bot {
       w.state = r.state;
       w.frozen = true;
       w.polling = false;
-      await this.tg.answerCallbackQuery(cb.id);
+      await answer();
       await stopTaskFor(this, conv, rec.sessionID);
       audit({ action: "watch_stop_task", chatId: conv, session: rec.sessionID, userId: cb.from?.id });
       if (r.edit) await this.pushWatchEdit(w, r.edit); // the ONE final "Stopped" edit (W4.2)
       return;
     }
-    await this.tg.answerCallbackQuery(cb.id);
+    await answer();
   }
 
   // ── the long-running prompt ──────────────────────────────────────────────
@@ -2450,9 +2625,7 @@ export class Bot {
     if (st.agent !== "plan") return;
     if ([...this.questionForms.values()].some((q) => q.conv === conv)) return;
     const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
-    const kb: Keyboard = {
-      inline_keyboard: [[{ text: tr(lang, "🔨 Sang build & thực thi", "🔨 Switch to build & execute"), callback_data: "pb:go" }]],
-    };
+    const kb: Keyboard = singleButton({ text: tr(lang, "🔨 Sang build & thực thi", "🔨 Switch to build & execute"), data: pbCallback.encode({ op: "go" }) });
     await this.tg
       .sendMessage(conv, tr(lang, "📐 <b>Kế hoạch đã sẵn sàng</b> — bấm để chuyển sang build và thực thi.", "📐 <b>Plan is ready</b> — tap to switch to build and execute."), { reply_markup: kb })
       .catch(() => {});
@@ -2699,7 +2872,7 @@ export class Bot {
     if (!data) return undefined; // too long to ship — omit the button
     if (alreadyOfferedContinue(this.st.peek(conv)?.continueOfferedTurn, turnId)) return undefined;
     this.st.set(conv, { continueOfferedTurn: turnId });
-    return { inline_keyboard: [[{ text: continueButtonLabel(lang), callback_data: data }]] };
+    return singleButton({ text: continueButtonLabel(lang), data });
   }
 
   /**
@@ -2919,7 +3092,7 @@ export class Bot {
       });
       await this.tg.sendMessage(
         conv,
-        tr(lang, `✅ Đã xoay Manager → session mới <code>${esc(sessionID)}</code>\nDir: <code>${esc(dir)}</code>\n${brief ? `📝 Brief: ${brief.split(/\s+/).length} từ` : "📝 (phiên cũ trống)"}`, `✅ Manager rotated → new session <code>${esc(sessionID)}</code>\nDir: <code>${esc(dir)}</code>\n${brief ? `📝 Brief: ${brief.split(/\s+/).length} words` : "📝 (old session empty)"}`),
+        okLine(lang, raw(tr(lang, `Đã xoay Manager → session mới <code>${esc(sessionID)}</code>\nDir: <code>${esc(dir)}</code>\n${brief ? `📝 Brief: ${brief.split(/\s+/).length} từ` : "📝 (phiên cũ trống)"}`, `Manager rotated → new session <code>${esc(sessionID)}</code>\nDir: <code>${esc(dir)}</code>\n${brief ? `📝 Brief: ${brief.split(/\s+/).length} words` : "📝 (old session empty)"}`))),
       );
       log(`manager rotation (${mode}) conv=${conv} ${oldSID} → ${sessionID} floor=${Math.round(floorK)}K brief=${brief ? brief.length : 0}ch`);
       // Refresh the snapshot so it reflects the rotation just performed (the
@@ -2937,7 +3110,7 @@ export class Bot {
       } catch (e2) {
         warn("rotation tracking (fail):", (e2 as Error)?.message);
       }
-      await this.tg.sendMessage(conv, tr(lang, "⚠️ Xoay phiên Manager thất bại — phiên cũ vẫn giữ nguyên.", "⚠️ Manager rotation failed — the old session is kept as-is.")).catch(() => {});
+      await this.tg.sendMessage(conv, warnLine(lang, raw(tr(lang, "Xoay phiên Manager thất bại — phiên cũ vẫn giữ nguyên.", "Manager rotation failed — the old session is kept as-is.")))).catch(() => {});
     }
   }
 
@@ -2999,19 +3172,18 @@ export class Bot {
       tr(lang, `🧹 Session Manager đang gần hết chỗ trống — nền (sau summarization) đã lên ~${Math.round(floorK)}K.\n\nĐề xuất: xoay sang phiên mới, giữ lại <b>memory + notes</b> cộng thêm một brief ngắn. Muốn xoay ngay?`, `🧹 The Manager session is running low on room — the floor (after summarization) is now ~${Math.round(floorK)}K.\n\nSuggestion: rotate to a fresh session, keeping <b>memory + notes</b> plus a short brief. Rotate now?`),
       {
         reply_markup: {
-          inline_keyboard: [[{ text: tr(lang, "🔄 Xoay ngay", "🔄 Rotate now"), callback_data: "rot:cf" }, { text: tr(lang, "↩️ Giữ phiên cũ", "↩️ Keep old session"), callback_data: "rot:cx" }]],
+          inline_keyboard: [[{ text: tr(lang, "🔄 Xoay ngay", "🔄 Rotate now"), callback_data: rotCb.encode({ op: "cf" }) }, { text: tr(lang, "↩️ Giữ phiên cũ", "↩️ Keep old session"), callback_data: rotCb.encode({ op: "cx" }) }]],
         },
       },
     );
   }
 
   /** M3 — rot:cf / rot:cx — confirm or cancel a manager rotation offer. */
-  private async handleRotationCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
-
+  public async handleRotationCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
     const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     const op = (cb.data ?? "").split(":")[1];
     if (op === "cx") {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "↩️ Đã huỷ", "↩️ Cancelled"));
+      answer(tr(lang, "↩️ Đã huỷ", "↩️ Cancelled"));
       if (messageId) {
         await this.tg
           .editMessageText(conv, messageId, tr(lang, "↩️ Đã huỷ — phiên Manager giữ nguyên.", "↩️ Cancelled — the Manager session is kept as-is."), { reply_markup: { inline_keyboard: [] } })
@@ -3022,18 +3194,47 @@ export class Bot {
     if (op !== "cf") return;
     const sid = this.st.peek(conv)?.sessionID;
     if (!sid) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Không có session để xoay", "No session to rotate"));
+      answer(tr(lang, "Không có session để xoay", "No session to rotate"));
       return;
     }
-    await this.tg.answerCallbackQuery(cb.id, tr(lang, "🔄 Đang xoay…", "🔄 Rotating…"));
+    answer(tr(lang, "🔄 Đang xoay…", "🔄 Rotating…"));
     const floor = (await this.managerFloor(sid)) ?? 0;
     await this.doManagerRotation(conv, "confirm", floor / 1000);
   }
 
-  /** Handle a button tap on the browser message. */
+
+  // ── Thin registry bridges: the typed dispatch calls these Bot methods, which
+  //    delegate to the split-out feature modules (the logic lives in the module,
+  //    not here). Keeping them as Bot methods gives the registry one uniform call
+  //    shape and keeps the routing tests' bot-method overrides intercepting. ──
+  public async handlePermissionCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
+    return handlePermissionCallback(this, cb, conv, messageId, answer);
+  }
+  public async handleNewConfirmCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
+    return handleNewConfirmCallback(this, cb, conv, messageId, answer);
+  }
+  public async handleUseCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
+    return handleUseCallback(this, cb, conv, messageId, answer);
+  }
+  public async handleBusyCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
+    return handleBusyCallback(this, cb, conv, messageId, answer);
+  }
+  public async handleModeCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
+    return handleModeCallback(this, cb, conv, messageId, answer);
+  }
+  public async handleVariantCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
+    return handleVariantCallback(this, cb, conv, messageId, answer);
+  }
+  public async handleModelCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
+    return handleModelCallback(this, cb, conv, messageId, answer);
+  }
+
+
+  /** Handle any inline-button tap: every prefix is served by the typed registry (C2.1). */
   private async handleCallback(cb: CallbackQuery): Promise<void> {
+    const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     if (!this.allowed(cb.from?.id)) {
-      await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "⛔ Không được phép", "⛔ Not allowed"));
+      await this.tg.answerCallbackQuery(cb.id, tr(lang, "⛔ Không được phép", "⛔ Not allowed"));
       return;
     }
     const conv = cb.message ? this.convOf(cb.message) : undefined;
@@ -3043,110 +3244,19 @@ export class Bot {
       await this.tg.answerCallbackQuery(cb.id);
       return;
     }
-    if (data.startsWith("ch:")) {
-      await this.handleChoiceCallback(cb, conv, messageId);
-      return;
-    }
-    if (data.startsWith("w:")) {
-      await this.handleWatchCallback(cb, conv);
-      return;
-    }
-    // "👁 Watch" button on the Working line. "ww:go" does NOT start with "w:"
-    // (it's "ww", not "w:"), so the w: branch above can never swallow it.
-    if (data.startsWith("ww:")) {
-      await this.handleWorkingWatchButton(cb, conv);
-      return;
-    }
-    if (data.startsWith("ns:")) {
-      await this.handleNextStepCallback(cb, conv, messageId);
-      return;
-    }
-    if (data.startsWith("fq:")) {
-      await this.handleFormCallback(cb, conv, messageId);
-      return;
-    }
-    if (data.startsWith("mode:")) {
-      await handleModeCallback(this, cb, conv, messageId);
-      return;
-    }
-    if (data.startsWith("perm:")) {
-      await handlePermissionCallback(this, cb, conv, messageId);
-      return;
-    }
-    if (data.startsWith("pb:")) {
-      await this.handlePlanToBuildCallback(cb, conv);
-      return;
-    }
-    if (data.startsWith("cont:")) {
-      await handleContinueCallback(this, cb, conv, messageId);
-      return;
-    }
-    if (data.startsWith(NOTE_CB_PREFIX)) {
-      await handleNoteCallback(this, cb, conv, messageId);
-      return;
-    }
-    if (data.startsWith("q:add:") || data.startsWith("q:steer:")) {
-      await handleBusyCallback(this, cb, conv, messageId);
-      return;
-    }
-    if (data.startsWith("reboot:")) {
-      await handleRebootCallback(this, cb, conv, messageId);
-      return;
-    }
-    if (data.startsWith("rot:")) {
-      await this.handleRotationCallback(cb, conv, messageId);
-      return;
-    }
-    if (data.startsWith("nw:")) {
-      await handleNewConfirmCallback(this, cb, conv, messageId);
-      return;
-    }
-    if (data.startsWith("use:")) {
-      await handleUseCallback(this, cb, conv, messageId);
-      return;
-    }
-    if (data.startsWith("agent:")) {
-      await handleAgentCallback(this, cb, conv, messageId);
-      return;
-    }
-    if (data.startsWith("variant:")) {
-      await handleVariantCallback(this, cb, conv, messageId);
-      return;
-    }
-    if (data.startsWith("mdl:")) {
-      await handleModelCallback(this, cb, conv, messageId);
-      return;
-    }
-    if (data.startsWith("kill:")) return this.orch.handleKillCallback(cb, conv, messageId);
-    if (await this.orch.handleCallback(cb, conv, messageId)) return;
-    // All spec-to-tasks callbacks (S2 list/detail + S4 Run + S6 controls +
-    // S5 PR flow): spec:<name>, specrun:<name>:<n> (next-runnable Run),
-    // specblocked:<name>:<n> (blocked Run, first tap), specrunok:<name>:<n>
-    // (blocked "Run anyway", 2nd tap) and the checkpoint-card controls
-    // spcacc:<name>:<n> (Accept), spcredo:<name>:<n> (Redo with note) and
-    // spcstop:<name>:<n> (Stop), plus the PR controls spcpr:<name> (open
-    // draft PR), spcready:<name> (mark ready) and spcclean:<name> (clean up).
-    if (data.startsWith("spec:") || data.startsWith("specrun:") || data.startsWith("specblocked:") || data.startsWith("specrunok:") || data.startsWith("spcacc:") || data.startsWith("spcredo:") || data.startsWith("spcstop:") || data.startsWith("spcpr:") || data.startsWith("spcready:") || data.startsWith("spcclean:")) {
-      await handleSpecCallback(this, cb, conv);
-      return;
-    }
-    if (data.startsWith("cmd:")) {
-      await this.runCommandButton(cb, conv, data.slice(4));
-      return;
-    }
-    if (data.startsWith("sch:")) {
-      await handleScheduleCallback(this, cb, conv, messageId);
-      return;
-    }
-    if (!data.startsWith("bs:")) {
-      await this.tg.answerCallbackQuery(cb.id);
-      return;
-    }
-    await handleBrowseCallback(this, cb, conv, messageId);
+    // Every button tap is served by the typed registry (C2.1): the two gates
+    // above (allow-list, no-conv) are the single C2.3 spot, and all 35
+    // prefixes are registered (C1.2), so a registered tap never falls
+    // through. The legacy startsWith chain is gone (docs/sdd/callback-
+    // registry.md, T6).
+    if (await dispatchCallback({ bot: this, conv, messageId, lang }, cb)) return;
+    // C2.2: the prefix was never registered (or the data has no colon) — a
+    // stale or mistyped button. Toast it (warned once) instead of vanishing.
+    await answerExpired(this, cb, lang, data);
   }
 
   /** Run a bot command from an inline button (the /help menu). */
-  private async runCommandButton(cb: CallbackQuery, conv: ConvKey, name: string): Promise<void> {
+  public async runCommandButton(cb: CallbackQuery, conv: ConvKey, name: string, answer: (toast?: string) => void): Promise<void> {
     const state = this.st.get(conv);
     try {
       switch (name) {
@@ -3209,24 +3319,24 @@ export class Bot {
       }
     } finally {
       // Answer last so the tap spinner shows while the command runs.
-      await this.tg.answerCallbackQuery(cb.id).catch(() => {});
+      answer();
     }
   }
 
   /** Handle a tap on the plan-to-build button (data = `pb:go`). */
-  private async handlePlanToBuildCallback(cb: CallbackQuery, conv: ConvKey): Promise<void> {
+  public async handlePlanToBuildCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void): Promise<void> {
     const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     const state = this.st.get(conv);
     if (this.inflight.has(conv)) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Đang chạy task — hẵng thử lại sau.", "A task is running — try again later."));
+    answer(tr(lang, "Đang chạy task — hãy thử lại sau.", "A task is running — try again later."));
       return;
     }
     if (!state.sessionID) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Chưa có session — hãy gửi một tin nhắn trước.", "No session yet — send a message first."));
+      answer(tr(lang, "Chưa có session — hãy gửi một tin nhắn trước.", "No session yet — send a message first."));
       return;
     }
     await applyMode(this, conv, state, "build");
-    await this.tg.answerCallbackQuery(cb.id, "Mode → build");
+    answer("Mode → build");
     await this.tg.sendMessage(conv, tr(lang, "Đã chuyển sang <b>build</b> — bắt đầu thực thi kế hoạch.", "Switched to <b>build</b> — starting to execute the plan.")).catch(() => {});
     const prompt = tr(lang,
       "Đã chuyển sang chế độ build. Hãy thực thi kế hoạch vừa được lập trong cuộc hội thoại này: bắt đầu từ bước 1, làm tuần tự, và dừng lại để hỏi nếu thiếu thông tin quan trọng. Nếu không có kế hoạch nào chưa thực thi, chỉ cần xác nhận đã sẵn sàng.",
@@ -3248,12 +3358,12 @@ export class Bot {
    * choice list). The keyboard is one-shot: it is dropped immediately so a
    * re-tap or a stale button (e.g. after a /new) can never fire a second turn.
    */
-  private async handleChoiceCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+  public async handleChoiceCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
     const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     // R3.3: the inert "chosen" button (replaces the keyboard after an accepted
     // tap) — re-tapping it does nothing; it only shows what was sent.
     if ((cb.data ?? "") === "ch:inert") {
-      await this.tg.answerCallbackQuery(cb.id);
+      answer();
       return;
     }
     const parts = (cb.data ?? "").split(":");
@@ -3264,7 +3374,7 @@ export class Bot {
     // R3.4: unknown id (the registry is in-memory — it outlived a restart) or
     // TTL-expired → "expired".
     if (!rec) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Nút này đã hết hạn.", "This button has expired."));
+      answer(tr(lang, "Nút này đã hết hạn.", "This button has expired."));
       return;
     }
     const choice = rec.options[idx];
@@ -3272,18 +3382,22 @@ export class Bot {
     // changed (a /new / /use / Manager rotation) → "no longer applies".
     if (!rec.sessionID || choice === undefined || !state || (state.sessionID && state.sessionID !== rec.sessionID)) {
       registry.delete(id);
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Nút này không còn áp dụng.", "This button is no longer applicable."));
+      answer(tr(lang, "Nút này không còn áp dụng.", "This button is no longer applicable."));
       return;
     }
     // R3.2: a turn is running → refuse, KEEP the buttons, send nothing. (This
     // changes today's behaviour, where a tap silently steered into the running
     // turn; R5.1 extends the refusal to the existing lettered-list buttons.)
     if (state.manager ? this.orch.managerInflight : this.inflight.has(conv)) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Đang chạy task — hẵng thử lại sau.", "A task is running — try again later."));
+    answer(tr(lang, "Đang chạy task — hãy thử lại sau.", "A task is running — try again later."));
       return;
     }
     // Consume BEFORE any await so a double-tap can never double-fire (R3.4).
     registry.delete(id);
+    // Auto-hide bookkeeping: this keyboard is no longer an active, untapped
+    // choices set (it becomes the inert ✓ below), so drop the conv's pointer —
+    // a later reply must not clobber the ✓ history.
+    if (this.activeChoice.get(conv)?.regId === id) this.activeChoice.delete(conv);
     // R3.1: a tap is a typed message — the same entry point as a typed message
     // (runPrompt for plain sessions, promptManager for the Manager), so it is
     // audited, shows the typing indicator, gets the turn footer + next-step
@@ -3297,15 +3411,15 @@ export class Bot {
       : this.runPrompt(conv, choice, state, messageId, lang);
     void turn.catch(async (e) => {
       warn("choice prompt:", (e as Error)?.message);
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "❌ Không thể xử lý — thử nhập lại.", "❌ Couldn't process that — try typing it again.")).catch(() => {});
+    answer(errorLine(lang, tr(lang, "Không thể xử lý — thử nhập lại.", "Couldn't process that — try typing it again.")));
     });
-    await this.tg.answerCallbackQuery(cb.id);
+    answer();
     // R3.3: replace the keyboard with a single inert button showing the chosen
     // text + a check mark, so the chat shows what was sent.
     if (messageId) {
       const label = "✓ " + (choice.length > 60 ? choice.slice(0, 60) : choice);
       await this.tg
-        .editMessageReplyMarkup(conv, messageId, { reply_markup: { inline_keyboard: [[{ text: label, callback_data: "ch:inert" }]] } })
+        .editMessageReplyMarkup(conv, messageId, { reply_markup: { inline_keyboard: [[{ text: label, callback_data: choiceCallback.encode({ kind: "inert" }) }]] } })
         .catch(() => {});
     }
   }
@@ -3320,35 +3434,35 @@ export class Bot {
    * N3.4: fixed text, the label says what happens. N3.5 is the shared
    * allow-list gate at the top of handleCallback (this.allowed).
    */
-  private async handleNextStepCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+  public async handleNextStepCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number, answer: (toast?: string) => void = (toast) => { void this.tg.answerCallbackQuery(cb.id, toast).catch(() => {}); }): Promise<void> {
     const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     const parsed = parseCallback(cb.data ?? "");
     if (!parsed) {
-      await this.tg.answerCallbackQuery(cb.id);
+      await answer();
       return;
     }
     const rec = nsRegistry.get(parsed.id, Date.now());
     if (!rec) {
       // N3.6: unknown id — outlived a bot restart (the registry is in-memory) or expired.
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Nút này đã hết hạn.", "This button has expired."));
+      await answer(tr(lang, "Nút này đã hết hạn.", "This button has expired."));
       return;
     }
     // N3.2: the tap is bound to the session the button was created for.
     const state = this.st.peek(conv);
     if (!state?.sessionID || state.sessionID !== rec.sessionID) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Nút này không còn áp dụng cho phiên hiện tại.", "This button no longer applies to the current session."));
+      await answer(tr(lang, "Nút này không còn áp dụng cho phiên hiện tại.", "This button no longer applies to the current session."));
       return;
     }
     // N3.3: a turn is running → refuse and KEEP the button (no markup edit).
     // (Manager turns have no inflight entry — fire-and-forget — but the board
     // action is read-only, so a busy Manager never blocks a /board tap.)
     if (this.inflight.has(conv)) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Đang chạy task — hẵng thử lại sau.", "A task is running — try again later."));
+    await answer(tr(lang, "Đang chạy task — hãy thử lại sau.", "A task is running — try again later."));
       return;
     }
     if (rec.rule === "review" && state.manager) {
       // The /review guard: the Manager has no repo (stale button after /manager on).
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "🔍 Manager không có repo để review.", "🔍 The Manager has no repo to review."));
+      await answer(tr(lang, "🔍 Manager không có repo để review.", "🔍 The Manager has no repo to review."));
       return;
     }
     // N3.1: one-shot — drop the next-step row and consume the record BEFORE
@@ -3369,16 +3483,16 @@ export class Bot {
     if (rec.rule === "review") {
       const prompt = reviewPrompt("", lang);
       if (!prompt) {
-        await this.tg.answerCallbackQuery(cb.id);
+        await answer();
         return;
       }
-      await this.tg.answerCallbackQuery(cb.id);
+      await answer();
       await this.runPrompt(conv, prompt, state, undefined, lang);
       return;
     }
     if (rec.rule === "board") {
       // S5: /board is read-only (no agent turn) — safe even mid-manager-turn.
-      await this.tg.answerCallbackQuery(cb.id);
+      await answer();
       await this.orch.cmdBoard(conv).catch((e) => warn("nextstep board tap:", (e as Error)?.message));
       return;
     }
@@ -3614,28 +3728,28 @@ export class Bot {
     const rows: Btn[][] = [];
     const fd = qf.formId;
     if (qf.waitingCustom !== undefined) {
-      rows.push([{ text: tr(lang, "❌ Huỷ", "❌ Cancel"), callback_data: `fq:${fd}:x` }]);
+      rows.push([{ text: tr(lang, "❌ Huỷ", "❌ Cancel"), callback_data: formCb.encode({ formID: fd, op: "x" }) }]);
     } else {
       (f.options ?? []).forEach((opt, i) => {
-        rows.push([{ text: `▪️ ${trunc(opt.label, 60)}`, callback_data: `fq:${fd}:o${i}` }]);
+        rows.push([{ text: `▪️ ${trunc(opt.label, 60)}`, callback_data: formCb.encode({ formID: fd, op: `o${i}` }) }]);
       });
       if (f.custom || !f.options?.length || f.type === "string") {
-        rows.push([{ text: tr(lang, "✍️ Gõ tự do…", "✍️ Type freely…"), callback_data: `fq:${fd}:c` }]);
+        rows.push([{ text: tr(lang, "✍️ Gõ tự do…", "✍️ Type freely…"), callback_data: formCb.encode({ formID: fd, op: "c" }) }]);
       }
-      rows.push([{ text: tr(lang, "❌ Huỷ", "❌ Cancel"), callback_data: `fq:${fd}:x` }]);
+      rows.push([{ text: tr(lang, "❌ Huỷ", "❌ Cancel"), callback_data: formCb.encode({ formID: fd, op: "x" }) }]);
     }
     return { text: lines.join("\n"), keyboard: { inline_keyboard: rows } };
   }
 
   /** Handle a tap on a question-form button (data = `fq:<formId>:<op>`). */
-  private async handleFormCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+  public async handleFormCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
     const data = cb.data ?? "";
     const parts = data.split(":");
     const formID = parts[1];
     const op = parts[2] ?? "";
     const qf = this.questionForms.get(formID);
     if (!qf) {
-      await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Phiên hỏi đã kết thúc.", "The question session has ended."));
+      answer(tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Phiên hỏi đã kết thúc.", "The question session has ended."));
       return;
     }
     try {
@@ -3643,13 +3757,13 @@ export class Bot {
         await this.oc.cancelForm(qf.sessionID, qf.formId, "Cancelled by user via Telegram.");
         this.questionForms.delete(formID);
         this.cancelReminder(qf.conv, formID); // the form is really cancelled → stop nudging (schedule lives under the worker conv)
-        await this.tg.answerCallbackQuery(cb.id);
-        if (messageId) await this.tg.editMessageText(conv, messageId, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "❌ Đã huỷ câu hỏi.", "❌ Question cancelled.")).catch(() => {});
+    answer();
+    if (messageId) await this.tg.editMessageText(conv, messageId, errorLine(this.userPrefs.getLang(cb.from?.id ?? ""), tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Đã huỷ câu hỏi.", "Question cancelled."))).catch(() => {});
         return;
       }
       if (op === "c") {
         qf.waitingCustom = qf.index;
-        await this.tg.answerCallbackQuery(cb.id);
+        answer();
         if (messageId) {
           const v = this.renderQuestion(qf);
           await this.tg.editMessageText(conv, messageId, v.text, { reply_markup: v.keyboard });
@@ -3662,13 +3776,13 @@ export class Bot {
         const opt = f.options?.[idx];
         if (!opt) throw new Error(tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Đáp án không hợp lệ — vui lòng thử lại.", "Invalid option — please try again."));
         qf.answers[f.key] = opt.value;
-        await this.tg.answerCallbackQuery(cb.id);
+        answer();
         await this.advanceOrSubmit(qf, messageId);
         return;
       }
-      await this.tg.answerCallbackQuery(cb.id);
+      answer();
     } catch (e) {
-      await this.tg.answerCallbackQuery(cb.id, `⚠️ ${(e as Error).message}`);
+    answer(warnLine(this.userPrefs.getLang(cb.from?.id ?? ""), raw((e as Error).message)));
     }
   }
 
@@ -3698,11 +3812,16 @@ export class Bot {
     this.cancelReminder(qf.conv, qf.formId); // form really submitted → stop nudging
     if (messageId) {
       const lang = this.userPrefs.getLang(this.st.peek(qf.conv)?.createdBy ?? "");
-      const summary = Object.entries(qf.answers)
-        .map(([k, v]) => `• ${esc(trunc(String(v), 80))}`)
-        .join("\n");
+      // One line per field: "• <question> → <answer>" — the option label when
+      // an option was tapped (lookup by value), the raw text for free answers.
+      const lines = qf.fields.map((f, i) => {
+        const q = f.title || f.description || tr(lang, `Câu ${i + 1}`, `Question ${i + 1}`);
+        const raw = qf.answers[f.key];
+        const a = f.options?.find((o) => o.value === raw)?.label ?? String(raw ?? "");
+        return `• ${esc(trunc(q, 80))} → ${esc(trunc(a, 80))}`;
+      });
       await this.tg
-        .editMessageText(cardConv, messageId, tr(lang, "✅ Đã gửi câu trả lời cho OpenCode.", "✅ Answer sent to OpenCode.") + (summary ? "\n" + summary : ""))
+        .editMessageText(cardConv, messageId, okLine(lang, raw(tr(lang, "Đã gửi câu trả lời cho OpenCode.", "Answer sent to OpenCode.") + (lines.length ? "\n" + lines.join("\n") : ""))))
         .catch(() => {});
     }
   }
@@ -3727,3 +3846,84 @@ export class Bot {
     return false;
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Callback-registry (docs/sdd/callback-registry.md) — T3 pilot migration.
+//
+// All migrated prefixes (T3 pilot: pb, ch, cont, reboot; T4: mode, agent,
+// variant, mdl, perm, rot, kill, prune, nw, use, fq, cmd, sch, wt, ap, q)
+// are registered here at module load, and bot.ts is the ONLY place that
+// imports this. The defs live with their producers. The handlers take an
+// `answer` fn injected by the dispatcher's adapter, so every tap — registry
+// path or legacy chain — is answered exactly once (C2.1) and a decode
+// failure gets the C2.2 "expired" toast with no fall-through (C3.2).
+//
+// The `ch:`/`cont:`/`reboot:` branches of the legacy chain below are RETAINED
+// for this pilot: they cover (a) `ch:` data whose id no longer matches the
+// 4-char shape — which the new def cannot even decode — and (b) any data the
+// dispatcher's decode rejects. Their handlers are the same functions the
+// registry calls.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The `pb:` callback def (docs/sdd/callback-registry.md — T3 pilot migration).
+ * Wire form: the fixed "pb:go" — the only value this button has ever carried,
+ * so decode is strict (a foreign value is malformed, not "some other op").
+ */
+export const pbCallback = defineCallback<{ op: "go" }>({
+  prefix: "pb",
+  encode: (a) => `pb:${a.op}`,
+  decode: (rest) => (rest === "go" ? { op: "go" } : null),
+});
+
+/**
+ * Register all migrated prefixes with their handlers (T3 + T4). Called once
+ * at module load; scripts re-call it after `_clearCallbacksForTest()`.
+ */
+export function registerBotCallbacks(): void {
+  registerCallback(pbCallback, (ctx, cb) => ctx.bot.handlePlanToBuildCallback(cb, ctx.conv, ctx.answer), "bot.ts (plan-to-build)");
+  registerCallback(choiceCallback, (ctx, cb) => ctx.bot.handleChoiceCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "choices.ts (choice buttons)");
+  registerCallback(continueCallback, (ctx, cb) => ctx.bot.handleContinueCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "continue.ts (continue button)");
+  registerCallback(rebootCallback, (ctx, cb) => ctx.bot.handleRebootCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "uptime.ts (reboot flow)");
+  // T4 group 2 — confirm / kill / prune prefixes.
+  registerCallback(rotCb, (ctx, cb) => ctx.bot.handleRotationCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "bot.ts (manager rotation)");
+  registerCallback(permCb, (ctx, cb) => ctx.bot.handlePermissionCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "bot.ts (permission prompts)");
+  registerCallback(killCb, (ctx, cb) => ctx.bot.orch.handleKillCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "orchestrator.ts (kill picker)");
+  registerCallback(pruneCb, (ctx, cb) => handlePruneCallback(ctx.bot.orch, cb, ctx.conv, ctx.answer, ctx.messageId), "purge.ts (prune confirm)");
+  // T4 group 3 — the remaining prefixes.
+  registerCallback(nwCb, (ctx, cb) => ctx.bot.handleNewConfirmCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "bot.ts (bare /new confirm)");
+  registerCallback(useCb, (ctx, cb) => ctx.bot.handleUseCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "bot.ts (/use picker)");
+  registerCallback(formCb, (ctx, cb) => ctx.bot.handleFormCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "bot.ts (question forms)");
+  registerCallback(cmdCb, (ctx, cb, args) => ctx.bot.runCommandButton(cb, ctx.conv, args, ctx.answer), "commands.ts (command grid)");
+  registerCallback(schCb, (ctx, cb) => handleScheduleCallback(ctx.bot, cb, ctx.conv, ctx.answer, ctx.messageId), "schedule.ts (schedules)");
+  registerCallback(busyCb, (ctx, cb) => ctx.bot.handleBusyCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "busy.ts (queue/steer)");
+  registerCallback(apCb, (ctx, cb) => ctx.bot.orch.handleApprovalCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "orchestrator.ts (approvals)");
+  registerCallback(wtCb, (ctx, cb) => ctx.bot.orch.handleWorktreeCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "orchestrator.ts (worktrees)");
+  // T4 group 1 — the picker prefixes.
+  registerCallback(modeCb, (ctx, cb) => ctx.bot.handleModeCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "bot.ts (mode picker)");
+  registerCallback(agentCb, (ctx, cb) => handleAgentCallback(ctx.bot, cb, ctx.conv, ctx.answer, ctx.messageId), "agents.ts (agent picker)");
+  registerCallback(variantCb, (ctx, cb) => ctx.bot.handleVariantCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "bot.ts (variant picker)");
+  registerCallback(modelCb, (ctx, cb) => ctx.bot.handleModelCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "bot.ts (model picker)");
+  // T5 — the folder browser menu and its sub-actions.
+  registerCallback(bsCallback, (ctx, cb) => ctx.bot.handleBrowseCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "browse.ts (folder browser)");
+  // T6 — the remaining 14 prefixes (watch, working-watch, next-steps, busy
+  // note, and the spec family). Completing this makes the legacy startsWith
+  // chain in handleCallback dead, so it is deleted. SPCAUTO is deliberately
+  // left unregistered (no chain branch handled it either).
+  registerCallback(watchCb, (ctx, cb) => ctx.bot.handleWatchCallback(cb, ctx.conv, ctx.answer), "watch.ts (watch card)");
+  registerCallback(wwCb, (ctx, cb) => ctx.bot.handleWorkingWatchButton(cb, ctx.conv, ctx.answer), "bot.ts (working watch)");
+  registerCallback(nsCb, (ctx, cb) => ctx.bot.handleNextStepCallback(cb, ctx.conv, ctx.messageId, ctx.answer), "nextsteps.ts (next steps)");
+  registerCallback(noteCb, (ctx, cb) => handleNoteCallback(ctx.bot, cb, ctx.conv, ctx.messageId, ctx.answer), "notes.ts (busy note)");
+  registerCallback(specCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec list/detail)");
+  registerCallback(specrunCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec run)");
+  registerCallback(specblockedCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec run-blocked)");
+  registerCallback(specrunokCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec run-anyway)");
+  registerCallback(spcaccCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec accept)");
+  registerCallback(spcredoCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec redo)");
+  registerCallback(spcstopCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec stop)");
+  registerCallback(spcprCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec PR flow)");
+  registerCallback(spcreadyCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec PR ready)");
+  registerCallback(spccleanCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec clean up)");
+}
+
+registerBotCallbacks();

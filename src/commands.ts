@@ -104,6 +104,7 @@ export const COMMANDS: BotCommand[] = [
 ];
 
 import type { Lang } from "./state.js";
+import { oneArg } from "./callbacks.js";
 
 /** Escape < > & for Telegram HTML (descriptions are trusted, args are not). */
 function esc(s: string): string {
@@ -162,6 +163,12 @@ export function helpText(lang: Lang = "vi"): string {
 }
 
 /**
+ * The `cmd:` callback def (docs/sdd/callback-registry.md — T4 migration).
+ * Wire form: `cmd:<name>` (name = a command's `c.cmd`, e.g. "new", "ls").
+ */
+export const cmdCb = oneArg("cmd");
+
+/**
  * The tappable button grid under /help — two buttons per row, in catalog
  * order. Button callback data is `cmd:<name>`, handled by runCommandButton.
  */
@@ -170,7 +177,7 @@ export function commandGrid(lang: Lang = "vi"): { inline_keyboard: Array<Array<{
   let row: Array<{ text: string; callback_data: string }> = [];
   for (const c of COMMANDS) {
     if (!c.button) continue;
-    row.push({ text: lang === "en" ? c.buttonEn ?? c.button : c.button, callback_data: `cmd:${c.cmd}` });
+    row.push({ text: lang === "en" ? c.buttonEn ?? c.button : c.button, callback_data: cmdCb.encode(c.cmd) });
     if (row.length === 2) {
       rows.push(row);
       row = [];

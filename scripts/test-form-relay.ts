@@ -1,11 +1,12 @@
 /**
  * Checks the "typed answer" consumption guard for relayed question forms
- * (formAcceptsTypedAnswer in src/bot.ts) — the fix for the "main-channel
- * form-text hijack": when a worker question is in typed-answer mode, text typed
- * in the SHARED main channel must be consumed only when it is a REPLY to the
- * question card, so a prompt meant for the manager is not hijacked as the
- * worker's answer. The worker's own topic is still consumed unconditionally
- * (the user is clearly talking to the worker). Pure logic — no bot, no Telegram.
+ * (formAcceptsTypedAnswer in src/bot.ts). Once the user taps "✍️ Gõ tự do…"
+ * (typed-answer mode), the next plain message is consumed for the worker in
+ * both the worker's own topic and the SHARED main channel — with or without
+ * a reply to the question card (a reply is no longer required; the trade-off
+ * is that a manager prompt typed meanwhile goes to the worker, and the form
+ * can be dismissed with ❌ Huỷ). A card that was never delivered (no
+ * messageId) still refuses to consume. Pure logic — no bot, no Telegram.
  *
  * Run:  npx tsx scripts/test-form-relay.ts
  */
@@ -34,11 +35,11 @@ const qf = { conv: WORKER, relayConv: MAIN, messageId: CARD, waitingCustom: 0 };
   check("worker topic, typed, reply to other msg → consumed", formAcceptsTypedAnswer(qf, WORKER, 999) === true);
 }
 
-// ── shared main channel: only when replying to the question card ─────────────
+// ── shared main channel: consumed regardless of reply (typed mode is explicit) ──
 {
   check("main channel, typed, reply to card → consumed", formAcceptsTypedAnswer(qf, MAIN, CARD) === true);
-  check("main channel, typed, no reply → NOT consumed", formAcceptsTypedAnswer(qf, MAIN, undefined) === false);
-  check("main channel, typed, reply to other msg → NOT consumed", formAcceptsTypedAnswer(qf, MAIN, 999) === false);
+  check("main channel, typed, no reply → consumed", formAcceptsTypedAnswer(qf, MAIN, undefined) === true);
+  check("main channel, typed, reply to other msg → consumed", formAcceptsTypedAnswer(qf, MAIN, 999) === true);
 }
 
 // ── not in typed mode: never consumed (button answers don't go through here) ──

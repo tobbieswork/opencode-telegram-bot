@@ -19,6 +19,7 @@
  */
 import { tr } from "./i18n.js";
 import { esc } from "./format.js";
+import { okLine, raw } from "./ui/text.js";
 import type { Lang } from "./state.js";
 
 /** One PR's point-in-time view, as built by a watcher tick. */
@@ -222,7 +223,7 @@ export function diffSnapshots(
 export function renderEvent(ev: PrEvent, repo: string, lang: Lang = "vi"): string {
   switch (ev.kind) {
     case "merged":
-      return `✅ ${esc(repo)} PR #${ev.number} merged · ${esc(ev.title)}`;
+      return okLine(lang, raw(`${esc(repo)} PR #${ev.number} merged · ${esc(ev.title)}`));
     case "opened":
       return `📌 ${esc(repo)} PR #${ev.number} ${tr(lang, "mới", "new")} · ${esc(ev.title)}`;
     case "ci": {

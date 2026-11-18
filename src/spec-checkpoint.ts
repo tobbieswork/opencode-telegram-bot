@@ -29,6 +29,7 @@ import type { ParsedTask } from "./spec.js";
 import { tr } from "./i18n.js";
 import type { Lang } from "./state.js";
 import { esc } from "./format.js";
+import { errorLine, okLine, raw, warnLine } from "./ui/text.js";
 import type { Btn } from "./shared.js";
 
 /** One recorded check result (a classified shell item). */
@@ -71,8 +72,18 @@ export function checkNameFromCommand(cmd: string): string {
  * `items` are duck-typed `{ state?: { status, input, metadata?, error? } }`
  * (the `{ type:"tool", name:"shell", state }` items of a session's messages);
  * non-shell / stateless items are ignored.
+ *
+ * `onlyNames` keeps only the checks with those derived names — the
+ * canonical verify checks (EXPECTED_CHECKS) at a checkpoint. A worker's
+ * exploratory shell calls (grep, ls, python, …) are NOT checks: a failing
+ * grep must not fail the run (bug found 2026-11-18 — callback-registry T4
+ * was checkpointed "fail" on failed exploratory commands while typecheck +
+ * test:unit had passed).
  */
-export function classifyShellItems(items: Array<{ state?: any }>): { ran: RanCheck[] } {
+export function classifyShellItems(
+  items: Array<{ state?: any }>,
+  onlyNames?: string[],
+): { ran: RanCheck[] } {
   const entries: RanCheck[] = [];
   const byName = new Map<string, RanCheck>();
   for (const it of items ?? []) {
@@ -81,6 +92,7 @@ export function classifyShellItems(items: Array<{ state?: any }>): { ran: RanChe
     const cmd = typeof st.input?.command === "string" ? st.input.command : "";
     if (!cmd) continue;
     const name = checkNameFromCommand(cmd);
+    if (onlyNames && !onlyNames.includes(name)) continue;
     let e: RanCheck;
     if (st.status === "error") {
       const msg = st.error?.message != null ? String(st.error.message) : "tool error";
@@ -167,6 +179,8 @@ export interface CheckpointCardArgs {
   checks: { ran: RanCheck[]; notRan: string[] };
   /** S3.7: the run ended in error (failed/stopped, or an errored shell item). */
   errored: boolean;
+  /** S6.5: auto run-next is on for this run (the card says so; no auto button). */
+  auto?: boolean;
   lang: Lang;
 }
 
@@ -176,9 +190,10 @@ export interface CheckpointCard {
 }
 
 /** S3.3 button labels (bilingual). */
-function buttonLabels(lang: Lang): { accept: string; redo: string; stop: string } {
+function buttonLabels(lang: Lang): { accept: string; auto: string; redo: string; stop: string } {
   return {
     accept: tr(lang, "✅ Chấp nhận", "✅ Accept"),
+    auto: tr(lang, "🤖 Tự chạy tiếp", "🤖 Auto-run next"),
     redo: tr(lang, "🔁 Làm lại kèm ghi chú", "🔁 Redo with note"),
     stop: tr(lang, "⏹ Dừng", "⏹ Stop"),
   };
@@ -192,18 +207,16 @@ function buttonLabels(lang: Lang): { accept: string; redo: string; stop: string 
  * and offers Redo with note + Stop ONLY (no Accept).
  */
 export function renderCheckpointCard(args: CheckpointCardArgs): CheckpointCard {
-  const { task, workerName, branch, commit, files, checks, errored, lang } = args;
+  const { task, workerName, branch, commit, files, checks, errored, auto, lang } = args;
   const spec = branch.startsWith("spec/") ? branch.slice("spec/".length) : branch;
   const canAccept = !errored && !!commit; // S3.7: never offer Accept otherwise
   const lines: string[] = [];
 
   // Header — the outcome icon makes a failing card impossible to miss.
   lines.push(
-    tr(
-      lang,
-      `${canAccept ? "✅" : "❌"} <b>Checkpoint</b> — task <b>${esc(task.id)}</b> ${esc(task.title)}`,
-      `${canAccept ? "✅" : "❌"} <b>Checkpoint</b> — task <b>${esc(task.id)}</b> ${esc(task.title)}`,
-    ),
+    canAccept
+      ? okLine(lang, raw(`<b>Checkpoint</b> — task <b>${esc(task.id)}</b> ${esc(task.title)}`))
+      : errorLine(lang, raw(`<b>Checkpoint</b> — task <b>${esc(task.id)}</b> ${esc(task.title)}`)),
   );
   lines.push(
     tr(
@@ -212,18 +225,22 @@ export function renderCheckpointCard(args: CheckpointCardArgs): CheckpointCard {
       `🧩 Worker: <b>${esc(workerName)}</b> · <code>${esc(branch)}</code>`,
     ),
   );
-
-  // S3.7 — say it explicitly.
-  if (errored) {
-    lines.push(tr(lang, "❌ Worker kết thúc với lỗi — chưa thể chấp nhận.", "❌ The worker ended in an error — it can't be accepted."));
-  } else if (!commit) {
+  // S6.5 — auto mode is visible on the card it applies to.
+  if (auto) {
     lines.push(
       tr(
         lang,
-        "⚠️ Không có commit nào trên nhánh kể từ khi fork — chưa thể chấp nhận.",
-        "⚠️ No commit on the branch since the fork — it can't be accepted.",
+        "🤖 Auto-run đang bật — task sẽ được chấp nhận và chạy tiếp tự động (nếu xanh).",
+        "🤖 Auto-run is on — the task will be accepted and the next started automatically (if green).",
       ),
     );
+  }
+
+  // S3.7 — say it explicitly.
+  if (errored) {
+    lines.push(errorLine(lang, tr(lang, "Worker kết thúc với lỗi — chưa thể chấp nhận.", "The worker ended in an error — it can't be accepted.")));
+  } else if (!commit) {
+    lines.push(warnLine(lang, tr(lang, "Không có commit nào trên nhánh kể từ khi fork — chưa thể chấp nhận.", "No commit on the branch since the fork — it can't be accepted.")));
   }
 
   // S3.1 — the commit (short hash + subject); the section is omitted when absent.
@@ -239,7 +256,7 @@ export function renderCheckpointCard(args: CheckpointCardArgs): CheckpointCard {
 
   // S3.1 — the checks that were run, with their result.
   if (checks.ran.length) {
-    lines.push(tr(lang, "✅ Checks đã chạy:", "✅ Checks run:"));
+    lines.push(okLine(lang, tr(lang, "Checks đã chạy:", "Checks run:")));
     for (const c of checks.ran) {
       if (c.ok) lines.push(`• <b>${esc(c.name)}</b> ✅`);
       else if (c.error !== undefined) lines.push(`• <b>${esc(c.name)}</b> ❌ (chưa chạy) — <i>${esc(c.error)}</i>`);
@@ -249,7 +266,7 @@ export function renderCheckpointCard(args: CheckpointCardArgs): CheckpointCard {
 
   // S3.1 — the checks that were NOT run.
   if (checks.notRan.length) {
-    lines.push(tr(lang, "⚠️ Checks CHƯA chạy:", "⚠️ Checks NOT run:"));
+    lines.push(warnLine(lang, tr(lang, "Checks CHƯA chạy:", "Checks NOT run:")));
     for (const c of checks.notRan) lines.push(`• <b>${esc(c)}</b>`);
   }
 
@@ -262,6 +279,7 @@ export function renderCheckpointCard(args: CheckpointCardArgs): CheckpointCard {
   const labels = buttonLabels(lang);
   const buttons: Btn[] = [];
   if (canAccept) buttons.push({ text: labels.accept, callback_data: `spcacc:${spec}:${task.n}` });
+  if (canAccept && !auto) buttons.push({ text: labels.auto, callback_data: `spcauto:${spec}:${task.n}` });
   buttons.push({ text: labels.redo, callback_data: `spcredo:${spec}:${task.n}` });
   buttons.push({ text: labels.stop, callback_data: `spcstop:${spec}:${task.n}` });
 

@@ -20,6 +20,7 @@ import { MACHINE_STATE_KEY } from "../state.js";
 import type { ModelInfo } from "../opencode.js";
 import { esc, trunc, stripTags, fmtNum, timeAgo } from "../format.js";
 import { tr } from "../i18n.js";
+import { raw, warnLine } from "../ui/text.js";
 import { warn, error } from "../logger.js";
 import { QUESTIONS_PREAMBLE } from "../shared.js";
 import type { UsageRow, RotationInfo } from "../usage.js";
@@ -76,28 +77,28 @@ export async function cmdReboot(ctx: BotCtx, conv: ConvKey): Promise<void> {
  *   reboot:cancel  → abort
  *   reboot:snooze  (from the uptime reminder)→ re-arm the snooze interval
  */
-export async function handleRebootCallback(ctx: BotCtx, cb: CallbackQuery, conv: ConvKey, messageId: number | undefined): Promise<void> {
+export async function handleRebootCallback(ctx: BotCtx, cb: CallbackQuery, conv: ConvKey, messageId: number | undefined, answer: (toast?: string) => void = (t) => { void ctx.tg.answerCallbackQuery(cb.id, t).catch(() => {}); }): Promise<void> {
   const lang = ctx.userPrefs.getLang(cb.from?.id ?? "");
   const action = (cb.data ?? "").slice("reboot:".length).split(":")[0];
   if (action === "snooze") {
     ctx.st.set(MACHINE_STATE_KEY, { lastRebootReminderMs: Date.now() });
-    await ctx.tg.answerCallbackQuery(cb.id, tr(lang, "OK, sẽ nhắc lại sau.", "OK, will remind you later."));
+    answer(tr(lang, "OK, sẽ nhắc lại sau.", "OK, will remind you later."));
     if (messageId !== undefined) await ctx.tg.editMessageReplyMarkup(conv, messageId, {}).catch(() => {});
     return;
   }
   if (action === "ask") {
-    await ctx.tg.answerCallbackQuery(cb.id);
+    answer();
     if (messageId !== undefined) await ctx.tg.editMessageReplyMarkup(conv, messageId, {}).catch(() => {});
     await sendRebootConfirm(ctx, conv);
     return;
   }
   if (action === "cancel") {
-    await ctx.tg.answerCallbackQuery(cb.id, tr(lang, "Đã huỷ.", "Cancelled."));
+    answer(tr(lang, "Đã huỷ.", "Cancelled."));
     if (messageId !== undefined) await ctx.tg.editMessageReplyMarkup(conv, messageId, {}).catch(() => {});
     return;
   }
   if (action === "go") {
-    await ctx.tg.answerCallbackQuery(cb.id);
+    answer();
     if (messageId !== undefined) await ctx.tg.editMessageReplyMarkup(conv, messageId, {}).catch(() => {});
     if (!isRebootConfirmFresh(cb.data, Date.now())) {
       await ctx.tg.sendMessage(conv, tr(lang, "⌛ Xác nhận reboot đã hết hạn — gửi /reboot để xác nhận lại.", "⌛ The reboot confirmation expired — send /reboot to confirm again.")).catch(() => {});
@@ -105,7 +106,7 @@ export async function handleRebootCallback(ctx: BotCtx, cb: CallbackQuery, conv:
     }
     if (ctx.rebootArmed) return; // double-tap: one reboot is already pending
     if (!existsSync(SAFE_REBOOT_BIN)) {
-      await ctx.tg.sendMessage(conv, tr(lang, "⚠️ Wrapper <b>safe-reboot</b> chưa được cài trên máy. Chạy khối sudo trong PR #11 trước.", "⚠️ The <b>safe-reboot</b> wrapper isn't installed on this box. Apply the sudo block from PR #11 first.")).catch(() => {});
+      await ctx.tg.sendMessage(conv, warnLine(lang, raw(tr(lang, "Wrapper <b>safe-reboot</b> chưa được cài trên máy. Chạy khối sudo trong PR #11 trước.", "The <b>safe-reboot</b> wrapper isn't installed on this box. Apply the sudo block from PR #11 first.")))).catch(() => {});
       return;
     }
     ctx.rebootArmed = true;
@@ -125,7 +126,7 @@ export async function handleRebootCallback(ctx: BotCtx, cb: CallbackQuery, conv:
       } catch (e) {
         ctx.rebootArmed = false;
         error("reboot arm failed:", (e as Error)?.message ?? e);
-        void ctx.tg.sendMessage(conv, tr(ctx.userPrefs.getLang(ctx.st.peek(conv)?.createdBy ?? ""), "⚠️ Không tạo được token reboot — xem log bot.", "⚠️ Could not create the reboot token — check the bot log.")).catch(() => {});
+        void ctx.tg.sendMessage(conv, warnLine(ctx.userPrefs.getLang(ctx.st.peek(conv)?.createdBy ?? ""), raw(tr(ctx.userPrefs.getLang(ctx.st.peek(conv)?.createdBy ?? ""), "Không tạo được token reboot — xem log bot.", "Could not create the reboot token — check the bot log.")))).catch(() => {});
         return;
       }
       execFile("sudo", ["-n", SAFE_REBOOT_BIN, token], (err) => {
@@ -135,7 +136,7 @@ export async function handleRebootCallback(ctx: BotCtx, cb: CallbackQuery, conv:
     }, ctx.cfg.rebootDelayMs).unref?.();
     return;
   }
-  await ctx.tg.answerCallbackQuery(cb.id);
+  answer();
 }
 
 /** `/status` — bot/server/session/connection at a glance. */
@@ -182,7 +183,8 @@ export async function cmdContext(ctx: BotCtx, conv: ConvKey, state: ChatState): 
   try {
     r = await ctx.oc.getSessionReport(state.sessionID);
   } catch (e) {
-    return ctx.tg.sendMessage(conv, `⚠️ Could not read the session: ${(e as Error).message}`);
+    const lang = ctx.userPrefs.getLang(ctx.st.peek(conv)?.createdBy ?? "");
+    return ctx.tg.sendMessage(conv, warnLine(lang, raw(`Could not read the session: ${(e as Error).message}`)));
   }
   const base = r.directory || state.directory || ctx.cfg.opencodeDirectory;
   const rel = (p: string) => (base && p.startsWith(base) ? p.slice(base.length).replace(/^\//, "") : p);

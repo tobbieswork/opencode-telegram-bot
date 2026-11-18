@@ -14,6 +14,7 @@ import type { ChatState, Lang } from "../state.js";
 import type { SessionBrief } from "../opencode.js";
 import { esc, trunc, stripTags } from "../format.js";
 import { tr } from "../i18n.js";
+import { raw, warnLine } from "../ui/text.js";
 import { warn } from "../logger.js";
 import { audit } from "../audit.js";
 import { dropNotes } from "../notes.js";
@@ -35,7 +36,7 @@ export async function cmdNew(ctx: BotCtx, conv: ConvKey): Promise<void> {
   };
   await ctx.tg.sendMessage(
     conv,
-    tr(lang, "⚠️ <b>/new</b> — chọn cách tạo phiên mới:", "⚠️ <b>/new</b> — choose how to create a new session:"),
+    warnLine(lang, raw(tr(lang, "<b>/new</b> — chọn cách tạo phiên mới:", "<b>/new</b> — choose how to create a new session:"))),
     { reply_markup: kb },
   );
 }
@@ -84,7 +85,7 @@ export async function doNewSession(ctx: BotCtx, conv: ConvKey, state: ChatState,
  * settles the card in place: removes its buttons (empty inline_keyboard) and
  * updates the message, so it can't be tapped twice.
  */
-export async function handleNewConfirmCallback(ctx: BotCtx, cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+export async function handleNewConfirmCallback(ctx: BotCtx, cb: CallbackQuery, conv: ConvKey, messageId?: number, answer: (toast?: string) => void = (t) => { void ctx.tg.answerCallbackQuery(cb.id, t).catch(() => {}); }): Promise<void> {
   const lang = ctx.userPrefs.getLang(cb.from?.id ?? "");
   const op = (cb.data ?? "").split(":")[1];
   const settle = (text: string) =>
@@ -92,19 +93,19 @@ export async function handleNewConfirmCallback(ctx: BotCtx, cb: CallbackQuery, c
       ? ctx.tg.editMessageText(conv, messageId, text, { reply_markup: { inline_keyboard: [] } }).catch(() => {})
       : Promise.resolve();
   if (op === "clear") {
-    await ctx.tg.answerCallbackQuery(cb.id, tr(lang, "🗑️ Đang tạo phiên mới…", "🗑️ Creating a new session…"));
+    answer(tr(lang, "🗑️ Đang tạo phiên mới…", "🗑️ Creating a new session…"));
     await settle("🗑️ " + tr(lang, "Đã chọn: Clear", "Chosen: Clear"));
     await doNewSession(ctx, conv, ctx.st.get(conv), false); // fresh state at confirm time
     return;
   }
   if (op === "keep") {
-    await ctx.tg.answerCallbackQuery(cb.id, tr(lang, "💾 Đang tạo phiên mới…", "💾 Creating a new session…"));
+    answer(tr(lang, "💾 Đang tạo phiên mới…", "💾 Creating a new session…"));
     await settle("💾 " + tr(lang, "Đã chọn: Clear + giữ ngữ cảnh", "Chosen: Clear + keep context"));
     await doNewSession(ctx, conv, ctx.st.get(conv), true);
     return;
   }
   // nw:cancel (or any unknown op) — keep the current session, just settle the card.
-  await ctx.tg.answerCallbackQuery(cb.id, tr(lang, "↩️ Đã huỷ", "↩️ Cancelled"));
+  answer(tr(lang, "↩️ Đã huỷ", "↩️ Cancelled"));
   await settle(tr(lang, "↩️ Đã huỷ — phiên cũ vẫn nguyên vẹn.", "↩️ Cancelled — the old session is intact."));
 }
 
@@ -196,11 +197,11 @@ export function sendUsePicker(ctx: BotCtx, conv: ConvKey, sessions: SessionBrief
 }
 
 /** Handle a tap on the /use picker (data = `use:<id|ls|close>`). */
-export async function handleUseCallback(ctx: BotCtx, cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+export async function handleUseCallback(ctx: BotCtx, cb: CallbackQuery, conv: ConvKey, messageId?: number, answer: (toast?: string) => void = (t) => { void ctx.tg.answerCallbackQuery(cb.id, t).catch(() => {}); }): Promise<void> {
   const lang = ctx.userPrefs.getLang(cb.from?.id ?? "");
   const id = (cb.data ?? "").slice("use:".length);
   if (id === "close" || id === "ls") {
-    await ctx.tg.answerCallbackQuery(cb.id);
+    answer();
     if (messageId) await ctx.tg.deleteMessage(conv, messageId).catch(() => {});
     if (id === "ls") await cmdList(ctx, conv);
     return;
@@ -212,14 +213,14 @@ export async function handleUseCallback(ctx: BotCtx, cb: CallbackQuery, conv: Co
     return undefined;
   });
   if (sessions && !sessions.some((s) => s.id === id)) {
-    await ctx.tg.answerCallbackQuery(cb.id, tr(lang, `❌ Không có session: ${trunc(id, 30)}`, `❌ No session: ${trunc(id, 30)}`));
+    answer(tr(lang, `❌ Không có session: ${trunc(id, 30)}`, `❌ No session: ${trunc(id, 30)}`));
     if (messageId)
       await ctx.tg.editMessageText(conv, messageId, tr(lang, `❌ Không có session <code>${esc(id)}</code>`, `❌ No session <code>${esc(id)}</code>`)).catch(() => {});
     return;
   }
   await ctx.stopCurrent(conv, true); // stop the running turn before switching (same as /new, /clear)
   applyUseState(ctx, conv, id);
-  await ctx.tg.answerCallbackQuery(cb.id, tr(lang, `Dùng ${trunc(id, 30)}`, `Using ${trunc(id, 30)}`));
+  answer(tr(lang, `Dùng ${trunc(id, 30)}`, `Using ${trunc(id, 30)}`));
   if (messageId) await ctx.tg.editMessageText(conv, messageId, tr(lang, `✅ Đang dùng session <code>${esc(id)}</code>`, `✅ Now using session <code>${esc(id)}</code>`)).catch(() => {});
 }
 

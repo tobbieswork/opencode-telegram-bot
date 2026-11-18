@@ -13,6 +13,7 @@ import type { CallbackQuery } from "../telegram.js";
 import type { ConvKey } from "../conv.js";
 import type { Lang } from "../state.js";
 import { tr } from "../i18n.js";
+import { raw, warnLine, okLine } from "../ui/text.js";
 import { warn, error } from "../logger.js";
 import { audit } from "../audit.js";
 import { parseBusyCallback } from "../busy.js";
@@ -33,17 +34,17 @@ import { NOTES_KEY } from "../shared.js";
    *             Manager's OWN session — workers are separate sessions, so a
    *             Manager steer touches only the Manager's turn (Q2.5).
    */
-export async function handleBusyCallback(ctx: BotCtx, cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+export async function handleBusyCallback(ctx: BotCtx, cb: CallbackQuery, conv: ConvKey, messageId?: number, answer: (toast?: string) => void = (t) => { void ctx.tg.answerCallbackQuery(cb.id, t).catch(() => {}); }): Promise<void> {
     const lang = ctx.userPrefs.getLang(cb.from?.id ?? "");
     const parsed = parseBusyCallback(cb.data);
     if (parsed === null) {
-      await ctx.tg.answerCallbackQuery(cb.id);
+      answer();
       return;
     }
     // Consume the entry NOW (before any await) so a double-tap can't queue/steer twice.
     const text = ctx.busyNotes.take(conv, parsed.messageId);
     if (text == null) {
-      await ctx.tg.answerCallbackQuery(cb.id, tr(lang, "Không tìm thấy nội dung tin nhắn đó.", "That message's content is no longer available."));
+      answer(tr(lang, "Không tìm thấy nội dung tin nhắn đó.", "That message's content is no longer available."));
       return;
     }
     const senderId = cb.from?.id != null ? String(cb.from.id) : undefined;
@@ -54,14 +55,14 @@ export async function handleBusyCallback(ctx: BotCtx, cb: CallbackQuery, conv: C
     if (parsed.kind === "add") {
       const r = ctx.queue.push(conv, { text, senderId });
       if (!r.ok) {
-        await ctx.tg.answerCallbackQuery(cb.id, tr(lang, "Hàng chờ đầy (3 tin).", "Queue is full (3 messages)."));
-        settleEdit(tr(lang, "⚠️ Hàng chờ đầy (3 tin) — bấm note để giữ.", "⚠️ Queue is full (3 messages) — use the note button to keep it."));
+        answer(tr(lang, "Hàng chờ đầy (3 tin).", "Queue is full (3 messages)."));
+        settleEdit(warnLine(lang, raw(tr(lang, "Hàng chờ đầy (3 tin) — bấm note để giữ.", "Queue is full (3 messages) — use the note button to keep it."))));
         return;
       }
       const pos = r.position;
       audit({ action: "queue_add", chatId: conv, userId: senderId, meta: { messageId: parsed.messageId, textLen: text.length, queuedCount: pos, senderId } });
-      await ctx.tg.answerCallbackQuery(cb.id, tr(lang, `✅ Đã thêm vào hàng chờ (vị trí #${pos}).`, `✅ Added to the queue (position #${pos}).`));
-      settleEdit(tr(lang, `✅ Đã thêm vào hàng chờ (vị trí #${pos}). Sẽ chạy sau khi tin hiện tại xong.`, `✅ Added to the queue (position #${pos}). Will run after the current message finishes.`));
+      answer(okLine(lang, raw(tr(lang, `Đã thêm vào hàng chờ (vị trí #${pos}).`, `Added to the queue (position #${pos}).`))));
+      settleEdit(okLine(lang, raw(tr(lang, `Đã thêm vào hàng chờ (vị trí #${pos}). Sẽ chạy sau khi tin hiện tại xong.`, `Added to the queue (position #${pos}). Will run after the current message finishes.`))));
       return;
     }
     // Steer (S-native): deliver to the running turn's session right away.
@@ -73,7 +74,7 @@ export async function handleBusyCallback(ctx: BotCtx, cb: CallbackQuery, conv: C
       const msg = r.ok
         ? tr(lang, `Không steer được — đã cho vào hàng chờ (vị trí #${r.position}).`, `Couldn't steer — added to the queue (position #${r.position}).`)
         : tr(lang, "Không steer được và hàng chờ đã đầy (3 tin).", "Couldn't steer and the queue is full (3 messages).");
-      await ctx.tg.answerCallbackQuery(cb.id, msg);
+      answer(msg);
       settleEdit(msg);
     };
     const sid = ctx.st.peek(conv)?.sessionID;
@@ -90,7 +91,7 @@ export async function handleBusyCallback(ctx: BotCtx, cb: CallbackQuery, conv: C
       return;
     }
     const msg = tr(lang, "🔀 Đang định tuyến — áp dụng tại điểm an toàn tiếp theo.", "🔀 Steering — applies at the next safe point.");
-    await ctx.tg.answerCallbackQuery(cb.id, msg);
+    answer(msg);
     settleEdit(msg);
   }
 
@@ -111,7 +112,7 @@ export async function prepareNotesTurn(ctx: BotCtx, conv: ConvKey, sid: string, 
   }
 
   /** Handle a tap on the "⏯ Chạy tiếp" button (data = `cont:<sessionID>`). */
-export async function handleContinueCallback(ctx: BotCtx, cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+export async function handleContinueCallback(ctx: BotCtx, cb: CallbackQuery, conv: ConvKey, messageId?: number, answer: (toast?: string) => void = (t) => { void ctx.tg.answerCallbackQuery(cb.id, t).catch(() => {}); }): Promise<void> {
     const target = parseContinueData(cb.data);
     // The button is one-shot: drop it immediately so a re-tap (or a stale button
     // left over after a /new) can never fire a second continue.
@@ -124,14 +125,14 @@ export async function handleContinueCallback(ctx: BotCtx, cb: CallbackQuery, con
     // Reject malformed data, or a conv whose session is no longer the one that
     // failed (a /new or /use replaced it) — continuing would hit the wrong session.
     if (!target || !state?.sessionID || state.sessionID !== target) {
-      await ctx.tg.answerCallbackQuery(cb.id, tr(ctx.userPrefs.getLang(cb.from?.id ?? ""), "Nút này không còn áp dụng cho phiên hiện tại.", "This button no longer applies to the current session."));
+      answer(tr(ctx.userPrefs.getLang(cb.from?.id ?? ""), "Nút này không còn áp dụng cho phiên hiện tại.", "This button no longer applies to the current session."));
       return;
     }
     if (ctx.inflight.has(conv)) {
-      await ctx.tg.answerCallbackQuery(cb.id, tr(ctx.userPrefs.getLang(cb.from?.id ?? ""), "Đang chạy task — hẵng thử lại sau.", "A task is running — try again in a moment."));
+      answer(tr(ctx.userPrefs.getLang(cb.from?.id ?? ""), "Đang chạy task — hẵng thử lại sau.", "A task is running — try again in a moment."));
       return;
     }
-    await ctx.tg.answerCallbackQuery(cb.id, tr(ctx.userPrefs.getLang(cb.from?.id ?? ""), "⏯ Đang chạy tiếp…", "⏯ Continuing…"));
+    answer(tr(ctx.userPrefs.getLang(cb.from?.id ?? ""), "⏯ Đang chạy tiếp…", "⏯ Continuing…"));
     ctx.startTyping(conv);
     const ac = new AbortController();
     ctx.inflight.set(conv, ac);

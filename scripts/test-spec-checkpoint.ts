@@ -82,6 +82,36 @@ try {
     check("notRan: an expected check with no result IS listed", computeNotRan([]).join(",") === "typecheck,test:unit,smoke", JSON.stringify(computeNotRan([])));
   }
 
+  // ── S3.2 (regression, 2026-11-18): exploratory calls are NOT checks ─────
+  {
+    // The callback-registry T4 session: typecheck + test:unit passed, but the
+    // worker had run failing exploratory commands (grep with no match, ls on a
+    // missing path, a python heredoc). The checkpoint must be a pass.
+    const items = [
+      { type: "tool", name: "shell", state: { status: "completed", input: { command: "grep -n foo src/" }, metadata: { exit: 1 } } },
+      { type: "tool", name: "shell", state: { status: "completed", input: { command: "ls docs/specs" }, metadata: { exit: 2 } } },
+      { type: "tool", name: "shell", state: { status: "completed", input: { command: "python3 - <<'EOF'" }, metadata: { exit: 1 } } },
+      { type: "tool", name: "shell", state: { status: "completed", input: { command: "npm run typecheck 2>&1 | tail -2" }, metadata: { exit: 0 } } },
+      { type: "tool", name: "shell", state: { status: "completed", input: { command: "npm run test:unit 2>&1 | tail -5" }, metadata: { exit: 0 } } },
+    ];
+    // Unfiltered (legacy behaviour) still classifies everything.
+    const all = classifyShellItems(items).ran;
+    check("unfiltered: sees every shell call incl. failing exploratory ones", all.length === 5 && all.some((c) => !c.ok), JSON.stringify(all));
+    // The checkpoint filters to the canonical verify checks.
+    const { ran } = classifyShellItems(items, EXPECTED_CHECKS);
+    check("canonical filter: only typecheck + test:unit remain", ran.length === 2 && ran.every((c) => c.ok), JSON.stringify(ran));
+    check("canonical filter: the run is a pass despite failed greps/ls/python", checkpointOutcome({ hash: "abc", subject: "x" }, ran, false) === "pass");
+    check("canonical filter: errored does not inherit exploratory tool errors", !ran.some((c) => c.error !== undefined), JSON.stringify(ran));
+    // A failing CANONICAL check still fails, even among exploratory noise.
+    const bad = [
+      items[0],
+      { type: "tool", name: "shell", state: { status: "completed", input: { command: "npm run typecheck" }, metadata: { exit: 0 } } },
+      { type: "tool", name: "shell", state: { status: "completed", input: { command: "npm run test:unit" }, metadata: { exit: 1 } } },
+    ];
+    const { ran: ranBad } = classifyShellItems(bad, EXPECTED_CHECKS);
+    check("canonical filter: a failing test:unit still fails the run", checkpointOutcome({ hash: "abc", subject: "x" }, ranBad, false) === "fail");
+  }
+
   // ── S3.2: retry-aware — the LAST recorded occurrence per check wins ───────
   {
     // (a) failed → fixed env → re-ran green: the card shows the final state.
@@ -184,6 +214,17 @@ try {
     check("card(no-commit): NO Accept button", !nocKb.some((d) => d.startsWith("spcacc:")), JSON.stringify(nocKb));
     check("card(no-commit): says no commit", /no commit/i.test(noc.text), noc.text);
     check("card(no-commit): omits the commit section", !noc.text.includes("abc1234"), noc.text);
+
+    // S6.5: auto mode on → the card says so and does NOT offer the auto button.
+    const autoCard = renderCheckpointCard({ ...base, auto: true });
+    const autoKb = autoCard.keyboard.inline_keyboard.flat().map((b) => b.callback_data ?? "");
+    check("card(auto): carries the auto banner", /Auto-run/i.test(autoCard.text), autoCard.text);
+    check("card(auto): no auto button", !autoKb.some((d) => d.startsWith("spcauto:")), JSON.stringify(autoKb));
+    check("card(auto): Accept still present", autoKb.includes("spcacc:alpha:2"), JSON.stringify(autoKb));
+    // S6.5: normal card → offers the auto opt-in button.
+    check("card(normal): offers the auto opt-in button", kbs.includes("spcauto:alpha:2"), JSON.stringify(kbs));
+    // S6.5: errored card (no Accept) → no auto button either.
+    check("card(errored): no auto button", !errKb.some((d) => d.startsWith("spcauto:")), JSON.stringify(errKb));
 
     // i18n: the Vietnamese variant renders (different label set, still bilingual-safe).
     const vi = renderCheckpointCard({ ...base, lang: "vi" });

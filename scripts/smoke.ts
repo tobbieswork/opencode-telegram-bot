@@ -31,6 +31,12 @@ class MockTelegram {
     this.out.push("[edit] " + text);
     if (opts?.reply_markup) this.keyboards.push(opts.reply_markup);
   }
+  // The watch card edits through the strict variant (surfaces vanished-card
+  // 400s); the mock records it exactly like editMessageText.
+  async editMessageTextStrict(_chatId: number, _messageId: number, text: string, opts: Record<string, unknown> = {}): Promise<void> {
+    this.out.push("[edit] " + text);
+    if (opts?.reply_markup) this.keyboards.push(opts.reply_markup);
+  }
   // Rich path (OPENCODE_TG_RICH=1 in .env): the bot tries sendRichMessage
   // first; the mock records the markdown as-is (no HTML conversion) and
   // resolves a message id, mirroring the real sendRich.
@@ -504,6 +510,73 @@ async function main(): Promise<void> {
   show("queue: drained + ran");
   await bot.handle(upd("/queue"));
   show("queue: /queue after drain (should be empty)");
+
+  // ── watch: live card during a turn (W6, end-to-end) ────────────────────────
+  // Start /watch while a turn is running: the card posts, it is edited while
+  // the turn works (tool-step + text events, W2.1/W2.2), and it freezes with
+  // the outcome + duration when the turn ends (W3.1), gaining the Watch-again
+  // button (W3.3). The prompt forces one read-only shell step so a tool label
+  // appears early, and forbids file writes so testws stays clean for S8.
+  console.log("\n=== WATCH (live card during a turn, end-to-end) ===");
+  {
+    const wBefore = mock.out.length;
+    const kbBefore = mock.keyboards.length;
+    const watchPrompt =
+      "Run ONE shell command that lists the files in the current directory, then write one short line about testing. " +
+      "Do NOT create, modify or delete any file. End with a single short sentence.";
+    await bot.handle(upd(watchPrompt));
+    // /watch must land MID-TURN: a fixed sleep raced fast turns (a 1.8s turn
+    // beat the old 2500ms wait, the card posted idle, and edit/freeze had
+    // nothing to observe). Poll the real sessionState until busy, then tap.
+    // If the turn ends before it is ever seen busy (faster than our poll),
+    // re-prompt once — the LLM turn takes seconds, so the second catch holds.
+    const wsid = st.get(42).sessionID;
+    let busy = false;
+    for (let attempt = 0; attempt < 2 && !busy; attempt++) {
+      if (attempt > 0) {
+        await bot.handle(upd(watchPrompt));
+      }
+      for (let i = 0; i < 50 && !busy; i++) {
+        try {
+          busy = (await oc.sessionState(wsid)).busy;
+        } catch {
+          break; // the client hiccup is not "busy" — stop polling
+        }
+        if (!busy) await waitMs(100);
+      }
+    }
+    await bot.handle(upd("/watch"));
+    console.log("watch tapped mid-turn (session busy):", busy);
+    // 1) The card is posted with the watch keyboard (w:<id>:c, + :s while working).
+    const card = await waitFor((a) => a.slice(wBefore).some((m) => /(Đang chạy|Đang nghỉ|Working|Idle)/.test(m)), mock.out, 30000);
+    console.log("watch card posted:", card);
+    const kbAll = () => JSON.stringify(mock.keyboards.slice(kbBefore));
+    const wBtn = kbAll().match(/w:[0-9a-z]{4}:(c|s|r)/);
+    console.log("watch keyboard present:", wBtn ? wBtn[0] : "NOT FOUND");
+    // 2) The card is EDITED while the turn works (an [edit] with the working header).
+    const edited = await waitFor(
+      (a) => a.slice(wBefore).some((m) => m.startsWith("[edit]") && /(Đang chạy|Working)/.test(m)),
+      mock.out,
+      60000,
+    );
+    console.log("watch card edited while working (W2.1/W2.2):", edited);
+    // 3) The turn ends: the card freezes with outcome + duration (W3.1, success
+    //    OR failure — both freeze) and the frozen keyboard gains :r (W3.3).
+    const frozen = await waitFor(
+      (a) => a.slice(wBefore).some((m) => m.startsWith("[edit]") && /(Hoàn tất|Done|Thất bại|Failed)/.test(m) && /· \d/.test(m)),
+      mock.out,
+      120000,
+    );
+    const again = /w:[0-9a-z]{4}:r/.test(kbAll());
+    console.log("watch card frozen with outcome + duration (W3.1):", frozen, "| watch-again button (W3.3):", again);
+    show("watch: final card");
+    if (!card || !wBtn || !edited || !frozen || !again) {
+      console.log("❌ WATCH: end-to-end watch failed — see card/edit/freeze/watch-again above");
+      process.exitCode = 1;
+    } else {
+      console.log("✅ WATCH: card posted, edited while working, frozen with the outcome");
+    }
+  }
 
   // ── spec: run a one-task spec end to end (S8, end-to-end) ─────────────────
   // The full pipeline on a real worker: /spec list → detail view → Run tap →

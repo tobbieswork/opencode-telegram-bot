@@ -74,8 +74,10 @@ export interface WorkerInfo {
    * `specRunning[spec]` marker is cleared (see Orchestrator.releaseSpecRun).
    * `conv` + `uid` are S5: the OWNER chat (where the Run tap happened, where
    * the checkpoint card is posted) and the tapping user's id (S6.2 `tapped_by`).
+   * `auto` (S6.5): when on, a GREEN task finish is accepted and the next task
+   * is spawned without a tap (specAutoContinue); any red finish clears it.
    */
-  specRun?: { spec: string; branch: string; task: string; conv: ConvKey; uid: number };
+  specRun?: { spec: string; branch: string; task: string; conv: ConvKey; uid: number; auto?: boolean };
   /**
    * Id of the topic intro message; anchor for switch_to_topic navigation (the
    * manager board's per-worker jump buttons). Set at spawn.

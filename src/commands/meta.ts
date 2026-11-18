@@ -10,6 +10,7 @@ import { renderRotationReport } from "../rotation-health.js";
 import { collectHealth, formatHealth } from "../health.js";
 import { buildProbes } from "../health-probes.js";
 import { tr, STRINGS, type Str } from "../i18n.js";
+import { raw, warnLine } from "../ui/text.js";
 import { STYLE_NAMES, resolveStyleArg, type StyleName } from "../style.js";
 import type { Lang } from "../state.js";
 
@@ -56,17 +57,17 @@ export async function cmdNote(bot: Bot, conv: ConvKey, arg: string): Promise<voi
  * user message's Telegram id (carried in the callback data); if the turn has
  * already ended (or the bot restarted) the entry is gone → "not found".
  */
-export async function handleNoteCallback(bot: Bot, cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+export async function handleNoteCallback(bot: Bot, cb: CallbackQuery, conv: ConvKey, messageId?: number, answer: (toast?: string) => void = (toast) => { void bot.tg.answerCallbackQuery(cb.id, toast).catch(() => {}); }): Promise<void> {
   const lang = bot.userPrefs.getLang(cb.from?.id ?? "");
   const id = parseNoteCallback(cb.data);
   if (id == null) {
-    await bot.tg.answerCallbackQuery(cb.id);
+    await answer();
     return;
   }
   // Consume the entry NOW (before any await) so a double-tap can't append twice.
   const text = bot.busyNotes.take(conv, id);
   if (text == null) {
-    await bot.tg.answerCallbackQuery(cb.id, tr(lang, "Không tìm thấy nội dung tin nhắn đó.", "That message's content is no longer available."));
+    await answer(tr(lang, "Không tìm thấy nội dung tin nhắn đó.", "That message's content is no longer available."));
     return;
   }
   // Save via the SAME path as cmdNote: append + persist + best-effort PUT.
@@ -77,7 +78,7 @@ export async function handleNoteCallback(bot: Bot, cb: CallbackQuery, conv: Conv
   if (sid) {
     await bot.oc.setInstruction(sid, NOTES_KEY, noteEntryText(next.notes!, lang)).catch((e) => warn("note put:", (e as Error).message));
   }
-  await bot.tg.answerCallbackQuery(cb.id, tr(lang, "📝 Đã ghi — agent sẽ xem ở lượt tiếp theo.", "📝 Saved — the agent will see it on the next turn."));
+  await answer(tr(lang, "📝 Đã ghi — agent sẽ xem ở lượt tiếp theo.", "📝 Saved — the agent will see it on the next turn."));
   // Remove the button: edit the busy message back to plain text (empty keyboard).
   // Best-effort — the message may be too old or deleted; ignore gracefully.
   if (messageId != null) {
@@ -114,7 +115,7 @@ export async function cmdRotation(bot: Bot, conv: ConvKey): Promise<void> {
   try {
     snap = bot.rotationHealthSnapshot();
   } catch (e) {
-    return bot.tg.sendMessage(conv, tr(lang, `⚠️ Không đọc được snapshot rotation: ${(e as Error).message}`, `⚠️ Can't read the rotation snapshot: ${(e as Error).message}`));
+    return bot.tg.sendMessage(conv, warnLine(lang, raw(tr(lang, `Không đọc được snapshot rotation: ${(e as Error).message}`, `Can't read the rotation snapshot: ${(e as Error).message}`))));
   }
   if (!snap) {
     return bot.tg.sendMessage(conv, tr(lang, "Chưa có dữ liệu rotation — session Manager chưa chạy qua tick xoay nào.", "No rotation data yet — the Manager session has not run a rotation tick."));
@@ -134,7 +135,7 @@ export async function cmdLang(bot: Bot, conv: ConvKey, arg: string, uid?: number
     return;
   }
   if (uid == null) {
-    await bot.tg.sendMessage(conv, "⚠️ Cannot identify user.");
+    await bot.tg.sendMessage(conv, warnLine(bot.userPrefs.getLang(uid ?? ""), "Cannot identify user."));
     return;
   }
   bot.userPrefs.setLang(uid, lang as Lang);
@@ -195,7 +196,7 @@ export async function cmdStyle(bot: Bot, conv: ConvKey, arg: string, uid?: numbe
     return;
   }
   if (uid == null) {
-    await bot.tg.sendMessage(conv, "⚠️ Cannot identify user.");
+    await bot.tg.sendMessage(conv, warnLine(lang, "Cannot identify user."));
     return;
   }
   bot.userPrefs.setStyle(uid, resolved);

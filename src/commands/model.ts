@@ -149,18 +149,18 @@ export async function showModelPicker(ctx: BotCtx, conv: ConvKey, models: ModelI
 }
 
 /** Handle a tap on the /model picker (data = `mdl:sel:<i>` / `mdl:pg:<n>` / `mdl:close` / `mdl:noop`). */
-export async function handleModelCallback(ctx: BotCtx, cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+export async function handleModelCallback(ctx: BotCtx, cb: CallbackQuery, conv: ConvKey, messageId?: number, answer: (toast?: string) => void = (t) => { void ctx.tg.answerCallbackQuery(cb.id, t).catch(() => {}); }): Promise<void> {
   const lang = ctx.userPrefs.getLang(cb.from?.id ?? "");
   const [, op, arg] = (cb.data ?? "").split(":");
   if (op === "close") {
     ctx.modelPickers.delete(conv);
-    await ctx.tg.answerCallbackQuery(cb.id);
+    answer();
     if (messageId) await ctx.tg.deleteMessage(conv, messageId).catch(() => {});
     return;
   }
   const mp = ctx.modelPickers.get(conv);
   if (!mp) {
-    await ctx.tg.answerCallbackQuery(cb.id, tr(lang, "Danh sách model đã đóng — gửi /model để mở lại.", "The model list was closed — send /model to open it again."));
+    answer(tr(lang, "Danh sách model đã đóng — gửi /model để mở lại.", "The model list was closed — send /model to open it again."));
     return;
   }
   try {
@@ -169,12 +169,12 @@ export async function handleModelCallback(ctx: BotCtx, cb: CallbackQuery, conv: 
       if (!m) throw new Error(tr(lang, "Model không còn trong danh sách — gửi /model để mở lại.", "The model is no longer in the list — send /model to open it again."));
       await applyModelPick(ctx, conv, m);
       ctx.modelPickers.delete(conv);
-      await ctx.tg.answerCallbackQuery(cb.id, `Model → ${trunc(m.id, 40)}`);
+      answer(`Model → ${trunc(m.id, 40)}`);
       if (messageId) await ctx.tg.editMessageText(conv, messageId, tr(lang, `✅ Model → <code>${esc(m.id)}</code> (${ctx.st.get(conv).sessionID ? "đã áp dụng" : "áp dụng khi /new"})`, `✅ Model → <code>${esc(m.id)}</code> (${ctx.st.get(conv).sessionID ? "applied" : "applies on /new"})`)).catch(() => {});
       return;
     }
     if (op === "pg") {
-      await ctx.tg.answerCallbackQuery(cb.id);
+      answer();
       if (!messageId) return;
       const v = renderModelPage(mp.models, Number(arg) || 0, undefined, ctx.st.get(conv).model?.id, lang);
       ctx.modelPickers.set(conv, { ...mp, page: Math.max(0, Math.min(Number(arg) || 0, Math.ceil(mp.models.length / MODEL_PAGE_SIZE) - 1)) });
@@ -182,9 +182,9 @@ export async function handleModelCallback(ctx: BotCtx, cb: CallbackQuery, conv: 
       return;
     }
     // "noop" or unknown
-    await ctx.tg.answerCallbackQuery(cb.id);
+    answer();
   } catch (e) {
-    await ctx.tg.answerCallbackQuery(cb.id, `⚠️ ${(e as Error).message}`);
+    answer(`⚠️ ${(e as Error).message}`);
   }
 }
 
@@ -252,23 +252,23 @@ export async function cmdMode(ctx: BotCtx, conv: ConvKey, arg: string, state: Ch
 }
 
 /** Handle a tap on the mode picker (switch in place, or close the picker). */
-export async function handleModeCallback(ctx: BotCtx, cb: CallbackQuery, conv: ConvKey, messageId: number | undefined): Promise<void> {
+export async function handleModeCallback(ctx: BotCtx, cb: CallbackQuery, conv: ConvKey, messageId: number | undefined, answer: (toast?: string) => void = (t) => { void ctx.tg.answerCallbackQuery(cb.id, t).catch(() => {}); }): Promise<void> {
   const lang = ctx.userPrefs.getLang(cb.from?.id ?? "");
   const id = (cb.data ?? "").split(":")[1];
   if (id === "close") {
-    await ctx.tg.answerCallbackQuery(cb.id);
+    answer();
     if (messageId) await ctx.tg.deleteMessage(conv, messageId);
     return;
   }
   if (id === "info") {
-    await ctx.tg.answerCallbackQuery(cb.id);
+    answer();
     const lines = Object.entries(MODES).map(([mid, m]) => `• <code>${esc(mid)}</code> — ${esc(m.hintEn === undefined ? m.hint : tr(lang, m.hint, m.hintEn))}`);
     await ctx.tg.sendMessage(conv, tr(lang, "📖 <b>Vai trò các mode</b>", "📖 <b>What each mode does</b>") + "\n" + lines.join("\n"));
     return;
   }
   const m = MODES[id];
   if (!m) {
-    await ctx.tg.answerCallbackQuery(cb.id, `❌ Unknown mode: ${esc(id)}`);
+    answer(`❌ Unknown mode: ${esc(id)}`);
     return;
   }
   const state = ctx.st.get(conv);
@@ -276,10 +276,10 @@ export async function handleModeCallback(ctx: BotCtx, cb: CallbackQuery, conv: C
   try {
     await applyMode(ctx, conv, state, m.agent);
   } catch (e) {
-    await ctx.tg.answerCallbackQuery(cb.id, `⚠️ ${(e as Error).message}`);
+    answer(`⚠️ ${(e as Error).message}`);
     return;
   }
-  await ctx.tg.answerCallbackQuery(cb.id, `Mode → ${id}`);
+  answer(`Mode → ${id}`);
   if (messageId && !wasCurrent) {
     const v = renderModePicker(state, lang);
     await ctx.tg.editMessageText(conv, messageId, v.text, { reply_markup: v.keyboard });
@@ -369,18 +369,18 @@ export function sendVariantPicker(ctx: BotCtx, conv: ConvKey, variants: string[]
 }
 
 /** Handle a tap on the /variant picker (data = `variant:<id|close>`). */
-export async function handleVariantCallback(ctx: BotCtx, cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+export async function handleVariantCallback(ctx: BotCtx, cb: CallbackQuery, conv: ConvKey, messageId?: number, answer: (toast?: string) => void = (t) => { void ctx.tg.answerCallbackQuery(cb.id, t).catch(() => {}); }): Promise<void> {
   const id = (cb.data ?? "").slice("variant:".length);
   if (id === "close") {
-    await ctx.tg.answerCallbackQuery(cb.id);
+    answer();
     if (messageId) await ctx.tg.deleteMessage(conv, messageId).catch(() => {});
     return;
   }
   try {
     const how = await applyVariant(ctx, conv, id);
-    await ctx.tg.answerCallbackQuery(cb.id, `Variant → ${id}`);
+    answer(`Variant → ${id}`);
     if (messageId) await ctx.tg.editMessageText(conv, messageId, `✅ Variant → <code>${esc(id)}</code> (${how})`).catch(() => {});
   } catch (e) {
-    await ctx.tg.answerCallbackQuery(cb.id, `⚠️ ${(e as Error).message}`);
+    answer(`⚠️ ${(e as Error).message}`);
   }
 }
