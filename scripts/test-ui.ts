@@ -96,5 +96,16 @@ function check(name: string, cond: boolean, detail?: string): void {
   check("lang is a real parameter, not global state", errorLine("en", "m") !== errorLine("vi", "m"));
 }
 
+// ── T4 pilot golden bytes (agents.ts + meta.ts, byte-identical) ─────────────
+{
+  check("golden: okLine = legacy agent-confirm bytes (vi)", okLine("vi", raw("Agent → <code>build</code> (applied to current session)")) === "✅ Agent → <code>build</code> (applied to current session)");
+  check("golden: okLine = legacy agent-confirm bytes (en, prefix language-neutral)", okLine("en", raw("Agent → <code>explore</code> (applies on /new)")) === "✅ Agent → <code>explore</code> (applies on /new)");
+  check("golden: okLine = legacy callback-edit bytes", okLine("vi", raw("Agent → <code>plan</code> (applied)")) === "✅ Agent → <code>plan</code> (applied)");
+  check("golden: warnLine = legacy context-read-error bytes", warnLine("vi", raw("Could not read the session: ECONNRESET")) === "⚠️ Could not read the session: ECONNRESET");
+  check("golden: warnLine = legacy rotation-snapshot vi bytes", warnLine("vi", raw("Không đọc được snapshot rotation: boom")) === "⚠️ Không đọc được snapshot rotation: boom");
+  check("golden: warnLine = legacy rotation-snapshot en bytes", warnLine("en", raw("Can't read the rotation snapshot: boom")) === "⚠️ Can't read the rotation snapshot: boom");
+  check("golden: warnLine = legacy cannot-identify-user bytes", warnLine("vi", "Cannot identify user.") === "⚠️ Cannot identify user.");
+}
+
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

@@ -16,6 +16,7 @@ import { renderRotationReport } from "../rotation-health.js";
 import { collectHealth, formatHealth } from "../health.js";
 import { buildProbes } from "../health-probes.js";
 import { tr, STRINGS, type Str } from "../i18n.js";
+import { raw, warnLine } from "../ui/text.js";
 import { STYLE_NAMES, resolveStyleArg, type StyleName } from "../style.js";
 import type { Lang } from "../state.js";
 
@@ -166,7 +167,8 @@ export async function cmdContext(bot: Bot, conv: ConvKey, state: ChatState): Pro
   try {
     r = await bot.oc.getSessionReport(state.sessionID);
   } catch (e) {
-    return bot.tg.sendMessage(conv, `⚠️ Could not read the session: ${(e as Error).message}`);
+    const lang = bot.userPrefs.getLang(bot.st.peek(conv)?.createdBy ?? "");
+    return bot.tg.sendMessage(conv, warnLine(lang, raw(`Could not read the session: ${(e as Error).message}`)));
   }
   const base = r.directory || state.directory || bot.cfg.opencodeDirectory;
   const rel = (p: string) => (base && p.startsWith(base) ? p.slice(base.length).replace(/^\//, "") : p);
@@ -318,7 +320,7 @@ export async function cmdRotation(bot: Bot, conv: ConvKey): Promise<void> {
   try {
     snap = bot.rotationHealthSnapshot();
   } catch (e) {
-    return bot.tg.sendMessage(conv, tr(lang, `⚠️ Không đọc được snapshot rotation: ${(e as Error).message}`, `⚠️ Can't read the rotation snapshot: ${(e as Error).message}`));
+    return bot.tg.sendMessage(conv, warnLine(lang, raw(tr(lang, `Không đọc được snapshot rotation: ${(e as Error).message}`, `Can't read the rotation snapshot: ${(e as Error).message}`))));
   }
   if (!snap) {
     return bot.tg.sendMessage(conv, tr(lang, "Chưa có dữ liệu rotation — session Manager chưa chạy qua tick xoay nào.", "No rotation data yet — the Manager session has not run a rotation tick."));
@@ -338,7 +340,7 @@ export async function cmdLang(bot: Bot, conv: ConvKey, arg: string, uid?: number
     return;
   }
   if (uid == null) {
-    await bot.tg.sendMessage(conv, "⚠️ Cannot identify user.");
+    await bot.tg.sendMessage(conv, warnLine(bot.userPrefs.getLang(uid ?? ""), "Cannot identify user."));
     return;
   }
   bot.userPrefs.setLang(uid, lang as Lang);
@@ -399,7 +401,7 @@ export async function cmdStyle(bot: Bot, conv: ConvKey, arg: string, uid?: numbe
     return;
   }
   if (uid == null) {
-    await bot.tg.sendMessage(conv, "⚠️ Cannot identify user.");
+    await bot.tg.sendMessage(conv, warnLine(lang, "Cannot identify user."));
     return;
   }
   bot.userPrefs.setStyle(uid, resolved);

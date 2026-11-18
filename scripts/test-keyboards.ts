@@ -106,5 +106,22 @@ function check(name: string, cond: boolean, detail?: string): void {
   check("pure: same input twice → same output", JSON.stringify(a) === JSON.stringify(b));
 }
 
+// ── T4 pilot golden bytes: the /agent picker (agents.ts) ───────────────────
+{
+  const WL = ["build", "general", "explore", "plan"];
+  /** The pre-migration hand-built keyboard (copied from the old agents.ts). */
+  const legacy = (lang: "vi" | "en", cur: string | undefined) => {
+    const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+    for (let i = 0; i < WL.length; i += 2) rows.push(WL.slice(i, i + 2).map((id) => ({ text: `${cur === id ? "▶️ " : ""}${id}`, callback_data: `agent:${id}` })));
+    rows.push([{ text: lang === "vi" ? "❌ Đóng" : "❌ Close", callback_data: "agent:close" }]);
+    return rows;
+  };
+  const helper = (lang: "vi" | "en", cur: string | undefined) =>
+    pickerKeyboard(lang, { labels: WL, data: (i) => `agent:${WL[i]}`, current: cur ? WL.indexOf(cur) : -1, closeData: "agent:close" }).inline_keyboard;
+  check("golden: agent picker vi + current", JSON.stringify(helper("vi", "build")) === JSON.stringify(legacy("vi", "build")));
+  check("golden: agent picker vi + current=plan", JSON.stringify(helper("vi", "plan")) === JSON.stringify(legacy("vi", "plan")));
+  check("golden: agent picker en, no current", JSON.stringify(helper("en", undefined)) === JSON.stringify(legacy("en", undefined)));
+}
+
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
