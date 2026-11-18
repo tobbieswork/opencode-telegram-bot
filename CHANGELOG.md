@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.42.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.41.2...opencode-telegram-bot-v1.42.0) (2026-11-18)
+
+
+### Features
+
+* auto run-next mode for spec checkpoints (S6.5) ([f638f62](https://github.com/tobbieswork/opencode-telegram-bot/commit/f638f626ef2a0c9562bdb63c2fe59701aed8e48d))
+* auto run-next mode for spec checkpoints (S6.5) ([6f35e1c](https://github.com/tobbieswork/opencode-telegram-bot/commit/6f35e1c94bbeb295a033bb5ce2709eec3289553e))
+
 ## [1.41.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.41.1...opencode-telegram-bot-v1.41.2) (2026-11-17)
 
 
