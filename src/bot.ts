@@ -324,8 +324,11 @@ export function formAcceptsTypedAnswer(
   if (qf.waitingCustom === undefined) return false;
   // The worker's own topic: the user is clearly talking to the worker.
   if (qf.conv === conv) return true;
-  // The shared main channel: only when the user replied to the question card.
-  if (qf.relayConv === conv) return qf.messageId !== undefined && replyToMessageId === qf.messageId;
+  // The shared main channel: the user opted into a typed answer, so the next
+  // plain message is consumed for the worker even without replying to the card
+  // (trade-off: a manager prompt typed meanwhile goes to the worker — the form
+  // can be dismissed with ❌ Huỷ). A missing card id (send failed) still refuses.
+  if (qf.relayConv === conv) return qf.messageId !== undefined;
   return false;
 }
 
@@ -5067,11 +5070,16 @@ export class Bot {
     this.cancelReminder(qf.conv, qf.formId); // form really submitted → stop nudging
     if (messageId) {
       const lang = this.userPrefs.getLang(this.st.peek(qf.conv)?.createdBy ?? "");
-      const summary = Object.entries(qf.answers)
-        .map(([k, v]) => `• ${esc(trunc(String(v), 80))}`)
-        .join("\n");
+      // One line per field: "• <question> → <answer>" — the option label when
+      // an option was tapped (lookup by value), the raw text for free answers.
+      const lines = qf.fields.map((f, i) => {
+        const q = f.title || f.description || tr(lang, `Câu ${i + 1}`, `Question ${i + 1}`);
+        const raw = qf.answers[f.key];
+        const a = f.options?.find((o) => o.value === raw)?.label ?? String(raw ?? "");
+        return `• ${esc(trunc(q, 80))} → ${esc(trunc(a, 80))}`;
+      });
       await this.tg
-        .editMessageText(cardConv, messageId, tr(lang, "✅ Đã gửi câu trả lời cho OpenCode.", "✅ Answer sent to OpenCode.") + (summary ? "\n" + summary : ""))
+        .editMessageText(cardConv, messageId, tr(lang, "✅ Đã gửi câu trả lời cho OpenCode.", "✅ Answer sent to OpenCode.") + (lines.length ? "\n" + lines.join("\n") : ""))
         .catch(() => {});
     }
   }
