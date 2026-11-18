@@ -9,7 +9,7 @@ import { OpenCodeCtl, newMessageID, assistantText, ModelInfo, SessionBrief } fro
 import { StateManager, ChatState, MsgPurpose, MACHINE_STATE_KEY, UserPrefsStore, Lang } from "./state.js";
 import { ConvKey, convKey, chatOf, parseConv } from "./conv.js";
 import { answerExpired, defineCallback, dispatchCallback, oneArg, registerCallback } from "./callbacks.js";
-import { Orchestrator, BUSY, killCb } from "./orchestrator.js";
+import { Orchestrator, BUSY, apCb, killCb, wtCb } from "./orchestrator.js";
 import { handlePruneCallback, pruneCb } from "./orchestrator/purge.js";
 import { closeFinishedTopicsAtStartup, deleteOrphanTopicsAtStartup } from "./orchestrator/topics.js";
 import { ScheduleStore, Scheduler } from "./scheduler.js";
@@ -55,10 +55,10 @@ import { GhPrLike, PrSnapshot, PrState, diffSnapshots, renderEvent, updatePrSnap
 import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, SAFE_REBOOT_BIN, rebootTokenFile, buildTokenLine, rebootCallback, rebootGoData, isRebootConfirmFresh } from "./uptime.js";
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
 import { DraftState, DraftAction, onTextDelta, onToolStart, isDmConv, EDIT_BUDGET } from "./stream.js";
-import { myCommands } from "./commands.js";
+import { cmdCb, myCommands } from "./commands.js";
 import { dropNotes, prepareNotes, NOTE_CB_PREFIX, BusyNoteStore } from "./notes.js";
 import { QueueStore } from "./queue.js";
-import { buildBusyReply, busyKeyboard, queueFullReply, parseBusyCallback } from "./busy.js";
+import { buildBusyReply, busyCb, busyKeyboard, queueFullReply, parseBusyCallback } from "./busy.js";
 import type { BusyReply } from "./busy.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
 import { log, warn, error } from "./logger.js";
@@ -68,7 +68,7 @@ import type { HealthSources } from "./health-probes.js";
 import { QUESTIONS_PREAMBLE, NOTES_KEY } from "./shared.js";
 import type { Btn, Keyboard } from "./shared.js";
 import { cmdAgents, cmdAgent, handleAgentCallback, agentCb } from "./commands/agents.js";
-import { cmdSchedule, handleScheduleCallback } from "./commands/schedule.js";
+import { cmdSchedule, handleScheduleCallback, schCb } from "./commands/schedule.js";
 import { Advisor } from "./advisor/advisor.js";
 import { cmdHelp, cmdStatus, cmdHealth, cmdContext, cmdUsage, cmdHistory, cmdNote, cmdRotation, handleNoteCallback, cmdLang, cmdStyle } from "./commands/meta.js";
 import { cmdSpec, handleSpecCallback, specAutoContinue } from "./commands/spec.js";
@@ -197,6 +197,34 @@ const permCb = defineCallback<{ requestID: string; decision: "once" | "always" |
     const decision = rest.slice(i + 1);
     if (decision !== "once" && decision !== "always" && decision !== "reject") return null;
     return { requestID: rest.slice(0, i), decision };
+  },
+});
+
+/**
+ * The `nw:` callback def (docs/sdd/callback-registry.md — T4 migration).
+ * Wire form: `nw:<op>` (op = clear/keep/cancel — the bare /new card).
+ */
+const nwCb = oneArg("nw");
+
+/**
+ * The `use:` callback def (docs/sdd/callback-registry.md — T4 migration).
+ * Wire form: `use:<id|ls|close>` (id = an OpenCode session id).
+ */
+const useCb = oneArg("use");
+
+/**
+ * The `fq:` callback def (docs/sdd/callback-registry.md — T4 migration).
+ * Wire form: `fq:<formId>:<op>` (op = x / c / o<i>; formId = the OpenCode
+ * server-generated form id — split at the LAST colon, a strict superset of
+ * the legacy first-segment parse).
+ */
+const formCb = defineCallback<{ formID: string; op: string }>({
+  prefix: "fq",
+  encode: (a) => `fq:${a.formID}:${a.op}`,
+  decode: (rest) => {
+    const i = rest.lastIndexOf(":");
+    if (i <= 0) return null;
+    return { formID: rest.slice(0, i), op: rest.slice(i + 1) };
   },
 });
 
@@ -3280,9 +3308,9 @@ export class Bot {
     const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
     const kb: Keyboard = {
       inline_keyboard: [
-        [{ text: "🗑️ Clear", callback_data: "nw:clear" }],
-        [{ text: tr(lang, "💾 Clear + giữ ngữ cảnh", "💾 Clear + keep context"), callback_data: "nw:keep" }],
-        [{ text: tr(lang, "↩️ Huỷ", "↩️ Cancel"), callback_data: "nw:cancel" }],
+        [{ text: "🗑️ Clear", callback_data: nwCb.encode("clear") }],
+        [{ text: tr(lang, "💾 Clear + giữ ngữ cảnh", "💾 Clear + keep context"), callback_data: nwCb.encode("keep") }],
+        [{ text: tr(lang, "↩️ Huỷ", "↩️ Cancel"), callback_data: nwCb.encode("cancel") }],
       ],
     };
     await this.tg.sendMessage(
@@ -3556,17 +3584,17 @@ export class Bot {
    *             Manager's OWN session — workers are separate sessions, so a
    *             Manager steer touches only the Manager's turn (Q2.5).
    */
-  private async handleBusyCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+  public async handleBusyCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
     const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     const parsed = parseBusyCallback(cb.data);
     if (parsed === null) {
-      await this.tg.answerCallbackQuery(cb.id);
+      answer();
       return;
     }
     // Consume the entry NOW (before any await) so a double-tap can't queue/steer twice.
     const text = this.busyNotes.take(conv, parsed.messageId);
     if (text == null) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Không tìm thấy nội dung tin nhắn đó.", "That message's content is no longer available."));
+      answer(tr(lang, "Không tìm thấy nội dung tin nhắn đó.", "That message's content is no longer available."));
       return;
     }
     const senderId = cb.from?.id != null ? String(cb.from.id) : undefined;
@@ -3577,13 +3605,13 @@ export class Bot {
     if (parsed.kind === "add") {
       const r = this.queue.push(conv, { text, senderId });
       if (!r.ok) {
-        await this.tg.answerCallbackQuery(cb.id, tr(lang, "Hàng chờ đầy (3 tin).", "Queue is full (3 messages)."));
+        answer(tr(lang, "Hàng chờ đầy (3 tin).", "Queue is full (3 messages)."));
         settleEdit(tr(lang, "⚠️ Hàng chờ đầy (3 tin) — bấm note để giữ.", "⚠️ Queue is full (3 messages) — use the note button to keep it."));
         return;
       }
       const pos = r.position;
       audit({ action: "queue_add", chatId: conv, userId: senderId, meta: { messageId: parsed.messageId, textLen: text.length, queuedCount: pos, senderId } });
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, `✅ Đã thêm vào hàng chờ (vị trí #${pos}).`, `✅ Added to the queue (position #${pos}).`));
+      answer(tr(lang, `✅ Đã thêm vào hàng chờ (vị trí #${pos}).`, `✅ Added to the queue (position #${pos}).`));
       settleEdit(tr(lang, `✅ Đã thêm vào hàng chờ (vị trí #${pos}). Sẽ chạy sau khi tin hiện tại xong.`, `✅ Added to the queue (position #${pos}). Will run after the current message finishes.`));
       return;
     }
@@ -3596,7 +3624,7 @@ export class Bot {
       const msg = r.ok
         ? tr(lang, `Không steer được — đã cho vào hàng chờ (vị trí #${r.position}).`, `Couldn't steer — added to the queue (position #${r.position}).`)
         : tr(lang, "Không steer được và hàng chờ đã đầy (3 tin).", "Couldn't steer and the queue is full (3 messages).");
-      await this.tg.answerCallbackQuery(cb.id, msg);
+      answer(msg);
       settleEdit(msg);
     };
     const sid = this.st.peek(conv)?.sessionID;
@@ -3613,7 +3641,7 @@ export class Bot {
       return;
     }
     const msg = tr(lang, "🔀 Đang định tuyến — áp dụng tại điểm an toàn tiếp theo.", "🔀 Steering — applies at the next safe point.");
-    await this.tg.answerCallbackQuery(cb.id, msg);
+    answer(msg);
     settleEdit(msg);
   }
 
@@ -3683,7 +3711,7 @@ export class Bot {
   /** nw:clear / nw:keep / nw:cancel — the bare /new card (see cmdNew). Each
    *  settles the card in place: removes its buttons (empty inline_keyboard) and
    *  updates the message, so it can't be tapped twice. */
-  private async handleNewConfirmCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+  public async handleNewConfirmCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
     const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     const op = (cb.data ?? "").split(":")[1];
     const settle = (text: string) =>
@@ -3691,19 +3719,19 @@ export class Bot {
         ? this.tg.editMessageText(conv, messageId, text, { reply_markup: { inline_keyboard: [] } }).catch(() => {})
         : Promise.resolve();
     if (op === "clear") {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "🗑️ Đang tạo phiên mới…", "🗑️ Creating a new session…"));
+      answer(tr(lang, "🗑️ Đang tạo phiên mới…", "🗑️ Creating a new session…"));
       await settle("🗑️ " + tr(lang, "Đã chọn: Clear", "Chosen: Clear"));
       await this.doNewSession(conv, this.st.get(conv), false); // fresh state at confirm time
       return;
     }
     if (op === "keep") {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "💾 Đang tạo phiên mới…", "💾 Creating a new session…"));
+      answer(tr(lang, "💾 Đang tạo phiên mới…", "💾 Creating a new session…"));
       await settle("💾 " + tr(lang, "Đã chọn: Clear + giữ ngữ cảnh", "Chosen: Clear + keep context"));
       await this.doNewSession(conv, this.st.get(conv), true);
       return;
     }
     // nw:cancel (or any unknown op) — keep the current session, just settle the card.
-    await this.tg.answerCallbackQuery(cb.id, tr(lang, "↩️ Đã huỷ", "↩️ Cancelled"));
+    answer(tr(lang, "↩️ Đã huỷ", "↩️ Cancelled"));
     await settle(tr(lang, "↩️ Đã huỷ — phiên cũ vẫn nguyên vẹn.", "↩️ Cancelled — the old session is intact."));
   }
 
@@ -3797,11 +3825,11 @@ export class Bot {
     const cur = this.st.get(conv).sessionID;
     const newest = [...sessions].sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0)).slice(0, 10);
     const rows: Btn[][] = newest.map((s) => [
-      { text: `${s.id === cur ? "▶️ " : ""}${s.title ? trunc(s.title, 40) : trunc(s.id, 14)}`, callback_data: `use:${s.id}` },
+      { text: `${s.id === cur ? "▶️ " : ""}${s.title ? trunc(s.title, 40) : trunc(s.id, 14)}`, callback_data: useCb.encode(s.id) },
     ]);
     rows.push([
-      { text: tr(lang, "📄 Xem tất cả", "📄 View all"), callback_data: "use:ls" },
-      { text: tr(lang, "❌ Đóng", "❌ Close"), callback_data: "use:close" },
+      { text: tr(lang, "📄 Xem tất cả", "📄 View all"), callback_data: useCb.encode("ls") },
+      { text: tr(lang, "❌ Đóng", "❌ Close"), callback_data: useCb.encode("close") },
     ]);
     return this.tg.sendMessage(
       conv,
@@ -3811,11 +3839,11 @@ export class Bot {
   }
 
   /** Handle a tap on the /use picker (data = `use:<id|ls|close>`). */
-  private async handleUseCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+  public async handleUseCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
     const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     const id = (cb.data ?? "").slice("use:".length);
     if (id === "close" || id === "ls") {
-      await this.tg.answerCallbackQuery(cb.id);
+      answer();
       if (messageId) await this.tg.deleteMessage(conv, messageId).catch(() => {});
       if (id === "ls") await this.cmdList(conv);
       return;
@@ -3827,14 +3855,14 @@ export class Bot {
       return undefined;
     });
     if (sessions && !sessions.some((s) => s.id === id)) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, `❌ Không có session: ${trunc(id, 30)}`, `❌ No session: ${trunc(id, 30)}`));
+      answer(tr(lang, `❌ Không có session: ${trunc(id, 30)}`, `❌ No session: ${trunc(id, 30)}`));
       if (messageId)
         await this.tg.editMessageText(conv, messageId, tr(lang, `❌ Không có session <code>${esc(id)}</code>`, `❌ No session <code>${esc(id)}</code>`)).catch(() => {});
       return;
     }
     await this.stopCurrent(conv, true); // stop the running turn before switching (same as /new, /clear)
     this.applyUseState(conv, id);
-    await this.tg.answerCallbackQuery(cb.id, tr(lang, `Dùng ${trunc(id, 30)}`, `Using ${trunc(id, 30)}`));
+    answer(tr(lang, `Dùng ${trunc(id, 30)}`, `Using ${trunc(id, 30)}`));
     if (messageId) await this.tg.editMessageText(conv, messageId, tr(lang, `✅ Đang dùng session <code>${esc(id)}</code>`, `✅ Now using session <code>${esc(id)}</code>`)).catch(() => {});
   }
 
@@ -4007,7 +4035,7 @@ export class Bot {
       return;
     }
     if (data.startsWith("fq:")) {
-      await this.handleFormCallback(cb, conv, messageId);
+      await this.handleFormCallback(cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
       return;
     }
     if (data.startsWith("mode:")) {
@@ -4031,7 +4059,7 @@ export class Bot {
       return;
     }
     if (data.startsWith("q:add:") || data.startsWith("q:steer:")) {
-      await this.handleBusyCallback(cb, conv, messageId);
+      await this.handleBusyCallback(cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
       return;
     }
     if (data.startsWith("reboot:")) {
@@ -4043,11 +4071,11 @@ export class Bot {
       return;
     }
     if (data.startsWith("nw:")) {
-      await this.handleNewConfirmCallback(cb, conv, messageId);
+      await this.handleNewConfirmCallback(cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
       return;
     }
     if (data.startsWith("use:")) {
-      await this.handleUseCallback(cb, conv, messageId);
+      await this.handleUseCallback(cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
       return;
     }
     if (data.startsWith("agent:")) {
@@ -4076,11 +4104,11 @@ export class Bot {
       return;
     }
     if (data.startsWith("cmd:")) {
-      await this.runCommandButton(cb, conv, data.slice(4));
+      await this.runCommandButton(cb, conv, data.slice(4), (t) => void this.tg.answerCallbackQuery(cb.id, t));
       return;
     }
     if (data.startsWith("sch:")) {
-      await handleScheduleCallback(this, cb, conv, messageId);
+      await handleScheduleCallback(this, cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
       return;
     }
     if (!data.startsWith("bs:")) {
@@ -4192,7 +4220,7 @@ export class Bot {
   }
 
   /** Run a bot command from an inline button (the /help menu). */
-  private async runCommandButton(cb: CallbackQuery, conv: ConvKey, name: string): Promise<void> {
+  public async runCommandButton(cb: CallbackQuery, conv: ConvKey, name: string, answer: (toast?: string) => void): Promise<void> {
     const state = this.st.get(conv);
     try {
       switch (name) {
@@ -4255,7 +4283,7 @@ export class Bot {
       }
     } finally {
       // Answer last so the tap spinner shows while the command runs.
-      await this.tg.answerCallbackQuery(cb.id).catch(() => {});
+      answer();
     }
   }
 
@@ -5051,28 +5079,28 @@ export class Bot {
     const rows: Btn[][] = [];
     const fd = qf.formId;
     if (qf.waitingCustom !== undefined) {
-      rows.push([{ text: tr(lang, "❌ Huỷ", "❌ Cancel"), callback_data: `fq:${fd}:x` }]);
+      rows.push([{ text: tr(lang, "❌ Huỷ", "❌ Cancel"), callback_data: formCb.encode({ formID: fd, op: "x" }) }]);
     } else {
       (f.options ?? []).forEach((opt, i) => {
-        rows.push([{ text: `▪️ ${trunc(opt.label, 60)}`, callback_data: `fq:${fd}:o${i}` }]);
+        rows.push([{ text: `▪️ ${trunc(opt.label, 60)}`, callback_data: formCb.encode({ formID: fd, op: `o${i}` }) }]);
       });
       if (f.custom || !f.options?.length || f.type === "string") {
-        rows.push([{ text: tr(lang, "✍️ Gõ tự do…", "✍️ Type freely…"), callback_data: `fq:${fd}:c` }]);
+        rows.push([{ text: tr(lang, "✍️ Gõ tự do…", "✍️ Type freely…"), callback_data: formCb.encode({ formID: fd, op: "c" }) }]);
       }
-      rows.push([{ text: tr(lang, "❌ Huỷ", "❌ Cancel"), callback_data: `fq:${fd}:x` }]);
+      rows.push([{ text: tr(lang, "❌ Huỷ", "❌ Cancel"), callback_data: formCb.encode({ formID: fd, op: "x" }) }]);
     }
     return { text: lines.join("\n"), keyboard: { inline_keyboard: rows } };
   }
 
   /** Handle a tap on a question-form button (data = `fq:<formId>:<op>`). */
-  private async handleFormCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+  public async handleFormCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
     const data = cb.data ?? "";
     const parts = data.split(":");
     const formID = parts[1];
     const op = parts[2] ?? "";
     const qf = this.questionForms.get(formID);
     if (!qf) {
-      await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Phiên hỏi đã kết thúc.", "The question session has ended."));
+      answer(tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Phiên hỏi đã kết thúc.", "The question session has ended."));
       return;
     }
     try {
@@ -5080,13 +5108,13 @@ export class Bot {
         await this.oc.cancelForm(qf.sessionID, qf.formId, "Cancelled by user via Telegram.");
         this.questionForms.delete(formID);
         this.cancelReminder(qf.conv, formID); // the form is really cancelled → stop nudging (schedule lives under the worker conv)
-        await this.tg.answerCallbackQuery(cb.id);
+        answer();
         if (messageId) await this.tg.editMessageText(conv, messageId, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "❌ Đã huỷ câu hỏi.", "❌ Question cancelled.")).catch(() => {});
         return;
       }
       if (op === "c") {
         qf.waitingCustom = qf.index;
-        await this.tg.answerCallbackQuery(cb.id);
+        answer();
         if (messageId) {
           const v = this.renderQuestion(qf);
           await this.tg.editMessageText(conv, messageId, v.text, { reply_markup: v.keyboard });
@@ -5099,13 +5127,13 @@ export class Bot {
         const opt = f.options?.[idx];
         if (!opt) throw new Error(tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Đáp án không hợp lệ — vui lòng thử lại.", "Invalid option — please try again."));
         qf.answers[f.key] = opt.value;
-        await this.tg.answerCallbackQuery(cb.id);
+        answer();
         await this.advanceOrSubmit(qf, messageId);
         return;
       }
-      await this.tg.answerCallbackQuery(cb.id);
+      answer();
     } catch (e) {
-      await this.tg.answerCallbackQuery(cb.id, `⚠️ ${(e as Error).message}`);
+      answer(`⚠️ ${(e as Error).message}`);
     }
   }
 
@@ -5356,6 +5384,15 @@ export function registerBotCallbacks(): void {
   registerCallback(permCb, (ctx, cb) => ctx.bot.handlePermissionCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "bot.ts (permission prompts)");
   registerCallback(killCb, (ctx, cb) => ctx.bot.orch.handleKillCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "orchestrator.ts (kill picker)");
   registerCallback(pruneCb, (ctx, cb) => handlePruneCallback(ctx.bot.orch, cb, ctx.conv, ctx.answer, ctx.messageId), "purge.ts (prune confirm)");
+  // T4 group 3 — the remaining prefixes.
+  registerCallback(nwCb, (ctx, cb) => ctx.bot.handleNewConfirmCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "bot.ts (bare /new confirm)");
+  registerCallback(useCb, (ctx, cb) => ctx.bot.handleUseCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "bot.ts (/use picker)");
+  registerCallback(formCb, (ctx, cb) => ctx.bot.handleFormCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "bot.ts (question forms)");
+  registerCallback(cmdCb, (ctx, cb, args) => ctx.bot.runCommandButton(cb, ctx.conv, args, ctx.answer), "commands.ts (command grid)");
+  registerCallback(schCb, (ctx, cb) => handleScheduleCallback(ctx.bot, cb, ctx.conv, ctx.answer, ctx.messageId), "schedule.ts (schedules)");
+  registerCallback(busyCb, (ctx, cb) => ctx.bot.handleBusyCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "busy.ts (queue/steer)");
+  registerCallback(apCb, (ctx, cb) => ctx.bot.orch.handleApprovalCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "orchestrator.ts (approvals)");
+  registerCallback(wtCb, (ctx, cb) => ctx.bot.orch.handleWorktreeCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "orchestrator.ts (worktrees)");
   // T4 group 1 — the picker prefixes.
   registerCallback(modeCb, (ctx, cb) => ctx.bot.handleModeCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "bot.ts (mode picker)");
   registerCallback(agentCb, (ctx, cb) => handleAgentCallback(ctx.bot, cb, ctx.conv, ctx.answer, ctx.messageId), "agents.ts (agent picker)");

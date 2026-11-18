@@ -231,6 +231,38 @@ export const killCb = defineCallback<string>({
   decode: (rest) => (rest === "" ? null : rest),
 });
 
+/**
+ * The `ap:` callback def (docs/sdd/callback-registry.md — T4 migration).
+ * Wire form: `ap:<id>:<ok|no|auto>` (id = the 10-hex approval key).
+ */
+export const apCb = defineCallback<{ id: string; op: "ok" | "no" | "auto" }>({
+  prefix: "ap",
+  encode: (a) => `ap:${a.id}:${a.op}`,
+  decode: (rest) => {
+    const i = rest.lastIndexOf(":");
+    if (i <= 0) return null;
+    const op = rest.slice(i + 1);
+    if (op !== "ok" && op !== "no" && op !== "auto") return null;
+    return { id: rest.slice(0, i), op };
+  },
+});
+
+/**
+ * The `wt:` callback def (docs/sdd/callback-registry.md — T4 migration).
+ * Wire form: `wt:<name>:<op>` (op = diff/merge/rm/rmok/keep; name = worker
+ * name — the op is split at the LAST colon, a strict superset of the legacy
+ * first-segment parse).
+ */
+export const wtCb = defineCallback<{ name: string; op: string }>({
+  prefix: "wt",
+  encode: (a) => `wt:${a.name}:${a.op}`,
+  decode: (rest) => {
+    const i = rest.lastIndexOf(":");
+    if (i <= 0) return null;
+    return { name: rest.slice(0, i), op: rest.slice(i + 1) };
+  },
+});
+
 export class Orchestrator {
   private bridge?: McpBridge;
   private approvals = new Map<string, Approval>();
@@ -1648,10 +1680,10 @@ export class Orchestrator {
       reply_markup: {
         inline_keyboard: [
           [
-            { text: "✅ Giao", callback_data: `ap:${id}:ok` },
-            { text: "❌ Huỷ", callback_data: `ap:${id}:no` },
+            { text: "✅ Giao", callback_data: apCb.encode({ id, op: "ok" }) },
+            { text: "❌ Huỷ", callback_data: apCb.encode({ id, op: "no" }) },
           ],
-          [{ text: "⚡ Giao + bật auto", callback_data: `ap:${id}:auto` }],
+          [{ text: "⚡ Giao + bật auto", callback_data: apCb.encode({ id, op: "auto" }) }],
         ],
       },
     });
@@ -1677,11 +1709,11 @@ export class Orchestrator {
   async handleCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<boolean> {
     const data = cb.data ?? "";
     if (data.startsWith("ap:")) {
-      await this.handleApprovalCallback(cb, conv, messageId);
+      await this.handleApprovalCallback(cb, conv, (t) => void this.h.tg.answerCallbackQuery(cb.id, t), messageId);
       return true;
     }
     if (data.startsWith("wt:")) {
-      await this.handleWorktreeCallback(cb, conv, messageId);
+      await this.handleWorktreeCallback(cb, conv, (t) => void this.h.tg.answerCallbackQuery(cb.id, t), messageId);
       return true;
     }
     if (data.startsWith("prune:")) {
@@ -1714,17 +1746,17 @@ export class Orchestrator {
   /** Delegates to ./orchestrator/topics.ts (kept as a method: tests call it directly). */
   async reapPendingTopicDeletes(): Promise<void> { return reapPendingTopicDeletes(this); }
 
-  private async handleApprovalCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+  public async handleApprovalCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
     const lang = this.h.userPrefs?.getLang(cb.from?.id ?? "") ?? "vi";
     const [, id, op] = (cb.data ?? "").split(":");
     const a = this.approvals.get(id);
     if (!a || a.chat !== chatOf(conv)) {
-      await this.h.tg.answerCallbackQuery(cb.id, tr(lang, "Yêu cầu này đã hết hạn.", "This request has expired."));
+      answer(tr(lang, "Yêu cầu này đã hết hạn.", "This request has expired."));
       if (messageId) await this.h.tg.editMessageText(conv, messageId, tr(lang, "⌛ Yêu cầu này đã hết hạn (bot đã khởi động lại hoặc đã xử lý).", "⌛ This request has expired (the bot restarted or already handled it)."), { reply_markup: { inline_keyboard: [] } }).catch(() => {});
       return;
     }
     this.approvals.delete(id);
-    await this.h.tg.answerCallbackQuery(cb.id);
+    answer();
     const what = a.kind === "spawn" ? tr(lang, `tạo worker ${a.spawn?.name}`, `create worker ${a.spawn?.name}`) : tr(lang, `gửi việc cho ${a.send?.name}`, `assign work to ${a.send?.name}`);
     const auditText = a.kind === "spawn" ? `spawn ${a.spawn?.name}: ${a.spawn?.task ?? ""}` : `send ${a.send?.name}: ${a.send?.message ?? ""}`;
     if (op === "no") {
@@ -1830,21 +1862,21 @@ export class Orchestrator {
     return {
       inline_keyboard: [
         [
-          { text: "📄 Diff", callback_data: `wt:${w.name}:diff` },
-          { text: "🔀 Merge", callback_data: `wt:${w.name}:merge` },
+          { text: "📄 Diff", callback_data: wtCb.encode({ name: w.name, op: "diff" }) },
+          { text: "🔀 Merge", callback_data: wtCb.encode({ name: w.name, op: "merge" }) },
         ],
-        [{ text: tr(lang, "🗑 Xoá worktree", "🗑 Delete worktree"), callback_data: `wt:${w.name}:rm` }],
+        [{ text: tr(lang, "🗑 Xoá worktree", "🗑 Delete worktree"), callback_data: wtCb.encode({ name: w.name, op: "rm" }) }],
       ],
     };
   }
 
-  private async handleWorktreeCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+  public async handleWorktreeCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
     const lang = this.h.userPrefs?.getLang(cb.from?.id ?? "") ?? "vi";
     const [, name, op] = (cb.data ?? "").split(":");
     const found = this.h.st.findWorker(conv, name);
     const w = found?.[1].worker;
     if (!found || !w?.worktree || !w.repoRoot) {
-      await this.h.tg.answerCallbackQuery(cb.id, tr(lang, "Worktree không còn.", "The worktree no longer exists."));
+      answer(tr(lang, "Worktree không còn.", "The worktree no longer exists."));
       return;
     }
     const wt = w.worktree;
@@ -1856,7 +1888,7 @@ export class Orchestrator {
       const shared = worktreeSharedBy(this.h.st, conv, wt.root);
       if (shared.length) {
         const names = shared.map((k) => this.h.st.peek(k)?.worker?.name ?? k).join(", ");
-        await this.h.tg.answerCallbackQuery(cb.id, tr(lang,
+        answer(tr(lang,
           `⚠️ Worktree đang dùng chung với worker ${names} — xoá/merge ở đây sẽ làm mất thư mục của worker đó. Hãy thao tác từ topic của nó.`,
           `⚠️ This worktree is shared with worker ${names} — removing or merging it here would delete that worker's directory. Manage it from that worker's topic instead.`,
         ));
@@ -1864,10 +1896,10 @@ export class Orchestrator {
       }
     }
     if (BUSY.includes(w.status) && op !== "diff") {
-      await this.h.tg.answerCallbackQuery(cb.id, tr(lang, "Worker đang chạy — /kill hoặc chờ xong rồi thử lại.", "The worker is running — /kill or wait for it to finish and try again."));
+      answer(tr(lang, "Worker đang chạy — /kill hoặc chờ xong rồi thử lại.", "The worker is running — /kill or wait for it to finish and try again."));
       return;
     }
-    await this.h.tg.answerCallbackQuery(cb.id);
+    answer();
     try {
       if (op === "diff") {
         await this.h.sendHtml(conv, `${tr(lang, `📄 <b>Diff ${esc(wt.branch)}</b> so với`, `📄 <b>Diff ${esc(wt.branch)}</b> vs`)} <code>${esc(wt.base)}</code>\n<pre>${esc(await diffSummary(wt))}</pre>`);
@@ -1878,7 +1910,7 @@ export class Orchestrator {
         // only the worktree directory is removed; an unmerged branch is kept.
         // So the user loses nothing here, which the warning must say correctly.
         await this.h.sendHtml(conv, tr(lang, "⚠️ Xoá worktree sẽ <b>commit các thay đổi chưa commit vào nhánh</b> của worker rồi xoá thư mục worktree (nhánh chưa merge vẫn được giữ — không mất gì). Chắc chắn?", "⚠️ Deleting the worktree will <b>commit uncommitted changes to the worker branch</b>, then remove the worktree directory (the unmerged branch is kept — nothing lost). Sure?"), {
-          reply_markup: { inline_keyboard: [[{ text: tr(lang, "🗑 Xoá thật", "🗑 Delete for real"), callback_data: `wt:${w.name}:rmok` }, { text: tr(lang, "Thôi", "No, keep"), callback_data: `wt:${w.name}:keep` }]] },
+          reply_markup: { inline_keyboard: [[{ text: tr(lang, "🗑 Xoá thật", "🗑 Delete for real"), callback_data: wtCb.encode({ name: w.name, op: "rmok" }) }, { text: tr(lang, "Thôi", "No, keep"), callback_data: wtCb.encode({ name: w.name, op: "keep" }) }]] },
         });
       } else if (op === "rmok") {
         let msg: string;

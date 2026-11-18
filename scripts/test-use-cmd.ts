@@ -113,7 +113,7 @@ const conv = "42";
   const { bot, interrupted, st } = makeBot();
   st.set(conv, { sessionID: "ses_A" });
   (bot as any).inflight.set(conv, new AbortController());
-  await (bot as any).handleUseCallback({ id: "cb1", data: "use:ses_B", from: { id: 1 } }, conv, 7);
+  await (bot as any).handleUseCallback({ id: "cb1", data: "use:ses_B", from: { id: 1 } }, conv, (t) => void (bot as any).tg.answerCallbackQuery("cb1", t), 7);
   check("callback /use → oc.interrupt awaited for the OLD session", interrupted.length === 1 && interrupted[0] === "ses_A", JSON.stringify(interrupted));
   check("callback /use → state switched to B", st.get(conv).sessionID === "ses_B", st.get(conv).sessionID);
 }
@@ -123,7 +123,7 @@ const conv = "42";
   const { bot, answered, interrupted, st } = makeBot();
   st.set(conv, { sessionID: "ses_A" });
   (bot as any).inflight.set(conv, new AbortController());
-  await (bot as any).handleUseCallback({ id: "cb2", data: "use:ses_gone", from: { id: 1 } }, conv, 7);
+  await (bot as any).handleUseCallback({ id: "cb2", data: "use:ses_gone", from: { id: 1 } }, conv, (t) => void (bot as any).tg.answerCallbackQuery("cb2", t), 7);
   check("stale callback → toast error mentioning the id", answered.some((t) => /Không có session|No session/.test(t) && t.includes("ses_gone")), JSON.stringify(answered));
   check("stale callback → state unchanged (still A)", st.get(conv).sessionID === "ses_A", st.get(conv).sessionID);
   check("stale callback → no interrupt sent", interrupted.length === 0, JSON.stringify(interrupted));

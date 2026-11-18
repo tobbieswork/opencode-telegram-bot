@@ -9,6 +9,7 @@ import { Schedule, SchedSpec, formatSchedule, nextRunAfter, parseScheduleSpec } 
 import { esc } from "../format.js";
 import { errorText, tr } from "../i18n.js";
 import { isUnderRoot } from "../fsbrowser.js";
+import { defineCallback } from "../callbacks.js";
 import { AGENT_WHITELIST } from "../shared.js";
 import type { Keyboard } from "../shared.js";
 
@@ -35,6 +36,23 @@ function creatorAllowed(bot: Bot, sch: Schedule): boolean {
   return bot.cfg.allowedUserIds.includes(sch.createdBy);
 }
 
+/**
+ * The `sch:` callback def (docs/sdd/callback-registry.md — T4 migration).
+ * Wire form: `sch:<op>:<id>` (op = p/r/run/d/dy, id = 4-char base36 schedule
+ * id) and `sch:ls` (re-list; no id).
+ */
+export const schCb = defineCallback<{ op: string; id?: string }>({
+  prefix: "sch",
+  encode: (a) => (a.id === undefined ? `sch:${a.op}` : `sch:${a.op}:${a.id}`),
+  decode: (rest) => {
+    const i = rest.indexOf(":");
+    const op = i === -1 ? rest : rest.slice(0, i);
+    if (op === "") return null;
+    const id = i === -1 ? "" : rest.slice(i + 1);
+    return { op, id: id === "" ? undefined : id };
+  },
+});
+
 /** The list view: one line + one button row per schedule (⏸/▶ · ▶▶ · 🗑). */
 function scheduleListMarkup(bot: Bot, mine: Schedule[], lang: Lang): { html: string; kb: Keyboard } {
   const fmtNext = (ms: number) =>
@@ -46,9 +64,9 @@ function scheduleListMarkup(bot: Bot, mine: Schedule[], lang: Lang): { html: str
     return `${paused}${formatSchedule(s)}${status}${next}`;
   });
   const rows = mine.map((s) => [
-    { text: s.enabled ? "⏸" : "▶", callback_data: `sch:${s.enabled ? "p" : "r"}:${s.id}` },
-    { text: "▶▶", callback_data: `sch:run:${s.id}` },
-    { text: "🗑", callback_data: `sch:d:${s.id}` },
+    { text: s.enabled ? "⏸" : "▶", callback_data: schCb.encode({ op: s.enabled ? "p" : "r", id: s.id }) },
+    { text: "▶▶", callback_data: schCb.encode({ op: "run", id: s.id }) },
+    { text: "🗑", callback_data: schCb.encode({ op: "d", id: s.id }) },
   ]);
   return { html: `<b>⏰ ${tr(lang, "Lịch", "Schedules")} (${mine.length})</b>\n${lines.join("\n")}`, kb: { inline_keyboard: rows } };
 }
@@ -247,12 +265,12 @@ async function scheduleRun(bot: Bot, conv: ConvKey, id: string): Promise<void> {
 }
 
 /** Schedule button taps: sch:p/sch:r (pause/resume) · sch:run · sch:d/sch:dy (rm, 2-step) · sch:ls (re-list). */
-export async function handleScheduleCallback(bot: Bot, cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+export async function handleScheduleCallback(bot: Bot, cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
   const lang = bot.userPrefs.getLang(cb.from?.id ?? "");
   const [, op, id] = (cb.data ?? "").split(":");
   // Re-list after a confirm/cancel — no schedule id involved.
   if (op === "ls") {
-    await bot.tg.answerCallbackQuery(cb.id);
+    answer();
     if (!messageId) return;
     const mine = bot.scheduleStore.load().filter((s) => s.conv === conv);
     const v = mine.length
@@ -262,16 +280,16 @@ export async function handleScheduleCallback(bot: Bot, cb: CallbackQuery, conv: 
     return;
   }
   if (!/^[a-z0-9]{4}$/.test(id ?? "")) {
-    await bot.tg.answerCallbackQuery(cb.id, tr(lang, "⏰ Id không hợp lệ", "⏰ Invalid id"));
+    answer(tr(lang, "⏰ Id không hợp lệ", "⏰ Invalid id"));
     return;
   }
   const sch = bot.scheduleStore.get(id);
   if (!sch || sch.conv !== conv) {
-    await bot.tg.answerCallbackQuery(cb.id, tr(lang, "⏰ Không tìm thấy lịch này của chat", "⏰ No such schedule in this chat"));
+    answer(tr(lang, "⏰ Không tìm thấy lịch này của chat", "⏰ No such schedule in this chat"));
     return;
   }
   if (!creatorAllowed(bot, sch)) {
-    await bot.tg.answerCallbackQuery(cb.id, tr(lang, "⛔ Người tạo không còn trong allowlist", "⛔ Creator no longer on the allowlist"));
+    answer(tr(lang, "⛔ Người tạo không còn trong allowlist", "⛔ Creator no longer on the allowlist"));
     return;
   }
   switch (op) {
@@ -279,7 +297,7 @@ export async function handleScheduleCallback(bot: Bot, cb: CallbackQuery, conv: 
     case "r": {
       const enable = op === "r";
       bot.scheduleStore.set(id, { enabled: enable });
-      await bot.tg.answerCallbackQuery(cb.id, enable ? tr(lang, `▶ Đã bật lại #${id}`, `▶ Resumed #${id}`) : tr(lang, `⏸ Đã dừng #${id}`, `⏸ Paused #${id}`));
+      answer(enable ? tr(lang, `▶ Đã bật lại #${id}`, `▶ Resumed #${id}`) : tr(lang, `⏸ Đã dừng #${id}`, `⏸ Paused #${id}`));
       if (messageId) {
         const mine = bot.scheduleStore.load().filter((s) => s.conv === conv);
         const v = mine.length
@@ -290,7 +308,7 @@ export async function handleScheduleCallback(bot: Bot, cb: CallbackQuery, conv: 
       return;
     }
     case "run": {
-      await bot.tg.answerCallbackQuery(cb.id, tr(lang, `▶▶ Đang chạy #${id}…`, `▶▶ Running #${id}…`));
+      answer(tr(lang, "▶▶ Đang chạy #${id}…", "▶▶ Running #${id}…"));
       try {
         await bot.orch.runScheduled(conv, sch);
       } catch (e) {
@@ -300,13 +318,13 @@ export async function handleScheduleCallback(bot: Bot, cb: CallbackQuery, conv: 
     }
     case "d": {
       // Destructive — two-step confirm (like /reboot).
-      await bot.tg.answerCallbackQuery(cb.id);
+      answer();
       if (!messageId) return;
       const kb: Keyboard = {
         inline_keyboard: [
           [
-            { text: tr(lang, `🗑 Xoá #${id}`, `🗑 Delete #${id}`), callback_data: `sch:dy:${id}` },
-            { text: tr(lang, "↩️ Quay lại", "↩️ Back"), callback_data: "sch:ls" },
+            { text: tr(lang, `🗑 Xoá #${id}`, `🗑 Delete #${id}`), callback_data: schCb.encode({ op: "dy", id }) },
+            { text: tr(lang, "↩️ Quay lại", "↩️ Back"), callback_data: schCb.encode({ op: "ls" }) },
           ],
         ],
       };
@@ -317,7 +335,7 @@ export async function handleScheduleCallback(bot: Bot, cb: CallbackQuery, conv: 
     }
     case "dy": {
       bot.scheduleStore.remove(id);
-      await bot.tg.answerCallbackQuery(cb.id, tr(lang, `🗑 Đã xoá #${id}`, `🗑 Deleted #${id}`));
+      answer(tr(lang, "🗑 Đã xoá #${id}", "🗑 Deleted #${id}"));
       if (messageId) {
         await bot.tg
           .editMessageText(conv, messageId, tr(lang, `🗑 Đã xoá lịch <b>#${id}</b>. Dọn topic mồ côi bằng /prune.`, `🗑 Deleted schedule <b>#${id}</b>. Clean up the orphaned topic with /prune.`), { reply_markup: { inline_keyboard: [] } })
@@ -326,6 +344,6 @@ export async function handleScheduleCallback(bot: Bot, cb: CallbackQuery, conv: 
       return;
     }
     default:
-      await bot.tg.answerCallbackQuery(cb.id);
+      answer();
   }
 }
