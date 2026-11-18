@@ -10,7 +10,7 @@ import { ConvKey, chatOf, convKey, parseConv } from "./conv.js";
 import { McpBridge, BridgeTool, makeRunScriptTool } from "./mcp-bridge.js";
 import { addWorktree, diffSummary, gitBoundary, gitRoot, gitStatusBrief, mergeWorktree, removeWorktree, resolveBaseBranch, runGit } from "./worktree.js";
 import { parseSpec, type ParsedTask } from "./spec.js";
-import { classifyShellItems, computeNotRan, renderCheckpointCard, checkpointOutcome } from "./spec-checkpoint.js";
+import { classifyShellItems, computeNotRan, renderCheckpointCard, checkpointOutcome, EXPECTED_CHECKS } from "./spec-checkpoint.js";
 import { managerSpecAccept, managerSpecAuto, managerSpecList, managerSpecRun } from "./commands/spec.js";
 import type { Bot } from "./bot.js";
 import { listDirs } from "./fsbrowser.js";
@@ -1205,7 +1205,11 @@ export class Orchestrator {
         }
       }
     }
-    const ran = classifyShellItems(items).ran;
+    // S3.2: the checkpoint's checks are the canonical verify checks
+    // (typecheck / test:unit / smoke) — the worker's exploratory shell calls
+    // are not checks, so a failing grep must not fail the run (2026-11-18:
+    // callback-registry T4 was checkpointed "fail" this way).
+    const ran = classifyShellItems(items, EXPECTED_CHECKS).ran;
     const notRan = computeNotRan(ran);
     const errored = status === "failed" || status === "stopped" || ran.some((c) => c.error !== undefined);
 
