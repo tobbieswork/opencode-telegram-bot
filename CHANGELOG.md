@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.44.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.44.0...opencode-telegram-bot-v1.44.1) (2026-11-18)
+
+
+### Bug Fixes
+
+* spec manager tools get the real Bot via a Host back-reference (this.h is a Host object, not the Bot) ([dc68eb6](https://github.com/tobbieswork/opencode-telegram-bot/commit/dc68eb6884edb00d3469d00c1c4be450cca89237))
+* spec manager tools need the real Bot (Host back-reference) ([df60dc3](https://github.com/tobbieswork/opencode-telegram-bot/commit/df60dc3eb510227b63e34f26d39266c6f704fbb0))
+
 ## [1.44.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.43.0...opencode-telegram-bot-v1.44.0) (2026-11-18)
 
 
