@@ -15,7 +15,6 @@
  * line under the message.
  */
 import { esc, trunc } from "../format.js";
-import { STRINGS, tr } from "../i18n.js";
 import type { Lang } from "../state.js";
 import { UI_ICON } from "./icons.js";
 
@@ -46,9 +45,15 @@ export function okLine(lang: Lang, msg: Text, limit: number = MSG_LIMIT): string
   return trunc(`${UI_ICON.success} ${render(msg)}`, limit);
 }
 
-/** "❌ Lỗi: <msg>" / "❌ Error: <msg>", with an optional hint line (M3.3). */
+/** "❌ <msg>", with an optional hint line (M3.3).
+ *
+ * Bare icon + text — the shape of 76 of the 77 ❌ message sites (T1 count).
+ * A message that carries a label (e.g. "❌ Lỗi: …") passes the label as part
+ * of `msg`. `lang` is kept for a uniform helper API (M3.1); this helper's
+ * wording is language-neutral. */
 export function errorLine(lang: Lang, msg: Text, hint?: Text, limit: number = MSG_LIMIT): string {
-  let out = tr(lang, STRINGS.error_prefix.vi, STRINGS.error_prefix.en) + render(msg);
+  void lang; // wording is language-neutral; kept for a uniform (lang, …) API (M3.1)
+  let out = `${UI_ICON.error} ${render(msg)}`;
   if (hint !== undefined) out += `\n<i>${render(hint)}</i>`;
   return trunc(out, limit);
 }

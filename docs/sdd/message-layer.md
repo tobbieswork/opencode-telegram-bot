@@ -61,7 +61,7 @@ New folder `src/ui/`:
 Example (illustrative):
 
 ```ts
-errorLine(lang, "Unknown agent: " + id)   // "❌ Lỗi: Unknown agent: &lt;...&gt;" / "❌ Error: ..."
+errorLine(lang, "Unknown agent: " + id)   // "❌ Unknown agent: &lt;...&gt;" — bare icon, language-neutral
 confirmKeyboard(lang, { yes: cb.encode({...}), no: cb.encode({...}) })
 ```
 
@@ -219,7 +219,7 @@ The `<pre><code>` in `format.ts:215,262` is inside `mdToHtmlChunks` itself
 
 | Helper | Shape | Uses | Decision |
 |---|---|---|---|
-| `errorLine` | ❌-prefixed message | 77 | keep |
+| `errorLine` | ❌-prefixed message (bare "❌ <msg>", language-neutral — decided 2026-11-18, 76/77 sites are bare) | 77 | keep |
 | `warnLine` | ⚠️-prefixed message | 46 | keep |
 | `okLine` | ✅-prefixed message | 35 | keep |
 | `statusLine` | ⏳-prefixed message | 12 | keep |

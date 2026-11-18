@@ -55,17 +55,17 @@ function check(name: string, cond: boolean, detail?: string): void {
 {
   check("okLine: prefix + plain text escaped", okLine("vi", "a<b>&c") === "✅ a&lt;b&gt;&amp;c");
   check("okLine: raw passes through", okLine("vi", raw("Model <b>x</b>")) === "✅ Model <b>x</b>");
-  check("errorLine vi: prefix + escaped msg", errorLine("vi", "đường <lỗi>") === "❌ Lỗi: đường &lt;lỗi&gt;");
-  check("errorLine en: prefix", errorLine("en", "boom") === "❌ Error: boom");
+  check("errorLine: bare prefix + escaped msg", errorLine("vi", "đường <lỗi>") === "❌ đường &lt;lỗi&gt;");
+  check("errorLine: bare prefix (language-neutral)", errorLine("en", "boom") === "❌ boom");
   check("warnLine: prefix + escaped", warnLine("vi", "a<b>") === "⚠️ a&lt;b&gt;");
   check("statusLine: prefix", statusLine("en", "working") === "⏳ working");
 }
 
 // ── hint (M3.3) ──────────────────────────────────────────────────────────────
 {
-  check("errorLine: hint on its own italic line", errorLine("vi", "boom", "gửi /new") === "❌ Lỗi: boom\n<i>gửi /new</i>");
-  check("errorLine: hint escaped", errorLine("vi", "boom", "a<b>") === "❌ Lỗi: boom\n<i>a&lt;b&gt;</i>");
-  check("errorLine: raw hint passes through", errorLine("vi", "boom", raw("<code>/new</code>")) === "❌ Lỗi: boom\n<i><code>/new</code></i>");
+  check("errorLine: hint on its own italic line", errorLine("vi", "boom", "gửi /new") === "❌ boom\n<i>gửi /new</i>");
+  check("errorLine: hint escaped", errorLine("vi", "boom", "a<b>") === "❌ boom\n<i>a&lt;b&gt;</i>");
+  check("errorLine: raw hint passes through", errorLine("vi", "boom", raw("<code>/new</code>")) === "❌ boom\n<i><code>/new</code></i>");
   check("warnLine: hint", warnLine("en", "slow", "wait") === "⚠️ slow\n<i>wait</i>");
   check("okLine: no hint parameter", okLine("vi", "done") === "✅ done");
 }
@@ -93,7 +93,7 @@ function check(name: string, cond: boolean, detail?: string): void {
 // ── purity (M3.1) ────────────────────────────────────────────────────────────
 {
   check("pure: same input twice → same output", errorLine("vi", "m", "h") === errorLine("vi", "m", "h"));
-  check("lang is a real parameter, not global state", errorLine("en", "m") !== errorLine("vi", "m"));
+  check("errorLine: bare shape is language-neutral", errorLine("en", "m") === errorLine("vi", "m"));
 }
 
 // ── T4 pilot golden bytes (agents.ts + meta.ts, byte-identical) ─────────────
