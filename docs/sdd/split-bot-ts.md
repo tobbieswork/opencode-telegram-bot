@@ -205,7 +205,7 @@ the pure-helper test + a live run (no direct `bot.ts` unit test).
 4. [x] (3ca575a) **T4 Medium modules:** `model`, `admin`. *Checkpoint: try the buttons in Telegram.*
 5. [x] (a9c6a84) **T5 Large modules:** `session`, `browse`. *Checkpoint: try the folder browser and `/new` in Telegram.*
 6. [x] (7f7cb89) **T6 `prompt-runner`.** Move last. *Checkpoint: run a real turn, queue and stop.*
-7. [ ] **T7 Cleanup.** Remove dead imports, check the size targets (S2.4), update `README.md` architecture notes if any.
+7. [x] (d9aa43b) **T7 Cleanup.** Remove dead imports, check the size targets (S2.4), update `README.md` architecture notes if any.
 8. [ ] **T8 End-to-end.** `npm run smoke` once at the end, then restart the service (`systemctl --user restart opencode-bot`) and check the journal.
 
 Verification order for every task: `npm run typecheck` and `npm run test:unit` first, `npm run smoke` once at the end.
