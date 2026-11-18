@@ -5,8 +5,15 @@ import type { ConvKey } from "../conv.js";
 import { esc, trunc } from "../format.js";
 import { warn, error } from "../logger.js";
 import { tr } from "../i18n.js";
+import { oneArg } from "../callbacks.js";
 import { AGENT_WHITELIST } from "../shared.js";
 import type { Btn } from "../shared.js";
+
+/**
+ * The `agent:` callback def (docs/sdd/callback-registry.md — T4 migration).
+ * Wire form: `agent:<id|close>` (id = an agent id from the /agent picker).
+ */
+export const agentCb = oneArg("agent");
 
 export async function cmdAgents(bot: Bot, conv: ConvKey): Promise<void> {
   const agents = await bot.oc.listAgents();
@@ -54,10 +61,10 @@ function sendAgentPicker(bot: Bot, conv: ConvKey, errorNote?: string, lang: Lang
   const rows: Btn[][] = [];
   for (let i = 0; i < AGENT_WHITELIST.length; i += 2) {
     rows.push(
-      AGENT_WHITELIST.slice(i, i + 2).map((id) => ({ text: `${cur === id ? "▶️ " : ""}${id}`, callback_data: `agent:${id}` })),
+      AGENT_WHITELIST.slice(i, i + 2).map((id) => ({ text: `${cur === id ? "▶️ " : ""}${id}`, callback_data: agentCb.encode(id) })),
     );
   }
-  rows.push([{ text: tr(lang, "❌ Đóng", "❌ Close"), callback_data: "agent:close" }]);
+  rows.push([{ text: tr(lang, "❌ Đóng", "❌ Close"), callback_data: agentCb.encode("close") }]);
   return bot.tg.sendMessage(
     conv,
     [errorNote ?? tr(lang, "❓ <b>/agent</b> cần tên agent", "❓ <b>/agent</b> needs an agent name"), tr(lang, "Hoặc gửi: <code>/agent &lt;id&gt;</code>", "Or send: <code>/agent &lt;id&gt;</code>")].join("\n"),
@@ -66,18 +73,18 @@ function sendAgentPicker(bot: Bot, conv: ConvKey, errorNote?: string, lang: Lang
 }
 
 /** Handle a tap on the /agent picker (data = `agent:<id|close>`). */
-export async function handleAgentCallback(bot: Bot, cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+export async function handleAgentCallback(bot: Bot, cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
   const id = (cb.data ?? "").slice("agent:".length);
   if (id === "close") {
-    await bot.tg.answerCallbackQuery(cb.id);
+    answer();
     if (messageId) await bot.tg.deleteMessage(conv, messageId).catch(() => {});
     return;
   }
   try {
     const how = await applyAgent(bot, conv, id);
-    await bot.tg.answerCallbackQuery(cb.id, `Agent → ${id}`);
+    answer(`Agent → ${id}`);
     if (messageId) await bot.tg.editMessageText(conv, messageId, `✅ Agent → <code>${esc(id)}</code> (${how})`).catch(() => {});
   } catch (e) {
-    await bot.tg.answerCallbackQuery(cb.id, `⚠️ ${(e as Error).message}`);
+    answer(`⚠️ ${(e as Error).message}`);
   }
 }

@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
+import { defineCallback } from "./callbacks.js";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Telegram, CallbackQuery, TOPIC_COLORS } from "./telegram.js";
 import { OpenCodeCtl, userText } from "./opencode.js";
@@ -218,6 +219,18 @@ interface Approval {
  * src/orchestrator/*, which take the Orchestrator as their first argument. Don't use
  * them elsewhere.
  */
+/**
+ * The `kill:` callback def (docs/sdd/callback-registry.md — T4 migration).
+ * Wire form: `kill:<name|close>` (name = a worker name; the whole tail after
+ * the prefix is the name, so a name containing ":" still round-trips, as
+ * with the legacy slice-based decode).
+ */
+export const killCb = defineCallback<string>({
+  prefix: "kill",
+  encode: (name) => `kill:${name}`,
+  decode: (rest) => (rest === "" ? null : rest),
+});
+
 export class Orchestrator {
   private bridge?: McpBridge;
   private approvals = new Map<string, Approval>();
@@ -525,8 +538,8 @@ export class Orchestrator {
       await this.h.sendHtml(conv, tr(lang, "Không có worker nào — /spawn để tạo.", "No workers — /spawn to create one."));
       return;
     }
-    const rows: Btn[][] = workers.map((w) => [{ text: `${ICON[w.status]} ${w.name}`, callback_data: `kill:${w.name}` }]);
-    rows.push([{ text: tr(lang, "❌ Đóng", "❌ Close"), callback_data: "kill:close" }]);
+    const rows: Btn[][] = workers.map((w) => [{ text: `${ICON[w.status]} ${w.name}`, callback_data: killCb.encode(w.name) }]);
+    rows.push([{ text: tr(lang, "❌ Đóng", "❌ Close"), callback_data: killCb.encode("close") }]);
     await this.h.sendHtml(
       conv,
       [errorNote ?? tr(lang, "❓ <b>/kill</b> cần tên worker", "❓ <b>/kill</b> needs a worker name"), tr(lang, "Bấm để dừng worker:", "Tap to stop a worker:"), tr(lang, "Hoặc gửi: <code>/kill &lt;tên&gt;</code>", "Or send: <code>/kill &lt;name&gt;</code>")].join("\n"),
@@ -538,21 +551,21 @@ export class Orchestrator {
    * Handle a tap on the /kill picker (data = `kill:<name|close>`). Public because
    * it is dispatched from Bot.handleCallback, like the other orchestrator callbacks.
    */
-  async handleKillCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+  async handleKillCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
     const lang = this.h.userPrefs?.getLang(cb.from?.id ?? "") ?? "vi";
     const name = (cb.data ?? "").slice("kill:".length);
     if (name === "close") {
-      await this.h.tg.answerCallbackQuery(cb.id);
+      answer();
       if (messageId) await this.h.tg.deleteMessage(conv, messageId).catch(() => {});
       return;
     }
     const found = this.h.st.findWorker(chatOf(conv), name);
     if (!found) {
-      await this.h.tg.answerCallbackQuery(cb.id, tr(lang, "Worker không còn tồn tại.", "The worker no longer exists."));
+      answer(tr(lang, "Worker không còn tồn tại.", "The worker no longer exists."));
       if (messageId) await this.h.tg.editMessageText(conv, messageId, tr(lang, "⌛ Worker không còn tồn tại — /board để xem lại.", "⌛ The worker no longer exists — /board to refresh."), { reply_markup: { inline_keyboard: [] } }).catch(() => {});
       return;
     }
-    await this.h.tg.answerCallbackQuery(cb.id, tr(lang, `Dừng ${name}`, `Stopping ${name}`));
+    answer(tr(lang, `Dừng ${name}`, `Stopping ${name}`));
     const msg = await this.stopWorker(found[0], true);
     if (messageId) await this.h.tg.editMessageText(conv, messageId, msg).catch(() => {});
   }
@@ -1672,7 +1685,7 @@ export class Orchestrator {
       return true;
     }
     if (data.startsWith("prune:")) {
-      await handlePruneCallback(this, cb, conv, messageId);
+      await handlePruneCallback(this, cb, conv, (t) => void this.h.tg.answerCallbackQuery(cb.id, t), messageId);
       return true;
     }
     return false;
