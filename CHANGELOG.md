@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.44.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.44.1...opencode-telegram-bot-v1.44.2) (2026-11-18)
+
+
+### Bug Fixes
+
+* spec_auto tool reports refused accepts ([9c120df](https://github.com/tobbieswork/opencode-telegram-bot/commit/9c120df9e679c4dd8a6f0870e4461926068d2c75))
+* spec_auto tool reports refused accepts (specAuto returns the accept result) ([0f422f8](https://github.com/tobbieswork/opencode-telegram-bot/commit/0f422f82c191a19b0e492ea73eae2a37b0e8bf15))
+
 ## [1.44.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.44.0...opencode-telegram-bot-v1.44.1) (2026-11-18)
 
 
