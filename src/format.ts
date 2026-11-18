@@ -1,14 +1,9 @@
-import type { WorkerStatus, Lang } from "./state.js";
+import type { Lang } from "./state.js";
 import { tr } from "./i18n.js";
 
-export const ICON: Record<WorkerStatus, string> = {
-  idle: "💤",
-  running: "🟢",
-  waiting: "🟡",
-  done: "✅",
-  failed: "❌",
-  stopped: "⏹",
-};
+/** Worker status → icon (lives in src/ui/icons.ts now; re-exported until the
+ * call sites move there — message-layer spec, M1.1). */
+export { ICON } from "./ui/icons.js";
 
 /** Escape text for Telegram HTML parse mode. */
 export function esc(s: string): string {
