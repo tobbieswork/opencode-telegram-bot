@@ -75,7 +75,7 @@ export function dispatchCallback(ctx, cb): Promise<boolean>; // false = not in r
 2. [x] (55acd8d) **T2 Registry core** (C1, C2.1-C2.4). `src/callbacks.ts`, `scripts/test-callbacks.ts` added to `test:unit`. Dispatcher tries registry, then old chain (C3.2). No prefix migrated yet. *Checkpoint: review the API.*
 3. [x] (b5ac10c) **T3 Pilot migration:** `pb`, `ch`, `cont`, `reboot` with round-trip tests including a captured real callback string each. *Checkpoint: try the buttons in Telegram.*
 4. [x] (6c32b03) **T4 Migrate the rest** in groups of 3-4 prefixes (`mode`, `agent`, `variant`, `mdl`; then `perm`, `rot`, `kill`, `prune`; then `nw`, `use`, `fq`, `cmd`, `sch`, `wt`, `ap`, `q`). *Checkpoint after each group.*
-5. [ ] **T5 Migrate `bs:`** (the browser menu and its sub-actions). *Checkpoint: browse folders and pick a session in Telegram.*
+5. [x] (1dcaf55) **T5 Migrate `bs:`** (the browser menu and its sub-actions). *Checkpoint: browse folders and pick a session in Telegram.*
 6. [ ] **T6 Remove the old chain** and add a startup self-check that lists registered prefixes (C1.2). *Checkpoint: read the startup log.*
 7. [ ] **T7 End-to-end.** `npm run smoke` once at the end, then restart the service and check the journal.
 
