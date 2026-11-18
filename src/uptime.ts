@@ -83,7 +83,6 @@ export function shouldRemindAboutReboot(p: {
   return p.now - p.lastReminderMs >= p.remindIntervalMs;
 }
 
-import { tr } from "./i18n.js";
 import type { Lang } from "./state.js";
 
 /** Human-readable uptime: "43 ngày 2 giờ" / "7 giờ" / "12 phút" (EN: "43d 2h" …). */

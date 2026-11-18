@@ -27,7 +27,6 @@ import { richMarkdownChunks } from "./rich.js";
 import { redactSecrets } from "./redact.js";
 import { extractTrailingChoices, extractOptionsMarker, choiceKeyboard, registry } from "./choices.js";
 import { scheduleForRegistration, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
-import { isAlreadyResolvedPermissionError } from "./perm.js";
 import { onPermissionAsked, onPermissionResolved, handlePermissionCallback } from "./commands/permission.js";
 import {
   cmdNew,
@@ -61,9 +60,9 @@ import {
 } from "./reactions.js";
 import { continueButtonLabel, shouldOfferContinue, continueCallbackData, alreadyOfferedContinue } from "./continue.js";
 import { GhPrLike, PrSnapshot, PrState, diffSnapshots, renderEvent, updatePrSnapshot } from "./pr-watch.js";
-import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, rebootGoData } from "./uptime.js";
+import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay } from "./uptime.js";
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
-import { DraftState, DraftAction, onTextDelta, onToolStart, isDmConv, EDIT_BUDGET } from "./stream.js";
+import { DraftState, onTextDelta, onToolStart, isDmConv, EDIT_BUDGET } from "./stream.js";
 import { myCommands } from "./commands.js";
 import { NOTE_CB_PREFIX, BusyNoteStore } from "./notes.js";
 import { QueueStore } from "./queue.js";
