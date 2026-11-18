@@ -28,6 +28,8 @@ import { gitRoot, ensureSpecWorktree, resolveBaseBranch, runGit, specBranchName,
 import { ghApi, githubRepoSlug, ghPrReady } from "../github.js";
 import { parseSpec, initMarkers, markTask, type ParsedTask } from "../spec.js";
 import { buildTaskPrompt } from "../spec-prompt.js";
+import { singleButton } from "../ui/keyboards.js";
+import { errorLine, okLine, raw, statusLine, warnLine } from "../ui/text.js";
 import { warn } from "../logger.js";
 import { NAME_RE as WORKER_NAME_RE, BUSY } from "../orchestrator.js";
 import { classifyShellItems, workerCommitsSinceFork } from "../spec-checkpoint.js";
@@ -184,7 +186,7 @@ function detailText(lang: Lang, title: string, tasks: ParsedTask[]): string {
     lines.push("");
     lines.push(
       done === tasks.length
-        ? "✅ " + tr(lang, "Tất cả tasks đã xong.", "All tasks done.")
+        ? okLine(lang, tr(lang, "Tất cả tasks đã xong.", "All tasks done."))
         : "⛔ " + tr(lang, "Không còn task chạy được — các task còn lại đang bị chặn.", "No runnable task left — the rest are blocked.")
     );
   }
@@ -192,7 +194,7 @@ function detailText(lang: Lang, title: string, tasks: ParsedTask[]): string {
 }
 
 function errorDetailText(lang: Lang, title: string, name: string, error: { line: number; message: string }): string {
-  const head = tr(lang, "⚠️ <b>Không phân tích được spec này</b>", "⚠️ <b>This spec could not be parsed</b>");
+  const head = warnLine(lang, raw(tr(lang, "<b>Không phân tích được spec này</b>", "<b>This spec could not be parsed</b>")));
   const file = `📄 <code>${esc(name)}.md</code> — <b>${esc(title)}</b>`;
   const line = error.line > 0 ? `📍 ${error.line}: ${esc(error.message)}` : esc(error.message);
   return `${head}\n${file}\n${line}`;
@@ -322,11 +324,7 @@ async function specRunSpawn(
     await bot.tg
       .sendMessage(
         conv,
-        tr(
-          lang,
-          `❌ Tên spec ${esc(name)} không dùng làm tên worker được (spec-${esc(name)}): chỉ a-z, 0-9, gạch ngang, tối đa 19 ký tự.`,
-          `❌ Spec name ${esc(name)} can't be a worker name (spec-${esc(name)}): a-z, 0-9, hyphen only, max 19 chars.`,
-        ),
+        errorLine(lang, raw(tr(lang, `Tên spec ${esc(name)} không dùng làm tên worker được (spec-${esc(name)}): chỉ a-z, 0-9, gạch ngang, tối đa 19 ký tự.`, `Spec name ${esc(name)} can't be a worker name (spec-${esc(name)}): a-z, 0-9, hyphen only, max 19 chars.`))),
       )
       .catch(() => {});
     return;
@@ -417,7 +415,7 @@ async function specRunSpawn(
   // Roll back the claim so the spec isn't wedged by a failed spawn.
   bot.orch.releaseSpecRun(chat, name, workerName);
   await bot.tg
-    .sendMessage(conv, tr(lang, `❌ Không chạy được: ${esc((lastErr as Error).message)}`, `❌ Couldn't run it: ${esc((lastErr as Error).message)}`))
+    .sendMessage(conv, errorLine(lang, raw(tr(lang, `Không chạy được: ${esc((lastErr as Error).message)}`, `Couldn't run it: ${esc((lastErr as Error).message)}`))))
     .catch(() => {});
 }
 
@@ -446,22 +444,22 @@ async function specRunFirstTap(bot: Bot, cb: CallbackQuery, conv: ConvKey, name:
   try {
     md = readFileSync(join(root, "docs", "sdd", `${name}.md`), "utf8");
   } catch {
-    await bot.tg.sendMessage(conv, tr(lang, `❌ Không tìm thấy spec ${esc(name)} trong docs/sdd.`, `❌ Spec ${esc(name)} not found in docs/sdd.`));
+    await bot.tg.sendMessage(conv, errorLine(lang, raw(tr(lang, `Không tìm thấy spec ${esc(name)} trong docs/sdd.`, `Spec ${esc(name)} not found in docs/sdd.`))));
     return;
   }
   const res = parseSpec(md);
   if ("error" in res) {
-    await bot.tg.sendMessage(conv, tr(lang, "❌ Spec này không phân tích được — không chạy được.", "❌ This spec can't be parsed — it can't be run."));
+    await bot.tg.sendMessage(conv, errorLine(lang, tr(lang, "Spec này không phân tích được — không chạy được.", "This spec can't be parsed — it can't be run.")));
     return;
   }
   const task = res.tasks.find((t) => t.n === n);
   if (!task) {
-    await bot.tg.sendMessage(conv, tr(lang, "❌ Không tìm thấy task này trong spec.", "❌ Task not found in the spec."));
+    await bot.tg.sendMessage(conv, errorLine(lang, tr(lang, "Không tìm thấy task này trong spec.", "Task not found in the spec.")));
     return;
   }
   // S2.5: a done task is never run.
   if (task.marker === "done") {
-    await bot.tg.sendMessage(conv, tr(lang, `✅ Task ${esc(task.id)} đã xong — không chạy lại.`, `✅ Task ${esc(task.id)} is already done — not re-running.`));
+    await bot.tg.sendMessage(conv, okLine(lang, raw(tr(lang, `Task ${esc(task.id)} đã xong — không chạy lại.`, `Task ${esc(task.id)} is already done — not re-running.`))));
     return;
   }
   if (task.needs) {
@@ -482,7 +480,7 @@ async function specRunFirstTap(bot: Bot, cb: CallbackQuery, conv: ConvKey, name:
       tr(lang, `⛔ Task <b>${esc(task.id)}</b> đang bị chặn: <i>${esc(task.needs)}</i>`, `⛔ Task <b>${esc(task.id)}</b> is blocked: <i>${esc(task.needs)}</i>`) +
         `\n${checkLine}\n` +
         tr(lang, "Bấm nếu bạn chắc chắn muốn chạy dù vậy:", "Tap if you're sure you want to run it anyway:"),
-      { reply_markup: { inline_keyboard: [[{ text: tr(lang, "▶️ Chạy dù vậy", "▶️ Run anyway"), callback_data: `specrunok:${name}:${n}` }]] } },
+      { reply_markup: singleButton({ text: tr(lang, "▶️ Chạy dù vậy", "▶️ Run anyway"), data: `specrunok:${name}:${n}` }) },
     );
     return;
   }
@@ -511,21 +509,21 @@ async function specRunSecondTap(bot: Bot, cb: CallbackQuery, conv: ConvKey, name
   try {
     md = readFileSync(join(root, "docs", "sdd", `${name}.md`), "utf8");
   } catch {
-    await bot.tg.sendMessage(conv, tr(lang, `❌ Không tìm thấy spec ${esc(name)} trong docs/sdd.`, `❌ Spec ${esc(name)} not found in docs/sdd.`));
+    await bot.tg.sendMessage(conv, errorLine(lang, raw(tr(lang, `Không tìm thấy spec ${esc(name)} trong docs/sdd.`, `Spec ${esc(name)} not found in docs/sdd.`))));
     return;
   }
   const res = parseSpec(md);
   if ("error" in res) {
-    await bot.tg.sendMessage(conv, tr(lang, "❌ Spec này không phân tích được — không chạy được.", "❌ This spec can't be parsed — it can't be run."));
+    await bot.tg.sendMessage(conv, errorLine(lang, tr(lang, "Spec này không phân tích được — không chạy được.", "This spec can't be parsed — it can't be run.")));
     return;
   }
   const task = res.tasks.find((t) => t.n === n);
   if (!task) {
-    await bot.tg.sendMessage(conv, tr(lang, "❌ Không tìm thấy task này trong spec.", "❌ Task not found in the spec."));
+    await bot.tg.sendMessage(conv, errorLine(lang, tr(lang, "Không tìm thấy task này trong spec.", "Task not found in the spec.")));
     return;
   }
   if (task.marker === "done") {
-    await bot.tg.sendMessage(conv, tr(lang, `✅ Task ${esc(task.id)} đã xong — không chạy lại.`, `✅ Task ${esc(task.id)} is already done — not re-running.`));
+    await bot.tg.sendMessage(conv, okLine(lang, raw(tr(lang, `Task ${esc(task.id)} đã xong — không chạy lại.`, `Task ${esc(task.id)} is already done — not re-running.`))));
     return;
   }
   await specRunSpawn(bot, conv, lang, uid, name, n, task, root, true);
@@ -550,7 +548,7 @@ async function noRunMessage(bot: Bot, conv: ConvKey, lang: Lang, name: string): 
   await bot.tg
     .sendMessage(
       conv,
-      tr(lang, `❌ Không tìm thấy run nào của spec ${esc(name)} — không có gì để xử lý.`, `❌ No run of spec ${esc(name)} found — nothing to act on.`),
+      errorLine(lang, raw(tr(lang, `Không tìm thấy run nào của spec ${esc(name)} — không có gì để xử lý.`, `No run of spec ${esc(name)} found — nothing to act on.`))),
     )
     .catch(() => {});
 }
@@ -585,17 +583,17 @@ async function specAccept(
   const w = s.worker!;
   if (BUSY.includes(w.status)) {
     await bot.tg
-      .sendMessage(conv, tr(lang, `⏳ Worker ${esc(w.name)} đang chạy — chờ nó xong trước khi chấp nhận.`, `⏳ Worker ${esc(w.name)} is still working — wait for it to finish before accepting.`))
+      .sendMessage(conv, statusLine(lang, raw(tr(lang, `Worker ${esc(w.name)} đang chạy — chờ nó xong trước khi chấp nhận.`, `Worker ${esc(w.name)} is still working — wait for it to finish before accepting.`))))
       .catch(() => {});
     return { ok: false };
   }
   if (w.status !== "done") {
     const msg =
       w.status === "failed"
-        ? tr(lang, `❌ Worker ${esc(w.name)} đã thất bại — không thể chấp nhận.`, `❌ The worker failed — it can't be accepted.`)
+        ? errorLine(lang, raw(tr(lang, `Worker ${esc(w.name)} đã thất bại — không thể chấp nhận.`, `The worker failed — it can't be accepted.`)))
         : w.status === "stopped"
           ? tr(lang, `⏹ Worker ${esc(w.name)} đã bị dừng — không thể chấp nhận.`, `⏹ The worker was stopped — it can't be accepted.`)
-          : tr(lang, `❌ Worker ${esc(w.name)} chưa xong — không thể chấp nhận.`, `❌ The worker is not finished — it can't be accepted.`);
+          : errorLine(lang, raw(tr(lang, `Worker ${esc(w.name)} chưa xong — không thể chấp nhận.`, `The worker is not finished — it can't be accepted.`)));
     await bot.tg.sendMessage(conv, msg).catch(() => {});
     return { ok: false };
   }
@@ -618,13 +616,13 @@ async function specAccept(
   const task = res.tasks.find((t) => t.n === n);
   if (!task) {
     await bot.tg
-      .sendMessage(conv, tr(lang, `❌ Task số ${n} không có trong spec ${esc(name)}.`, `❌ Task ${n} not found in the spec ${esc(name)}.`))
+      .sendMessage(conv, errorLine(lang, raw(tr(lang, `Task số ${n} không có trong spec ${esc(name)}.`, `Task ${n} not found in the spec ${esc(name)}.`))))
       .catch(() => {});
     return { ok: false };
   }
   if (task.marker === "done") {
     await bot.tg
-      .sendMessage(conv, tr(lang, `✅ Task ${esc(task.id)} đã được chấp nhận rồi.`, `✅ Task ${esc(task.id)} is already accepted.`))
+      .sendMessage(conv, okLine(lang, raw(tr(lang, `Task ${esc(task.id)} đã được chấp nhận rồi.`, `Task ${esc(task.id)} is already accepted.`))))
       .catch(() => {});
     return { ok: false };
   }
@@ -641,7 +639,7 @@ async function specAccept(
   const ran = classifyShellItems(items).ran;
   if (ran.some((c) => c.error !== undefined)) {
     await bot.tg
-      .sendMessage(conv, tr(lang, `❌ Có check đã lỗi (chưa chạy được) — không thể chấp nhận. Hãy dùng "Làm lại kèm ghi chú".`, `❌ A check errored (never ran) — the run can't be accepted. Use "Redo with note".`))
+      .sendMessage(conv, errorLine(lang, tr(lang, `Có check đã lỗi (chưa chạy được) — không thể chấp nhận. Hãy dùng "Làm lại kèm ghi chú".`, `A check errored (never ran) — the run can't be accepted. Use "Redo with note".`)))
       .catch(() => {});
     return { ok: false };
   }
@@ -651,7 +649,7 @@ async function specAccept(
   const commits = workerCommitsSinceFork(lines, name);
   if (commits.length === 0) {
     await bot.tg
-      .sendMessage(conv, tr(lang, `❌ Chưa thể chấp nhận — không có commit nào của worker trên nhánh kể từ khi fork.`, `❌ Can't accept — there is no commit on the branch since the fork.`))
+      .sendMessage(conv, errorLine(lang, tr(lang, `Chưa thể chấp nhận — không có commit nào của worker trên nhánh kể từ khi fork.`, `Can't accept — there is no commit on the branch since the fork.`)))
       .catch(() => {});
     return { ok: false };
   }
@@ -687,11 +685,7 @@ async function specAccept(
   }
 
   const lines2: string[] = [
-    tr(
-      lang,
-      `✅ Task ${esc(task.id)} đã được chấp nhận — đã đánh dấu xong (<code>${esc(commit.hash)}</code>).`,
-      `✅ Task ${esc(task.id)} accepted — marked done (<code>${esc(commit.hash)}</code>).`,
-    ),
+    okLine(lang, raw(tr(lang, `Task ${esc(task.id)} đã được chấp nhận — đã đánh dấu xong (<code>${esc(commit.hash)}</code>).`, `Task ${esc(task.id)} accepted — marked done (<code>${esc(commit.hash)}</code>).`))),
   ];
   const buttons: { text: string; callback_data: string }[] = [];
   if (next >= 0) {
@@ -699,7 +693,7 @@ async function specAccept(
     lines2.push(`${tr(lang, "Task chạy tiếp:", "Next runnable:")} ▶️ <b>${esc(t.id)} ${esc(t.title)}</b>`);
     buttons.push({ text: `▶️ Run ${t.id}`, callback_data: `specrun:${name}:${t.n}` });
   } else {
-    lines2.push(tr(lang, "✅ Tất cả tasks đã xong.", "✅ All tasks done."));
+    lines2.push(okLine(lang, tr(lang, "Tất cả tasks đã xong.", "All tasks done.")));
   }
 
   // S5.1/S5.2/S5.3: the PR offer. A recorded PR gets its body refreshed (+
@@ -717,7 +711,7 @@ async function specAccept(
     lines2.push(
       ok
         ? tr(lang, `🔗 PR #${pr.number} — body đã cập nhật.`, `🔗 PR #${pr.number} — body updated.`)
-        : tr(lang, `⚠️ Không cập nhật được body PR #${pr.number}.`, `⚠️ Couldn't update PR #${pr.number}'s body.`),
+        : warnLine(lang, tr(lang, `Không cập nhật được body PR #${pr.number}.`, `Couldn't update PR #${pr.number}'s body.`)),
     );
     if (allDone) {
       buttons.push({ text: tr(lang, "✅ Sẵn sàng review", "✅ Mark ready for review"), callback_data: `spcready:${name}` });
@@ -727,11 +721,7 @@ async function specAccept(
     buttons.push({ text: tr(lang, "📝 Mở draft PR", "📝 Open draft PR"), callback_data: `spcpr:${name}` });
   } else {
     lines2.push(
-      tr(
-        lang,
-        `⚠️ Đã accept nhưng KHÔNG đẩy được <code>${esc(branch)}</code> — kiểm tra remote.`,
-        `⚠️ Accepted but could NOT push <code>${esc(branch)}</code> — check the remote.`,
-      ),
+      warnLine(lang, raw(tr(lang, `Đã accept nhưng KHÔNG đẩy được <code>${esc(branch)}</code> — kiểm tra remote.`, `Accepted but could NOT push <code>${esc(branch)}</code> — check the remote.`))),
     );
   }
   const keyboard = buttons.length ? { reply_markup: { inline_keyboard: buttons.map((b) => [b]) } } : undefined;
@@ -946,7 +936,7 @@ async function specStop(
   const w = found[1].worker!;
   if (!BUSY.includes(w.status)) {
     await bot.tg
-      .sendMessage(conv, tr(lang, `✅ Worker ${esc(w.name)} đã xong rồi — không có gì để dừng.`, `✅ Worker ${esc(w.name)} has already finished — nothing to stop.`))
+      .sendMessage(conv, okLine(lang, raw(tr(lang, `Worker ${esc(w.name)} đã xong rồi — không có gì để dừng.`, `Worker ${esc(w.name)} has already finished — nothing to stop.`))))
       .catch(() => {});
     return;
   }
@@ -994,7 +984,7 @@ async function specPrOpen(
   const repo = await githubRepoSlug(root);
   if (!repo) {
     await bot.tg
-      .sendMessage(conv, tr(lang, `❌ Không xác định được repo GitHub từ remote origin của ${esc(name)}.`, `❌ Couldn't determine the GitHub repo from ${esc(name)}'s origin remote.`))
+      .sendMessage(conv, errorLine(lang, raw(tr(lang, `Không xác định được repo GitHub từ remote origin của ${esc(name)}.`, `Couldn't determine the GitHub repo from ${esc(name)}'s origin remote.`))))
       .catch(() => {});
     return;
   }
@@ -1007,13 +997,13 @@ async function specPrOpen(
     try {
       md = readFileSync(join(root, "docs", "sdd", `${name}.md`), "utf8");
     } catch {
-      await bot.tg.sendMessage(conv, tr(lang, `❌ Không tìm thấy spec ${esc(name)} trong docs/sdd.`, `❌ Spec ${esc(name)} not found in docs/sdd.`)).catch(() => {});
+      await bot.tg.sendMessage(conv, errorLine(lang, raw(tr(lang, `Không tìm thấy spec ${esc(name)} trong docs/sdd.`, `Spec ${esc(name)} not found in docs/sdd.`)))).catch(() => {});
       return;
     }
   }
   const res = parseSpec(md);
   if ("error" in res) {
-    await bot.tg.sendMessage(conv, tr(lang, "❌ Spec này không phân tích được — không mở PR được.", "❌ This spec can't be parsed — can't open a PR.")).catch(() => {});
+    await bot.tg.sendMessage(conv, errorLine(lang, tr(lang, "Spec này không phân tích được — không mở PR được.", "This spec can't be parsed — can't open a PR."))).catch(() => {});
     return;
   }
   const title = specTitle(md, name);
@@ -1032,7 +1022,7 @@ async function specPrOpen(
     url = created.html_url ?? `https://github.com/${repo}/pull/${number}`;
   } catch (e) {
     await bot.tg
-      .sendMessage(conv, tr(lang, `❌ Không mở được draft PR: ${esc((e as Error).message)}`, `❌ Couldn't open the draft PR: ${esc((e as Error).message)}`))
+      .sendMessage(conv, errorLine(lang, raw(tr(lang, `Không mở được draft PR: ${esc((e as Error).message)}`, `Couldn't open the draft PR: ${esc((e as Error).message)}`))))
       .catch(() => {});
     return;
   }
@@ -1073,14 +1063,14 @@ async function specPrReady(
   }
   const pr = getSpecPr(bot, name);
   if (!pr) {
-    await bot.tg.sendMessage(conv, tr(lang, `❌ Chưa có PR nào cho spec ${esc(name)}.`, `❌ No PR recorded for spec ${esc(name)}.`)).catch(() => {});
+    await bot.tg.sendMessage(conv, errorLine(lang, raw(tr(lang, `Chưa có PR nào cho spec ${esc(name)}.`, `No PR recorded for spec ${esc(name)}.`)))).catch(() => {});
     return;
   }
   try {
     await ghPrReady(pr.repo, pr.number);
   } catch (e) {
     await bot.tg
-      .sendMessage(conv, tr(lang, `❌ Không đánh dấu sẵn sàng được PR #${pr.number}: ${esc((e as Error).message)}`, `❌ Couldn't mark PR #${pr.number} ready: ${esc((e as Error).message)}`))
+      .sendMessage(conv, errorLine(lang, raw(tr(lang, `Không đánh dấu sẵn sàng được PR #${pr.number}: ${esc((e as Error).message)}`, `Couldn't mark PR #${pr.number} ready: ${esc((e as Error).message)}`))))
       .catch(() => {});
     return;
   }
@@ -1091,7 +1081,7 @@ async function specPrReady(
     userId: uid != null ? String(uid) : undefined,
     meta: { spec: name, repo: pr.repo, number: pr.number, userId: uid ?? null },
   });
-  await bot.tg.sendMessage(conv, tr(lang, `✅ PR #${pr.number} đã sẵn sàng review.`, `✅ PR #${pr.number} is ready for review.`)).catch(() => {});
+  await bot.tg.sendMessage(conv, okLine(lang, tr(lang, `PR #${pr.number} đã sẵn sàng review.`, `PR #${pr.number} is ready for review.`))).catch(() => {});
 }
 
 /**
@@ -1114,7 +1104,7 @@ async function specCleanUp(
   }
   const pr = getSpecPr(bot, name);
   if (!pr) {
-    await bot.tg.sendMessage(conv, tr(lang, `❌ Chưa có PR nào cho spec ${esc(name)} — không có gì để dọn.`, `❌ No PR recorded for spec ${esc(name)} — nothing to clean up.`)).catch(() => {});
+    await bot.tg.sendMessage(conv, errorLine(lang, raw(tr(lang, `Chưa có PR nào cho spec ${esc(name)} — không có gì để dọn.`, `No PR recorded for spec ${esc(name)} — nothing to clean up.`)))).catch(() => {});
     return;
   }
   const root = await gitRoot(convDir(bot, conv));
@@ -1128,7 +1118,7 @@ async function specCleanUp(
   try {
     await runGit(wtRoot, ["fetch", "origin", "main"]);
   } catch (e) {
-    await bot.tg.sendMessage(conv, tr(lang, `❌ Không fetch được main: ${esc((e as Error).message)}`, `❌ Couldn't fetch main: ${esc((e as Error).message)}`)).catch(() => {});
+    await bot.tg.sendMessage(conv, errorLine(lang, raw(tr(lang, `Không fetch được main: ${esc((e as Error).message)}`, `Couldn't fetch main: ${esc((e as Error).message)}`)))).catch(() => {});
     return;
   }
   let extra = "";
@@ -1142,11 +1132,7 @@ async function specCleanUp(
     await bot.tg
       .sendMessage(
         conv,
-        tr(
-          lang,
-          `❌ Không dọn được — branch <code>${esc(branch)}</code> còn commit chưa có trong main (${esc(first)}…). Hãy merge PR trước.`,
-          `❌ Can't clean up — branch <code>${esc(branch)}</code> still has commits not in main (${esc(first)}…). Merge the PR first.`,
-        ),
+        errorLine(lang, raw(tr(lang, `Không dọn được — branch <code>${esc(branch)}</code> còn commit chưa có trong main (${esc(first)}…). Hãy merge PR trước.`, `Can't clean up — branch <code>${esc(branch)}</code> still has commits not in main (${esc(first)}…). Merge the PR first.`))),
       )
       .catch(() => {});
     return;
@@ -1209,7 +1195,7 @@ export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: Conv
   if (data.startsWith("specrunok:")) {
     const ref = parseRunRef(data.slice("specrunok:".length));
     if (!ref) {
-      await bot.tg.sendMessage(conv, tr(lang, "❌ Không rõ task nào.", "❌ Unknown task."));
+      await bot.tg.sendMessage(conv, errorLine(lang, tr(lang, "Không rõ task nào.", "Unknown task.")));
       return;
     }
     await specRunSecondTap(bot, cb, conv, ref.name, ref.n);
@@ -1218,7 +1204,7 @@ export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: Conv
   if (data.startsWith("specblocked:")) {
     const ref = parseRunRef(data.slice("specblocked:".length));
     if (!ref) {
-      await bot.tg.sendMessage(conv, tr(lang, "❌ Không rõ task nào.", "❌ Unknown task."));
+      await bot.tg.sendMessage(conv, errorLine(lang, tr(lang, "Không rõ task nào.", "Unknown task.")));
       return;
     }
     await specRunFirstTap(bot, cb, conv, ref.name, ref.n);
@@ -1227,7 +1213,7 @@ export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: Conv
   if (data.startsWith("specrun:")) {
     const ref = parseRunRef(data.slice("specrun:".length));
     if (!ref) {
-      await bot.tg.sendMessage(conv, tr(lang, "❌ Không rõ task nào.", "❌ Unknown task."));
+      await bot.tg.sendMessage(conv, errorLine(lang, tr(lang, "Không rõ task nào.", "Unknown task.")));
       return;
     }
     await specRunFirstTap(bot, cb, conv, ref.name, ref.n);
@@ -1236,7 +1222,7 @@ export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: Conv
   if (data.startsWith("spcacc:")) {
     const ref = parseRunRef(data.slice("spcacc:".length));
     if (!ref) {
-      await bot.tg.sendMessage(conv, tr(lang, "❌ Không rõ task nào.", "❌ Unknown task."));
+      await bot.tg.sendMessage(conv, errorLine(lang, tr(lang, "Không rõ task nào.", "Unknown task.")));
       return;
     }
     await specAccept(bot, conv, lang, cb.from?.id, ref.name, ref.n);
@@ -1254,7 +1240,7 @@ export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: Conv
   if (data.startsWith("spcredo:")) {
     const ref = parseRunRef(data.slice("spcredo:".length));
     if (!ref) {
-      await bot.tg.sendMessage(conv, tr(lang, "❌ Không rõ task nào.", "❌ Unknown task."));
+      await bot.tg.sendMessage(conv, errorLine(lang, tr(lang, "Không rõ task nào.", "Unknown task.")));
       return;
     }
     await specRedo(bot, cb, conv, lang, cb.from?.id, ref.name, ref.n);
@@ -1263,7 +1249,7 @@ export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: Conv
   if (data.startsWith("spcstop:")) {
     const ref = parseRunRef(data.slice("spcstop:".length));
     if (!ref) {
-      await bot.tg.sendMessage(conv, tr(lang, "❌ Không rõ task nào.", "❌ Unknown task."));
+      await bot.tg.sendMessage(conv, errorLine(lang, tr(lang, "Không rõ task nào.", "Unknown task.")));
       return;
     }
     await specStop(bot, cb, conv, lang, cb.from?.id, ref.name, ref.n);
@@ -1273,7 +1259,7 @@ export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: Conv
   if (data.startsWith("spcpr:")) {
     const nm = data.slice("spcpr:".length);
     if (!NAME_RE.test(nm)) {
-      await bot.tg.sendMessage(conv, tr(lang, "❌ Không rõ spec nào.", "❌ Unknown spec."));
+      await bot.tg.sendMessage(conv, errorLine(lang, tr(lang, "Không rõ spec nào.", "Unknown spec.")));
       return;
     }
     await specPrOpen(bot, cb, conv, lang, cb.from?.id, nm);
@@ -1282,7 +1268,7 @@ export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: Conv
   if (data.startsWith("spcready:")) {
     const nm = data.slice("spcready:".length);
     if (!NAME_RE.test(nm)) {
-      await bot.tg.sendMessage(conv, tr(lang, "❌ Không rõ spec nào.", "❌ Unknown spec."));
+      await bot.tg.sendMessage(conv, errorLine(lang, tr(lang, "Không rõ spec nào.", "Unknown spec.")));
       return;
     }
     await specPrReady(bot, cb, conv, lang, cb.from?.id, nm);
@@ -1291,7 +1277,7 @@ export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: Conv
   if (data.startsWith("spcclean:")) {
     const nm = data.slice("spcclean:".length);
     if (!NAME_RE.test(nm)) {
-      await bot.tg.sendMessage(conv, tr(lang, "❌ Không rõ spec nào.", "❌ Unknown spec."));
+      await bot.tg.sendMessage(conv, errorLine(lang, tr(lang, "Không rõ spec nào.", "Unknown spec.")));
       return;
     }
     await specCleanUp(bot, cb, conv, lang, cb.from?.id, nm);
@@ -1299,7 +1285,7 @@ export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: Conv
   }
   const name = data.slice("spec:".length);
   if (!NAME_RE.test(name)) {
-    await bot.tg.sendMessage(conv, tr(lang, "❌ Không rõ spec nào.", "❌ Unknown spec."));
+    await bot.tg.sendMessage(conv, errorLine(lang, tr(lang, "Không rõ spec nào.", "Unknown spec.")));
     return;
   }
   const dir = convDir(bot, conv);
@@ -1308,7 +1294,7 @@ export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: Conv
   try {
     md = readFileSync(join(root!, "docs", "sdd", `${name}.md`), "utf8");
   } catch {
-    await bot.tg.sendMessage(conv, tr(lang, `❌ Không tìm thấy spec ${esc(name)} trong docs/sdd.`, `❌ Spec ${esc(name)} not found in docs/sdd.`));
+    await bot.tg.sendMessage(conv, errorLine(lang, raw(tr(lang, `Không tìm thấy spec ${esc(name)} trong docs/sdd.`, `Spec ${esc(name)} not found in docs/sdd.`))));
     return;
   }
   const title = specTitle(md, name);

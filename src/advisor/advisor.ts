@@ -17,6 +17,7 @@
  * refused and a new thread is opened instead.
  */
 import { convKey, parseConv, type ConvKey } from "../conv.js";
+import { raw, statusLine, warnLine } from "../ui/text.js";
 import type { StateManager, Lang, UserPrefsStore } from "../state.js";
 import type { Telegram } from "../telegram.js";
 import type { Config } from "../config.js";
@@ -182,7 +183,7 @@ export class Advisor {
       };
     }
     if (this.busy.has(conv)) {
-      await this.h.sendHtml(conv, tr(this.langOf(conv), `⏳ ${esc(label)} vẫn đang trả lời câu trước — hỏi tiếp sau khi có câu trả lời.`, `⏳ ${esc(label)} is still answering the previous question — ask again once it replies.`)).catch(() => {});
+      await this.h.sendHtml(conv, statusLine(this.langOf(conv), raw(tr(this.langOf(conv), `${esc(label)} vẫn đang trả lời câu trước — hỏi tiếp sau khi có câu trả lời.`, `${esc(label)} is still answering the previous question — ask again once it replies.`)))).catch(() => {});
       throw new Error(`${label} is still answering the previous question in this thread — wait for it.`);
     }
     this.busy.add(conv);
@@ -211,7 +212,7 @@ export class Advisor {
       // An offline machine / daemon error should not leave the user hanging:
       // report the reason and keep the thread (the user can retry).
       const msg = e instanceof AdvisorError ? e.message : String(e);
-      await this.h.sendHtml(conv, tr(this.langOf(conv), `⚠️ Không hỏi được ${esc(label)}: ${esc(msg)}`, `⚠️ Couldn't ask ${esc(label)}: ${esc(msg)}`)).catch(() => {});
+      await this.h.sendHtml(conv, warnLine(this.langOf(conv), raw(tr(this.langOf(conv), `Không hỏi được ${esc(label)}: ${esc(msg)}`, `Couldn't ask ${esc(label)}: ${esc(msg)}`)))).catch(() => {});
       throw e;
     } finally {
       this.busy.delete(conv);

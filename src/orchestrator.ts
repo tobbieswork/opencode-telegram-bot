@@ -19,6 +19,8 @@ import { buildHandoffPrompt, followUpsFromMessages, respawnName, respawnNotice, 
 import { scriptInstruction } from "./sandbox/scriptPreamble.js";
 import { topicDeepLink } from "./shared.js";
 import { ICON, esc, trunc, timeAgo, stripTags, mdToHtmlChunks } from "./format.js";
+import { confirmKeyboard } from "./ui/keyboards.js";
+import { errorLine, okLine, raw, warnLine } from "./ui/text.js";
 import { log, warn } from "./logger.js";
 import { audit } from "./audit.js";
 import { BusyNoteStore } from "./notes.js";
@@ -477,7 +479,7 @@ export class Orchestrator {
       const r = await this.spawn(chatOf(conv), { name, directory: dir, spawnedBy: "user", writes: true });
       await this.h.sendHtml(conv, tr(lang, `🧩 Đã tạo worker <b>${esc(name)}</b> — mở topic “${esc(this.topicName(r.worker))}” để làm việc.`, `🧩 Worker <b>${esc(name)}</b> created — open topic “${esc(this.topicName(r.worker))}” to work.`));
     } catch (e) {
-      await this.h.sendHtml(conv, `❌ ${esc((e as Error).message)}`);
+      await this.h.sendHtml(conv, errorLine(lang, (e as Error).message));
     }
   }
 
@@ -514,7 +516,7 @@ export class Orchestrator {
       await this.h.sendHtml(conv, msg);
       return;
     }
-    await this.showKillPicker(conv, name ? tr(this.langOf(conv), `❌ Không có worker <code>${esc(name)}</code>`, `❌ No worker <code>${esc(name)}</code>`) : undefined);
+    await this.showKillPicker(conv, name ? errorLine(this.langOf(conv), raw(tr(this.langOf(conv), `Không có worker <code>${esc(name)}</code>`, `No worker <code>${esc(name)}</code>`))) : undefined);
   }
 
   /** The /kill picker card: one stop-button per worker + a hint line. */
@@ -608,7 +610,7 @@ export class Orchestrator {
         ].join("\n"),
       );
     } catch (e) {
-      await this.h.sendHtml(conv, tr(lang, `❌ Không bật được Manager: ${esc((e as Error).message)}`, `❌ Can't turn on the Manager: ${esc((e as Error).message)}`));
+      await this.h.sendHtml(conv, errorLine(lang, raw(tr(lang, `Không bật được Manager: ${esc((e as Error).message)}`, `Can't turn on the Manager: ${esc((e as Error).message)}`))));
     }
   }
 
@@ -1408,7 +1410,7 @@ export class Orchestrator {
           const lineId = await this.h
             .tg.sendMessageId(
               conv,
-              tr(lang, "✅ Xong — xem lại thay đổi của worker:", "✅ Done — review the worker's changes:"),
+              okLine(lang, raw(tr(lang, "Xong — xem lại thay đổi của worker:", "Done — review the worker's changes:"))),
               { reply_markup: { inline_keyboard: [reviewRow] } },
             )
             .catch(() => -1);
@@ -1489,7 +1491,7 @@ export class Orchestrator {
         isolate: false, // reuse the dead worker's directory/worktree as-is
       });
     } catch (e) {
-      await this.h.sendHtml(conv, tr(this.langOf(conv), `⚠️ Không tự tạo worker thay thế được: ${esc((e as Error).message)}`, `⚠️ Couldn't auto-create a replacement worker: ${esc((e as Error).message)}`)).catch(() => {});
+      await this.h.sendHtml(conv, warnLine(this.langOf(conv), raw(tr(this.langOf(conv), `Không tự tạo worker thay thế được: ${esc((e as Error).message)}`, `Couldn't auto-create a replacement worker: ${esc((e as Error).message)}`)))).catch(() => {});
       return undefined;
     }
     // Attach lineage + carry the worktree/repoRoot so /wt (diff/merge/remove)
@@ -1716,7 +1718,7 @@ export class Orchestrator {
     const auditText = a.kind === "spawn" ? `spawn ${a.spawn?.name}: ${a.spawn?.task ?? ""}` : `send ${a.send?.name}: ${a.send?.message ?? ""}`;
     if (op === "no") {
       audit({ action: "dispatch_reject", userId: cb.from?.id, chatId: a.chat, outcome: "rejected", text: auditText });
-      if (messageId) await this.h.tg.editMessageText(conv, messageId, tr(lang, `❌ Đã huỷ: ${esc(what)}.`, `❌ Cancelled: ${esc(what)}.`)).catch(() => {});
+      if (messageId) await this.h.tg.editMessageText(conv, messageId, errorLine(lang, raw(tr(lang, `Đã huỷ: ${esc(what)}.`, `Cancelled: ${esc(what)}.`)))).catch(() => {});
       queueReport(this, a.chat, `[approval #${id}] REJECTED by the user: ${what}. Do not retry it; ask the user what to do instead if needed.`);
       return;
     }
@@ -1726,14 +1728,14 @@ export class Orchestrator {
       audit({ action: "dispatch_approve", userId: cb.from?.id, chatId: a.chat, outcome: op === "auto" ? "ok+auto_on" : "ok", text: auditText });
       if (messageId) {
         await this.h.tg
-          .editMessageText(conv, messageId, tr(lang, `✅ Đã duyệt: ${esc(what)}.${op === "auto" ? "\n⚡ Auto đã bật — các lần sau không hỏi nữa (/auto off để tắt)." : ""}`, `✅ Approved: ${esc(what)}.${op === "auto" ? "\n⚡ Auto mode on — no more prompts (/auto off to disable)." : ""}`))
+          .editMessageText(conv, messageId, okLine(lang, raw(tr(lang, `Đã duyệt: ${esc(what)}.${op === "auto" ? "\n⚡ Auto đã bật — các lần sau không hỏi nữa (/auto off để tắt)." : ""}`, `Approved: ${esc(what)}.${op === "auto" ? "\n⚡ Auto mode on — no more prompts (/auto off to disable)." : ""}`))))
           .catch(() => {});
       }
       queueReport(this, a.chat, `[approval #${id}] APPROVED by the user: ${result}.${op === "auto" ? " Auto mode is now on." : ""}`);
     } catch (e) {
       const msg = (e as Error).message;
       audit({ action: "dispatch_approve", userId: cb.from?.id, chatId: a.chat, outcome: `error: ${msg}`, text: auditText });
-      if (messageId) await this.h.tg.editMessageText(conv, messageId, tr(lang, `⚠️ Duyệt nhưng thất bại: ${esc(msg)}`, `⚠️ Approved but failed: ${esc(msg)}`)).catch(() => {});
+      if (messageId) await this.h.tg.editMessageText(conv, messageId, warnLine(lang, raw(tr(lang, `Duyệt nhưng thất bại: ${esc(msg)}`, `Approved but failed: ${esc(msg)}`)))).catch(() => {});
       queueReport(this, a.chat, `[approval #${id}] approved but FAILED: ${msg}`);
     }
   }
@@ -1843,10 +1845,10 @@ export class Orchestrator {
       const shared = worktreeSharedBy(this.h.st, conv, wt.root);
       if (shared.length) {
         const names = shared.map((k) => this.h.st.peek(k)?.worker?.name ?? k).join(", ");
-        await this.h.tg.answerCallbackQuery(cb.id, tr(lang,
-          `⚠️ Worktree đang dùng chung với worker ${names} — xoá/merge ở đây sẽ làm mất thư mục của worker đó. Hãy thao tác từ topic của nó.`,
-          `⚠️ This worktree is shared with worker ${names} — removing or merging it here would delete that worker's directory. Manage it from that worker's topic instead.`,
-        ));
+        await this.h.tg.answerCallbackQuery(cb.id, warnLine(lang, raw(tr(lang,
+          `Worktree đang dùng chung với worker ${names} — xoá/merge ở đây sẽ làm mất thư mục của worker đó. Hãy thao tác từ topic của nó.`,
+          `This worktree is shared with worker ${names} — removing or merging it here would delete that worker's directory. Manage it from that worker's topic instead.`,
+        ))));
         return;
       }
     }
@@ -1864,8 +1866,8 @@ export class Orchestrator {
         // Uncommitted work is COMMITTED to the worker branch first (not lost) —
         // only the worktree directory is removed; an unmerged branch is kept.
         // So the user loses nothing here, which the warning must say correctly.
-        await this.h.sendHtml(conv, tr(lang, "⚠️ Xoá worktree sẽ <b>commit các thay đổi chưa commit vào nhánh</b> của worker rồi xoá thư mục worktree (nhánh chưa merge vẫn được giữ — không mất gì). Chắc chắn?", "⚠️ Deleting the worktree will <b>commit uncommitted changes to the worker branch</b>, then remove the worktree directory (the unmerged branch is kept — nothing lost). Sure?"), {
-          reply_markup: { inline_keyboard: [[{ text: tr(lang, "🗑 Xoá thật", "🗑 Delete for real"), callback_data: `wt:${w.name}:rmok` }, { text: tr(lang, "Thôi", "No, keep"), callback_data: `wt:${w.name}:keep` }]] },
+        await this.h.sendHtml(conv, warnLine(lang, raw(tr(lang, "Xoá worktree sẽ <b>commit các thay đổi chưa commit vào nhánh</b> của worker rồi xoá thư mục worktree (nhánh chưa merge vẫn được giữ — không mất gì). Chắc chắn?", "Deleting the worktree will <b>commit uncommitted changes to the worker branch</b>, then remove the worktree directory (the unmerged branch is kept — nothing lost). Sure?"))), {
+          reply_markup: confirmKeyboard(lang, { text: tr(lang, "🗑 Xoá thật", "🗑 Delete for real"), data: `wt:${w.name}:rmok` }, { text: tr(lang, "Thôi", "No, keep"), data: `wt:${w.name}:keep` }),
         });
       } else if (op === "rmok") {
         let msg: string;
@@ -1893,7 +1895,7 @@ export class Orchestrator {
         await this.h.tg.deleteMessage(conv, messageId);
       }
     } catch (e) {
-      await this.h.sendHtml(conv, `❌ ${esc((e as Error).message)}`);
+      await this.h.sendHtml(conv, errorLine(lang, (e as Error).message));
     }
   }
 

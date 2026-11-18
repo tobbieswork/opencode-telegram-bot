@@ -25,6 +25,7 @@ import { nextRunAfter, decideRun, formatSchedule } from "./schedule.js";
 import type { Schedule } from "./schedule.js";
 import { warn } from "./logger.js";
 import { tr } from "./i18n.js";
+import { raw, warnLine } from "./ui/text.js";
 import type { Lang } from "./state.js";
 
 /** On-disk shape of `data/schedules.json` (versioned so we can migrate later). */
@@ -248,7 +249,7 @@ export class Scheduler {
           this.mark(sch.id, { lastStatus: "error" });
           warn(`scheduler: #${sch.id} error: ${errText(e)}`);
           const lang = this.deps.langOf?.(sch.conv) ?? "vi";
-          await this.safeNotify(sch.conv, tr(lang, `⚠️ ${formatSchedule(sch)} — lỗi khi chạy.`, `⚠️ ${formatSchedule(sch)} — error while running.`));
+          await this.safeNotify(sch.conv, warnLine(lang, raw(tr(lang, `${formatSchedule(sch)} — lỗi khi chạy.`, `${formatSchedule(sch)} — error while running.`))));
         }
       }
     } finally {

@@ -7,6 +7,7 @@ import { warn } from "../logger.js";
 import { selectPruneable } from "../prune.js";
 import { removeWorktree } from "../worktree.js";
 import { tr } from "../i18n.js";
+import { singleButton } from "../ui/keyboards.js";
 import type { Lang, StateManager } from "../state.js";
 import type { Orchestrator } from "../orchestrator.js";
 
@@ -104,7 +105,7 @@ export async function cmdPrune(o: Orchestrator, conv: ConvKey, arg: string): Pro
   }
   lines.push("", tr(lang, "<i>Bấm Xoá để xoá topic + state + session (không ảnh hưởng worker đang chạy).</i>", "<i>Tap Delete to remove the topics + state + sessions (running workers are not affected).</i>"));
   await o.h.sendHtml(conv, lines.join("\n"), {
-    reply_markup: { inline_keyboard: [[{ text: tr(lang, "🗑 Xoá", "🗑 Delete"), callback_data: `prune:${id}` }]] },
+    reply_markup: singleButton({ text: tr(lang, "🗑 Xoá", "🗑 Delete"), data: `prune:${id}` }),
   });
 }
 
