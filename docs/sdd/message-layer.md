@@ -134,7 +134,7 @@ Rule applied: a helper is kept only if its shape has **3+ uses**.
 | `src/pr-watch.ts` | 1 | 225 |
 | `src/watch.ts` | 1 | 197 |
 
-Plus 6 ✅-prefixed `STRINGS` entries in `i18n.ts` (81, 85, 130, 134, 138, 142, 146).
+Plus 7 ✅-prefixed `STRINGS` entries in `i18n.ts` (81, 85, 130, 134, 138, 142, 146).
 
 ### 6.3 Warn line (⚠️-prefixed) — 46 uses → **keep `warnLine`**
 
