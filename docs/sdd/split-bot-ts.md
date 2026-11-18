@@ -202,7 +202,7 @@ the pure-helper test + a live run (no direct `bot.ts` unit test).
 1. [x] (1cb938d) **T1 Call graph and list.** Read-only: for each candidate module, list the functions, the `Bot` fields they use and the tests that cover them. Write the confirmed module list and move order into this spec. *Checkpoint: approve the list.*
 2. [x] (b13d524) **T2 `BotCtx` and one pilot module** (`permission`). Add `commands/ctx.ts`; move permission; no behaviour change. *Checkpoint: review the pattern before repeating it.*
 3. [x] (65ede38) **T3 Small modules:** `permission`, `notes`. *Checkpoint: line count and tests.*
-4. [ ] **T4 Medium modules:** `model`, `admin`. *Checkpoint: try the buttons in Telegram.*
+4. [x] (3ca575a) **T4 Medium modules:** `model`, `admin`. *Checkpoint: try the buttons in Telegram.*
 5. [ ] **T5 Large modules:** `session`, `browse`. *Checkpoint: try the folder browser and `/new` in Telegram.*
 6. [ ] **T6 `prompt-runner`.** Move last. *Checkpoint: run a real turn, queue and stop.*
 7. [ ] **T7 Cleanup.** Remove dead imports, check the size targets (S2.4), update `README.md` architecture notes if any.
