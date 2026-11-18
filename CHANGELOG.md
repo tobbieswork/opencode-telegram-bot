@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.47.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.47.0...opencode-telegram-bot-v1.47.1) (2026-11-18)
+
+
+### Bug Fixes
+
+* chunk &gt;4096-char sendMessage text (no more ❌ Lỗi on long replies) ([aa3e224](https://github.com/tobbieswork/opencode-telegram-bot/commit/aa3e224b2b53683f7727ea3110059dd84c3f7d5f))
+* chunk &gt;4096-char sendMessage text into well-formed HTML chunks ([9e8ab5b](https://github.com/tobbieswork/opencode-telegram-bot/commit/9e8ab5b6e484a1049e3c553c5f1bf0d97e061de4))
+
 ## [1.47.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.46.2...opencode-telegram-bot-v1.47.0) (2026-11-18)
 
 
