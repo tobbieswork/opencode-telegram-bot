@@ -29,6 +29,7 @@ import type { ParsedTask } from "./spec.js";
 import { tr } from "./i18n.js";
 import type { Lang } from "./state.js";
 import { esc } from "./format.js";
+import { errorLine, okLine, raw, warnLine } from "./ui/text.js";
 import type { Btn } from "./shared.js";
 
 /** One recorded check result (a classified shell item). */
@@ -202,11 +203,9 @@ export function renderCheckpointCard(args: CheckpointCardArgs): CheckpointCard {
 
   // Header — the outcome icon makes a failing card impossible to miss.
   lines.push(
-    tr(
-      lang,
-      `${canAccept ? "✅" : "❌"} <b>Checkpoint</b> — task <b>${esc(task.id)}</b> ${esc(task.title)}`,
-      `${canAccept ? "✅" : "❌"} <b>Checkpoint</b> — task <b>${esc(task.id)}</b> ${esc(task.title)}`,
-    ),
+    canAccept
+      ? okLine(lang, raw(`<b>Checkpoint</b> — task <b>${esc(task.id)}</b> ${esc(task.title)}`))
+      : errorLine(lang, raw(`<b>Checkpoint</b> — task <b>${esc(task.id)}</b> ${esc(task.title)}`)),
   );
   lines.push(
     tr(
@@ -228,15 +227,9 @@ export function renderCheckpointCard(args: CheckpointCardArgs): CheckpointCard {
 
   // S3.7 — say it explicitly.
   if (errored) {
-    lines.push(tr(lang, "❌ Worker kết thúc với lỗi — chưa thể chấp nhận.", "❌ The worker ended in an error — it can't be accepted."));
+    lines.push(errorLine(lang, tr(lang, "Worker kết thúc với lỗi — chưa thể chấp nhận.", "The worker ended in an error — it can't be accepted.")));
   } else if (!commit) {
-    lines.push(
-      tr(
-        lang,
-        "⚠️ Không có commit nào trên nhánh kể từ khi fork — chưa thể chấp nhận.",
-        "⚠️ No commit on the branch since the fork — it can't be accepted.",
-      ),
-    );
+    lines.push(warnLine(lang, tr(lang, "Không có commit nào trên nhánh kể từ khi fork — chưa thể chấp nhận.", "No commit on the branch since the fork — it can't be accepted.")));
   }
 
   // S3.1 — the commit (short hash + subject); the section is omitted when absent.
@@ -252,7 +245,7 @@ export function renderCheckpointCard(args: CheckpointCardArgs): CheckpointCard {
 
   // S3.1 — the checks that were run, with their result.
   if (checks.ran.length) {
-    lines.push(tr(lang, "✅ Checks đã chạy:", "✅ Checks run:"));
+    lines.push(okLine(lang, tr(lang, "Checks đã chạy:", "Checks run:")));
     for (const c of checks.ran) {
       if (c.ok) lines.push(`• <b>${esc(c.name)}</b> ✅`);
       else if (c.error !== undefined) lines.push(`• <b>${esc(c.name)}</b> ❌ (chưa chạy) — <i>${esc(c.error)}</i>`);
@@ -262,7 +255,7 @@ export function renderCheckpointCard(args: CheckpointCardArgs): CheckpointCard {
 
   // S3.1 — the checks that were NOT run.
   if (checks.notRan.length) {
-    lines.push(tr(lang, "⚠️ Checks CHƯA chạy:", "⚠️ Checks NOT run:"));
+    lines.push(warnLine(lang, tr(lang, "Checks CHƯA chạy:", "Checks NOT run:")));
     for (const c of checks.notRan) lines.push(`• <b>${esc(c)}</b>`);
   }
 
