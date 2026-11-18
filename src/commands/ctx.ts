@@ -10,8 +10,10 @@
  * Keep this minimal: add a member only when a module actually needs it.
  */
 import type { Telegram } from "../telegram.js";
-import type { OpenCodeCtl } from "../opencode.js";
-import type { StateManager, UserPrefsStore, Lang } from "../state.js";
+import type { OpenCodeCtl, ModelInfo } from "../opencode.js";
+import type { StateManager, UserPrefsStore, Lang, ChatState } from "../state.js";
+import type { Config } from "../config.js";
+import type { RotationHealthSnapshot } from "../rotation-health.js";
 import type { BusyNoteStore } from "../notes.js";
 import type { QueueStore } from "../queue.js";
 import type { Orchestrator } from "../orchestrator.js";
@@ -60,4 +62,20 @@ export interface BotCtx {
   inflight: Map<ConvKey, AbortController>;
   startTyping(conv: ConvKey): void;
   runPromptTask(conv: ConvKey, sid: string, text: string, ac: AbortController, userMsgId?: number, lang?: Lang): Promise<void>;
+  /** Live config (used by model/admin features for budgets, defaults, delays). */
+  cfg: Config;
+  /** Send a (chunked) HTML message; the keyboard rides the final chunk. */
+  sendHtml(conv: ConvKey, html: string, opts?: { reply_markup?: Keyboard }): Promise<void>;
+  /** Open /model button pickers (owned by the model feature). */
+  modelPickers: Map<ConvKey, { models: ModelInfo[]; page: number }>;
+  /** Reboot already armed (owned by the admin feature). */
+  rebootArmed: boolean;
+  /** Resolve the model ref to apply: explicit per-chat > config default > session's current model. */
+  resolveModel(state: ChatState, sessionID?: string): Promise<{ id: string; providerID: string } | null>;
+  /** Apply the chat's model + effective variant to a session (best-effort). */
+  applyModelAndVariant(sessionID: string, state: ChatState): Promise<void>;
+  /** The Manager's 24h context floor (rotation feature) — /status shows it. */
+  managerFloor(sessionID: string, now?: number): Promise<number | null>;
+  /** The rotation health snapshot (rotation feature) — /usage's footer. */
+  rotationHealthSnapshot(): RotationHealthSnapshot | null;
 }

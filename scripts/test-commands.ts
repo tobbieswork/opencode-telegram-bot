@@ -8,8 +8,8 @@
  * Run:  npx tsx scripts/test-commands.ts
  */
 import { COMMANDS, CMD_GROUPS, myCommands, helpText, commandGrid, knownCommands } from "../src/commands.js";
-import { Bot } from "../src/bot.js";
 import { cmdAgent } from "../src/commands/agents.js";
+import { cmdModels } from "../src/commands/model.js";
 import { cmdNote, cmdStyle } from "../src/commands/meta.js";
 
 let failures = 0;
@@ -178,8 +178,7 @@ const cmds = COMMANDS.map((c) => c.cmd);
     cfg: { replyMaxLen: 100_000 },
     tg: { sendMessage: async (_c: string, t: string) => void sent.push(t) },
   };
-  (duck as any).cmdModels = (Bot.prototype as any).cmdModels;
-  await duck.cmdModels("conv-models");
+  await cmdModels(duck, "conv-models");
   const last = sent[sent.length - 1] ?? "";
   const noRawTags = last.replace(/<\/?(b|code)>/g, "");
   check("/models footer: id placeholder escaped", last.includes("&lt;id&gt;") && !last.includes("<id>"), last);

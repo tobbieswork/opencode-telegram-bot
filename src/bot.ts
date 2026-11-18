@@ -1,9 +1,8 @@
 import { isAbsolute, resolve, dirname, join } from "node:path";
-import { existsSync, statSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, statSync, readFileSync } from "node:fs";
 import { writeFile, unlink } from "node:fs/promises";
 import { execFile } from "node:child_process";
-import { homedir, tmpdir } from "node:os";
-import { randomBytes } from "node:crypto";
+import { tmpdir } from "node:os";
 import { Telegram, Update, CallbackQuery, Message, MessageGenerationStopped, MessageReactionUpdated } from "./telegram.js";
 import { OpenCodeCtl, newMessageID, assistantText, ModelInfo, SessionBrief } from "./opencode.js";
 import { StateManager, ChatState, MsgPurpose, MACHINE_STATE_KEY, UserPrefsStore, Lang } from "./state.js";
@@ -53,7 +52,7 @@ import {
 } from "./reactions.js";
 import { continueButtonLabel, shouldOfferContinue, continueCallbackData, alreadyOfferedContinue } from "./continue.js";
 import { GhPrLike, PrSnapshot, PrState, diffSnapshots, renderEvent, updatePrSnapshot } from "./pr-watch.js";
-import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, SAFE_REBOOT_BIN, rebootTokenFile, buildTokenLine, rebootGoData, isRebootConfirmFresh } from "./uptime.js";
+import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, rebootGoData } from "./uptime.js";
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
 import { DraftState, DraftAction, onTextDelta, onToolStart, isDmConv, EDIT_BUDGET } from "./stream.js";
 import { myCommands } from "./commands.js";
@@ -69,9 +68,23 @@ import type { HealthSources } from "./health-probes.js";
 import { QUESTIONS_PREAMBLE } from "./shared.js";
 import type { Btn, Keyboard } from "./shared.js";
 import { cmdAgents, cmdAgent, handleAgentCallback } from "./commands/agents.js";
+import {
+  cmdModels,
+  cmdModel,
+  cmdMode,
+  cmdVariants,
+  cmdVariantSet,
+  handleModelCallback,
+  handleModeCallback,
+  handleVariantCallback,
+  applyMode,
+  resolveModel as resolveModelFree,
+  applyModelAndVariant as applyModelAndVariantFree,
+} from "./commands/model.js";
+import { cmdReboot, handleRebootCallback, cmdStatus, cmdContext, cmdUsage } from "./commands/admin.js";
 import { cmdSchedule, handleScheduleCallback } from "./commands/schedule.js";
 import { Advisor } from "./advisor/advisor.js";
-import { cmdHelp, cmdStatus, cmdHealth, cmdContext, cmdUsage, cmdHistory, cmdNote, cmdRotation, handleNoteCallback, cmdLang, cmdStyle } from "./commands/meta.js";
+import { cmdHelp, cmdHealth, cmdHistory, cmdNote, cmdRotation, handleNoteCallback, cmdLang, cmdStyle } from "./commands/meta.js";
 import { cmdSpec, handleSpecCallback } from "./commands/spec.js";
 import {
   clampWatchInterval,
@@ -379,8 +392,8 @@ export class Bot {
   private prWatchBusy = false;
   /** Re-entrancy guard for the 10-min rotation tick, keyed by conv (mirrors prWatchBusy). */
   private rotationTickInFlight = new Set<ConvKey>();
-  /** A reboot is already armed (token minted, timer pending) — ignores a double-tap on "Xác nhận". */
-  private rebootArmed = false;
+  /** A reboot is already armed (token minted, timer pending) — ignores a double-tap on "Xác nhận". Owned by the admin feature (commands/admin.ts). */
+  public rebootArmed = false;
   /** Sessions from which we already stripped the language instruction this process (when the toggle is off), so we don't call removeInstruction every prompt. */
   private languageRemoved = new Set<string>();
   /** The self-editing "agent is doing…" line per conv: message id + current label. */
@@ -468,8 +481,8 @@ export class Bot {
    * default; tests shorten it. (A per-file setTimeout, unref'd.)
    */
   public reportFileCleanupMs = 60_000;
-  /** Open /model button pickers, one per conv (in-memory; dead buttons after a restart are handled). */
-  private modelPickers = new Map<ConvKey, { models: ModelInfo[]; page: number }>();
+  /** Open /model button pickers, one per conv (in-memory; dead buttons after a restart are handled). Owned by the model feature (commands/model.ts). */
+  public modelPickers = new Map<ConvKey, { models: ModelInfo[]; page: number }>();
   /** The user's most recent top-level chat, for proactive notices (e.g. DNS heal). */
   private lastActiveConv?: ConvKey;
   /** Reaction UX: index keys already logged as "not indexed", so a reaction storm doesn't spam the log. */
@@ -781,99 +794,6 @@ export class Bot {
       tr(lang, `Kernel security updates chỉ áp dụng sau reboot — nên reboot định kỳ ~${this.cfg.uptimeThresholdDays} ngày. `, `Kernel security updates only apply after a reboot — reboot regularly, ~${this.cfg.uptimeThresholdDays} days. `) +
       tr(lang, "Bấm nút để reboot (xác nhận 2 bước) hoặc chọn nhắc lại sau.", "Tap a button to reboot (2-step confirm) or choose to be reminded later.");
     await this.tg.sendMessage(chat, text, { reply_markup: kb }).catch((e) => warn("uptime reminder:", e?.message ?? e));
-  }
-
-  /** The two-step confirmation message + keyboard for an actual reboot. */
-  private async sendRebootConfirm(conv: ConvKey): Promise<void> {
-    const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
-    const kb: Keyboard = {
-      inline_keyboard: [
-        [
-          { text: tr(lang, "✅ Xác nhận reboot", "✅ Confirm reboot"), callback_data: rebootGoData(Date.now()) },
-          { text: tr(lang, "❌ Huỷ", "❌ Cancel"), callback_data: "reboot:cancel" },
-        ],
-      ],
-    };
-    const secs = Math.round(this.cfg.rebootDelayMs / 1000);
-    const text =
-      tr(lang, `⚠️ <b>Chắc reboot máy không?</b>\n`, `⚠️ <b>Reboot the box?</b>\n`) +
-      tr(lang, `Máy sẽ khởi động lại trong ~${secs} giây; bot + OpenCode sẽ tắt và tự chạy lại sau (linger). `, `The box reboots in ~${secs}s; the bot + OpenCode stop and self-resume after (linger). `) +
-      tr(lang, "Bấm <b>Xác nhận</b> nếu bạn chắc chắn, hoặc <b>Huỷ</b>.", "Tap <b>Confirm</b> if you're sure, or <b>Cancel</b>.");
-    await this.tg.sendMessage(conv, text, { reply_markup: kb });
-  }
-
-  /** /reboot — manually start the two-step reboot flow (no confirmation gate yet). */
-  private async cmdReboot(conv: ConvKey): Promise<void> {
-    await this.sendRebootConfirm(conv);
-  }
-
-  /**
-   * Reboot callback flow (two explicit taps required — this reboots the box):
-   *   reboot:ask     (from the uptime reminder) → show the confirmation
-   *   reboot:go      (from the confirmation)   → confirm, then reboot after the delay
-   *   reboot:cancel  → abort
-   *   reboot:snooze  (from the uptime reminder)→ re-arm the snooze interval
-   */
-  private async handleRebootCallback(cb: CallbackQuery, conv: ConvKey, messageId: number | undefined): Promise<void> {
-    const lang = this.userPrefs.getLang(cb.from?.id ?? "");
-    const action = (cb.data ?? "").slice("reboot:".length).split(":")[0];
-    if (action === "snooze") {
-      this.st.set(MACHINE_STATE_KEY, { lastRebootReminderMs: Date.now() });
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "OK, sẽ nhắc lại sau.", "OK, will remind you later."));
-      if (messageId !== undefined) await this.tg.editMessageReplyMarkup(conv, messageId, {}).catch(() => {});
-      return;
-    }
-    if (action === "ask") {
-      await this.tg.answerCallbackQuery(cb.id);
-      if (messageId !== undefined) await this.tg.editMessageReplyMarkup(conv, messageId, {}).catch(() => {});
-      await this.sendRebootConfirm(conv);
-      return;
-    }
-    if (action === "cancel") {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Đã huỷ.", "Cancelled."));
-      if (messageId !== undefined) await this.tg.editMessageReplyMarkup(conv, messageId, {}).catch(() => {});
-      return;
-    }
-    if (action === "go") {
-      await this.tg.answerCallbackQuery(cb.id);
-      if (messageId !== undefined) await this.tg.editMessageReplyMarkup(conv, messageId, {}).catch(() => {});
-      if (!isRebootConfirmFresh(cb.data, Date.now())) {
-        await this.tg.sendMessage(conv, tr(lang, "⌛ Xác nhận reboot đã hết hạn — gửi /reboot để xác nhận lại.", "⌛ The reboot confirmation expired — send /reboot to confirm again.")).catch(() => {});
-        return;
-      }
-      if (this.rebootArmed) return; // double-tap: one reboot is already pending
-      if (!existsSync(SAFE_REBOOT_BIN)) {
-        await this.tg.sendMessage(conv, tr(lang, "⚠️ Wrapper <b>safe-reboot</b> chưa được cài trên máy. Chạy khối sudo trong PR #11 trước.", "⚠️ The <b>safe-reboot</b> wrapper isn't installed on this box. Apply the sudo block from PR #11 first.")).catch(() => {});
-        return;
-      }
-      this.rebootArmed = true;
-      const secs = Math.round(this.cfg.rebootDelayMs / 1000);
-      await this.tg.sendMessage(conv, tr(lang, `🔄 <b>Đang reboot máy trong ~${secs} giây…</b>\nBot sẽ tự chạy lại sau khi máy lên (linger).`, `🔄 <b>Rebooting the box in ~${secs}s…</b>\nThe bot self-resumes after the box is back (linger).`)).catch(() => {});
-      // Fire after the delay so the message above gets delivered. The token is
-      // minted INSIDE the timer, right before the wrapper runs: the wrapper
-      // rejects tokens older than REBOOT_TOKEN_TTL_MS, and rebootDelayMs
-      // (default 15 s) is longer than that, so minting it earlier would always
-      // be refused as stale. A stray `systemctl reboot` is refused regardless.
-      setTimeout(() => {
-        const token = randomBytes(16).toString("hex");
-        const tokenFile = rebootTokenFile(homedir());
-        try {
-          mkdirSync(dirname(tokenFile), { recursive: true });
-          writeFileSync(tokenFile, buildTokenLine(token, Date.now()), { mode: 0o600 });
-        } catch (e) {
-          this.rebootArmed = false;
-          error("reboot arm failed:", (e as Error)?.message ?? e);
-          void this.tg.sendMessage(conv, tr(this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? ""), "⚠️ Không tạo được token reboot — xem log bot.", "⚠️ Could not create the reboot token — check the bot log.")).catch(() => {});
-          return;
-        }
-        execFile("sudo", ["-n", SAFE_REBOOT_BIN, token], (err) => {
-          this.rebootArmed = false; // only reached if the box did NOT go down
-          if (err) error("reboot denied/failed:", err.message);
-        });
-      }, this.cfg.rebootDelayMs).unref?.();
-      return;
-    }
-    await this.tg.answerCallbackQuery(cb.id);
   }
 
   /**
@@ -2091,24 +2011,24 @@ export class Bot {
       case "/b":
         return this.cmdBrowse(conv, arg, state);
       case "/models":
-        return this.cmdModels(conv);
+        return cmdModels(this, conv);
       case "/model":
-        return this.cmdModel(conv, arg, state);
+        return cmdModel(this, conv, arg, state);
       case "/agents":
         return cmdAgents(this, conv);
       case "/agent":
         return cmdAgent(this, conv, arg, state);
       case "/modes":
       case "/mode":
-        return this.cmdMode(conv, arg, state);
+        return cmdMode(this, conv, arg, state);
       case "/variants":
-        return this.cmdVariants(conv, arg, state);
+        return cmdVariants(this, conv, arg, state);
       case "/variant":
-        return this.cmdVariantSet(conv, arg, state);
+        return cmdVariantSet(this, conv, arg, state);
       case "/stop":
         return this.cmdStop(conv, state);
       case "/reboot":
-        return this.cmdReboot(conv);
+        return cmdReboot(this, conv);
       case "/status":
         return cmdStatus(this, conv, state);
       case "/health":
@@ -3167,24 +3087,14 @@ export class Bot {
     if (sid) await this.oc.interrupt(sid).catch(() => {});
   }
 
-  // ── model + variant helpers ─────────────────────────────────────────────────────
-  /** Resolve the model ref to use: explicit per-chat > config default > session's current model. */
-  private async resolveModel(state: ChatState, sessionID?: string): Promise<{ id: string; providerID: string } | null> {
-    if (state.model) return state.model;
-    if (this.cfg.defaultModel) return this.cfg.defaultModel;
-    if (sessionID) {
-      const s = await this.oc.getSession(sessionID).catch(() => null);
-      if (s?.model?.id && s?.model?.providerID) return { id: s.model.id, providerID: s.model.providerID };
-    }
-    return null;
+  // Shared model primitives (bodies in commands/model.ts) — kept on Bot as
+  // thin delegates until their last caller (prompt-runner, T6) moves, so
+  // session/rotation/browse/prompt-runner can call them through BotCtx.
+  public resolveModel(state: ChatState, sessionID?: string) {
+    return resolveModelFree(this, state, sessionID);
   }
-
-  /** Apply the chat's model + effective variant to a session (best-effort, non-fatal). */
-  private async applyModelAndVariant(sessionID: string, state: ChatState): Promise<void> {
-    const model = await this.resolveModel(state, sessionID);
-    if (!model) return;
-    const variant = state.variant ?? this.cfg.defaultVariant;
-    await this.oc.setModel(sessionID, { ...model, variant }).catch((e) => warn("applyModelAndVariant:", e?.message));
+  public applyModelAndVariant(sessionID: string, state: ChatState) {
+    return applyModelAndVariantFree(this, sessionID, state);
   }
 
   // ── commands ─────────────────────────────────────────────────────────────
@@ -3846,7 +3756,7 @@ export class Bot {
       return;
     }
     if (data.startsWith("mode:")) {
-      await this.handleModeCallback(cb, conv, messageId);
+      await handleModeCallback(this, cb, conv, messageId);
       return;
     }
     if (data.startsWith("perm:")) {
@@ -3870,7 +3780,7 @@ export class Bot {
       return;
     }
     if (data.startsWith("reboot:")) {
-      await this.handleRebootCallback(cb, conv, messageId);
+      await handleRebootCallback(this, cb, conv, messageId);
       return;
     }
     if (data.startsWith("rot:")) {
@@ -3890,11 +3800,11 @@ export class Bot {
       return;
     }
     if (data.startsWith("variant:")) {
-      await this.handleVariantCallback(cb, conv, messageId);
+      await handleVariantCallback(this, cb, conv, messageId);
       return;
     }
     if (data.startsWith("mdl:")) {
-      await this.handleModelCallback(cb, conv, messageId);
+      await handleModelCallback(this, cb, conv, messageId);
       return;
     }
     if (data.startsWith("kill:")) return this.orch.handleKillCallback(cb, conv, messageId);
@@ -4042,13 +3952,13 @@ export class Bot {
           await this.cmdBrowse(conv, "", state);
           break;
         case "mode":
-          await this.cmdMode(conv, "", state);
+          await cmdMode(this, conv, "", state);
           break;
         case "models":
-          await this.cmdModels(conv);
+          await cmdModels(this, conv);
           break;
         case "variants":
-          await this.cmdVariants(conv, "", state);
+          await cmdVariants(this, conv, "", state);
           break;
         case "agents":
           await cmdAgents(this, conv);
@@ -4057,7 +3967,7 @@ export class Bot {
           await this.cmdStop(conv, state);
           break;
         case "reboot":
-          await this.cmdReboot(conv);
+          await cmdReboot(this, conv);
           break;
         case "status":
           await cmdStatus(this, conv, state);
@@ -4092,236 +4002,6 @@ export class Bot {
     }
   }
 
-  private async cmdModels(conv: ConvKey): Promise<void> {
-    const models = await this.oc.listModels();
-    const cur = this.st.get(conv).model?.id;
-    const max = this.cfg.replyMaxLen;
-    const footer = "\n\nSet with /model &lt;id&gt;";
-    // Show EVERY model, packed into ≤max-char pages on line boundaries so each
-    // message is valid HTML with balanced tags (no mid-tag cuts → no 400s).
-    const units = [
-      `<b>Models (${models.length})</b>`,
-      ...models.map((m) => `${cur === m.id ? "▶️ " : ""}<code>${m.id}</code>${m.name ? ` — ${esc(m.name)}` : ""}`),
-    ];
-    const pages: string[] = [];
-    let page = "";
-    for (let i = 0; i < units.length; i++) {
-      const unit = units[i];
-      const final = i === units.length - 1;
-      const budget = max - (final ? footer.length : 0);
-      if (page && (page + "\n" + unit).length > budget) {
-        pages.push(page);
-        page = unit;
-      } else {
-        page = page ? page + "\n" + unit : unit;
-      }
-    }
-    if (page) pages.push(page + footer);
-    for (const p of pages) await this.tg.sendMessage(conv, p);
-  }
-
-  /**
-   * `/model [id]` — set the model. Without a valid argument the user gets a
-   * paged button picker (10 models/page) instead of the text list.
-   */
-  private async cmdModel(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
-    void state;
-    const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
-    let models: ModelInfo[];
-    try {
-      models = await this.oc.listModels();
-    } catch (e) {
-      return this.tg.sendMessage(conv, tr(lang, `⚠️ Không liệt kê được model: ${(e as Error).message}`, `⚠️ Couldn't list models: ${(e as Error).message}`));
-    }
-    if (!arg) return this.showModelPicker(conv, models, 0, undefined, lang);
-    const m = models.find((x) => x.id === arg || `${x.providerID}/${x.id}` === arg);
-    if (!m) return this.showModelPicker(conv, models, 0, tr(lang, `❌ Unknown model: <code>${esc(arg)}</code>`, `❌ Unknown model: <code>${esc(arg)}</code>`), lang);
-    await this.applyModelPick(conv, m);
-    await this.tg.sendMessage(conv, tr(lang, `✅ Model → <code>${esc(m.id)}</code> (${this.st.get(conv).sessionID ? "đã áp dụng cho session hiện tại" : "áp dụng khi /new"})`, `✅ Model → <code>${esc(m.id)}</code> (${this.st.get(conv).sessionID ? "applied to current session" : "applies on /new"})`));
-  }
-
-  /** Apply the model choice (shared by the typed command and the picker buttons). */
-  private async applyModelPick(conv: ConvKey, m: ModelInfo): Promise<void> {
-    this.st.set(conv, { model: { id: m.id, providerID: m.providerID } });
-    const sid = this.st.get(conv).sessionID;
-    if (sid) await this.applyModelAndVariant(sid, this.st.get(conv));
-  }
-
-  /** The text + keyboard for one page of the /model picker. */
-  private renderModelPage(models: ModelInfo[], page: number, errorNote?: string, curId?: string, lang: Lang = "vi"): { text: string; keyboard: Keyboard } {
-    const pageCount = Math.max(1, Math.ceil(models.length / MODEL_PAGE_SIZE));
-    const p = Math.max(0, Math.min(page, pageCount - 1));
-    const slice = models.slice(p * MODEL_PAGE_SIZE, (p + 1) * MODEL_PAGE_SIZE);
-    const rows: Btn[][] = [];
-    for (let i = 0; i < slice.length; i += 2) {
-      rows.push(
-        slice.slice(i, i + 2).map((m, j) => ({
-          text: `${curId === m.id ? "▶️ " : ""}${trunc(m.id, 28)}`,
-          callback_data: `mdl:sel:${p * MODEL_PAGE_SIZE + i + j}`,
-        })),
-      );
-    }
-    if (pageCount > 1) {
-      const nav: Btn[] = [];
-      if (p > 0) nav.push({ text: "⬅️", callback_data: `mdl:pg:${p - 1}` });
-      nav.push({ text: `${p + 1}/${pageCount}`, callback_data: "mdl:noop" });
-      if (p < pageCount - 1) nav.push({ text: "➡️", callback_data: `mdl:pg:${p + 1}` });
-      rows.push(nav);
-    }
-    rows.push([{ text: tr(lang, "❌ Đóng", "❌ Close"), callback_data: "mdl:close" }]);
-    return {
-      text: [errorNote ?? tr(lang, "❓ <b>/model</b> cần tên model", "❓ <b>/model</b> needs a model name"), `<i>${tr(lang, "trang", "page")} ${p + 1}/${pageCount} · Hoặc gửi: <code>/model &lt;id&gt;</code></i>`].join("\n"),
-      keyboard: { inline_keyboard: rows },
-    };
-  }
-
-  /** Open the model picker (or re-show it after a bad argument) and remember the model list. */
-  private async showModelPicker(conv: ConvKey, models: ModelInfo[], page: number, errorNote?: string, lang: Lang = "vi"): Promise<void> {
-    const pageCount = Math.max(1, Math.ceil(models.length / MODEL_PAGE_SIZE));
-    const p = Math.max(0, Math.min(page, pageCount - 1));
-    this.modelPickers.set(conv, { models, page: p });
-    const v = this.renderModelPage(models, p, errorNote, this.st.get(conv).model?.id, lang);
-    await this.tg.sendMessage(conv, v.text, { reply_markup: v.keyboard });
-  }
-
-  /** Handle a tap on the /model picker (data = `mdl:sel:<i>` / `mdl:pg:<n>` / `mdl:close` / `mdl:noop`). */
-  private async handleModelCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
-    const lang = this.userPrefs.getLang(cb.from?.id ?? "");
-    const [, op, arg] = (cb.data ?? "").split(":");
-    if (op === "close") {
-      this.modelPickers.delete(conv);
-      await this.tg.answerCallbackQuery(cb.id);
-      if (messageId) await this.tg.deleteMessage(conv, messageId).catch(() => {});
-      return;
-    }
-    const mp = this.modelPickers.get(conv);
-    if (!mp) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Danh sách model đã đóng — gửi /model để mở lại.", "The model list was closed — send /model to open it again."));
-      return;
-    }
-    try {
-      if (op === "sel") {
-        const m = mp.models[Number(arg)];
-        if (!m) throw new Error(tr(lang, "Model không còn trong danh sách — gửi /model để mở lại.", "The model is no longer in the list — send /model to open it again."));
-        await this.applyModelPick(conv, m);
-        this.modelPickers.delete(conv);
-        await this.tg.answerCallbackQuery(cb.id, `Model → ${trunc(m.id, 40)}`);
-        if (messageId) await this.tg.editMessageText(conv, messageId, tr(lang, `✅ Model → <code>${esc(m.id)}</code> (${this.st.get(conv).sessionID ? "đã áp dụng" : "áp dụng khi /new"})`, `✅ Model → <code>${esc(m.id)}</code> (${this.st.get(conv).sessionID ? "applied" : "applies on /new"})`)).catch(() => {});
-        return;
-      }
-      if (op === "pg") {
-        await this.tg.answerCallbackQuery(cb.id);
-        if (!messageId) return;
-        const v = this.renderModelPage(mp.models, Number(arg) || 0, undefined, this.st.get(conv).model?.id, lang);
-        this.modelPickers.set(conv, { ...mp, page: Math.max(0, Math.min(Number(arg) || 0, Math.ceil(mp.models.length / MODEL_PAGE_SIZE) - 1)) });
-        await this.tg.editMessageText(conv, messageId, v.text, { reply_markup: v.keyboard }).catch(() => {});
-        return;
-      }
-      // "noop" or unknown
-      await this.tg.answerCallbackQuery(cb.id);
-    } catch (e) {
-      await this.tg.answerCallbackQuery(cb.id, `⚠️ ${(e as Error).message}`);
-    }
-  }
-
-  /** The current mode, derived from the session's agent (a curated label). */
-  public currentMode(state: ChatState): string | undefined {
-    return Object.entries(MODES).find(([, m]) => m.agent === state.agent)?.[0];
-  }
-
-  /** Switch the chat's mode (agent): persist it and apply to the open session. */
-  private async applyMode(conv: ConvKey, state: ChatState, agent: string): Promise<void> {
-    this.st.set(conv, { agent });
-    if (state.sessionID) {
-      await this.oc.setAgent(state.sessionID, agent).catch((e) => error("setAgent:", e?.message));
-    }
-  }
-
-  /** Build the inline "pick a mode" message: a short header + one button per mode. */
-  private renderModePicker(state: ChatState, lang: Lang = "vi"): { text: string; keyboard: Keyboard } {
-    const cur = this.currentMode(state);
-    const entries = Object.entries(MODES);
-    const rows: Btn[][] = [];
-    for (let i = 0; i < entries.length; i += 2) {
-      const row: Btn[] = [];
-      for (let j = i; j < Math.min(i + 2, entries.length); j++) {
-        const [id] = entries[j];
-        row.push({ text: `${cur === id ? "▶️ " : ""}${id}`, callback_data: `mode:${id}` });
-      }
-      rows.push(row);
-    }
-    rows.push([
-      { text: tr(lang, "❓ Vai trò", "❓ Roles"), callback_data: "mode:info" },
-      { text: tr(lang, "❌ Đóng", "❌ Close"), callback_data: "mode:close" },
-    ]);
-    const curLabel = cur ? `<b>${esc(cur)}</b>` : tr(lang, "<i>chưa chọn</i>", "<i>not set</i>");
-    return {
-      text: [tr(lang, `<b>Chọn mode</b> — ${curLabel}`, `<b>Choose a mode</b> — ${curLabel}`), tr(lang, "<i>bấm để đổi · mode hiện tại đánh dấu ▶️</i>", "<i>tap to switch · current mode is marked ▶️</i>"), "Hoặc gửi: <code>/mode &lt;id&gt;</code>"].join("\n"),
-      keyboard: { inline_keyboard: rows },
-    };
-  }
-
-  /**
-   * Show the mode picker (inline buttons), or switch straight to `/mode <name>`.
-   * A mode is a friendly front-end over the agent; the current mode is derived
-   * from the session's agent, so /agent and /mode can never disagree.
-   */
-  private async cmdMode(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
-    const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
-    const want = arg.trim().toLowerCase();
-    if (!want) {
-      const v = this.renderModePicker(state, lang);
-      await this.tg.sendMessage(conv, v.text, { reply_markup: v.keyboard });
-      return;
-    }
-    const m = MODES[want];
-    if (!m) {
-      const v = this.renderModePicker(state, lang);
-      await this.tg.sendMessage(conv, `❌ Unknown mode: <code>${esc(want)}</code>`, { reply_markup: v.keyboard });
-      return;
-    }
-    await this.applyMode(conv, state, m.agent);
-    const applied = tr(lang, "đã áp dụng", "applied");
-    const appliedOnNew = tr(lang, "áp dụng khi /new", "applies on /new");
-    const v = this.renderModePicker(state, lang);
-    await this.tg.sendMessage(conv, `✅ Mode → <b>${esc(want)}</b> (${state.sessionID ? applied : appliedOnNew})`, { reply_markup: v.keyboard });
-  }
-
-  /** Handle a tap on the mode picker (switch in place, or close the picker). */
-  private async handleModeCallback(cb: CallbackQuery, conv: ConvKey, messageId: number | undefined): Promise<void> {
-    const lang = this.userPrefs.getLang(cb.from?.id ?? "");
-    const id = (cb.data ?? "").split(":")[1];
-    if (id === "close") {
-      await this.tg.answerCallbackQuery(cb.id);
-      if (messageId) await this.tg.deleteMessage(conv, messageId);
-      return;
-    }
-    if (id === "info") {
-      await this.tg.answerCallbackQuery(cb.id);
-      const lines = Object.entries(MODES).map(([mid, m]) => `• <code>${esc(mid)}</code> — ${esc(m.hintEn === undefined ? m.hint : tr(lang, m.hint, m.hintEn))}`);
-      await this.tg.sendMessage(conv, tr(lang, "📖 <b>Vai trò các mode</b>", "📖 <b>What each mode does</b>") + "\n" + lines.join("\n"));
-      return;
-    }
-    const m = MODES[id];
-    if (!m) {
-      await this.tg.answerCallbackQuery(cb.id, `❌ Unknown mode: ${esc(id)}`);
-      return;
-    }
-    const state = this.st.get(conv);
-    const wasCurrent = this.currentMode(state) === id;
-    try {
-      await this.applyMode(conv, state, m.agent);
-    } catch (e) {
-      await this.tg.answerCallbackQuery(cb.id, `⚠️ ${(e as Error).message}`);
-      return;
-    }
-    await this.tg.answerCallbackQuery(cb.id, `Mode → ${id}`);
-    if (messageId && !wasCurrent) {
-      const v = this.renderModePicker(state, lang);
-      await this.tg.editMessageText(conv, messageId, v.text, { reply_markup: v.keyboard });
-    }
-  }
-
   /** Handle a tap on the plan-to-build button (data = `pb:go`). */
   private async handlePlanToBuildCallback(cb: CallbackQuery, conv: ConvKey): Promise<void> {
     const lang = this.userPrefs.getLang(cb.from?.id ?? "");
@@ -4334,7 +4014,7 @@ export class Bot {
       await this.tg.answerCallbackQuery(cb.id, tr(lang, "Chưa có session — hãy gửi một tin nhắn trước.", "No session yet — send a message first."));
       return;
     }
-    await this.applyMode(conv, state, "build");
+    await applyMode(this, conv, state, "build");
     await this.tg.answerCallbackQuery(cb.id, "Mode → build");
     await this.tg.sendMessage(conv, tr(lang, "Đã chuyển sang <b>build</b> — bắt đầu thực thi kế hoạch.", "Switched to <b>build</b> — starting to execute the plan.")).catch(() => {});
     const prompt = tr(lang,
@@ -4521,108 +4201,6 @@ export class Bot {
     const residual = this.nextStepResiduals.get(id) ?? { inline_keyboard: [] };
     this.nextStepResiduals.delete(id);
     void this.tg.editMessageReplyMarkup(conv, id, { reply_markup: residual }).catch(() => {});
-  }
-
-  /**
-   * `/variants [id]` — list (no arg) or set the reasoning "variant" as a plain
-   * text message. The button-pick version lives in cmdVariantSet (/variant).
-   */
-  private async cmdVariants(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
-    const want = arg.trim().toLowerCase();
-    const model = await this.resolveModel(state, state.sessionID);
-    const variants = model ? await this.oc.getVariants(model) : [];
-    const cur = state.variant ?? this.cfg.defaultVariant;
-
-    if (!want) {
-      const lines = variants.length
-        ? variants.map((v) => `${v === cur ? "▶️ " : ""}<code>${esc(v)}</code>`).join("\n")
-        : "<i>(no variants reported for this model)</i>";
-      const modelLabel = model ? ` — <code>${esc(model.id)}</code>` : " — <i>no model set</i>";
-      await this.sendHtml(
-        conv,
-        `<b>Variants</b>${modelLabel}\n${lines}\n\n<i>current: ${esc(cur)}</i>\nSet with /variants &lt;id&gt;`,
-      );
-      return;
-    }
-    if (!model) {
-      return this.tg.sendMessage(conv, "❌ No model set. Use /model first, then set a variant.");
-    }
-    if (variants.length && !variants.includes(want)) {
-      return this.tg.sendMessage(
-        conv,
-        `❌ Unknown variant <code>${esc(want)}</code>. Available: ${esc(variants.join(", "))}`,
-      );
-    }
-    const how = await this.applyVariant(conv, want);
-    await this.tg.sendMessage(conv, `✅ Variant → <code>${esc(want)}</code> (${how})`);
-  }
-
-  /**
-   * `/variant [id]` — set the reasoning variant, with a button picker when the
-   * argument is missing (or unknown). Models without variants keep the plain
-   * text answer (delegated to cmdVariants).
-   */
-  private async cmdVariantSet(conv: ConvKey, arg: string, state: ChatState): Promise<void> {
-    const want = arg.trim().toLowerCase();
-    let model: { id: string; providerID: string } | null = null;
-    let variants: string[] = [];
-    try {
-      model = await this.resolveModel(state, state.sessionID);
-      if (model) variants = await this.oc.getVariants(model);
-    } catch (e) {
-      warn("variant lookup:", (e as Error).message);
-    }
-    // No model, or the model reports no variants: keep the existing text output.
-    if (!model || !variants.length) return this.cmdVariants(conv, arg, state);
-    const cur = state.variant ?? this.cfg.defaultVariant;
-    if (!want) return this.sendVariantPicker(conv, variants, cur, undefined, this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? ""));
-    if (!variants.includes(want)) return this.sendVariantPicker(conv, variants, cur, `❌ Unknown variant <code>${esc(want)}</code>`, this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? ""));
-    const how = await this.applyVariant(conv, want);
-    await this.tg.sendMessage(conv, `✅ Variant → <code>${esc(want)}</code> (${how})`);
-  }
-
-  /** Apply the variant choice (shared by /variants, /variant and the picker buttons). */
-  private async applyVariant(conv: ConvKey, want: string): Promise<"applied to current session" | "applies on /new"> {
-    this.st.set(conv, { variant: want });
-    const sid = this.st.get(conv).sessionID;
-    if (sid) {
-      await this.applyModelAndVariant(sid, this.st.get(conv));
-      return "applied to current session";
-    }
-    return "applies on /new";
-  }
-
-  /** The /variant picker card: one button per variant + a hint line. */
-  private sendVariantPicker(conv: ConvKey, variants: string[], cur: string, errorNote?: string, lang: Lang = "vi"): Promise<void> {
-    const rows: Btn[][] = [];
-    for (let i = 0; i < variants.length; i += 2) {
-      rows.push(
-        variants.slice(i, i + 2).map((v) => ({ text: `${v === cur ? "▶️ " : ""}${v}`, callback_data: `variant:${v}` })),
-      );
-    }
-    rows.push([{ text: tr(lang, "❌ Đóng", "❌ Close"), callback_data: "variant:close" }]);
-    return this.tg.sendMessage(
-      conv,
-      [errorNote ?? tr(lang, "❓ <b>/variant</b> cần tên variant", "❓ <b>/variant</b> needs a variant name"), "Hoặc gửi: <code>/variant &lt;id&gt;</code>"].join("\n"),
-      { reply_markup: { inline_keyboard: rows } },
-    );
-  }
-
-  /** Handle a tap on the /variant picker (data = `variant:<id|close>`). */
-  private async handleVariantCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
-    const id = (cb.data ?? "").slice("variant:".length);
-    if (id === "close") {
-      await this.tg.answerCallbackQuery(cb.id);
-      if (messageId) await this.tg.deleteMessage(conv, messageId).catch(() => {});
-      return;
-    }
-    try {
-      const how = await this.applyVariant(conv, id);
-      await this.tg.answerCallbackQuery(cb.id, `Variant → ${id}`);
-      if (messageId) await this.tg.editMessageText(conv, messageId, `✅ Variant → <code>${esc(id)}</code> (${how})`).catch(() => {});
-    } catch (e) {
-      await this.tg.answerCallbackQuery(cb.id, `⚠️ ${(e as Error).message}`);
-    }
   }
 
   /**
