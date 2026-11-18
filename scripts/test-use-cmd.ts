@@ -15,6 +15,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Bot } from "../src/bot.js";
+import { cmdUse, handleUseCallback } from "../src/commands/session.js";
 import { StateManager } from "../src/state.js";
 import { configureAudit } from "../src/audit.js";
 
@@ -82,7 +83,7 @@ const conv = "42";
   st.set(conv, { sessionID: "ses_A" });
   const ac = new AbortController();
   (bot as any).inflight.set(conv, ac); // a turn is running on A
-  await (bot as any).cmdUse(conv, "ses_B", st.get(conv));
+  await cmdUse(bot as any, conv, "ses_B", st.get(conv));
   check("inflight /use → oc.interrupt awaited for the OLD session", interrupted.length === 1 && interrupted[0] === "ses_A", JSON.stringify(interrupted));
   check("inflight /use → inflight controller aborted", ac.signal.aborted === true);
   check("inflight /use → state switched to B", st.get(conv).sessionID === "ses_B", st.get(conv).sessionID);
@@ -93,7 +94,7 @@ const conv = "42";
   const { bot, sent, interrupted, st } = makeBot();
   st.set(conv, { sessionID: "ses_A" });
   (bot as any).inflight.set(conv, new AbortController());
-  await (bot as any).cmdUse(conv, "ses_nope", st.get(conv));
+  await cmdUse(bot as any, conv, "ses_nope", st.get(conv));
   check("unknown id → error mentioning the id", sent.some((t) => /Không có session|No session/.test(t) && t.includes("ses_nope")), sent.join(" | "));
   check("unknown id → state unchanged (still A)", st.get(conv).sessionID === "ses_A", st.get(conv).sessionID);
   check("unknown id → no interrupt sent", interrupted.length === 0, JSON.stringify(interrupted));
@@ -103,7 +104,7 @@ const conv = "42";
 {
   const { bot, st } = makeBot();
   st.set(conv, { sessionID: "ses_A", notes: "- 12:00: remember the API key", notesStage: "pending" });
-  await (bot as any).cmdUse(conv, "ses_B", st.get(conv));
+  await cmdUse(bot as any, conv, "ses_B", st.get(conv));
   const s = st.get(conv);
   check("switch drops pending notes", s.notes === undefined && s.notesStage === undefined, JSON.stringify({ notes: s.notes, notesStage: s.notesStage }));
 }
@@ -113,7 +114,7 @@ const conv = "42";
   const { bot, interrupted, st } = makeBot();
   st.set(conv, { sessionID: "ses_A" });
   (bot as any).inflight.set(conv, new AbortController());
-  await (bot as any).handleUseCallback({ id: "cb1", data: "use:ses_B", from: { id: 1 } }, conv, (t) => void (bot as any).tg.answerCallbackQuery("cb1", t), 7);
+  await handleUseCallback(bot as any, { id: "cb1", data: "use:ses_B", from: { id: 1 } }, conv, 7);
   check("callback /use → oc.interrupt awaited for the OLD session", interrupted.length === 1 && interrupted[0] === "ses_A", JSON.stringify(interrupted));
   check("callback /use → state switched to B", st.get(conv).sessionID === "ses_B", st.get(conv).sessionID);
 }
@@ -123,7 +124,7 @@ const conv = "42";
   const { bot, answered, interrupted, st } = makeBot();
   st.set(conv, { sessionID: "ses_A" });
   (bot as any).inflight.set(conv, new AbortController());
-  await (bot as any).handleUseCallback({ id: "cb2", data: "use:ses_gone", from: { id: 1 } }, conv, (t) => void (bot as any).tg.answerCallbackQuery("cb2", t), 7);
+  await handleUseCallback(bot as any, { id: "cb2", data: "use:ses_gone", from: { id: 1 } }, conv, 7);
   check("stale callback → toast error mentioning the id", answered.some((t) => /Không có session|No session/.test(t) && t.includes("ses_gone")), JSON.stringify(answered));
   check("stale callback → state unchanged (still A)", st.get(conv).sessionID === "ses_A", st.get(conv).sessionID);
   check("stale callback → no interrupt sent", interrupted.length === 0, JSON.stringify(interrupted));

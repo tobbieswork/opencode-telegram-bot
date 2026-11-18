@@ -1,17 +1,11 @@
-import { execFile } from "node:child_process";
 import type { Bot } from "../bot.js";
 import type { CallbackQuery } from "../telegram.js";
-import type { ModelInfo } from "../opencode.js";
-import { MACHINE_STATE_KEY } from "../state.js";
-import type { ChatState } from "../state.js";
 import type { ConvKey } from "../conv.js";
-import { esc, trunc, stripTags, fmtNum, timeAgo } from "../format.js";
+import { esc } from "../format.js";
 import { helpText, commandGrid, myCommands } from "../commands.js";
-import type { UsageRow, RotationInfo } from "../usage.js";
-import { formatUsageReport, compactionCeiling } from "../usage.js";
 import { appendNote, noteEntryText, showNotes, BUSY_REPLY_TEXT, parseNoteCallback } from "../notes.js";
 import { warn } from "../logger.js";
-import { QUESTIONS_PREAMBLE, NOTES_KEY } from "../shared.js";
+import { NOTES_KEY } from "../shared.js";
 import { renderRotationReport } from "../rotation-health.js";
 import { collectHealth, formatHealth } from "../health.js";
 import { buildProbes } from "../health-probes.js";
@@ -95,24 +89,6 @@ export async function handleNoteCallback(bot: Bot, cb: CallbackQuery, conv: Conv
 }
 
 /**
- * The deployed version: `git describe --tags --match "v[0-9]*" --always --dirty`
- * (e.g. `v1.0.2-3-gabc1234`), or the bare short hash when no tag exists yet.
- * Empty string on any failure — /status must never break because git is missing
- * or the repo is not clean.
- *
- * `--match "v[0-9]*"` limits describe to the clean vX.Y.Z tags: release-please
- * also keeps a `<component>-vX.Y.Z` anchor tag on the same commit, and without
- * the filter describe would report that longer name.
- */
-function deployedVersion(): Promise<string> {
-  return new Promise((res) =>
-    execFile("git", ["describe", "--tags", "--match", "v[0-9]*", "--always", "--dirty"], { timeout: 3000 }, (e, out) =>
-      res(e ? "" : out.trim())
-    )
-  );
-}
-
-/**
  * /health — one line per background subsystem (OpenCode, bridge, scheduler,
  * PR-watch, advisor, uptime, DNS heal). Read-only: it only reads the signals
  * the subsystems already keep, plus two cheap liveness pings.
@@ -124,187 +100,6 @@ export async function cmdHealth(bot: Bot, conv: ConvKey, uid: number | string | 
   await bot.sendHtml(conv, formatHealth(lines, lang, now));
 }
 
-export async function cmdStatus(bot: Bot, conv: ConvKey, state: ChatState): Promise<void> {
-  const info = await bot.oc.serverInfo().catch(() => null);
-  const version = await deployedVersion();
-  const busy = bot.inflight.has(conv);
-  const mode = bot.currentMode(state);
-  // Explicitly set model wins; otherwise observe what the session actually
-  // runs on (server-resolved default) from the newest assistant message.
-  const live = state.sessionID ? await bot.oc.getSessionModel(state.sessionID).catch(() => undefined) : undefined;
-  const model = state.model ?? live;
-  const modelLabel = model ? (model.providerID && model.providerID !== "?" ? `${model.providerID}/${model.id}` : model.id) : null;
-  const lines = [
-    `<b>Bot</b>${version ? ` <code>${esc(version)}</code>` : ""}`,
-    `<b>OpenCode</b>${info?.version ? " v" + info.version : ""}`,
-    `url: <code>${esc((info?.urls ?? [info?.url]).filter(Boolean).join(", ") || "?")}</code>`,
-    `dir: <code>${esc(state.directory || bot.cfg.opencodeDirectory)}</code>`,
-    `session: ${state.sessionID ? `<code>${state.sessionID}</code>` : "none"}`,
-    `model: ${modelLabel ? `<code>${esc(modelLabel)}</code>` : "default"}`,
-    `variant: <code>${esc(state.variant ?? bot.cfg.defaultVariant)}</code>`,
-    `mode: ${mode ? `<code>${esc(mode)}</code>` : "—"}`,
-    `agent: ${state.agent ? `<code>${state.agent}</code>` : "default"}`,
-    `state: ${busy ? "⏳ busy" : "🟢 idle"}`,
-  ];
-  // The Manager's context FLOOR (min sent-context over 24h) — the persistent
-  // baseline that drifts up over days and drives auto-rotation. Manager convs
-  // only; a read failure just omits the line (never breaks /status).
-  if (state.manager && state.sessionID) {
-    const floor = (await bot.managerFloor(state.sessionID)) ?? 0;
-    if (floor > 0) lines.push(`ctx floor: ~${Math.round(floor / 1000)}K`);
-  }
-  await bot.sendHtml(conv, lines.join("\n"));
-}
-
-/**
- * `/context` — a photo of the current session: what it is, how much it has
- * used, and what it most recently touched. Distinct from /status (connection
- * + settings) and /history (recent message text).
- */
-export async function cmdContext(bot: Bot, conv: ConvKey, state: ChatState): Promise<void> {
-  if (!state.sessionID) return bot.tg.sendMessage(conv, "No current session. Send /new.");
-  let r;
-  try {
-    r = await bot.oc.getSessionReport(state.sessionID);
-  } catch (e) {
-    const lang = bot.userPrefs.getLang(bot.st.peek(conv)?.createdBy ?? "");
-    return bot.tg.sendMessage(conv, warnLine(lang, raw(`Could not read the session: ${(e as Error).message}`)));
-  }
-  const base = r.directory || state.directory || bot.cfg.opencodeDirectory;
-  const rel = (p: string) => (base && p.startsWith(base) ? p.slice(base.length).replace(/^\//, "") : p);
-
-  const lines: string[] = [];
-  lines.push(`📋 <b>Session</b> — ${esc(trunc(r.title || "(no title)", 60))}`);
-  lines.push(`id: <code>${esc(r.id)}</code>`);
-  if (r.directory) lines.push(`📁 <code>${esc(r.directory)}</code>`);
-
-  const live = await bot.oc.getSessionModel(state.sessionID).catch(() => undefined);
-  const model = state.model ?? live;
-  const modelLabel = model ? (model.providerID && model.providerID !== "?" ? `${model.providerID}/${model.id}` : model.id) : null;
-  lines.push(
-    `🤖 model: ${modelLabel ? `<code>${esc(modelLabel)}</code>` : "default"} · agent: ${r.agent ? `<code>${esc(r.agent)}</code>` : "default"}`,
-  );
-
-  const t = r.tokens;
-  if (t) lines.push(`📦 tokens: in ${fmtNum(t.input)} / out ${fmtNum(t.output)} / reasoning ${fmtNum(t.reasoning)} · cache ${fmtNum(t.cache)}`);
-  if (typeof r.cost === "number" && r.cost > 0) lines.push(`💰 cost: $${r.cost.toFixed(4)}`);
-  lines.push(`💬 ${r.messageCount} messages`);
-  if (r.created) lines.push(`🕐 started ${timeAgo(r.created)}`);
-
-  if (r.modifiedFiles.length) {
-    const files = r.modifiedFiles.map((f) => `<code>${esc(rel(f))}</code>`).join(", ");
-    lines.push(`📝 files: ${files}`);
-  }
-  if (r.lastUserPrompt) {
-    // The first prompt is sent with the headless preamble prepended; strip it
-    // so the "last" line shows what the user actually typed.
-    const last = r.lastUserPrompt.startsWith(QUESTIONS_PREAMBLE)
-      ? r.lastUserPrompt.slice(QUESTIONS_PREAMBLE.length).replace(/^\s+\n+/, "").replace(/\n+$/, "")
-      : r.lastUserPrompt;
-    if (last.trim()) lines.push(`👤 last: “${esc(trunc(stripTags(last), 120))}”`);
-  }
-  await bot.sendHtml(conv, lines.join("\n"));
-}
-
-/**
- * /usage — context pressure across every session this bot tracks (manager,
- * workers, regular chats): current context vs the model's window, plus the
- * cumulative totals. The answer to "which session is about to overflow?"
- *
- * REST budget: exactly 2 calls per UNIQUE session — session.get (cumulative
- * tokens) and one message.list (model + current context). Convs that share a
- * session (reattach) are deduped by session id BEFORE any call is made, and
- * the calls run through a small worker pool so many tracked sessions can't
- * fan out into an unbounded burst. (maxRows can't be applied before the
- * fetch: the rows are sorted BY context pressure, which only exists after
- * the calls — so the cap still applies post-fetch, but the fetch itself is
- * already bounded by dedup + pool + the small number of tracked sessions.)
- */
-export async function cmdUsage(bot: Bot, conv: ConvKey, arg = ""): Promise<void> {
-  const all = /\s--all\b/.test(arg);
-  const models = await bot.oc.listModels().catch(() => [] as ModelInfo[]);
-  const entries = Object.entries(bot.st.all()).filter(
-    ([k, s]) => typeof s.sessionID === "string" && k !== MACHINE_STATE_KEY,
-  );
-  // Several convs can point at one session (reattach): dedup BEFORE calling
-  // the API so a shared session costs one fetch, not one per conv.
-  const bySid = new Map<string, string>();
-  for (const [key, s] of entries) {
-    const sid = s.sessionID as string;
-    if (bySid.has(sid)) continue;
-    const [chatId, topicId] = key.split(":");
-    const label = s.worker?.name ?? (s.manager ? "manager" : topicId ? `#topic ${topicId}` : chatId);
-    bySid.set(sid, label);
-  }
-  const sids = [...bySid.keys()];
-  const rows: UsageRow[] = new Array(sids.length);
-  let next = 0;
-  const fetchRow = async (): Promise<void> => {
-    for (;;) {
-      const i = next++;
-      if (i >= sids.length) return;
-      const sid = sids[i];
-      const [sess, info] = await Promise.all([
-        bot.oc.getSession(sid).catch(() => null),
-        bot.oc.latestAssistantInfo(sid).catch(() => undefined),
-      ]);
-      const model = info?.model;
-      rows[i] = {
-        label: bySid.get(sid)!,
-        id: sid,
-        current: info?.context,
-        limit: model
-          ? (models.find((m) => m.id === model.id && m.providerID === model.providerID) ??
-             models.find((m) => m.id === model.id))?.contextLimit
-          : undefined,
-         cumInput: (sess as any)?.tokens?.input ?? 0,
-         cumOutput: (sess as any)?.tokens?.output ?? 0,
-         // Liveness signal (session.time.updated) — already fetched above, zero extra calls.
-         updated: typeof (sess as any)?.time?.updated === "number" ? (sess as any).time.updated : undefined,
-       };
-    }
-  };
-  // At most 4 sessions in flight, regardless of how many are tracked.
-  await Promise.all(Array.from({ length: Math.min(4, sids.length) }, () => fetchRow()));
-  // Manager-rotation footer (display-only): the live floor + 7-day trend come
-  // from the rotation monitor's snapshot — the SAME read-only source /rotation
-  // renders; the thresholds come from the live config (the snapshot's copy can
-  // predate a config change). The compaction ceiling is derived from the
-  // manager row's model window. Any failure degrades to "no footer" — /usage
-  // must always reply with the session table.
-  let rotation: RotationInfo | undefined;
-  try {
-    const snap = bot.rotationHealthSnapshot();
-    const managerRow = rows.find((r) => r.label === "manager");
-    rotation = {
-      floorK: snap?.currentFloorK ?? null,
-      confirmK: bot.cfg.rotationConfirmFloorK,
-      autoK: bot.cfg.rotationAutoFloorK,
-      compaction: compactionCeiling(managerRow?.limit),
-      trend: snap?.floorTrend,
-    };
-  } catch (e) {
-    warn("rotation snapshot:", (e as Error).message);
-  }
-  const lang = bot.userPrefs.getLang(bot.st.peek(conv)?.createdBy ?? "");
-  await bot.sendHtml(conv, formatUsageReport(rows, esc, { warnPct: bot.cfg.usageWarnPct, maxRows: bot.cfg.usageMaxRows, activeHours: bot.cfg.usageActiveHours, all, rotation, lang }).join("\n"));
-}
-
-export async function cmdHistory(bot: Bot, conv: ConvKey, state: ChatState): Promise<void> {
-  if (!state.sessionID) return bot.tg.sendMessage(conv, "No current session. Send /new.");
-  const msgs = await bot.oc.listMessages(state.sessionID).catch(() => [] as any[]);
-  const sorted = [...msgs].sort((a: any, b: any) => (a.time?.created ?? 0) - (b.time?.created ?? 0));
-  const recent = sorted.slice(-6);
-  const lines = recent.map((m) => {
-    if (m.type === "user") return "👤 " + esc(trunc(stripTags(m.text ?? ""), 300));
-    if (m.type === "assistant") {
-      const t = (m.content ?? []).filter((c: any) => c?.type === "text").map((c: any) => c.text).join("\n");
-      return "🤖 " + esc(trunc(stripTags(t), 400));
-    }
-    return "· " + m.type;
-  });
-  await bot.sendHtml(conv, `<b>Recent messages</b>\n${lines.join("\n")}`);
-}
 
 
 /**

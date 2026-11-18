@@ -15,6 +15,12 @@ export const QUESTIONS_PREAMBLE =
 /** Instruction-entry key for /note scratchpad notes (see src/notes.ts). */
 export const NOTES_KEY = "tgbot.notes";
 
+/**
+ * Instruction-entry key for the /new --keep carry-over summary (see
+ * commands/session.ts): the fresh session reads it for its whole life.
+ */
+export const CARRYOVER_KEY = "tgbot.carryover";
+
 export type Btn = { text: string; callback_data?: string; url?: string; switch_to_topic?: { message_id: number } };
 export type Keyboard = { inline_keyboard: Btn[][] };
 

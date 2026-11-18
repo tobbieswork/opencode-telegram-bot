@@ -21,6 +21,13 @@ import type { ConvKey } from "./conv.js";
 export const LANGUAGE_EN_KEY = "tgbot.language_en";
 /** The exact instruction injected when the user's preference is "en". */
 export const LANGUAGE_EN_INSTRUCTION = "Respond in English to all user messages.";
+/** Key under which the per-session language instruction is stored (namespaced `api/<key>`). */
+export const LANGUAGE_INSTRUCTION_KEY = "tgbot.language";
+/** Injected per-session so the model keeps the user's language and does not leak CJK. */
+export const LANGUAGE_INSTRUCTION =
+  "Always reply in the SAME language the user wrote in, throughout the entire answer. Do NOT " +
+  "switch to or mix in any other language (e.g. Chinese, English) within the same reply — this " +
+  "includes code comments, labels, and short phrases.";
 
 /**
  * The instruction text to inject for a language preference.

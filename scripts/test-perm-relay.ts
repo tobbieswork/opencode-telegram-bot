@@ -22,6 +22,7 @@ import { Bot } from "../src/bot.js";
 import { StateManager } from "../src/state.js";
 import { convKey } from "../src/conv.js";
 import { isAlreadyResolvedPermissionError } from "../src/perm.js";
+import { onPermissionAsked } from "../src/commands/permission.js";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: string): void {
@@ -117,7 +118,7 @@ async function main(): Promise<void> {
       return 12345; // second send succeeds
     });
     st.set(CONV, { sessionID: "ses_perm_retry" });
-    await (bot as any).onPermissionAsked({ id: "perm_retry", sessionID: "ses_perm_retry", action: "edit", resources: ["f.ts"] });
+    await onPermissionAsked(bot, { id: "perm_retry", sessionID: "ses_perm_retry", action: "edit", resources: ["f.ts"] });
     const p = (bot as any).permissionPrompts.get("perm_retry");
     check("B3 retry-then-succeed: retried, 2 send calls", n === 2, `calls=${n}`);
     check("B3 retry-then-succeed: messageId = success id", p?.messageId === 12345, JSON.stringify(p));
@@ -133,7 +134,7 @@ async function main(): Promise<void> {
       throw new Error("429 Too Many Requests"); // every send fails
     });
     st.set(CONV, { sessionID: "ses_perm_fail" });
-    await (bot as any).onPermissionAsked({ id: "perm_fail", sessionID: "ses_perm_fail", action: "edit", resources: ["f.ts"] });
+    await onPermissionAsked(bot, { id: "perm_fail", sessionID: "ses_perm_fail", action: "edit", resources: ["f.ts"] });
     const p = (bot as any).permissionPrompts.get("perm_fail");
     check("B3 all-fail: 3 send attempts (bounded)", n === 3, `calls=${n}`);
     check("B3 all-fail: registered with sentinel messageId 0", p?.messageId === 0, JSON.stringify(p));

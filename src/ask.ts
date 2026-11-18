@@ -2,7 +2,6 @@ import type { Bot } from "./bot.js";
 import { chatOf, parseConv, type ConvKey } from "./conv.js";
 import { esc, trunc, timeAgo } from "./format.js";
 import { errorText, tr } from "./i18n.js";
-import type { Lang } from "./state.js";
 import { agentLabel, resolveAgent, type AgentId } from "./advisor/agents.js";
 
 /**

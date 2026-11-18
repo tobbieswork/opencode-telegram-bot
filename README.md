@@ -432,7 +432,8 @@ src/
   opencode.ts   OpenCode control wrapper (sessions, prompts, models, agents)
   fsbrowser.ts  directory listing for the /browse picker
   telegram.ts   Telegram Bot API client (long polling, forum topics)
-  bot.ts        command routing + per-conversation state + background prompt task
+  bot.ts        update polling + routing; inflight/queue guards; wiring to feature modules
+  commands/     feature modules — one file per command family (commands, callbacks, keyboards)
   conv.ts       conversation keys: a chat, or one forum topic in it
   orchestrator.ts  worker topics, the Manager agent, approvals, worktree actions
   mcp-bridge.ts tiny MCP server the Manager calls to steer workers

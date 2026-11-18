@@ -416,7 +416,7 @@ async function main(): Promise<void> {
     registerBotCallbacks();
 
     check("T5: bs is registered", registeredPrefixes().includes("bs"), JSON.stringify(registeredPrefixes()));
-    check("T5: bs owner", callbackOwner("bs") === "bot.ts (folder browser)", callbackOwner("bs"));
+    check("T5: bs owner", callbackOwner("bs") === "browse.ts (folder browser)", callbackOwner("bs"));
 
     // Round-trip: the bare ops (no numeric arg).
     for (const op of ["up", "hid", "open", "list", "setdir", "setsess", "close", "noop"] as const) {

@@ -59,14 +59,11 @@ interface Exc {
 }
 
 const EXCEPTIONS: Exc[] = [
-  // src/health.ts — icon table
   {
     file: "src/health.ts",
     text: '{ ok: "✅", warn: "⚠️", fail: "❌", off: "⚪" }',
     why: "icon table (HealthStatus → icon, same role as ICON in format.ts)",
   },
-
-  // src/spec-checkpoint.ts — checkpoint card
   {
     file: "src/spec-checkpoint.ts",
     text: 'accept: tr(lang, "✅ Chấp nhận", "✅ Accept")',
@@ -87,8 +84,6 @@ const EXCEPTIONS: Exc[] = [
     text: "else lines.push(`• <b>${esc(c.name)}</b> ❌`)",
     why: "trailing mark on a card line (task blocked)",
   },
-
-  // src/rotation-health.ts — rotation verdict
   {
     file: "src/rotation-health.ts",
     text: 'r.outcome === "success" ? "✅" : "❌"',
@@ -104,8 +99,6 @@ const EXCEPTIONS: Exc[] = [
     text: '"❌ vượt ngưỡng — nền &gt;120K hoặc lần xoay cuối thất bại", "❌ over threshold — floor &gt;120K or last rotation failed"',
     why: "verdict line (over threshold) — label-prefixed, not a bare errorLine",
   },
-
-  // src/commands/spec.ts — task list + ready button
   {
     file: "src/commands/spec.ts",
     text: 'status === "done" ? "✅" : status === "next" ? "▶️" : status === "blocked" ? "⛔" : "○"',
@@ -116,8 +109,6 @@ const EXCEPTIONS: Exc[] = [
     text: 'tr(lang, "✅ Sẵn sàng review", "✅ Mark ready for review")',
     why: "button label (Mark ready for review), 2 sites",
   },
-
-  // src/watch.ts — watch result header + close button
   {
     file: "src/watch.ts",
     text: 'header("✅", tr(lang, "Hoàn tất", "Done"), durMs)',
@@ -133,85 +124,11 @@ const EXCEPTIONS: Exc[] = [
     text: 'tr(lang, "❌ Đóng", "Close"), callback_data: `w:${id}:c`',
     why: "button label (watch close)",
   },
-
-  // src/bot.ts — reboot card, pickers, file browser, permission card
-  {
-    file: "src/bot.ts",
-    text: 'tr(lang, "✅ Xác nhận reboot", "✅ Confirm reboot")',
-    why: "button label (confirm reboot)",
-  },
-  {
-    file: "src/bot.ts",
-    text: 'tr(lang, "❌ Huỷ", "❌ Cancel"), data: rebootCallback.encode({ op: "cancel" })',
-    why: "button label (cancel reboot)",
-  },
-  {
-    file: "src/bot.ts",
-    text: 'tr(lang, "❌ Đóng", "❌ Close"), callback_data: useCb.encode("close")',
-    why: "button label (use picker close)",
-  },
-  {
-    file: "src/bot.ts",
-    text: '{ text: tr(b.lang, "❌ Đóng", "❌ Close"), callback_data: bsCallback.encode({ op: "close" }) }',
-    why: "button label (file-browser close)"
-  },
-  {
-    file: "src/bot.ts",
-    text: 'rows.push([{ text: tr(b.lang, "❌ Đóng", "❌ Close"), callback_data: bsCallback.encode({ op: "close" }) }]);',
-    why: "button label (file-browser close), 2 sites",
-  },
-  {
-    file: "src/bot.ts",
-    text: 'tr(b.lang, "✅ Mở tại đây", "✅ Open here")',
-    why: "button label (file-browser open here)",
-  },
-  {
-    file: "src/bot.ts",
-    text: '"Chạm một thư mục để vào · ✅ để mở OpenCode tại đây", "Tap a folder to enter · ✅ to open OpenCode here"',
-    why: "mid-line ✅ mention (file-browser hint)",
-  },
-  {
-    file: "src/bot.ts",
-    text: 'tr(lang, "❌ Đóng", "❌ Close"), callback_data: modelCb.encode({ op: "close" })',
-    why: "button label (model picker close)",
-  },
-  {
-    file: "src/bot.ts",
-    text: 'tr(lang, "❌ Đóng", "❌ Close"), callback_data: modeCb.encode("close")',
-    why: "button label (mode picker close)",
-  },
-  {
-    file: "src/bot.ts",
-    text: "`❌ Unknown variant <code>${esc(want)}</code>`",
-    why: "❌ message passed inline as a call argument",
-  },
-  {
-    file: "src/bot.ts",
-    text: 'tr(lang, "❌ Đóng", "❌ Close"), callback_data: variantCb.encode("close")',
-    why: "button label (variant picker close)",
-  },
-  {
-    file: "src/bot.ts",
-    text: "`✅ Variant → <code>${esc(id)}</code> (${how})`",
-    why: "✅ message passed inline (variant set)",
-  },
   {
     file: "src/bot.ts",
     text: 'tr(lang, "❌ Huỷ", "❌ Cancel"), callback_data: formCb.encode({ formID: fd, op: "x" })',
     why: "button label (form-question cancel), 2 sites",
   },
-  {
-    file: "src/bot.ts",
-    text: 'tr(lang, "✅ Duyệt 1 lần", "✅ Allow once")',
-    why: "button label (allow once)",
-  },
-  {
-    file: "src/bot.ts",
-    text: 'tr(lang, "❌ Từ chối", "❌ Deny")',
-    why: "button label (deny)",
-  },
-
-  // src/orchestrator.ts — kill picker, auto-off note, topic rename, assign card
   {
     file: "src/orchestrator.ts",
     text: 'tr(lang, "❌ Đóng", "❌ Close"), callback_data: killCb.encode("close")',
@@ -237,8 +154,6 @@ const EXCEPTIONS: Exc[] = [
     text: '{ text: "❌ Huỷ", callback_data: apCb.encode({ id, op: "no" }) }',
     why: "button label (assign: cancel)",
   },
-
-  // src/callbacks.ts — registry error toast (added post-T6 by the callback-registry spec)
   {
     file: "src/callbacks.ts",
     text: 'vi: "❌ Lỗi: nút không phản hồi"',
@@ -249,8 +164,6 @@ const EXCEPTIONS: Exc[] = [
     text: 'en: "❌ Error: the button failed"',
     why: "error toast constant (C2.4: handler threw — button failed)",
   },
-
-  // src/commands/spec.ts — /spec group header + manager-tool error (added post-T6)
   {
     file: "src/commands/spec.ts",
     text: "✅ Đã xong (${finished.length})",
@@ -261,6 +174,196 @@ const EXCEPTIONS: Exc[] = [
     text: 'tr(lang, "❌ Không rõ task nào.", "❌ Unknown task.")',
     why: "inline ❌ error (manager spec tool: unparseable run ref)",
   },
+  {
+    file: "src/commands/admin.ts",
+    text: '{ text: tr(lang, "✅ Xác nhận reboot", "✅ Confirm reboot"), callback_data: rebootGoData(Date.now()) },',
+    why: "button label (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/admin.ts",
+    text: '{ text: tr(lang, "❌ Huỷ", "❌ Cancel"), callback_data: "reboot:cancel" },',
+    why: "button label (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/browse.ts",
+    text: 'if (!existsSync(p)) return ctx.tg.sendMessage(conv, `❌ No such directory: <code>${esc(p)}</code>`);',
+    why: "inline message line (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/browse.ts",
+    text: 'if (!roots.length) return ctx.tg.sendMessage(conv, tr(lang, "❌ Không có thư mục nào được phép duyệt.", "❌ No directories are allowed to browse."));',
+    why: "inline message line (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/browse.ts",
+    text: 'if (!isDir) return ctx.tg.sendMessage(conv, tr(lang, `❌ Không phải thư mục: <code>${esc(path)}</code>`, `❌ Not a directory: <code>${esc(path)}</code>`));',
+    why: "inline message line (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/browse.ts",
+    text: '{ text: tr(b.lang, "❌ Đóng", "❌ Close"), callback_data: "bs:close" },',
+    why: "button label (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/browse.ts",
+    text: 'rows.push([{ text: tr(b.lang, "❌ Đóng", "❌ Close"), callback_data: "bs:close" }]);',
+    why: "button label (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/browse.ts",
+    text: 'return { text: b.result ?? tr(b.lang, "✅ Xong", "✅ Done"), keyboard: { inline_keyboard: rows } };',
+    why: "icon literal (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/browse.ts",
+    text: 'nav.push({ text: tr(b.lang, "✅ Mở tại đây", "✅ Open here"), callback_data: "bs:open" });',
+    why: "button label (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/browse.ts",
+    text: 'rows.push([{ text: tr(b.lang, "❌ Đóng", "❌ Close"), callback_data: "bs:close" }]);',
+    why: "button label (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/browse.ts",
+    text: 'meta.push(tr(b.lang, "Chạm một thư mục để vào · ✅ để mở OpenCode tại đây", "Tap a folder to enter · ✅ to open OpenCode here"));',
+    why: "button/keyboard row (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/browse.ts",
+    text: 'tr(b.lang, `✅ Đã đặt thư mục làm việc:`, `✅ Working directory set:`) + `\\n<code>${esc(b.path)}</code>`,',
+    why: "icon literal (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/model.ts",
+    text: 'if (!m) return showModelPicker(ctx, conv, models, 0, tr(lang, `❌ Unknown model: <code>${esc(arg)}</code>`, `❌ Unknown model: <code>${esc(arg)}</code>`), lang);',
+    why: "icon literal (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/model.ts",
+    text: 'await ctx.tg.sendMessage(conv, tr(lang, `✅ Model → <code>${esc(m.id)}</code> (${ctx.st.get(conv).sessionID ? "đã áp dụng cho session hiện tại" : "áp dụng khi /new"})`, `✅ Model → <code>${esc(m.id)}</code> (${ctx.st.get(conv).sessionID ? "applied to current session" : "applies on /new"})`));',
+    why: "inline message line (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/model.ts",
+    text: 'rows.push([{ text: tr(lang, "❌ Đóng", "❌ Close"), callback_data: "mdl:close" }]);',
+    why: "button label (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/model.ts",
+    text: 'if (messageId) await ctx.tg.editMessageText(conv, messageId, tr(lang, `✅ Model → <code>${esc(m.id)}</code> (${ctx.st.get(conv).sessionID ? "đã áp dụng" : "áp dụng khi /new"})`, `✅ Model → <code>${esc(m.id)}</code> (${ctx.st.get(conv).sessionID ? "applied" : "applies on /new"})`)).catch(() => {});',
+    why: "status/edit line (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/model.ts",
+    text: '{ text: tr(lang, "❌ Đóng", "❌ Close"), callback_data: "mode:close" },',
+    why: "button label (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/model.ts",
+    text: 'await ctx.tg.sendMessage(conv, `❌ Unknown mode: <code>${esc(want)}</code>`, { reply_markup: v.keyboard });',
+    why: "inline message line (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/model.ts",
+    text: 'await ctx.tg.sendMessage(conv, `✅ Mode → <b>${esc(want)}</b> (${state.sessionID ? applied : appliedOnNew})`, { reply_markup: v.keyboard });',
+    why: "inline message line (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/model.ts",
+    text: 'answer(`❌ Unknown mode: ${esc(id)}`);',
+    why: "icon literal (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/model.ts",
+    text: 'return ctx.tg.sendMessage(conv, "❌ No model set. Use /model first, then set a variant.");',
+    why: "inline message line (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/model.ts",
+    text: '`❌ Unknown variant <code>${esc(want)}</code>. Available: ${esc(variants.join(", "))}`,',
+    why: "icon literal (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/model.ts",
+    text: 'await ctx.tg.sendMessage(conv, `✅ Variant → <code>${esc(want)}</code> (${how})`);',
+    why: "inline message line (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/model.ts",
+    text: 'if (!variants.includes(want)) return sendVariantPicker(ctx, conv, variants, cur, `❌ Unknown variant <code>${esc(want)}</code>`, ctx.userPrefs.getLang(ctx.st.peek(conv)?.createdBy ?? ""));',
+    why: "icon literal (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/model.ts",
+    text: 'await ctx.tg.sendMessage(conv, `✅ Variant → <code>${esc(want)}</code> (${how})`);',
+    why: "inline message line (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/model.ts",
+    text: 'rows.push([{ text: tr(lang, "❌ Đóng", "❌ Close"), callback_data: "variant:close" }]);',
+    why: "button label (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/model.ts",
+    text: 'if (messageId) await ctx.tg.editMessageText(conv, messageId, `✅ Variant → <code>${esc(id)}</code> (${how})`).catch(() => {});',
+    why: "status/edit line (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/permission.ts",
+    text: '{ text: tr(lang, "✅ Duyệt 1 lần", "✅ Allow once"), callback_data: `perm:${requestID}:once` },',
+    why: "button label (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/permission.ts",
+    text: '[{ text: tr(lang, "❌ Từ chối", "❌ Deny"), callback_data: `perm:${requestID}:reject` }],',
+    why: "button label (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/permission.ts",
+    text: 'once: tr(lang, "✅ Đã duyệt (1 lần).", "✅ Allowed (once)."),',
+    why: "icon literal (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/permission.ts",
+    text: 'reject: tr(lang, "❌ Đã từ chối.", "❌ Denied."),',
+    why: "icon literal (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/prompt-runner.ts",
+    text: ': `❌ Error: ${esc((e as Error).message)}`;',
+    why: "icon literal (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/session.ts",
+    text: 'return sendUsePicker(ctx, conv, sessions, tr(lang, `❌ Không có session <code>${esc(arg)}</code>`, `❌ No session <code>${esc(arg)}</code>`), lang);',
+    why: "icon literal (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/session.ts",
+    text: 'await ctx.tg.sendMessage(conv, tr(lang, `✅ Đang dùng session <code>${esc(arg)}</code>`, `✅ Now using session <code>${esc(arg)}</code>`));',
+    why: "inline message line (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/session.ts",
+    text: '{ text: tr(lang, "❌ Đóng", "❌ Close"), callback_data: "use:close" },',
+    why: "button label (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/session.ts",
+    text: 'answer(tr(lang, `❌ Không có session: ${trunc(id, 30)}`, `❌ No session: ${trunc(id, 30)}`));',
+    why: "icon literal (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/session.ts",
+    text: 'await ctx.tg.editMessageText(conv, messageId, tr(lang, `❌ Không có session <code>${esc(id)}</code>`, `❌ No session <code>${esc(id)}</code>`)).catch(() => {});',
+    why: "status/edit line (module-extracted from bot.ts)",
+  },
+  {
+    file: "src/commands/session.ts",
+    text: 'if (messageId) await ctx.tg.editMessageText(conv, messageId, tr(lang, `✅ Đang dùng session <code>${esc(id)}</code>`, `✅ Now using session <code>${esc(id)}</code>`)).catch(() => {});',
+    why: "status/edit line (module-extracted from bot.ts)",
+  }
 ];
 
 // ── scanner ─────────────────────────────────────────────────────────────────
