@@ -83,7 +83,7 @@ confirmKeyboard(lang, { yes: cb.encode({...}), no: cb.encode({...}) })
 4. [x] (3f0b695) **T4 Pilot migration:** (done 2026-11-18 — pilot `agents` + `meta`, 6 sites, byte-identical; see the T5 note below for the audit.) `src/commands/agents.ts` and `src/commands/meta.ts`, byte-identical output. *Checkpoint: see the messages in Telegram.*
 5. [x] **T5 Migrate remaining files** (done 2026-11-18, commits `3f0b695` `48266a2` `781fe1d`+`dc047cb` `86bd3e9` `2182d3f` `9857586` `3d12dc7`). ~190 sites migrated, byte-identical (golden-byte checks per group): `agents`+`meta` (6), `schedule` (11), `orchestrator/*` (12), `bot.ts` (63, in 3 subgroups), `commands/spec` (48), `spec-checkpoint` (5), final sweep 10 small files (27: `schedule` ❌-group 10, `format` 5, `btw` 3, `advisor` 2, `agents` 2, `recovery`/`busy`/`pr-watch`/`scheduler`/`activity` 1 each). Every original `tr()` payload audited icon-stripped against the migrated file (A/B string audit). The deferred `schedule` ❌-group was unblocked by the bare-❌ `errorLine` shape. Remaining inline icon lines are the exception set (T6): button labels, mid-line/trailing marks, conditional icon-arg shapes (`watch` `header()`), verdict suffix after a leading label (rotation-health), ICON tables, exported constants, and icons outside the approved set (⚙️ ✍️ ✏️ ⏱️ 🔎 ♾️ ℹ️ …). *Checkpoint after each group.*
 6. [x] (a281e1e) **T6 Consistency check** (M4.4). Add `test:ui-consistency`; list allowed exceptions. *Checkpoint: review the exception list.*
-7. [ ] **T7 End-to-end.** `npm run smoke` once at the end, then restart the service and check the journal.
+7. [x] (PENDING) **T7 End-to-end.** `npm run smoke` once at the end, then restart the service and check the journal.
    Needs: OpenCode service (smoke drives the live service; the service restart is manager-owned)
 
 Verification order for every task: `npm run typecheck` and `npm run test:unit` first, `npm run smoke` once at the end.
@@ -230,3 +230,12 @@ The `<pre><code>` in `format.ts:215,262` is inside `mdToHtmlChunks` itself
 | `backCloseRow` | `❌ Đóng` / `❌ Close` row | 10 | keep (2026-11-18 recount: prose said 11, the list of sites — and the code — has 10) |
 | `singleButton` | one button / one per row | 14 | keep (2026-11-18 recount: prose said 12, the list of sites — and the code — has 14) |
 | `codeBlock` | `<pre>` block | 1 | **drop** |
+
+## 7. T7 End-to-end (2026-11-18)
+
+- `npm run smoke` (Node 24) against the live service: **SMOKE_EXIT=0, all sections green** — prompt, sweep, permission, plan-to-build, browse, question relay, next-step review, quick-replies, queue, WATCH, and S8 (spec run → worker → checkpoint → accept → marker).
+- Two flakes surfaced during the runs, both on the smoke script side, neither in bot code:
+  - **NEXT-STEP** (run 1): the review turn produced no message within the 120s wait — a provider stall; the re-run passed, no code change.
+  - **WATCH** (run 2): the scenario's fixed 2.5s wait raced a 1.8s turn — `/watch` tapped after the turn ended, so the card posted idle. Fixed in `scripts/smoke.ts` (poll the real `sessionState` until busy, then tap; PR #291).
+- Service restarted on `67bda46`; journal clean (no errors; one pre-existing benign `form.created` WARN from a smoke session).
+- Scope note: the smoke exercises the **live service on main** (the e2e pipeline gate). The branch's own code is verified by `npm run typecheck` + `npm run test:unit` + `npm run test:ui-consistency`, all green at `a281e1e`.
