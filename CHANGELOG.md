@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.46.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.46.1...opencode-telegram-bot-v1.46.2) (2026-11-18)
+
+
+### Bug Fixes
+
+* specAccept refuses runs whose newest worker commit predates the run start ([7562fd3](https://github.com/tobbieswork/opencode-telegram-bot/commit/7562fd3361b5a3e1b4dacd374cfb7f07b3fa61d3))
+* specAccept refuses runs whose newest worker commit predates the run start ([858fd78](https://github.com/tobbieswork/opencode-telegram-bot/commit/858fd78f7305ccdd4943e1e309e4b6190c5a1e8a))
+
 ## [1.46.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.46.0...opencode-telegram-bot-v1.46.1) (2026-11-18)
 
 
