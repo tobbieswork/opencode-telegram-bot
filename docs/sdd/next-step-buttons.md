@@ -113,14 +113,14 @@ written by the agent, ours are decided by plain rules in the bot.
 
 ## 5. Tasks (each ends with a human checkpoint)
 
-0. **S0 Read-only check.** Without any model call, read how `getSessionReport` behaves on a real session (time taken, whether `modifiedFiles` is per session). The overflow check is `isOverflowError` in `src/format.ts`; confirm it is what the failure path already uses. Write the result into a "Findings" section here. *Checkpoint: confirm the `review` rule's data source.*
-1. **S1 Engine** (N1, N2, N3.1 to N3.6). `src/nextsteps.ts` with the rule table, `decide`, the registry and callback encoding, plus `scripts/test-nextsteps.ts`: every rule, the exclusions, the 3-button cap, thresholds, encoding under 64 bytes, TTL, session binding. *Checkpoint: review the rule table as a table.*
-2. **S2 Config and docs** (N4.1, N4.2, N4.4). Two variables, README and `.env.example`; doc-sync stays green; `off` behaves exactly as today. *Checkpoint: review the wording.*
-3. **S3 Plain sessions** (N1.3 to N1.5, N3.7). Build facts at the turn end in `runPromptTask`, attach to the footer, `ns:` tap handler for `review`. *Checkpoint: try it from the phone.*
-4. **S4 Workers** (N2.1, N2.2). Add `review` to the worktree card and to writing workers without one. *Checkpoint: finish a worker and tap Review.*
-5. **S5 Manager and failures.** `board` after a Manager turn with busy workers, `new-keep` on overflow. *Checkpoint: check both with a real Manager chat.*
-6. **S6 Audit** (N4.3). `nextstep_shown` and `nextstep_tap`; a small summary of tap rate per rule, readable from the log. *Checkpoint: read a sample log.*
-7. **S7 End-to-end.** One extra scenario in `npm run smoke` with `OPENCODE_TG_NEXT_MIN_SECS=0`: a build turn that changes a file shows Review, and tapping it starts a review turn. Smoke runs last, as in `AGENTS.md`.
+0. [x] **S0 Read-only check.** Without any model call, read how `getSessionReport` behaves on a real session (time taken, whether `modifiedFiles` is per session). The overflow check is `isOverflowError` in `src/format.ts`; confirm it is what the failure path already uses. Write the result into a "Findings" section here. *Checkpoint: confirm the `review` rule's data source.*
+1. [x] (0da85ff) **S1 Engine** (N1, N2, N3.1 to N3.6). `src/nextsteps.ts` with the rule table, `decide`, the registry and callback encoding, plus `scripts/test-nextsteps.ts`: every rule, the exclusions, the 3-button cap, thresholds, encoding under 64 bytes, TTL, session binding. *Checkpoint: review the rule table as a table.*
+2. [x] (7557cb7) **S2 Config and docs** (N4.1, N4.2, N4.4). Two variables, README and `.env.example`; doc-sync stays green; `off` behaves exactly as today. *Checkpoint: review the wording.*
+3. [x] (a0e5592) **S3 Plain sessions** (N1.3 to N1.5, N3.7). Build facts at the turn end in `runPromptTask`, attach to the footer, `ns:` tap handler for `review`. *Checkpoint: try it from the phone.*
+4. [x] (c724bae) **S4 Workers** (N2.1, N2.2). Add `review` to the worktree card and to writing workers without one. *Checkpoint: finish a worker and tap Review.*
+5. [x] (b99f000) **S5 Manager and failures.** `board` after a Manager turn with busy workers, `new-keep` on overflow. *Checkpoint: check both with a real Manager chat.*
+6. [x] (c2ccfaf) **S6 Audit** (N4.3). `nextstep_shown` and `nextstep_tap`; a small summary of tap rate per rule, readable from the log. *Checkpoint: read a sample log.*
+7. [x] (c440689) **S7 End-to-end.** One extra scenario in `npm run smoke` with `OPENCODE_TG_NEXT_MIN_SECS=0`: a build turn that changes a file shows Review, and tapping it starts a review turn. Smoke runs last, as in `AGENTS.md`.
 
 Verification order for every task: `npm run typecheck` and `npm run test:unit` first, `npm run smoke` once at the end.
 
@@ -128,4 +128,8 @@ Verification order for every task: `npm run typecheck` and `npm run test:unit` f
 Model-generated suggestions, buttons that write or merge, moving the three existing buttons onto the engine, per-user preferences for which rules to show, and suggestions after scheduled runs.
 
 ## 7. Findings (filled in by task S0)
-_Not run yet._
+
+_Ran in-chat during design (2026-11-12); re-verified against main on 2026-11-18._
+
+- The overflow check is `isOverflowError` (`src/format.ts`), used by the failure path (`src/bot.ts:2981`, `src/bot.ts:3044`) — confirmed.
+- `getSessionReport().modifiedFiles` undercounts files created through the shell (the report doesn't list them) — which is why the Review rule switched to a git working-tree fingerprint (`6721e65`) instead of trusting the report.
