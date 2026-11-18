@@ -11,6 +11,8 @@ import { errorText, tr } from "../i18n.js";
 import { isUnderRoot } from "../fsbrowser.js";
 import { AGENT_WHITELIST } from "../shared.js";
 import type { Keyboard } from "../shared.js";
+import { confirmKeyboard } from "../ui/keyboards.js";
+import { raw, titledList, warnLine } from "../ui/text.js";
 
 // ── /schedule ────────────────────────────────────────────────────────────
 // Schedules live in a SEPARATE file (data/schedules.json), never in
@@ -50,7 +52,9 @@ function scheduleListMarkup(bot: Bot, mine: Schedule[], lang: Lang): { html: str
     { text: "▶▶", callback_data: `sch:run:${s.id}` },
     { text: "🗑", callback_data: `sch:d:${s.id}` },
   ]);
-  return { html: `<b>⏰ ${tr(lang, "Lịch", "Schedules")} (${mine.length})</b>\n${lines.join("\n")}`, kb: { inline_keyboard: rows } };
+  // The lines are already-safe (no untrusted user text) — raw() keeps the
+  // pre-migration no-escape behaviour byte-identical.
+  return { html: titledList(lang, raw(`⏰ ${tr(lang, "Lịch", "Schedules")} (${mine.length})`), lines.map(raw)), kb: { inline_keyboard: rows } };
 }
 
 /** The /schedule usage card, HTML-escaped (sendMessage is parse_mode HTML). Localized by lang. */
@@ -302,16 +306,13 @@ export async function handleScheduleCallback(bot: Bot, cb: CallbackQuery, conv: 
       // Destructive — two-step confirm (like /reboot).
       await bot.tg.answerCallbackQuery(cb.id);
       if (!messageId) return;
-      const kb: Keyboard = {
-        inline_keyboard: [
-          [
-            { text: tr(lang, `🗑 Xoá #${id}`, `🗑 Delete #${id}`), callback_data: `sch:dy:${id}` },
-            { text: tr(lang, "↩️ Quay lại", "↩️ Back"), callback_data: "sch:ls" },
-          ],
-        ],
-      };
+      const kb: Keyboard = confirmKeyboard(
+        lang,
+        { text: tr(lang, `🗑 Xoá #${id}`, `🗑 Delete #${id}`), data: `sch:dy:${id}` },
+        { text: tr(lang, "↩️ Quay lại", "↩️ Back"), data: "sch:ls" },
+      );
       await bot.tg
-        .editMessageText(conv, messageId, tr(lang, `⚠️ Xoá lịch <b>#${id}</b> (${formatSchedule(sch)})? Topic + lịch sử vẫn giữ.`, `⚠️ Delete schedule <b>#${id}</b> (${formatSchedule(sch)})? Topic + history kept.`), { reply_markup: kb })
+        .editMessageText(conv, messageId, warnLine(lang, raw(tr(lang, `Xoá lịch <b>#${id}</b> (${formatSchedule(sch)})? Topic + lịch sử vẫn giữ.`, `Delete schedule <b>#${id}</b> (${formatSchedule(sch)})? Topic + history kept.`))), { reply_markup: kb })
         .catch(() => {});
       return;
     }
