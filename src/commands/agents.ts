@@ -7,7 +7,8 @@ import { warn, error } from "../logger.js";
 import { tr } from "../i18n.js";
 import { oneArg } from "../callbacks.js";
 import { AGENT_WHITELIST } from "../shared.js";
-import type { Btn } from "../shared.js";
+import { pickerKeyboard } from "../ui/keyboards.js";
+import { errorLine, okLine, raw, warnLine } from "../ui/text.js";
 
 /**
  * The `agent:` callback def (docs/sdd/callback-registry.md — T4 migration).
@@ -39,9 +40,10 @@ export async function cmdAgent(bot: Bot, conv: ConvKey, arg: string, state: Chat
   if (!arg) return sendAgentPicker(bot, conv, undefined, bot.userPrefs.getLang(bot.st.peek(conv)?.createdBy ?? ""));
   // Unknown id (and the listing succeeded) → show the picker too; a failed
   // listing keeps the old behaviour of trusting the typed id.
-  if (agents && !agents.some((a) => a.id === arg)) return sendAgentPicker(bot, conv, `❌ Unknown agent: <code>${esc(arg)}</code>`, bot.userPrefs.getLang(bot.st.peek(conv)?.createdBy ?? ""));
+  if (agents && !agents.some((a) => a.id === arg)) return sendAgentPicker(bot, conv, errorLine(bot.userPrefs.getLang(bot.st.peek(conv)?.createdBy ?? ""), raw(`Unknown agent: <code>${esc(arg)}</code>`)), bot.userPrefs.getLang(bot.st.peek(conv)?.createdBy ?? ""));
   const how = await applyAgent(bot, conv, arg);
-  await bot.tg.sendMessage(conv, `✅ Agent → <code>${esc(arg)}</code> (${how === "applied" ? "applied to current session" : "applies on /new"})`);
+  const lang = bot.userPrefs.getLang(bot.st.peek(conv)?.createdBy ?? "");
+  await bot.tg.sendMessage(conv, okLine(lang, raw(`Agent → <code>${esc(arg)}</code> (${how === "applied" ? "applied to current session" : "applies on /new"})`)));
 }
 
 /** Apply the agent switch (shared by the typed command and the picker buttons). */
@@ -58,17 +60,17 @@ async function applyAgent(bot: Bot, conv: ConvKey, agent: string): Promise<"appl
 /** The /agent picker card: one button per whitelisted agent + a hint line. */
 function sendAgentPicker(bot: Bot, conv: ConvKey, errorNote?: string, lang: Lang = "vi"): Promise<void> {
   const cur = bot.st.get(conv).agent;
-  const rows: Btn[][] = [];
-  for (let i = 0; i < AGENT_WHITELIST.length; i += 2) {
-    rows.push(
-      AGENT_WHITELIST.slice(i, i + 2).map((id) => ({ text: `${cur === id ? "▶️ " : ""}${id}`, callback_data: agentCb.encode(id) })),
-    );
-  }
-  rows.push([{ text: tr(lang, "❌ Đóng", "❌ Close"), callback_data: agentCb.encode("close") }]);
   return bot.tg.sendMessage(
     conv,
     [errorNote ?? tr(lang, "❓ <b>/agent</b> cần tên agent", "❓ <b>/agent</b> needs an agent name"), tr(lang, "Hoặc gửi: <code>/agent &lt;id&gt;</code>", "Or send: <code>/agent &lt;id&gt;</code>")].join("\n"),
-    { reply_markup: { inline_keyboard: rows } },
+    {
+      reply_markup: pickerKeyboard(lang, {
+        labels: AGENT_WHITELIST,
+        data: (i) => `agent:${AGENT_WHITELIST[i]}`,
+        current: cur ? AGENT_WHITELIST.indexOf(cur) : -1,
+        closeData: "agent:close",
+      }),
+    },
   );
 }
 
@@ -82,9 +84,10 @@ export async function handleAgentCallback(bot: Bot, cb: CallbackQuery, conv: Con
   }
   try {
     const how = await applyAgent(bot, conv, id);
+    const lang = bot.userPrefs.getLang(cb.from?.id ?? "");
     answer(`Agent → ${id}`);
-    if (messageId) await bot.tg.editMessageText(conv, messageId, `✅ Agent → <code>${esc(id)}</code> (${how})`).catch(() => {});
+    if (messageId) await bot.tg.editMessageText(conv, messageId, okLine(lang, raw(`Agent → <code>${esc(id)}</code> (${how})`))).catch(() => {});
   } catch (e) {
-    answer(`⚠️ ${(e as Error).message}`);
+    answer(warnLine(bot.userPrefs.getLang(cb.from?.id ?? ""), raw((e as Error).message)));
   }
 }

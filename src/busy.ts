@@ -20,6 +20,7 @@
 import type { Lang } from "./state.js";
 import { BUSY_REPLY_TEXT, noteButtonLabel, noteCallbackData } from "./notes.js";
 import { tr } from "./i18n.js";
+import { warnLine } from "./ui/text.js";
 import type { Keyboard } from "./shared.js";
 import { defineCallback } from "./callbacks.js";
 
@@ -95,7 +96,7 @@ export function buildBusyReply(opts: {
 
 /** The plain line shown when the queue is already full (cap 3). */
 export function queueFullText(lang: Lang = "vi"): string {
-  return tr(lang, "⚠️ Hàng chờ đã đầy (3 tin).", "⚠️ Queue is full (3 messages).");
+  return warnLine(lang, tr(lang, "Hàng chờ đã đầy (3 tin).", "Queue is full (3 messages)."));
 }
 
 /**

@@ -5,6 +5,7 @@
  */
 
 import type { Lang } from "./state.js";
+import { errorLine, okLine, raw } from "./ui/text.js";
 
 /** Collapse whitespace and clip a raw value to a display-safe length. */
 export function clip(s: string, max = 48): string {
@@ -76,5 +77,5 @@ export function activityDoneLine(label: string, ok: boolean, seconds?: number, l
     done = label.replace("Đang ", "Đã ");
   }
   const t = ok && typeof seconds === "number" && seconds >= 0 ? ` · ${seconds.toFixed(1)}s` : "";
-  return `${ok ? "✅" : "❌"} ${done}${t}`;
+  return ok ? okLine(lang, raw(`${done}${t}`)) : errorLine(lang, raw(`${done}${t}`));
 }

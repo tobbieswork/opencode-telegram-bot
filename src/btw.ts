@@ -3,6 +3,7 @@ import type { ChatState } from "./state.js";
 import type { ConvKey } from "./conv.js";
 import { esc, trunc, stripTags, mdToHtmlChunks } from "./format.js";
 import { tr } from "./i18n.js";
+import { errorLine, raw, statusLine } from "./ui/text.js";
 import { richMarkdownChunks } from "./rich.js";
 
 /**
@@ -40,7 +41,7 @@ export async function cmdBtw(bot: Bot, conv: ConvKey, state: ChatState, arg: str
     return;
   }
   if (bot.btwRunning.has(conv)) {
-    await bot.sendHtml(conv, tr(lang, "⏳ Đang có một /btw chạy trong chat này — đợi nó xong rồi hỏi tiếp nhé.", "⏳ A /btw is already running in this chat — wait for it to finish, then ask again."));
+    await bot.sendHtml(conv, statusLine(lang, tr(lang, "Đang có một /btw chạy trong chat này — đợi nó xong rồi hỏi tiếp nhé.", "A /btw is already running in this chat — wait for it to finish, then ask again.")));
     return;
   }
   bot.btwRunning.add(conv);
@@ -63,7 +64,7 @@ export async function cmdBtw(bot: Bot, conv: ConvKey, state: ChatState, arg: str
     if (ac.signal.aborted || res.interrupted) {
       await bot.sendHtml(conv, tr(lang, "⏱️ /btw quá 3 phút — đã huỷ phiên tạm. Câu hỏi có lẽ cần một task thật sự (🔥 hoặc /spawn).", "⏱️ /btw took over 3 minutes — the temp session was cancelled. The question probably needs a real task (🔥 or /spawn)."));
     } else if (res.error) {
-      await bot.sendHtml(conv, tr(lang, "❌ /btw lỗi: ", "❌ /btw error: ") + esc(trunc(res.error.message ?? res.error.type ?? "unknown", 300)));
+      await bot.sendHtml(conv, errorLine(lang, raw(tr(lang, "/btw lỗi: ", "/btw error: ") + esc(trunc(res.error.message ?? res.error.type ?? "unknown", 300)))));
     } else if (!res.reply) {
       await bot.sendHtml(conv, tr(lang, "❓ /btw kết thúc mà không có trả lời (có thể phiên tạm bị từ chối quyền chạy tool).", "❓ /btw finished without an answer (the temp session may have been denied tool permissions)."));
     } else {
@@ -84,7 +85,7 @@ export async function cmdBtw(bot: Bot, conv: ConvKey, state: ChatState, arg: str
     }
   } catch (e) {
     // Never drop the turn silently — see the /schedule rule (project memory #105).
-    await bot.sendHtml(conv, tr(lang, "❌ /btw lỗi: ", "❌ /btw error: ") + esc(trunc(String((e as Error)?.message ?? e), 300))).catch(() => {});
+    await bot.sendHtml(conv, errorLine(lang, raw(tr(lang, "/btw lỗi: ", "/btw error: ") + esc(trunc(String((e as Error)?.message ?? e), 300))))).catch(() => {});
   } finally {
     clearTimeout(timer);
     bot.btwRunning.delete(conv);
