@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.42.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.42.0...opencode-telegram-bot-v1.42.1) (2026-11-18)
+
+
+### Bug Fixes
+
+* question relay — submit card keeps questions + labels; typed answer no longer requires a reply ([7b7fc00](https://github.com/tobbieswork/opencode-telegram-bot/commit/7b7fc001e98be57f4e1ad2169063a5d49900ba5b))
+* question relay — submit card keeps questions + labels; typed answer no longer requires a reply ([85a3f48](https://github.com/tobbieswork/opencode-telegram-bot/commit/85a3f489361429dc20bbebf151ec37dbc04f61c5))
+
 ## [1.42.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.41.2...opencode-telegram-bot-v1.42.0) (2026-11-18)
 
 
