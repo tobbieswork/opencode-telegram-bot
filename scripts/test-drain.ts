@@ -16,7 +16,8 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { drainInflightCore, Bot } from "../src/bot.js";
+import { Bot } from "../src/bot.js";
+import { drainInflightCore } from "../src/commands/prompt-runner.js";
 import { applyUseState } from "../src/commands/session.js";
 import { StateManager } from "../src/state.js";
 

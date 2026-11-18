@@ -19,6 +19,7 @@ import type { QueueStore } from "../queue.js";
 import type { Orchestrator } from "../orchestrator.js";
 import type { ConvKey } from "../conv.js";
 import type { Keyboard } from "../shared.js";
+import type { DraftState } from "../stream.js";
 import type { WatchStopReason } from "../bot.js";
 import type { BrowseState } from "./browse.js";
 
@@ -90,4 +91,39 @@ export interface BotCtx {
   browsers: Map<ConvKey, BrowseState>;
   /** In-flight question forms, keyed by form id (owned by the form subsystem; /clear drops its conv's). */
   questionForms: Map<string, { conv: ConvKey }>;
+
+  // ── prompt-runner turn state (T6) — owned by Bot, reached by the runner via ctx ──
+  /** Fire-and-forget reply work a graceful-shutdown drain must wait for (owned by the prompt-runner). */
+  pendingSends: Set<Promise<void>>;
+  /** True while the shutdown drain is running: preview pushes pause so the notice stays (owned by the prompt-runner). */
+  draining: boolean;
+  /** Sessions whose language instruction we already stripped this process (owned by the prompt-runner). */
+  languageRemoved: Set<string>;
+  /** Live streaming-draft wrapper per conv (owned by the prompt-runner; late-delta guard). */
+  drafts: Map<ConvKey, { state: DraftState | null; previewMsgId?: number; throttleMs: number; nextEditAt: number; budget: number; gen: number }>;
+  /** Per-conv turn generation, bumped at turn start (owned by the prompt-runner; kills stray late-delta previews). */
+  turnGen: Map<ConvKey, number>;
+  /** S3 next-step footer message id per conv (owned by the prompt-runner). */
+  nextStepFooters: Map<ConvKey, number>;
+  // ── message/turn surface called across module boundaries (prompt-runner T6) ──
+  stopTyping(conv: ConvKey): void;
+  startWorking(conv: ConvKey, lang?: Lang): void;
+  stopWorking(conv: ConvKey): void;
+  clearActivity(conv: ConvKey): void;
+  dropPreview(conv: ConvKey): Promise<void>;
+  sendReply(conv: ConvKey, text: string): Promise<void>;
+  bodyReact(conv: ConvKey, messageId: number | undefined, emoji: string): void;
+  noteNextStepMessage(conv: ConvKey, messageId: number, residual?: Keyboard): void;
+  maybeOfferPlanToBuild(conv: ConvKey): Promise<void>;
+  nextStepSnapshot(conv: ConvKey): Promise<string | undefined>;
+  buildNextStepKeyboard(conv: ConvKey, sessionID: string, info: { outcome: "succeeded" | "failed" | "interrupted"; interrupted: boolean; reply?: string; elapsedMs: number; error?: { type?: string; message?: string }; lang: Lang; fpBefore?: string }): Promise<Keyboard | undefined>;
+  buildNextStepFailureKeyboard(conv: ConvKey, sessionID: string, info: { outcome: "failed"; interrupted: boolean; elapsedMs: number; error?: { type?: string; message?: string }; lang: Lang }): Promise<Keyboard | undefined>;
+  offerContinueKeyboard(conv: ConvKey, sessionID: string, turnId: string, outcome: string | undefined, interrupted: boolean, lang?: Lang): Keyboard | undefined;
+  /** Stop nudging all of the conv's live /watch cards (W5.1) — used by the shutdown drain. */
+  stopAllWatches(): void;
+  // ── cross-calls the runner makes on the Bot instance (Q1.x drain chain; tests monkey-patch these) ──
+  runPrompt(conv: ConvKey, text: string, state: ChatState, userMsgId?: number, lang?: Lang): Promise<{ busy: boolean }>;
+  runPromptTask(conv: ConvKey, sid: string, text: string, ac: AbortController, userMsgId?: number, lang?: Lang): Promise<void>;
+  drainQueue(conv: ConvKey): void;
+  notifyQueuedNotRunning(): void;
 }

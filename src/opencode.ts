@@ -786,3 +786,13 @@ export class OpenCodeCtl {
     if (this.eventGen === gen) this.eventRunning = false;
   }
 }
+
+/** True when an error is a network-level "Transport: fetch failed" blip (retries after a service restart). */
+export function isTransportError(e: any): boolean {
+  if (!e) return false;
+  if (e.reason === "Transport" || e.cause?.reason === "Transport") return true;
+  const msg = `${e.cause?.message ?? ""} ${e.message ?? ""}`;
+  return /fetch failed|ECONNRESET|ECONNREFUSED|EPIPE|EPROTO|ETIMEDOUT|EAI_AGAIN|socket hang up|network .*unreachable|UND_ERR_[A-Z]+/i.test(
+    msg,
+  );
+}

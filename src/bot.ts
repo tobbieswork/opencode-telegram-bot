@@ -4,7 +4,7 @@ import { writeFile, unlink } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { Telegram, Update, CallbackQuery, Message, MessageGenerationStopped, MessageReactionUpdated } from "./telegram.js";
-import { OpenCodeCtl, newMessageID, assistantText, ModelInfo } from "./opencode.js";
+import { OpenCodeCtl, assistantText, ModelInfo } from "./opencode.js";
 import { StateManager, ChatState, MsgPurpose, MACHINE_STATE_KEY, UserPrefsStore, Lang } from "./state.js";
 import { ConvKey, convKey, chatOf, parseConv } from "./conv.js";
 import { Orchestrator, BUSY } from "./orchestrator.js";
@@ -14,9 +14,6 @@ import { isUserAllowed } from "./schedule.js";
 import { Config } from "./config.js";
 import { esc, stripTags, chunk, trunc, mdToHtmlChunks, formatTurnFailure, isOverflowError } from "./format.js";
 import { tr, STRINGS } from "./i18n.js";
-import { applyLanguagePin } from "./language.js";
-import { applySuggestPin } from "./suggest.js";
-import { applyStylePin } from "./style.js";
 import {
   extractMedia,
   buildPromptText,
@@ -61,7 +58,6 @@ import {
   REACTED_CAP,
   REACT_TEXT_MAX,
   REACTION_CELEBRATE,
-  REACTION_FAIL,
 } from "./reactions.js";
 import { continueButtonLabel, shouldOfferContinue, continueCallbackData, alreadyOfferedContinue } from "./continue.js";
 import { GhPrLike, PrSnapshot, PrState, diffSnapshots, renderEvent, updatePrSnapshot } from "./pr-watch.js";
@@ -71,13 +67,11 @@ import { DraftState, DraftAction, onTextDelta, onToolStart, isDmConv, EDIT_BUDGE
 import { myCommands } from "./commands.js";
 import { NOTE_CB_PREFIX, BusyNoteStore } from "./notes.js";
 import { QueueStore } from "./queue.js";
-import { buildBusyReply, busyKeyboard, queueFullReply } from "./busy.js";
-import type { BusyReply } from "./busy.js";
 import { log, warn, error } from "./logger.js";
 import { audit } from "./audit.js";
 import { advisorHealth } from "./advisor/advisor-client.js";
 import type { HealthSources } from "./health-probes.js";
-import { QUESTIONS_PREAMBLE, CARRYOVER_KEY } from "./shared.js";
+import { CARRYOVER_KEY } from "./shared.js";
 import type { Btn, Keyboard } from "./shared.js";
 import { cmdAgents, cmdAgent, handleAgentCallback } from "./commands/agents.js";
 import {
@@ -98,6 +92,7 @@ import { cmdSchedule, handleScheduleCallback } from "./commands/schedule.js";
 import { Advisor } from "./advisor/advisor.js";
 import { cmdHelp, cmdHealth, cmdNote, cmdRotation, handleNoteCallback, cmdLang, cmdStyle } from "./commands/meta.js";
 import { cmdSpec, handleSpecCallback } from "./commands/spec.js";
+import { trackPending as trackPendingFree, drainInflight as drainInflightFree, notifyQueuedNotRunning as notifyQueuedNotRunningFree, runPrompt as runPromptFree, runPromptTask as runPromptTaskFree, drainQueue as drainQueueFree, stopCurrent as stopCurrentFree } from "./commands/prompt-runner.js";
 import {
   clampWatchInterval,
   createWatch,
@@ -166,24 +161,6 @@ const MODES: Record<string, { agent: string; hint: string; hintEn: string }> = {
 
 /** Models shown per page in the /model button picker. */
 const MODEL_PAGE_SIZE = 10;
-
-/** Key under which the per-session language instruction is stored (namespaced `api/<key>`). */
-const LANGUAGE_INSTRUCTION_KEY = "tgbot.language";
-/** Injected per-session so the model keeps the user's language and does not leak CJK. */
-const LANGUAGE_INSTRUCTION =
-  "Always reply in the SAME language the user wrote in, throughout the entire answer. Do NOT " +
-  "switch to or mix in any other language (e.g. Chinese, English) within the same reply — this " +
-  "includes code comments, labels, and short phrases.";
-
-/** True when an error is a network-level "Transport: fetch failed" blip. */
-function isTransportError(e: any): boolean {
-  if (!e) return false;
-  if (e.reason === "Transport" || e.cause?.reason === "Transport") return true;
-  const msg = `${e.cause?.message ?? ""} ${e.message ?? ""}`;
-  return /fetch failed|ECONNRESET|ECONNREFUSED|EPIPE|EPROTO|ETIMEDOUT|EAI_AGAIN|socket hang up|network .*unreachable|UND_ERR_[A-Z]+/i.test(
-    msg,
-  );
-}
 
 /** A single visible field of a question form, as we relay it to Telegram. */
 interface QField {
@@ -262,39 +239,6 @@ interface WatchLive {
 /** watch_end reasons (W6.3). */
 export type WatchStopReason = "done" | "idle" | "timeout" | "closed" | "replaced" | "session-changed" | "edit-failed" | "shutdown";
 
-/** Shown on a live stream preview while the bot drains at shutdown. */
-const DRAIN_PREVIEW_TEXT = "⏳ Đang khởi động lại… kết quả sẽ gửi sau.";
-
-/**
- * Core of the graceful-shutdown drain, split out so it can be unit-tested with
- * fake promises (no bot, no Telegram, no systemd).
- *
- * Polls `isBusy` until it reports idle, or until `timeoutMs` elapses —
- * whichever comes first. Work that appears WHILE the drain is running (e.g. a
- * final-reply sweep spawned by the very turn that just ended) is picked up on
- * the next poll, so the drain never returns while registered work is pending.
- *
- * @returns true when everything settled before the cap, false when the cap
- *          elapsed first. The caller must exit either way — the cap is the
- *          guarantee that the drain never blocks forever.
- */
-export async function drainInflightCore(opts: {
-  /** True while in-flight work that must finish before exit remains. */
-  isBusy: () => boolean;
-  /** Hard cap for the whole wait. */
-  timeoutMs: number;
-  /** Poll interval (default 100ms). */
-  pollMs?: number;
-}): Promise<boolean> {
-  const pollMs = opts.pollMs ?? 100;
-  const deadline = Date.now() + opts.timeoutMs;
-  for (;;) {
-    if (!opts.isBusy()) return true;
-    if (Date.now() >= deadline) return false;
-    await new Promise((r) => setTimeout(r, Math.min(pollMs, deadline - Date.now())));
-  }
-}
-
 /**
  * Decide whether a typed message should be consumed as the answer to a question
  * form, split out so it can be unit-tested without a bot or Telegram.
@@ -359,9 +303,9 @@ export class Bot {
    * drainInflight): the unrelayed-reply sweeps that carry a finished turn's
    * final send. Each promise deletes itself once settled.
    */
-  private pendingSends = new Set<Promise<void>>();
+  public pendingSends = new Set<Promise<void>>();
   /** True while the shutdown drain is running: preview pushes pause so the "restarting" notice stays. */
-  private draining = false;
+  public draining = false;
   /**
    * Pending-prompt reminder timers, keyed by `${conv}::${promptId}` (one per
    * pending form/permission, so a conv's form and permission don't share a slot).
@@ -382,7 +326,7 @@ export class Bot {
   /** A reboot is already armed (token minted, timer pending) — ignores a double-tap on "Xác nhận". Owned by the admin feature (commands/admin.ts). */
   public rebootArmed = false;
   /** Sessions from which we already stripped the language instruction this process (when the toggle is off), so we don't call removeInstruction every prompt. */
-  private languageRemoved = new Set<string>();
+  public languageRemoved = new Set<string>();
   /** The self-editing "agent is doing…" line per conv: message id + current label. */
   private activity = new Map<ConvKey, { msgId: number; label: string; toolStart: number }>();
   /** The "⏳ Đang xử lý…" line per conv (General top-level only): msgId once sent + the elapsed-time timer. */
@@ -397,7 +341,7 @@ export class Bot {
    * The next turn starts clean (runPromptTask deletes the entry). Pure
    * preview — the final-reply path is independent.
    */
-  private drafts = new Map<
+  public drafts = new Map<
     ConvKey,
     { state: DraftState | null; previewMsgId?: number; throttleMs: number; nextEditAt: number; budget: number; gen: number }
   >();
@@ -409,7 +353,7 @@ export class Bot {
    * the race where a late delta of a finished turn would otherwise spawn a
    * stray preview message after the final reply.
    */
-  private turnGen = new Map<ConvKey, number>();
+  public turnGen = new Map<ConvKey, number>();
 
   // ── /watch live card (docs/sdd/watch.md, task W3) ─────────────────────────
   /** One live watch per conversation (W1.5: at most one per conv). */
@@ -445,7 +389,7 @@ export class Bot {
    * id per conv that carries the turn's next-step keyboard. N3.1 drops it on
    * tap; N3.7 drops it when the user sends their next message. In-memory.
    */
-  private nextStepFooters = new Map<ConvKey, number>();
+  public nextStepFooters = new Map<ConvKey, number>();
   /**
    * S3 next-step buttons (N2.3): the session modified-files set at the moment
    * "review" was last OFFERED in this conv; a path that appears in a later
@@ -662,8 +606,7 @@ export class Bot {
 
   /** Register fire-and-forget reply work so a shutdown drain waits for it. */
   private trackPending(p: Promise<void>): void {
-    this.pendingSends.add(p);
-    void p.finally(() => this.pendingSends.delete(p));
+    return trackPendingFree(this, p);
   }
 
   /**
@@ -681,28 +624,8 @@ export class Bot {
    *
    * @returns true when everything settled before the cap.
    */
-  async drainInflight(opts: { timeoutMs: number }): Promise<boolean> {
-    this.draining = true; // pause preview pushes so the notice isn't overwritten
-    this.stopAllWatches(); // W5.1: stop the live cards (in-memory cleanup + audit — Telegram is stopped after)
-    this.notifyQueuedNotRunning(); // Q1.8: queued turns won't start — tell the chats now
-    const edits: Promise<unknown>[] = [];
-    for (const [conv, w] of this.drafts) {
-      if (w.previewMsgId && w.previewMsgId !== 0) {
-        edits.push(
-          this.tg
-            .editMessageText(conv, w.previewMsgId, tr(this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? ""), DRAIN_PREVIEW_TEXT, "⏳ Restarting… the result will be sent after."), { parse_mode: undefined })
-            .catch(() => {}),
-        );
-      }
-    }
-    if (edits.length) {
-      // Bound the notice phase itself: a hung Telegram call must not eat the cap.
-      await Promise.race([Promise.allSettled(edits), new Promise((r) => setTimeout(r, 5_000))]);
-    }
-    return drainInflightCore({
-      timeoutMs: opts.timeoutMs,
-      isBusy: () => this.inflight.size > 0 || this.orch.managerInflight || this.pendingSends.size > 0,
-    });
+  drainInflight(opts: { timeoutMs: number }): Promise<boolean> {
+    return drainInflightFree(this, opts);
   }
 
   /**
@@ -712,16 +635,8 @@ export class Bot {
    * during the drain (the final sends only need Telegram), and the process exits
    * right after drainInflightCore returns.
    */
-  private notifyQueuedNotRunning(): void {
-    for (const [conv] of Object.entries(this.st.all())) {
-      const n = this.queue.size(conv);
-      if (n <= 0) continue;
-      audit({ action: "queue_drop", chatId: conv, meta: { count: n, reason: "shutdown" } });
-      const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
-      void this.tg
-        .sendMessage(conv, tr(lang, `⚠️ Bot đang tắt — ${n} tin trong hàng chờ sẽ không chạy.`, `⚠️ Bot is shutting down — ${n} queued message(s) will not run.`))
-        .catch(() => {});
-    }
+  public notifyQueuedNotRunning(): void {
+    return notifyQueuedNotRunningFree(this);
   }
 
   // ── Uptime monitor + reboot ─────────────────────────────────────────────────
@@ -1191,7 +1106,7 @@ export class Bot {
    * "worker-done" when the conv is a worker topic) so a reaction on it can be
    * resolved; a worker that has just finished gets a 🎉 on its report.
    */
-  private async sendReply(conv: ConvKey, text: string): Promise<void> {
+  public async sendReply(conv: ConvKey, text: string): Promise<void> {
     const clean = stripTags(text ?? "");
     if (!clean) return;
     // Pattern B (deterministic, model-agnostic): if the reply ENDS with a short
@@ -1320,7 +1235,7 @@ export class Bot {
    * Body language (feature C): the bot reacts to a message. Best-effort — a
    * failure is logged and never affects the turn (setReaction never throws).
    */
-  private bodyReact(conv: ConvKey, messageId: number | undefined, emoji: string): void {
+  public bodyReact(conv: ConvKey, messageId: number | undefined, emoji: string): void {
     if (!this.cfg.react || !messageId) return;
     const { chatId } = parseConv(conv);
     void this.tg.setReaction(chatId, messageId, emoji).then((ok) => {
@@ -1562,7 +1477,7 @@ export class Bot {
     this.typing.set(conv, t);
   }
   /** Stop the repeating typing indicator for a chat (no-op if not running). */
-  private stopTyping(conv: ConvKey): void {
+  public stopTyping(conv: ConvKey): void {
     const t = this.typing.get(conv);
     if (t) clearInterval(t);
     this.typing.delete(conv);
@@ -1577,7 +1492,7 @@ export class Bot {
    * for DMs (native typing renders fine there). Manager turns only — runPromptTask
    * is manager-only, so worker topics never reach here.
    */
-  private startWorking(conv: ConvKey, lang?: Lang): void {
+  public startWorking(conv: ConvKey, lang?: Lang): void {
     if (!this.cfg.working || isDmConv(conv)) return; // manager turns in groups/topics; DMs show native typing fine
     if (this.working.has(conv)) return;
     log(`⏳ working indicator shown for ${conv}`);
@@ -1613,7 +1528,7 @@ export class Bot {
   }
 
   /** Remove the "⏳ Đang xử lý…" line (idempotent) — when the reply stream starts or the turn ends. */
-  private stopWorking(conv: ConvKey): void {
+  public stopWorking(conv: ConvKey): void {
     const e = this.working.get(conv);
     if (!e) return;
     this.working.delete(conv);
@@ -1658,7 +1573,7 @@ export class Bot {
   }
 
   /** Remove the activity line when the turn ends (idempotent). */
-  private clearActivity(conv: ConvKey): void {
+  public clearActivity(conv: ConvKey): void {
     const cur = this.activity.get(conv);
     this.activity.delete(conv);
     this.toolNames.delete(conv);
@@ -1793,7 +1708,7 @@ export class Bot {
    * deltas of this turn cannot spawn a stray preview after the final message.
    * The wrapper is removed at the start of the NEXT turn (runPromptTask).
    */
-  private async dropPreview(conv: ConvKey): Promise<void> {
+  public async dropPreview(conv: ConvKey): Promise<void> {
     const w = this.drafts.get(conv);
     // Bump the generation FIRST so even a concurrent in-flight pushPreview
     // result cannot re-arm the preview after this point.
@@ -2506,242 +2421,12 @@ export class Bot {
   }
 
   // ── the long-running prompt ──────────────────────────────────────────────
-  private async runPrompt(conv: ConvKey, text: string, state: ChatState, userMsgId?: number, lang?: Lang): Promise<{ busy: boolean }> {
-    // A closed worker topic reopens itself when the user speaks in it
-    // (openForumTopic is a no-op on an already-open topic, so safe every time).
-    if (state.worker) void this.tg.openForumTopic(conv).catch(() => {});
-    if (this.inflight.has(conv)) {
-      // Busy reply per config.busyMode (ask / queue / off — see src/busy.ts).
-      // In "queue" mode the message is auto-enqueued on arrival (no tap); in
-      // "off" the reply is byte-identical to the pre-queue behaviour.
-      const busyLang = lang ?? "vi";
-      let reply: BusyReply;
-      if (this.cfg.busyMode === "queue" && userMsgId != null) {
-        const r = this.queue.push(conv, { text, senderId: state.createdBy != null ? String(state.createdBy) : undefined });
-        if (r.ok) audit({ action: "queue_add", chatId: conv, userId: state.createdBy != null ? String(state.createdBy) : undefined, meta: { messageId: userMsgId, textLen: text.length, queuedCount: r.position, auto: true } });
-        reply = r.ok
-          ? buildBusyReply({ lang: busyLang, mode: "queue", messageId: userMsgId, queuedCount: r.position })
-          : queueFullReply({ lang: busyLang, messageId: userMsgId });
-      } else {
-        reply = buildBusyReply({ lang: busyLang, mode: this.cfg.busyMode, messageId: userMsgId, canSteer: true });
-      }
-      const kb = busyKeyboard(reply.buttons);
-      await this.tg.sendMessage(conv, reply.text, kb ? { reply_markup: kb } : undefined);
-      // Retain the dropped message's text so a tap (Queue / Steer now / note)
-      // can fetch it from the busy-note store by the user message's id.
-      if (userMsgId != null) this.busyNotes.push(conv, userMsgId, text);
-      return { busy: true };
-    }
-
-    // Keep the "typing…" indicator alive for the whole turn (until the reply is sent).
-    this.startTyping(conv);
-    this.startWorking(conv, lang); // "⏳ Đang xử lý…" — General top-level only (native typing doesn't render there)
-    try {
-      let sid = state.sessionID;
-      if (!sid) {
-        sid = await this.oc.createSession(state.directory || this.cfg.opencodeDirectory);
-        await this.applyModelAndVariant(sid, state);
-        if (state.agent) await this.oc.setAgent(sid, state.agent).catch((e) => warn("setAgent:", e?.message));
-        this.st.set(conv, { sessionID: sid });
-      }
-      // Per-user language preference: pin the session to English when the user
-      // chose "en" ("vi"/unset clears it). Idempotent and self-tracked per session,
-      // so a fresh session after /new, /use, or rotation re-applies on its prompt.
-      await applyLanguagePin(this.oc, this.st, conv, sid, lang);
-      // Quick replies (R2): pin the [OPTIONS] instruction when enabled; idempotent + self-tracked.
-      await applySuggestPin(this.oc, this.st, conv, sid, this.cfg.suggest);
-      // Per-user output style: pin the style instruction when set ("default" = no pin); idempotent + self-tracked.
-      // uid source: the conv's last driver (createdBy, set from the sender uid on every user message) —
-      // the same resolution the orchestrator uses for the Manager pin.
-      await applyStylePin(this.oc, this.st, conv, sid, this.userPrefs.getStyle(state.createdBy ?? ""));
-      // "Stay in the user's language" is a per-session INSTRUCTION (OpenCode
-      // injects `api/*` entries into the system context), not prepended text —
-      // cleaner and it doesn't grow the user-turn context. Tracked per SESSION
-      // (guidedLanguageSession), so a brand-new session after /new, /use, setsess,
-      // or plan→build gets it re-applied on its first prompt.
-      if (this.cfg.guideLanguage) {
-        if (state.guidedLanguageSession !== sid) {
-          try {
-            await this.oc.setInstruction(sid, LANGUAGE_INSTRUCTION_KEY, LANGUAGE_INSTRUCTION);
-            // Record on success only — a failure is retried on the next prompt.
-            this.st.set(conv, { guidedLanguageSession: sid });
-          } catch (e) {
-            warn("setInstruction:", (e as Error)?.message);
-          }
-        }
-      } else if (!this.languageRemoved.has(sid)) {
-        // Toggle off: strip any instruction a previous (enabled) run left on this
-        // session (idempotent; remembered per process so we don't call it every
-        // prompt). Clear the applied-marker so re-enabling re-applies it.
-        try {
-          await this.oc.removeInstruction(sid, LANGUAGE_INSTRUCTION_KEY);
-          this.languageRemoved.add(sid); // success only — a failure is retried on the next prompt
-        } catch (e) {
-          warn("removeInstruction:", (e as Error)?.message);
-        }
-        if (state.guidedLanguageSession === sid) this.st.set(conv, { guidedLanguageSession: undefined });
-      }
-      // Scratchpad notes (/note): retire last turn's notes or surface pending ones.
-      await prepareNotesTurn(this, conv, sid, lang ?? "vi");
-      // Inject the "ask via question tool" preamble once per session so the agent
-      // knows it is headless and should surface decisions as answerable questions.
-      let promptText = text;
-      if (this.cfg.guideQuestions && !state.guided) {
-        promptText = QUESTIONS_PREAMBLE + "\n\n" + text;
-        this.st.set(conv, { guided: true });
-      }
-      const ac = new AbortController();
-      this.inflight.set(conv, ac);
-      log(`[chat ${conv}] prompt on ${sid} (${text.length} chars)`);
-      audit({ action: "prompt", userId: this.st.peek(conv)?.createdBy, chatId: conv, session: sid, dir: state.directory || this.cfg.opencodeDirectory, outcome: "accepted", text });
-      // Fire-and-forget: don't block the polling loop; /stop aborts `ac`.
-      void this.runPromptTask(conv, sid, promptText, ac, userMsgId, lang).catch((e) => error("prompt task:", e?.message));
-    } catch (e) {
-      this.stopTyping(conv); // don't leave "typing…" running if the prompt never started
-      throw e;
-    }
-    return { busy: false };
+  public runPrompt(conv: ConvKey, text: string, state: ChatState, userMsgId?: number, lang?: Lang): Promise<{ busy: boolean }> {
+    return runPromptFree(this, conv, text, state, userMsgId, lang);
   }
 
-  public async runPromptTask(conv: ConvKey, sid: string, text: string, ac: AbortController, userMsgId?: number, lang?: Lang): Promise<void> {
-    const langEff: Lang = lang ?? this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
-    // One id for this user message, reused by the reconnect retry below: the
-    // server dedupes on it, so the retry waits on the same turn instead of
-    // running the instruction a second time.
-    const messageID = newMessageID();
-    // Bump the turn generation: invalidates any preview state from a previous
-    // turn (its wrapper may still linger to absorb late deltas) and starts the
-    // streaming wrapper for this turn fresh.
-    this.turnGen.set(conv, (this.turnGen.get(conv) ?? 0) + 1);
-    this.drafts.delete(conv);
-    const run = () => this.oc.promptAndWait(sid, text, { signal: ac.signal, messageID });
-    // Turn outcome, for the drain decision in `finally` (Q3.2: only a SUCCEEDED
-    // turn runs the next queued message; a failed or interrupted turn holds it).
-    // Fail-safe default "failed" so an unexpected path never drains the queue.
-    let outcome: "succeeded" | "failed" | "interrupted" = "failed";
-    // Next-step Review signal: the working-tree fingerprint BEFORE the turn
-    // (undefined when the feature is off, the conv is not a plain build session,
-    // or the folder is not a git repo). Compared with a second one afterwards.
-    const nsBefore = await this.nextStepSnapshot(conv);
-    try {
-      let res;
-      try {
-        res = await run();
-      } catch (e) {
-        // A persistent "Transport: fetch failed" usually means the OpenCode
-        // service restarted on a new port (stale URL). Re-discover and retry
-        // once; the retry rides out the reconnect.
-        if (!ac.signal.aborted && isTransportError(e)) {
-          warn("prompt failed (transport) — reconnecting to OpenCode and retrying…");
-          await this.oc.reconnect();
-          res = await run();
-        } else {
-          throw e;
-        }
-      }
-      // Classify the turn now that `res` is final (after any reconnect retry).
-      if (res.interrupted) outcome = "interrupted";
-      else if (res.outcome === "failed") outcome = "failed";
-      else outcome = "succeeded";
-      this.stopTyping(conv);
-      // Drop the live preview before the final message lands (group transport
-      // keeps a real, self-editing message that must not outlive the reply).
-      await this.dropPreview(conv);
-      // A failed turn produced no useful reply — surface the real reason (often
-      // context overflow, fixable with /clear) instead of an opaque "failed · Xs".
-      if (res.outcome === "failed" && !res.interrupted) {
-        if (res.reply) {
-          await this.sendReply(conv, res.reply);
-          if (res.replyTime) this.st.set(conv, { lastRelayedTime: res.replyTime });
-        }
-        // A genuine failure (not a user /stop): attach a one-tap "⏯ Chạy tiếp"
-        // button to the failure message so the user can resume the same session.
-        const kb = this.offerContinueKeyboard(conv, sid, messageID, res.outcome, res.interrupted, langEff);
-        // S5 (next-step buttons): a context-overflow failure also earns the
-        // "new-keep" row (engine rule) — same message, under the Continue row.
-        const nsKb = await this.buildNextStepFailureKeyboard(conv, sid, {
-          outcome: "failed",
-          interrupted: false,
-          elapsedMs: res.elapsedMs,
-          error: res.error,
-          lang: langEff,
-        });
-        const failText = formatTurnFailure(res.error, res.elapsedMs, langEff);
-        if (nsKb) {
-          const rows = [...(kb?.inline_keyboard ?? []), ...nsKb.inline_keyboard];
-          const failId = await this.tg.sendMessageId(conv, failText, { reply_markup: { inline_keyboard: rows } }).catch(() => -1);
-          // N3.1/N3.7: remember the message so the next-step row can be dropped
-          // on tap / next user message, reverting to the Continue row when there
-          // is one (the pre-existing button must survive).
-          if (failId > 0) this.noteNextStepMessage(conv, failId, kb);
-        } else {
-          // No next-step row: exactly the pre-next-steps path (chunked by sendHtml).
-          await this.sendHtml(conv, failText, kb ? { reply_markup: kb } : {});
-        }
-        // Body language (feature C): the bot dislikes the turn that failed.
-        this.bodyReact(conv, userMsgId, REACTION_FAIL);
-        return;
-      }
-      const reply = res.reply || (res.interrupted ? "(interrupted — no text produced yet)" : "(no text reply)");
-      await this.sendReply(conv, reply);
-      // Remember the newest reply we've relayed so a restart can recover any that
-      // were produced but never sent (see recoverOrphanedReplies).
-      if (res.replyTime) this.st.set(conv, { lastRelayedTime: res.replyTime });
-      // A quiet italic footer. The <i> tags are meant to render (HTML mode), so
-      // we do NOT escape the whole string — only the server-supplied outcome text.
-      const meta = `<i>${esc(res.outcome ?? "")} · ${(res.elapsedMs / 1000).toFixed(1)}s${res.interrupted ? " · stopped" : ""}</i>`;
-      // S3 (next-step buttons): the quiet footer carries the turn's keyboard —
-      // no extra message. decide() returns [] for everything it must not show
-      // (N1.3–N1.5: choices/other-keyboard, stopped turns, non-idle convs).
-      // R4.1: a reply carrying quick replies (an [OPTIONS] marker) gets no
-      // rule-based next-step buttons for that turn (the model's options win).
-      const hasQuickReplies = this.cfg.suggest && extractOptionsMarker(stripTags(res.reply ?? "")) !== null;
-      const kb = hasQuickReplies
-        ? undefined
-        : await this.buildNextStepKeyboard(conv, sid, {
-            outcome,
-            interrupted: res.interrupted,
-            reply: res.reply,
-            elapsedMs: res.elapsedMs,
-            error: res.error,
-            lang: langEff,
-            fpBefore: nsBefore,
-          });
-      if (kb) {
-        const footerId = await this.tg.sendMessageId(conv, meta, { reply_markup: kb }).catch(() => -1);
-        if (footerId > 0) this.nextStepFooters.set(conv, footerId);
-      } else {
-        await this.tg.sendMessage(conv, meta).catch(() => {});
-      }
-      if (!res.interrupted && res.reply) await this.maybeOfferPlanToBuild(conv);
-    } catch (e) {
-      // A throw (service down, unhandled) is a failed turn; a user /stop aborts
-      // the signal (interrupted). Either way it is NOT "succeeded", so no drain.
-      outcome = ac.signal.aborted ? "interrupted" : "failed";
-      this.stopTyping(conv);
-      await this.dropPreview(conv);
-      error("prompt error:", (e as Error)?.message);
-      const lang = this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
-      const msg = isTransportError(e)
-        ? tr(lang, "⚠️ Không thể nối tới OpenCode (service có thể đang restart / chưa chạy). Hẵng thử lại sau, hoặc kiểm tra `opencode service status`.", "⚠️ Can't reach OpenCode (the service may be restarting / not running). Try again later, or check `opencode service status`.")
-        : `❌ Error: ${esc((e as Error).message)}`;
-      await this.tg.sendMessage(conv, msg).catch(() => {});
-      // Body language (feature C): the bot dislikes the turn that failed.
-      this.bodyReact(conv, userMsgId, REACTION_FAIL);
-    } finally {
-      this.clearActivity(conv);
-      this.stopWorking(conv); // safety net: drop the "⏳ Đang xử lý…" line if it never reached the stream
-      // NOTE: do NOT delete the streaming wrapper here — it must stay (killed
-      // by the generation bump in dropPreview) so late deltas of this turn
-      // cannot spawn a stray preview after the final message. The NEXT turn
-      // removes it (see the turnGen bump at the top of runPromptTask).
-      this.inflight.delete(conv);
-      this.busyNotes.clear(conv); // the turn ended: the note-button retention window is over
-      // Drain the queue ONLY after a SUCCEEDED turn (Q3.2): a failed or
-      // interrupted turn holds the queue. Placed after inflight.delete so the
-      // drained item passes runPrompt's inflight guard (race-safe, see drainQueue).
-      if (outcome === "succeeded") this.drainQueue(conv);
-    }
+  public runPromptTask(conv: ConvKey, sid: string, text: string, ac: AbortController, userMsgId?: number, lang?: Lang): Promise<void> {
+    return runPromptTaskFree(this, conv, sid, text, ac, userMsgId, lang);
   }
 
   /**
@@ -2751,27 +2436,8 @@ export class Bot {
    * report `busy`, and the item is put back (Q1.11). One item per turn-end, and
    * the queue is finite + capped at 3, so this can never infinite-loop.
    */
-  private drainQueue(conv: ConvKey): void {
-    if (this.draining) return; // shutdown in progress — queued turns must not start
-    const item = this.queue.shift(conv); // drops expired heads, returns the next live item or null
-    if (!item) return; // nothing queued
-    audit({ action: "queue_run", chatId: conv, userId: item.senderId, meta: { senderId: item.senderId, waitedMs: Date.now() - item.at } });
-    const state = this.st.get(conv);
-    void this.runPrompt(conv, item.text, state, undefined, undefined).then(
-      (res) => {
-        // Lost the turn-end race to a user message (inflight is theirs now): put
-        // the item back at the HEAD (FIFO preserved, Q1.11) so it runs on the
-        // next succeeded turn-end, ahead of anything enqueued behind it.
-        if (res.busy) this.queue.prepend(conv, item);
-      },
-      (e) => {
-        // A setup failure (service down) must not silently lose the message:
-        // put it back at the head. It can only re-fire on a later SUCCEEDED
-        // turn, so this can't infinite-loop.
-        warn("drainQueue: runPrompt failed, requeueing:", (e as Error)?.message);
-        this.queue.prepend(conv, item);
-      },
-    );
+  public drainQueue(conv: ConvKey): void {
+    return drainQueueFree(this, conv);
   }
 
   /**
@@ -2780,7 +2446,7 @@ export class Bot {
    * is already in the session context. Offered on every successful plan turn
    * (not just once), and skipped while the agent is mid-question.
    */
-  private async maybeOfferPlanToBuild(conv: ConvKey): Promise<void> {
+  public async maybeOfferPlanToBuild(conv: ConvKey): Promise<void> {
     const st = this.st.get(conv);
     if (st.agent !== "plan") return;
     if ([...this.questionForms.values()].some((q) => q.conv === conv)) return;
@@ -2799,7 +2465,7 @@ export class Bot {
    * the conv is not a plain session on the build agent, the folder is not a git
    * repo, or git is slow (capped at 1.5 s so it can never hold up the prompt).
    */
-  private async nextStepSnapshot(conv: ConvKey): Promise<string | undefined> {
+  public async nextStepSnapshot(conv: ConvKey): Promise<string | undefined> {
     if (!this.cfg.nextSteps) return undefined;
     const state = this.st.peek(conv);
     if (!state || state.worker || state.manager || state.advisor) return undefined;
@@ -2817,7 +2483,7 @@ export class Bot {
    * getSessionReport call (N2.3 filesNew) happens only after the cheap gates
    * pass, never on every turn.
    */
-  private async buildNextStepKeyboard(
+  public async buildNextStepKeyboard(
     conv: ConvKey,
     sessionID: string,
     info: {
@@ -2917,7 +2583,7 @@ export class Bot {
    * Continue — treating it as a blocking keyboard would make the rule dead
    * code. The two rows ride the same failure message.
    */
-  private async buildNextStepFailureKeyboard(
+  public async buildNextStepFailureKeyboard(
     conv: ConvKey,
     sessionID: string,
     info: { outcome: "failed"; interrupted: boolean; elapsedMs: number; error?: { type?: string; message?: string }; lang: Lang },
@@ -3021,7 +2687,7 @@ export class Bot {
    * already offered one for this same turn, or when the callback data would
    * exceed Telegram's limit. Pure decision + encoding live in src/continue.ts.
    */
-  private offerContinueKeyboard(
+  public offerContinueKeyboard(
     conv: ConvKey,
     sessionID: string,
     turnId: string,
@@ -3042,18 +2708,8 @@ export class Bot {
    * interrupt that turn on the server — otherwise switching away (/new, /clear,
    * opening another session) left the old session running and spending tokens.
    */
-  public async stopCurrent(conv: ConvKey, interrupt = false): Promise<void> {
-    this.stopTyping(conv);
-    this.clearActivity(conv);
-    this.busyNotes.clear(conv); // /stop (and /new, /clear) end the turn: drop the note-button retention
-    const droppedQueue = this.queue.clear(conv); // /stop (and /new, /clear, session switch) = stop EVERYTHING, including the queue (Q1.5)
-    if (droppedQueue > 0) audit({ action: "queue_drop", chatId: conv, meta: { count: droppedQueue, reason: "stop" } });
-    await this.dropPreview(conv); // stopping a turn drops its live preview (and kills late deltas)
-    this.orch.clearManagerBusy(conv); // /new, /clear, /stop all drop the manager's session — never let a late terminal event wedge the flag
-    const ac = this.inflight.get(conv);
-    if (ac) ac.abort();
-    const sid = this.st.peek(conv)?.sessionID;
-    if (ac && interrupt && sid) await this.oc.interrupt(sid).catch((e) => warn("interrupt:", e?.message));
+  public stopCurrent(conv: ConvKey, interrupt = false): Promise<void> {
+    return stopCurrentFree(this, conv, interrupt);
   }
 
   /**
@@ -3739,7 +3395,7 @@ export class Bot {
    * or one short line. Remember its id so N3.7 can dismiss it, and (for a
    * card) the keyboard it reverts to: the card's own Diff/Merge/Delete rows.
    */
-  private noteNextStepMessage(conv: ConvKey, messageId: number, residual?: Keyboard): void {
+  public noteNextStepMessage(conv: ConvKey, messageId: number, residual?: Keyboard): void {
     if (messageId <= 0) return;
     // The footer stays keyed by conv (N3.7 dismisses this conv's newest row); the residual
     // is keyed by messageId so a tap on a stale row restores ITS OWN row, not the newest.
