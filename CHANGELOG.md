@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.47.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.46.2...opencode-telegram-bot-v1.47.0) (2026-11-18)
+
+
+### Features
+
+* callback-registry spec — all 35 prefixes in the typed registry ([f67625e](https://github.com/tobbieswork/opencode-telegram-bot/commit/f67625e61faf8b2342c300e888216cb2b15ef0b2))
+* migrate the remaining 14 callback prefixes and remove the legacy chain (T6) ([6d2de8f](https://github.com/tobbieswork/opencode-telegram-bot/commit/6d2de8f466ade606f3608e5f5d3f006b5479bedd))
+
 ## [1.46.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.46.1...opencode-telegram-bot-v1.46.2) (2026-11-18)
 
 
