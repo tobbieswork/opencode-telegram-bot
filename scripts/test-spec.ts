@@ -82,7 +82,21 @@ const cp = parseSpec(canonical);
 }
 
 // ── markerless spec (S4.3: no markers = all todo) ──────────────────────────
-const nextstep = read("next-step-buttons.md");
+// Synthetic fixture: the real next-step-buttons.md is closed (all [x]) since
+// the feature shipped, so the markerless code path is exercised on a literal.
+const nextstep = `# Unmarked next-step spec (synthetic golden)
+
+## Tasks
+
+0. **S0 Read-only check.** Without any model call, read how the report behaves. *Checkpoint: confirm the data source.*
+1. **S1 Engine** (N1, N2, N3.1 to N3.6). Rule table, decide, registry, encoding under 64 bytes. *Checkpoint: review the rule table.*
+2. **S2 Config.** Two variables, README, .env.example.
+3. **S3 Plain sessions.** Build facts, attach, tap handler.
+4. **S4 Workers.** Add review to the worktree card.
+5. **S5 Manager and failures.** Board after a Manager turn.
+6. **S6 Audit.** Events and tap rate.
+7. **S7 End-to-end.** One scenario in smoke.
+`;
 const np = parseSpec(nextstep);
 {
   check("markerless: parses 8 tasks", isOk(np) && np.tasks.length === 8, isOk(np) ? `got ${np.tasks.length}` : JSON.stringify(np));
@@ -159,7 +173,8 @@ const qp = parseSpec(queue);
 
   // markTask WITHOUT a commit: the inserted marker must survive re-parse
   const outNC = markTask(nextstep, 0);
-  const lineNC = outNC.split("\n")[115];
+  const iNC = outNC.split("\n").findIndex((l) => /^0\. /.test(l));
+  const lineNC = outNC.split("\n")[iNC];
   check("markTask no-commit: space after [x]", lineNC.startsWith("0. [x] **S0 Read-only check.**"), lineNC);
   const reNC = parseSpec(outNC);
   check("markTask no-commit: round-trip keeps done, no commit", isOk(reNC) && reNC.tasks[0].marker === "done" && reNC.tasks[0].commit === undefined, JSON.stringify(reNC.tasks?.[0]));
@@ -167,8 +182,8 @@ const qp = parseSpec(queue);
   // markerless item: marker inserted, commit appended after the marker
   const out2 = markTask(nextstep, 0, "deadbee");
   const diff2 = changedLineIndices(nextstep, out2);
-  check("markTask on markerless: exactly one line changed", JSON.stringify(diff2) === JSON.stringify([115]), JSON.stringify(diff2));
-  const line2 = out2.split("\n")[115];
+  check("markTask on markerless: exactly one line changed", Array.isArray(diff2) && diff2.length === 1, JSON.stringify(diff2));
+  const line2 = Array.isArray(diff2) && diff2.length === 1 ? out2.split("\n")[diff2[0]] : "";
   check("markTask on markerless: [x] (commit) after the number", line2.startsWith("0. [x] (deadbee) **S0 Read-only check.**"), line2);
   const re2 = parseSpec(out2);
   check("markTask on markerless: round-trip", isOk(re2) && re2.tasks[0].marker === "done" && re2.tasks[0].commit === "deadbee" && re2.tasks[0].title === "Read-only check", JSON.stringify(re2));
