@@ -79,7 +79,7 @@ confirmKeyboard(lang, { yes: cb.encode({...}), no: cb.encode({...}) })
 
 1. [x] **T1 Usage count.** (done 2026-11-18, results in §6) Read-only: count each repeated shape (error line, ok line, confirm keyboard, picker) with file and line. Keep only shapes with 3 or more uses. Update this spec. *Checkpoint: approve the helper list.*
 2. [x] **T2 Icons and text helpers** (M1, M3, M4.3). (done 2026-11-18 — `src/ui/icons.ts` with `ICON` + `UI_ICON`, `src/ui/text.ts` with `okLine`/`errorLine`/`warnLine`/`statusLine`/`titledList` + `raw()`, `scripts/test-ui.ts` in `test:unit`; `format.ts` re-exports `ICON` per M1.1.) `src/ui/icons.ts`, `text.ts`, `scripts/test-ui.ts` added to `test:unit`. No call sites changed. *Checkpoint: review the helper API and wording.*
-3. [ ] **T3 Keyboard helpers** (M2). `src/ui/keyboards.ts` and tests. *Checkpoint: review.*
+3. [x] **T3 Keyboard helpers** (M2). (done 2026-11-18 — `src/ui/keyboards.ts`: `confirmKeyboard`, `singleButton`, `backCloseRow`, `pickerKeyboard` + `BTN_LABEL_MAX=32`; plain `Btn`s, no callback registry yet per M2.2; `scripts/test-keyboards.ts` in `test:unit`.) `src/ui/keyboards.ts` and tests. *Checkpoint: review.*
 4. [ ] **T4 Pilot migration:** `src/commands/agents.ts` and `src/commands/meta.ts`, byte-identical output. *Checkpoint: see the messages in Telegram.*
 5. [ ] **T5 Migrate remaining files**, one commit per file or module (`schedule`, `orchestrator/*`, `bot.ts` sections). *Checkpoint after each group.*
 6. [ ] **T6 Consistency check** (M4.4). Add `test:ui-consistency`; list allowed exceptions. *Checkpoint: review the exception list.*
