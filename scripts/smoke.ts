@@ -521,16 +521,32 @@ async function main(): Promise<void> {
   {
     const wBefore = mock.out.length;
     const kbBefore = mock.keyboards.length;
-    await bot.handle(
-      upd(
-        "Run ONE shell command that lists the files in the current directory, then write one short line about testing. " +
-          "Do NOT create, modify or delete any file. End with a single short sentence.",
-      ),
-    );
-    // A few seconds in, the turn is mid-flight; /watch on a busy session goes
-    // straight to the working card (startWatch checks sessionState).
-    await waitMs(2500);
+    const watchPrompt =
+      "Run ONE shell command that lists the files in the current directory, then write one short line about testing. " +
+      "Do NOT create, modify or delete any file. End with a single short sentence.";
+    await bot.handle(upd(watchPrompt));
+    // /watch must land MID-TURN: a fixed sleep raced fast turns (a 1.8s turn
+    // beat the old 2500ms wait, the card posted idle, and edit/freeze had
+    // nothing to observe). Poll the real sessionState until busy, then tap.
+    // If the turn ends before it is ever seen busy (faster than our poll),
+    // re-prompt once — the LLM turn takes seconds, so the second catch holds.
+    const wsid = st.get(42).sessionID;
+    let busy = false;
+    for (let attempt = 0; attempt < 2 && !busy; attempt++) {
+      if (attempt > 0) {
+        await bot.handle(upd(watchPrompt));
+      }
+      for (let i = 0; i < 50 && !busy; i++) {
+        try {
+          busy = (await oc.sessionState(wsid)).busy;
+        } catch {
+          break; // the client hiccup is not "busy" — stop polling
+        }
+        if (!busy) await waitMs(100);
+      }
+    }
     await bot.handle(upd("/watch"));
+    console.log("watch tapped mid-turn (session busy):", busy);
     // 1) The card is posted with the watch keyboard (w:<id>:c, + :s while working).
     const card = await waitFor((a) => a.slice(wBefore).some((m) => /(Đang chạy|Đang nghỉ|Working|Idle)/.test(m)), mock.out, 30000);
     console.log("watch card posted:", card);
