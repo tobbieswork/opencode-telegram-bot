@@ -1,6 +1,6 @@
 # Spec: Typed callback registry
 
-- **Status:** In progress — T1–T4 done (20 of the 33 inventoried prefixes migrated; `bs`, `ns`, `note`, `spec`/`specrun`/`spc*` remain for T5–T6), T5–T7 pending
+- **Status:** T1–T6 done (all 35 inventoried prefixes migrated), T7 (E2E: smoke + service restart + journal) pending
 - **Date:** 2026-11-17
 - **Scope:** `opencode-telegram-bot`
 - **Format:** requirements (EARS) -> design -> tasks, human checkpoint after each task
@@ -68,6 +68,7 @@ export function dispatchCallback(ctx, cb): Promise<boolean>; // false = not in r
 - **Old buttons after deploy.** Handled by C3.1; a test replays a captured list of real callback strings against the new decoders.
 - **Handler signature differences.** Some handlers take `messageId`, some `conv`. The registry passes one context object; adapters are thin wrappers during migration.
 - **Size.** Adds about 150 lines and removes the chain in `bot.ts`; net effect is neutral until all prefixes move.
+- **`spcauto:` is a producer without a handler** (pre-existing gap, found in T6). `spec-checkpoint.ts` emits `spcauto:<name>:<n>`, but neither the legacy chain nor the registry handled it — tapping it falls to the "expired" toast. T6 preserves that behavior (not registered). Follow-up decision needed: add it to the spec family, or remove the producer.
 
 ## 4. Tasks (each ends with a human checkpoint)
 
@@ -76,7 +77,7 @@ export function dispatchCallback(ctx, cb): Promise<boolean>; // false = not in r
 3. [x] (b5ac10c) **T3 Pilot migration:** `pb`, `ch`, `cont`, `reboot` with round-trip tests including a captured real callback string each. *Checkpoint: try the buttons in Telegram.*
 4. [x] (6c32b03) **T4 Migrate the rest** in groups of 3-4 prefixes (`mode`, `agent`, `variant`, `mdl`; then `perm`, `rot`, `kill`, `prune`; then `nw`, `use`, `fq`, `cmd`, `sch`, `wt`, `ap`, `q`). *Checkpoint after each group.*
 5. [x] (1dcaf55) **T5 Migrate `bs:`** (the browser menu and its sub-actions). *Checkpoint: browse folders and pick a session in Telegram.*
-6. [ ] **T6 Remove the old chain** and add a startup self-check that lists registered prefixes (C1.2). *Checkpoint: read the startup log.*
+6. [x] (6d2de8f) **T6 Remove the old chain** and add a startup self-check that lists registered prefixes (C1.2). *Checkpoint: read the startup log.*
 7. [ ] **T7 End-to-end.** `npm run smoke` once at the end, then restart the service and check the journal.
 
 Verification order for every task: `npm run typecheck` and `npm run test:unit` first, `npm run smoke` once at the end.
