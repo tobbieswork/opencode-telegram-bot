@@ -15,6 +15,7 @@
  * 64-byte callback_data cap, carrying no user text.
  */
 import { randomInt } from "node:crypto";
+import { fields } from "./callbacks.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -266,3 +267,11 @@ export function parseCallback(data: string): { id: string; k: number } | null {
   if (!Number.isSafeInteger(k) || k < 0) return null;
   return { id, k };
 }
+
+/**
+ * The `ns:` callback def (docs/sdd/callback-registry.md — T6 migration).
+ * Wire form: `ns:<id>:<k>` — a 4-char base36 registry id and a non-negative
+ * integer index. Both are bounded by the producer (callbackFor), so no
+ * 64-byte fallback is needed.
+ */
+export const nsCb = fields("ns", 2);

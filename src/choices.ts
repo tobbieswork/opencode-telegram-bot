@@ -14,6 +14,7 @@
  * See docs/sdd/interactive-buttons-research.md (§5) for the full design.
  */
 import { randomInt } from "node:crypto";
+import { defineCallback } from "./callbacks.js";
 import type { Keyboard, Btn } from "./shared.js";
 import type { ConvKey } from "./conv.js";
 
@@ -213,6 +214,36 @@ export function extractOptionsMarker(markdown: string): OptionsMarker | null {
 }
 
 /**
+ * The `ch:` callback def (docs/sdd/callback-registry.md — T3 pilot migration).
+ * Wire form: "ch:<id>:<i>" (id = the 4-char base36 choice-registry key, i the
+ * option index) or the one-shot tapped marker "ch:inert". Declared ONCE here:
+ * choiceKeyboard() below encodes through it, bot.ts registers it with its
+ * handler, and the dispatcher decodes with it — nothing else parses the wire
+ * form. (The choice DETECTOR above is untouched — out of scope per the spec.)
+ */
+export type ChoiceCallbackArgs = { kind: "pick"; id: string; index: number } | { kind: "inert" };
+
+const CHOICE_ID_RE = /^[0-9a-z]{4}$/;
+
+export const choiceCallback = defineCallback<ChoiceCallbackArgs>({
+  prefix: "ch",
+  encode: (a) => {
+    if (a.kind === "inert") return "ch:inert";
+    if (!CHOICE_ID_RE.test(a.id)) throw new Error(`callback "ch": id must be 4 base36 chars, got ${JSON.stringify(a.id)}`);
+    if (!Number.isInteger(a.index) || a.index < 0) throw new Error(`callback "ch": index must be a non-negative integer, got ${a.index}`);
+    return `ch:${a.id}:${a.index}`;
+  },
+  decode: (rest) => {
+    if (rest === "inert") return { kind: "inert" };
+    const m = /^([0-9a-z]{4}):(\d+)$/.exec(rest);
+    if (!m) return null;
+    const index = Number(m[2]);
+    if (!Number.isSafeInteger(index)) return null;
+    return { kind: "pick", id: m[1], index };
+  },
+});
+
+/**
  * Build the inline keyboard mirroring a choice list: one button per row, label
  * truncated to ~40 chars, and a TINY `callback_data` = `ch:<id>:<i>` (id is a
  * short registry key, i the option index) — well under Telegram's 64-byte cap,
@@ -222,7 +253,7 @@ export function choiceKeyboard(id: string, options: string[], noTruncate = false
   // noTruncate (quick replies, R1.3): the label must equal the text that will be
   // sent, so it is never cut — R1.3 already caps each option at 56 chars.
   const rows: Btn[][] = options.slice(0, 8).map((t, i) => [
-    { text: noTruncate ? t : t.length > 40 ? t.slice(0, 40) + "…" : t, callback_data: `ch:${id}:${i}` },
+    { text: noTruncate ? t : t.length > 40 ? t.slice(0, 40) + "…" : t, callback_data: choiceCallback.encode({ kind: "pick", id, index: i }) },
   ]);
   return { inline_keyboard: rows };
 }

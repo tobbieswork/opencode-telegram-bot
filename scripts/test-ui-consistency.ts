@@ -142,18 +142,23 @@ const EXCEPTIONS: Exc[] = [
   },
   {
     file: "src/bot.ts",
-    text: 'tr(lang, "❌ Huỷ", "❌ Cancel"), data: "reboot:cancel"',
+    text: 'tr(lang, "❌ Huỷ", "❌ Cancel"), data: rebootCallback.encode({ op: "cancel" })',
     why: "button label (cancel reboot)",
   },
   {
     file: "src/bot.ts",
-    text: 'tr(lang, "❌ Đóng", "❌ Close"), callback_data: "use:close"',
+    text: 'tr(lang, "❌ Đóng", "❌ Close"), callback_data: useCb.encode("close")',
     why: "button label (use picker close)",
   },
   {
     file: "src/bot.ts",
-    text: '{ text: tr(b.lang, "❌ Đóng", "❌ Close"), callback_data: "bs:close" }',
-    why: "button label (file-browser close), 3 sites",
+    text: '{ text: tr(b.lang, "❌ Đóng", "❌ Close"), callback_data: bsCallback.encode({ op: "close" }) }',
+    why: "button label (file-browser close)"
+  },
+  {
+    file: "src/bot.ts",
+    text: 'rows.push([{ text: tr(b.lang, "❌ Đóng", "❌ Close"), callback_data: bsCallback.encode({ op: "close" }) }]);',
+    why: "button label (file-browser close), 2 sites",
   },
   {
     file: "src/bot.ts",
@@ -167,12 +172,12 @@ const EXCEPTIONS: Exc[] = [
   },
   {
     file: "src/bot.ts",
-    text: 'tr(lang, "❌ Đóng", "❌ Close"), callback_data: "mdl:close"',
+    text: 'tr(lang, "❌ Đóng", "❌ Close"), callback_data: modelCb.encode({ op: "close" })',
     why: "button label (model picker close)",
   },
   {
     file: "src/bot.ts",
-    text: 'tr(lang, "❌ Đóng", "❌ Close"), callback_data: "mode:close"',
+    text: 'tr(lang, "❌ Đóng", "❌ Close"), callback_data: modeCb.encode("close")',
     why: "button label (mode picker close)",
   },
   {
@@ -182,7 +187,7 @@ const EXCEPTIONS: Exc[] = [
   },
   {
     file: "src/bot.ts",
-    text: 'tr(lang, "❌ Đóng", "❌ Close"), callback_data: "variant:close"',
+    text: 'tr(lang, "❌ Đóng", "❌ Close"), callback_data: variantCb.encode("close")',
     why: "button label (variant picker close)",
   },
   {
@@ -192,7 +197,7 @@ const EXCEPTIONS: Exc[] = [
   },
   {
     file: "src/bot.ts",
-    text: 'tr(lang, "❌ Huỷ", "❌ Cancel"), callback_data: `fq:${fd}:x`',
+    text: 'tr(lang, "❌ Huỷ", "❌ Cancel"), callback_data: formCb.encode({ formID: fd, op: "x" })',
     why: "button label (form-question cancel), 2 sites",
   },
   {
@@ -209,7 +214,7 @@ const EXCEPTIONS: Exc[] = [
   // src/orchestrator.ts — kill picker, auto-off note, topic rename, assign card
   {
     file: "src/orchestrator.ts",
-    text: 'tr(lang, "❌ Đóng", "❌ Close"), callback_data: "kill:close"',
+    text: 'tr(lang, "❌ Đóng", "❌ Close"), callback_data: killCb.encode("close")',
     why: "button label (kill picker close)",
   },
   {
@@ -224,12 +229,12 @@ const EXCEPTIONS: Exc[] = [
   },
   {
     file: "src/orchestrator.ts",
-    text: '{ text: "✅ Giao", callback_data: `ap:${id}:ok` }',
+    text: '{ text: "✅ Giao", callback_data: apCb.encode({ id, op: "ok" }) }',
     why: "button label (assign: ok)",
   },
   {
     file: "src/orchestrator.ts",
-    text: '{ text: "❌ Huỷ", callback_data: `ap:${id}:no` }',
+    text: '{ text: "❌ Huỷ", callback_data: apCb.encode({ id, op: "no" }) }',
     why: "button label (assign: cancel)",
   },
 

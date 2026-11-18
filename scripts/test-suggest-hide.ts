@@ -37,6 +37,7 @@ interface Edit { messageId: number; markup: Record<string, unknown> }
 function makeBot() {
   const sent: SentMsg[] = [];
   const edits: Edit[] = [];
+  const answers: string[] = [];
   let nextId = 100;
   const tg: any = {
     onThreadNotFound: undefined,
@@ -86,7 +87,7 @@ function makeBot() {
   (bot as any).startWorking = () => {};
   (bot as any).clearActivity = () => {};
   (bot as any).dropPreview = async () => {};
-  return { bot, sent, edits, st };
+  return { bot, sent, edits, st, answers };
 }
 
 /** The registry id embedded in a sent keyboard's callback_data ("ch:<id>:<i>"). */
@@ -100,7 +101,7 @@ function regIdOf(opts?: Record<string, unknown>): string | undefined {
 
 // ── S1: a new options reply hides the previous active keyboard ─────────────
 {
-  const { bot, sent, edits, st } = makeBot();
+  const { bot, sent, edits, st, answers } = makeBot();
   const conv = "42";
   st.set(conv, { sessionID: "ses_1" });
   await bot.sendReply(conv, "Reply one\n\n[OPTIONS: alpha | beta]");
@@ -122,13 +123,13 @@ function regIdOf(opts?: Record<string, unknown>): string | undefined {
 
 // ── S2: a tapped keyboard's ✓ history survives the next options reply ──────
 {
-  const { bot, sent, edits, st } = makeBot();
+  const { bot, sent, edits, st, answers } = makeBot();
   const conv = "43";
   st.set(conv, { sessionID: "ses_1" });
   await bot.sendReply(conv, "Reply one\n\n[OPTIONS: alpha | beta]");
   const first = sent[sent.length - 1];
   const id1 = regIdOf(first.opts);
-  await (bot as any).handleChoiceCallback({ id: "c1", data: `ch:${id1}:0`, from: { id: "1" } } as any, conv, first.id);
+  await (bot as any).handleChoiceCallback({ id: "c1", data: `ch:${id1}:0`, from: { id: "1" } } as any, conv, (t?: string) => answers.push(t), first.id);
   const afterTap = edits[edits.length - 1];
   check("S2 tap replaced the keyboard with the ✓ button", afterTap?.messageId === first.id && /✓ alpha/.test(JSON.stringify(afterTap.markup)), JSON.stringify(afterTap));
   const actAfterTap = (bot as any).activeChoice.get(conv);
@@ -140,7 +141,7 @@ function regIdOf(opts?: Record<string, unknown>): string | undefined {
 
 // ── S3: a reply without options leaves the previous keyboard alone ─────────
 {
-  const { bot, sent, edits, st } = makeBot();
+  const { bot, sent, edits, st, answers } = makeBot();
   const conv = "44";
   st.set(conv, { sessionID: "ses_1" });
   await bot.sendReply(conv, "Reply one\n\n[OPTIONS: alpha | beta]");

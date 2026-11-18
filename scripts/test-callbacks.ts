@@ -14,10 +14,16 @@
  *   or forgets to answer;
  * - C2.2: registered data that fails to decode, and data that matches
  *   nothing (answerExpired), get a short "button expired" toast, warn once
- *   per unique data string, and never throw.
+ *   per unique data string, and never throw;
+ * - T3 (pilot migration of pb/ch/cont/reboot, C3.1/C3.3): the four migrated
+ *   defs round-trip, reject malformed input, enforce the 64-byte cap, and
+ *   decode CAPTURED real callback strings (buttons already in production);
+ *   importing bot.js registers the four prefixes, and dispatch routes them
+ *   to the handler adapters with exactly one answer.
  *
  * No Telegram and no Bot instance involved: the registry only touches
- * `bot.tg.answerCallbackQuery`, which is faked here.
+ * `bot.tg.answerCallbackQuery`, which is faked here. (The T3 section imports
+ * bot.js for the real defs/registration — still no Bot instance, no network.)
  *
  * Run: npx tsx scripts/test-callbacks.ts
  */
@@ -41,7 +47,15 @@ import {
   _resetWarnOnceForTest,
   _setTokenTtlMsForTest,
 } from "../src/callbacks.js";
+import { bsCallback, pbCallback, registerBotCallbacks, wwCb } from "../src/bot.js";
 import type { Bot } from "../src/bot.js";
+import { choiceCallback, choiceKeyboard, registry as choiceRecords } from "../src/choices.js";
+import { continueCallback, continueCallbackData, parseContinueData } from "../src/continue.js";
+import { rebootCallback, rebootGoData } from "../src/uptime.js";
+import { watchCb } from "../src/watch.js";
+import { nsCb } from "../src/nextsteps.js";
+import { noteCb } from "../src/notes.js";
+import { specCb, specrunCb, specblockedCb, specrunokCb, spcaccCb, spcredoCb, spcstopCb, spcprCb, spcreadyCb, spccleanCb } from "../src/commands/spec.js";
 import type { CallbackQuery } from "../src/telegram.js";
 
 let failures = 0;
@@ -268,6 +282,245 @@ async function main(): Promise<void> {
     } finally {
       console.warn = origWarn;
     }
+  }
+
+  // ── T3: pilot migration — pb, ch, cont, reboot (C3.1/C3.3) ──────────────
+  {
+    // bot.js's module load registers the four pilot prefixes; the T2 section
+    // above cleared the registry, so restore the real registration.
+    _clearCallbacksForTest();
+    registerBotCallbacks();
+
+    check(
+      "T3: all four pilot prefixes are registered",
+      ["pb", "ch", "cont", "reboot"].every((p) => registeredPrefixes().includes(p)),
+      JSON.stringify(registeredPrefixes()),
+    );
+    check("T3: pb owner", callbackOwner("pb") === "bot.ts (plan-to-build)", callbackOwner("pb"));
+    check("T3: ch owner", callbackOwner("ch") === "choices.ts (choice buttons)", callbackOwner("ch"));
+    check("T3: cont owner", callbackOwner("cont") === "continue.ts (continue button)", callbackOwner("cont"));
+    check("T3: reboot owner", callbackOwner("reboot") === "uptime.ts (reboot flow)", callbackOwner("reboot"));
+
+    // pb — the wire form is the fixed "pb:go" (C3.1).
+    check("T3 pb: encodes as pb:go", pbCallback.encode({ op: "go" }) === "pb:go", pbCallback.encode({ op: "go" }));
+    check("T3 pb: round-trips", JSON.stringify(pbCallback.decode("go")) === JSON.stringify({ op: "go" }));
+    check("T3 pb: a foreign value is malformed", pbCallback.decode("stop") === null);
+    check("T3 pb: empty rest is malformed", pbCallback.decode("") === null);
+    check("T3 pb: extra fields are malformed", pbCallback.decode("go:extra") === null);
+    check("T3 pb: the encoded form fits 64 bytes", Buffer.byteLength(pbCallback.encode({ op: "go" }), "utf8") <= CALLBACK_MAX_BYTES);
+
+    // ch — "ch:<id>:<i>" (4-char base36 registry key + option index) or "ch:inert".
+    const pick = { kind: "pick", id: "ab12", index: 3 };
+    check("T3 ch: pick encodes as ch:ab12:3", choiceCallback.encode(pick) === "ch:ab12:3", choiceCallback.encode(pick));
+    check("T3 ch: pick round-trips", JSON.stringify(choiceCallback.decode("ab12:3")) === JSON.stringify(pick));
+    check("T3 ch: index 0 round-trips", JSON.stringify(choiceCallback.decode("ab12:0")) === JSON.stringify({ kind: "pick", id: "ab12", index: 0 }));
+    check("T3 ch: inert encodes as ch:inert", choiceCallback.encode({ kind: "inert" }) === "ch:inert");
+    check("T3 ch: inert round-trips", JSON.stringify(choiceCallback.decode("inert")) === JSON.stringify({ kind: "inert" }));
+    check("T3 ch: an uppercase id is malformed", choiceCallback.decode("AB12:3") === null);
+    check("T3 ch: a 3-char id is malformed", choiceCallback.decode("ab1:3") === null);
+    check("T3 ch: a 5-char id is malformed", choiceCallback.decode("abcde:3") === null);
+    check("T3 ch: a missing index is malformed", choiceCallback.decode("ab12") === null);
+    check("T3 ch: an empty index is malformed", choiceCallback.decode("ab12:") === null);
+    check("T3 ch: a non-numeric index is malformed", choiceCallback.decode("ab12:x") === null);
+    check("T3 ch: extra fields are malformed", choiceCallback.decode("ab12:3:4") === null);
+    check("T3 ch: empty rest is malformed", choiceCallback.decode("") === null);
+    check("T3 ch: encode rejects a 3-char id", throws(() => choiceCallback.encode({ kind: "pick", id: "ab1", index: 0 })));
+    check("T3 ch: encode rejects a negative index", throws(() => choiceCallback.encode({ kind: "pick", id: "ab12", index: -1 })));
+    check("T3 ch: encode rejects a fractional index", throws(() => choiceCallback.encode({ kind: "pick", id: "ab12", index: 1.5 })));
+
+    // cont — "cont:<sessionID>".
+    check("T3 cont: encodes as cont:<id>", continueCallback.encode("ses_abc123") === "cont:ses_abc123");
+    check("T3 cont: round-trips", continueCallback.decode("ses_abc123") === "ses_abc123");
+    check("T3 cont: empty rest is malformed", continueCallback.decode("") === null);
+    setCallbackStrict(true);
+    try {
+      // the prefix is 5 bytes: a 60-byte id makes 65 B (over), 59 makes 64 (ok).
+      check("T3 cont: a 65-byte encode throws CallbackLimitError", throws(() => continueCallback.encode("s".repeat(60)), CallbackLimitError));
+      check("T3 cont: exactly 64 bytes encodes", continueCallback.encode("s".repeat(59)).length === 64);
+    } finally {
+      setCallbackStrict(false);
+    }
+    check("T3 cont: the producer OMITS (does not throw) over the cap", continueCallbackData("s".repeat(60)) === undefined);
+    check("T3 cont: the producer keeps the 64-byte boundary", continueCallbackData("s".repeat(59)) !== undefined);
+    check("T3 cont: parseContinueData agrees with the def", parseContinueData("cont:ses_abc123") === "ses_abc123" && parseContinueData("cont:") === undefined);
+
+    // reboot — "reboot:<op>" plus "reboot:go:<epoch-ms>".
+    for (const op of ["ask", "snooze", "cancel"] as const) {
+      check(`T3 reboot: ${op} round-trips`, rebootCallback.encode({ op }) === `reboot:${op}` && JSON.stringify(rebootCallback.decode(op)) === JSON.stringify({ op }));
+    }
+    check(
+      "T3 reboot: go round-trips",
+      rebootCallback.encode({ op: "go", issuedMs: 1762969622000 }) === "reboot:go:1762969622000" &&
+        JSON.stringify(rebootCallback.decode("go:1762969622000")) === JSON.stringify({ op: "go", issuedMs: 1762969622000 }),
+    );
+    check("T3 reboot: rebootGoData encodes through the def", rebootGoData(1762969622000) === "reboot:go:1762969622000");
+    check("T3 reboot: a go without timestamp is malformed", rebootCallback.decode("go") === null);
+    check("T3 reboot: a garbled timestamp is malformed", rebootCallback.decode("go:abc") === null);
+    check("T3 reboot: a zero timestamp is malformed", rebootCallback.decode("go:0") === null);
+    check("T3 reboot: a negative timestamp is malformed", rebootCallback.decode("go:-1") === null);
+    check("T3 reboot: an unknown op is malformed", rebootCallback.decode("xyz") === null);
+    check("T3 reboot: an op with extra fields is malformed", rebootCallback.decode("ask:extra") === null);
+    check("T3 reboot: empty rest is malformed", rebootCallback.decode("") === null);
+    check("T3 reboot: encode rejects a fractional issuedMs", throws(() => rebootCallback.encode({ op: "go", issuedMs: 1.5 })));
+    check("T3 reboot: encode rejects a non-positive issuedMs", throws(() => rebootCallback.encode({ op: "go", issuedMs: 0 })));
+
+    // C3.1 — replay CAPTURED real callback strings against the new decoders,
+    // so buttons already sent before this deploy keep working.
+    // pb: "pb:go" is the only wire string this button has ever carried (a
+    // single literal producer), so the captured string is exactly this one.
+    check("T3 C3.1: captured 'pb:go' decodes", JSON.stringify(pbCallback.decode("go")) === JSON.stringify({ op: "go" }));
+    // ch: choice ids live in the bot's memory (they do not survive a
+    // restart), so capture a real one through the real producer — registry.put
+    // (the real id generator) + choiceKeyboard (the real encoder).
+    const chId = choiceRecords.put("c1", "ses_captured", ["one", "two"]);
+    const chWire = choiceKeyboard(chId, ["one", "two"]).inline_keyboard[0][0].callback_data!;
+    check("T3 C3.1: captured ch: has the real wire form", /^ch:[0-9a-z]{4}:0$/.test(chWire), chWire);
+    check("T3 C3.1: captured ch: decodes back to the pick", JSON.stringify(choiceCallback.decode(chWire.slice("ch:".length))) === JSON.stringify({ kind: "pick", id: chId, index: 0 }), chWire);
+    // cont: captured from the live journal (manager rotation line, 2026-11-15).
+    const contCaptured = "cont:ses_e218197a2ffeH3ybgUypvQO7q8";
+    check("T3 C3.1: captured cont: fits 64 bytes", Buffer.byteLength(contCaptured, "utf8") <= CALLBACK_MAX_BYTES);
+    check("T3 C3.1: captured cont: decodes to the real session id", continueCallback.decode(contCaptured.slice("cont:".length)) === "ses_e218197a2ffeH3ybgUypvQO7q8");
+    // reboot: "reboot:ask" is the exact wire string every real uptime reminder
+    // has carried since the feature shipped (a single literal producer).
+    check("T3 C3.1: captured 'reboot:ask' decodes", JSON.stringify(rebootCallback.decode("ask")) === JSON.stringify({ op: "ask" }));
+    // plus the go variant through the real encoder with a real 13-digit ms
+    // (≈ the real confirm tap of 2026-11-12 13:27:02 UTC).
+    const goCaptured = rebootGoData(1762969622000);
+    check("T3 C3.1: captured reboot:go: decodes back", JSON.stringify(rebootCallback.decode(goCaptured.slice("reboot:".length))) === JSON.stringify({ op: "go", issuedMs: 1762969622000 }), goCaptured);
+
+    // Dispatch wiring: the registered prefixes route to the handler adapters
+    // with exactly one answer (C2.1/C2.4) — a fake bot that records the calls.
+    const { bot, answers } = fakeBot();
+    const calls: string[] = [];
+    (bot as Record<string, unknown>).handlePlanToBuildCallback = async (_cb: unknown, _conv: unknown, answer: (t?: string) => void) => { calls.push("pb"); answer("pb-done"); };
+    (bot as Record<string, unknown>).handleChoiceCallback = async (_cb: unknown, _conv: unknown, answer: (t?: string) => void, _mid: unknown) => { calls.push("ch"); };
+    (bot as Record<string, unknown>).handleContinueCallback = async (_cb: unknown, _conv: unknown, answer: (t?: string) => void, _mid: unknown) => { calls.push("cont"); answer("cont-done"); };
+    (bot as Record<string, unknown>).handleRebootCallback = async (_cb: unknown, _conv: unknown, answer: (t?: string) => void, _mid: unknown) => { calls.push("reboot"); };
+    check("T3 dispatch: pb:go routes to the pb handler", (await dispatchCallback(base(bot), cb("pb:go"))) === true && calls.length === 1 && calls[0] === "pb", JSON.stringify(calls));
+    check("T3 dispatch: …answered exactly once, with the handler's toast", answers.length === 1 && answers[0]?.text === "pb-done", JSON.stringify(answers));
+    check("T3 dispatch: ch routes to the ch handler", (await dispatchCallback(base(bot), cb(`ch:${chId}:1`))) === true && calls[1] === "ch", JSON.stringify(calls));
+    check("T3 dispatch: a forgetful handler is answered silently", answers.length === 2 && answers[1]?.text === undefined, JSON.stringify(answers));
+    check("T3 dispatch: the captured cont: string routes", (await dispatchCallback(base(bot), cb(contCaptured))) === true && calls[2] === "cont" && answers[2]?.text === "cont-done", JSON.stringify(calls));
+    check("T3 dispatch: reboot routes", (await dispatchCallback(base(bot), cb("reboot:cancel"))) === true && calls[3] === "reboot" && answers[3]?.text === undefined, JSON.stringify(calls));
+    check(
+      "T3 dispatch: a malformed ch: is answered expired (no fall-through)",
+      (await dispatchCallback(base(bot), cb("ch:AB12:3"))) === true && answers.length === 5 && answers[4]?.text === EXPIRED_TOAST.vi,
+      JSON.stringify(answers),
+    );
+  }
+  // ── T5: bs: migration — folder browser (C3.1/C3.3) ─────────────────────
+  {
+    // bot.js's module load registers the prefixes; the sections above cleared
+    // the registry, so restore the real registration.
+    _clearCallbacksForTest();
+    registerBotCallbacks();
+
+    check("T5: bs is registered", registeredPrefixes().includes("bs"), JSON.stringify(registeredPrefixes()));
+    check("T5: bs owner", callbackOwner("bs") === "bot.ts (folder browser)", callbackOwner("bs"));
+
+    // Round-trip: the bare ops (no numeric arg).
+    for (const op of ["up", "hid", "open", "list", "setdir", "setsess", "close", "noop"] as const) {
+      check(`T5 bs: ${op} encodes as bs:${op}`, bsCallback.encode({ op }) === `bs:${op}`, bsCallback.encode({ op }));
+      check(`T5 bs: ${op} round-trips`, JSON.stringify(bsCallback.decode(op)) === JSON.stringify({ op }), JSON.stringify(bsCallback.decode(op)));
+    }
+    // Round-trip: the ops that carry a numeric arg (folder index / page).
+    check(
+      "T5 bs: nav:5 round-trips",
+      bsCallback.encode({ op: "nav", arg: "5" }) === "bs:nav:5" && JSON.stringify(bsCallback.decode("nav:5")) === JSON.stringify({ op: "nav", arg: "5" }),
+    );
+    check(
+      "T5 bs: pg:0 round-trips",
+      bsCallback.encode({ op: "pg", arg: "0" }) === "bs:pg:0" && JSON.stringify(bsCallback.decode("pg:0")) === JSON.stringify({ op: "pg", arg: "0" }),
+    );
+    // Malformed: an empty op can't round-trip.
+    check("T5 bs: empty rest is malformed", bsCallback.decode("") === null);
+    check("T5 bs: an arg with no op is malformed", bsCallback.decode(":5") === null);
+    // C1.3: the 64-byte cap is enforced in bytes (every real bs: op is short,
+    // so a realistic encode fits; an over-long op is refused in strict mode).
+    check("T5 bs: the longest real op fits 64 bytes", Buffer.byteLength(bsCallback.encode({ op: "setsess" }), "utf8") <= CALLBACK_MAX_BYTES);
+    setCallbackStrict(true);
+    try {
+      check("T5 bs: an over-long op is refused (strict)", throws(() => bsCallback.encode({ op: "x".repeat(62) }), CallbackLimitError));
+    } finally {
+      setCallbackStrict(false);
+    }
+
+    // C3.1 — replay captured real callback strings against the new decoder,
+    // so buttons already sent before this deploy keep working. bs: strings are
+    // structurally bounded (a fixed op set + a small page/index integer), so
+    // representative captured values are the exact wire form.
+    check("T5 C3.1: captured 'bs:nav:3' decodes", JSON.stringify(bsCallback.decode("nav:3")) === JSON.stringify({ op: "nav", arg: "3" }));
+    check("T5 C3.1: captured 'bs:pg:1' decodes", JSON.stringify(bsCallback.decode("pg:1")) === JSON.stringify({ op: "pg", arg: "1" }));
+    check("T5 C3.1: captured 'bs:setdir' decodes", JSON.stringify(bsCallback.decode("setdir")) === JSON.stringify({ op: "setdir" }));
+    check("T5 C3.1: captured 'bs:close' decodes", JSON.stringify(bsCallback.decode("close")) === JSON.stringify({ op: "close" }));
+    check("T5 C3.1: captured 'bs:setsess' decodes", JSON.stringify(bsCallback.decode("setsess")) === JSON.stringify({ op: "setsess" }));
+
+    // Dispatch wiring: the registered prefix routes to the handler adapter with
+    // exactly one answer (C2.1/C2.4) — a fake bot that records the calls.
+    const { bot, answers } = fakeBot();
+    const calls: string[] = [];
+    (bot as Record<string, unknown>).handleBrowseCallback = async (_cb: unknown, _conv: unknown, answer: (t?: string) => void, _mid: unknown) => { calls.push("bs"); answer("bs-done"); };
+    check("T5 dispatch: bs:close routes to the browse handler", (await dispatchCallback(base(bot), cb("bs:close"))) === true && calls.length === 1 && calls[0] === "bs", JSON.stringify(calls));
+    check("T5 dispatch: …answered exactly once, with the handler's toast", answers.length === 1 && answers[0]?.text === "bs-done", JSON.stringify(answers));
+    check("T5 dispatch: bs:nav:2 routes (arg form)", (await dispatchCallback(base(bot), cb("bs:nav:2"))) === true && calls.length === 2 && calls[1] === "bs", JSON.stringify(calls));
+  }
+  // ── T6: the remaining 14 prefixes + old-chain removal (C1.2/C3.1/C3.3) ──
+  {
+    // bot.js's module load registers the prefixes; the sections above cleared
+    // the registry, so restore the real registration.
+    _clearCallbacksForTest();
+    registerBotCallbacks();
+
+    // C1.2 + migration complete: ALL 35 inventoried prefixes are registered,
+    // and no duplicate threw (registerCallback would throw on a dup, naming
+    // both owners). This is the "old chain removed" precondition.
+    const all = [
+      "agent", "ap", "bs", "ch", "cmd", "cont", "fq", "kill", "mdl", "mode",
+      "ns", "note", "nw", "pb", "perm", "prune", "q", "reboot", "rot", "sch",
+      "spec", "specblocked", "specrun", "specrunok", "spcacc", "spcclean",
+      "spcready", "spcredo", "spcpr", "spcstop", "use", "variant", "w", "ww", "wt",
+    ];
+    const reg = registeredPrefixes();
+    check("T6: all 35 prefixes are registered (no duplicate threw)", reg.length === 35 && all.every((p) => reg.includes(p)), JSON.stringify(reg));
+    check("T6: spcauto is NOT registered (pre-existing gap, behavior preserved)", !reg.includes("spcauto"), JSON.stringify(reg));
+
+    // The 14 newly-migrated prefixes have their owners recorded.
+    check("T6: w owner", callbackOwner("w") === "watch.ts (watch card)", callbackOwner("w"));
+    check("T6: ww owner", callbackOwner("ww") === "bot.ts (working watch)", callbackOwner("ww"));
+    check("T6: ns owner", callbackOwner("ns") === "nextsteps.ts (next steps)", callbackOwner("ns"));
+    check("T6: note owner", callbackOwner("note") === "notes.ts (busy note)", callbackOwner("note"));
+    check("T6: spec owner", callbackOwner("spec") === "commands/spec.ts (spec list/detail)", callbackOwner("spec"));
+    check("T6: specrun owner", callbackOwner("specrun") === "commands/spec.ts (spec run)", callbackOwner("specrun"));
+
+    // Round-trips (C3.3): each new def encodes the real wire form and decodes back.
+    check("T6 w: round-trips", watchCb.encode(["ab12", "c"]) === "w:ab12:c" && JSON.stringify(watchCb.decode("ab12:c")) === JSON.stringify(["ab12", "c"]));
+    check("T6 ww: round-trips", wwCb.encode("go") === "ww:go" && wwCb.decode("go") === "go");
+    check("T6 ns: round-trips", nsCb.encode(["ab12", "3"]) === "ns:ab12:3" && JSON.stringify(nsCb.decode("ab12:3")) === JSON.stringify(["ab12", "3"]));
+    check("T6 note: round-trips", noteCb.encode("12345") === "note:12345" && noteCb.decode("12345") === "12345");
+    check("T6 spec: round-trips", specCb.encode("my-spec") === "spec:my-spec" && specCb.decode("my-spec") === "my-spec");
+    check("T6 specrun: round-trips", specrunCb.encode(["my-spec", "2"]) === "specrun:my-spec:2" && JSON.stringify(specrunCb.decode("my-spec:2")) === JSON.stringify(["my-spec", "2"]));
+    check("T6 specblocked: round-trips", specblockedCb.encode(["my-spec", "1"]) === "specblocked:my-spec:1" && JSON.stringify(specblockedCb.decode("my-spec:1")) === JSON.stringify(["my-spec", "1"]));
+    check("T6 specrunok: round-trips", specrunokCb.encode(["my-spec", "1"]) === "specrunok:my-spec:1" && JSON.stringify(specrunokCb.decode("my-spec:1")) === JSON.stringify(["my-spec", "1"]));
+    check("T6 spcacc: round-trips", spcaccCb.encode(["my-spec", "4"]) === "spcacc:my-spec:4" && JSON.stringify(spcaccCb.decode("my-spec:4")) === JSON.stringify(["my-spec", "4"]));
+    check("T6 spcredo: round-trips", spcredoCb.encode(["my-spec", "4"]) === "spcredo:my-spec:4" && JSON.stringify(spcredoCb.decode("my-spec:4")) === JSON.stringify(["my-spec", "4"]));
+    check("T6 spcstop: round-trips", spcstopCb.encode(["my-spec", "4"]) === "spcstop:my-spec:4" && JSON.stringify(spcstopCb.decode("my-spec:4")) === JSON.stringify(["my-spec", "4"]));
+    check("T6 spcpr: round-trips", spcprCb.encode("my-spec") === "spcpr:my-spec" && spcprCb.decode("my-spec") === "my-spec");
+    check("T6 spcready: round-trips", spcreadyCb.encode("my-spec") === "spcready:my-spec" && spcreadyCb.decode("my-spec") === "my-spec");
+    check("T6 spcclean: round-trips", spccleanCb.encode("my-spec") === "spcclean:my-spec" && spccleanCb.decode("my-spec") === "my-spec");
+
+    // Malformed (C3.3): a wrong field count is rejected (→ C2.2 expired toast).
+    check("T6 w: one field is malformed", watchCb.decode("ab12") === null);
+    check("T6 specrun: one field is malformed", specrunCb.decode("my-spec") === null);
+    check("T6 note: empty is malformed", noteCb.decode("") === null);
+
+    // Dispatch wiring (C2.1): the newly-registered method-based handlers route.
+    const { bot, answers } = fakeBot();
+    const calls: string[] = [];
+    (bot as Record<string, unknown>).handleWatchCallback = async () => { calls.push("w"); };
+    (bot as Record<string, unknown>).handleWorkingWatchButton = async () => { calls.push("ww"); };
+    check("T6 dispatch: w:ab12:c routes", (await dispatchCallback(base(bot), cb("w:ab12:c"))) === true && calls.length === 1 && calls[0] === "w", JSON.stringify(calls));
+    check("T6 dispatch: ww:go routes", (await dispatchCallback(base(bot), cb("ww:go"))) === true && calls.length === 2 && calls[1] === "ww", JSON.stringify(calls));
+    check("T6 dispatch: answered exactly once per tap", answers.length === 2, JSON.stringify(answers));
   }
 }
 

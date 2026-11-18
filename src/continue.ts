@@ -7,6 +7,7 @@
  * unit-testable in isolation (see scripts/test-continue.ts).
  */
 
+import { CallbackLimitError, oneArg } from "./callbacks.js";
 import type { Lang } from "./state.js";
 
 /** The one-line prompt sent to the model when the user taps the button. */
@@ -42,15 +43,29 @@ export function shouldOfferContinue(p: { outcome?: string; interrupted: boolean 
 }
 
 /**
+ * The `cont:` callback def (docs/sdd/callback-registry.md — T3 pilot
+ * migration): one session-id argument. Declared ONCE here — the producer
+ * below encodes through it, bot.ts registers it with its handler, and
+ * parseContinueData is a thin view over the same decode, so the wire form
+ * has a single source of truth.
+ */
+export const continueCallback = oneArg("cont");
+
+/**
  * Pure: build the callback data for a continue button targeting `sessionID`. The
  * data carries the session id so the click routes back to the exact session that
  * failed (and is rejected if that session has since been replaced). Returns
  * undefined when the data would exceed Telegram's 64-byte cap — then the button
- * must be OMITTED rather than shipped unclickable.
+ * must be OMITTED rather than shipped unclickable (the registry's encoder
+ * refuses over-limit data, so we catch exactly that and drop the button).
  */
 export function continueCallbackData(sessionID: string): string | undefined {
-  const data = CONTINUE_CB_PREFIX + sessionID;
-  return Buffer.byteLength(data, "utf8") <= CALLBACK_DATA_MAX_BYTES ? data : undefined;
+  try {
+    return continueCallback.encode(sessionID);
+  } catch (e) {
+    if (e instanceof CallbackLimitError) return undefined;
+    throw e;
+  }
 }
 
 /**
@@ -59,8 +74,7 @@ export function continueCallbackData(sessionID: string): string | undefined {
  */
 export function parseContinueData(data: string | undefined): string | undefined {
   if (!data || !data.startsWith(CONTINUE_CB_PREFIX)) return undefined;
-  const sessionID = data.slice(CONTINUE_CB_PREFIX.length);
-  return sessionID.length > 0 ? sessionID : undefined;
+  return continueCallback.decode(data.slice(CONTINUE_CB_PREFIX.length)) ?? undefined;
 }
 
 /**

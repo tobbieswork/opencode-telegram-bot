@@ -37,6 +37,7 @@ import { audit } from "../audit.js";
 import { isUserAllowed } from "../schedule.js";
 import { tr } from "../i18n.js";
 import { esc, trunc } from "../format.js";
+import { oneArg, fields } from "../callbacks.js";
 
 /** One spec in docs/sdd/: parsed (with progress) or unparseable (S1.4). */
 type SpecEntry =
@@ -1193,20 +1194,18 @@ ${esc(removed)}`,
  *  - "spcredo:<name>:<n>"     → S6 Redo with note (pending-note flow)
  *  - "spcstop:<name>:<n>"     → S6 Stop (busy worker only)
  */
-export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: ConvKey): Promise<void> {
+export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void = (toast) => { void bot.tg.answerCallbackQuery(cb.id, toast).catch(() => {}); }): Promise<void> {
   const lang = bot.userPrefs.getLang(cb.from?.id ?? "");
   const data = cb.data ?? "";
   if (!bot.cfg.spec) {
-    await bot.tg.answerCallbackQuery(cb.id);
+    answer();
     await bot.tg.sendMessage(conv, disabledText(lang));
     return;
   }
   // Non-fatal: a transient network failure here must NOT abort the tap — a
   // fatal answer once silently lost a user's Run tap during a network blip
   // (the handler aborted before dispatch).
-  await bot.tg.answerCallbackQuery(cb.id).catch((e) =>
-    warn("answerCallbackQuery (spec):", (e as Error)?.message),
-  );
+  answer();
   if (data.startsWith("specrunok:")) {
     const ref = parseRunRef(data.slice("specrunok:".length));
     if (!ref) {
@@ -1479,3 +1478,21 @@ export async function managerSpecAuto(bot: Bot, conv: ConvKey, name: string, tas
     ? `Auto started for "${name}" task ${n}: it accepts, then the next task runs with auto-continue armed (it stops at a blocked or failing task).`
     : `Accept of "${name}" task ${n} was refused — the reason is posted in the conversation (nothing auto-ran).`;
 }
+
+// ── T6 (docs/sdd/callback-registry.md): the spec-family callback defs ──────
+// Wire forms are UNCHANGED by this migration (producers keep the same
+// strings): spec:/spcpr:/spcready:/spcclean: carry the spec NAME only (NAME_RE
+// rejects ":", so the name can never carry a colon); specrun:/specblocked:/
+// specrunok:/spcacc:/spcredo:/spcstop: carry "<name>:<n>". SPCAUTO is
+// intentionally NOT defined: no chain branch handled it before either, so it
+// stays unregistered and falls to the "expired" toast (pre-existing behavior).
+export const specCb = oneArg("spec");
+export const spcprCb = oneArg("spcpr");
+export const spcreadyCb = oneArg("spcready");
+export const spccleanCb = oneArg("spcclean");
+export const specrunCb = fields("specrun", 2);
+export const specblockedCb = fields("specblocked", 2);
+export const specrunokCb = fields("specrunok", 2);
+export const spcaccCb = fields("spcacc", 2);
+export const spcredoCb = fields("spcredo", 2);
+export const spcstopCb = fields("spcstop", 2);

@@ -9,8 +9,10 @@
  *
  * This module is deliberately PURE (no fs/child_process): reading /proc/uptime
  * and firing the reboot live in bot.ts; everything decided here is unit-testable
- * (see scripts/test-uptime.ts).
+ * (see scripts/test-uptime.ts). (The callbacks.js import is side-effect-free.)
  */
+
+import { defineCallback } from "./callbacks.js";
 
 /** Reboot when uptime passes this many days (kernel updates need a reboot). */
 export const DEFAULT_UPTIME_THRESHOLD_DAYS = 30;
@@ -38,9 +40,43 @@ export function buildTokenLine(token: string, nowMs: number): string {
   return `${token} ${nowMs}\n`;
 }
 
+/**
+ * The `reboot:` callback def (docs/sdd/callback-registry.md — T3 pilot
+ * migration). Wire form: "reboot:ask" | "reboot:snooze" | "reboot:cancel" |
+ * "reboot:go:<epoch-ms>" — the confirm button carries its issue time so a
+ * stale tap can never reboot the box (see isRebootConfirmFresh). Declared
+ * ONCE here: rebootGoData() encodes through it, and bot.ts registers it with
+ * the reboot-flow handler.
+ */
+export type RebootCallbackArgs = { op: "ask" } | { op: "snooze" } | { op: "cancel" } | { op: "go"; issuedMs: number };
+
+export const rebootCallback = defineCallback<RebootCallbackArgs>({
+  prefix: "reboot",
+  encode: (a) => {
+    if (a.op === "go") {
+      if (!Number.isInteger(a.issuedMs) || a.issuedMs <= 0) throw new Error(`callback "reboot": issuedMs must be a positive integer, got ${a.issuedMs}`);
+      return `reboot:go:${a.issuedMs}`;
+    }
+    return `reboot:${a.op}`;
+  },
+  decode: (rest) => {
+    const i = rest.indexOf(":");
+    const op = i === -1 ? rest : rest.slice(0, i);
+    if (op === "ask" || op === "snooze" || op === "cancel") return i === -1 ? { op } : null; // no extra fields
+    if (op !== "go") return null;
+    const ms = i === -1 ? "" : rest.slice(i + 1);
+    // Accept exactly what isRebootConfirmFresh accepts (digits, positive,
+    // finite); anything else is malformed → the C2.2 "expired" toast.
+    if (!/^\d+$/.test(ms)) return null;
+    const issuedMs = Number(ms);
+    if (!Number.isFinite(issuedMs) || issuedMs <= 0) return null;
+    return { op: "go", issuedMs };
+  },
+});
+
 /** callback_data for the confirm button: carries when the confirmation was issued. */
 export function rebootGoData(nowMs: number): string {
-  return `reboot:go:${nowMs}`;
+  return rebootCallback.encode({ op: "go", issuedMs: nowMs });
 }
 
 /**

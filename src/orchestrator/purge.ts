@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { oneArg } from "../callbacks.js";
 import type { ConvKey } from "../conv.js";
 import { chatOf } from "../conv.js";
 import type { CallbackQuery } from "../telegram.js";
@@ -75,6 +76,12 @@ export async function purgeConv(o: Orchestrator, conv: ConvKey): Promise<boolean
 }
 
 /**
+ * The `prune:` callback def (docs/sdd/callback-registry.md — T4 migration).
+ * Wire form: `prune:<id>` (id = the 10-hex pending-prune key from cmdPrune).
+ */
+export const pruneCb = oneArg("prune");
+
+/**
  * `/prune [số_ngày]` — offer to delete finished worker topics that haven't
  * been touched for N days (default 7). The user confirms with a button
  * before anything is deleted; the list card stays valid until tapped.
@@ -105,7 +112,7 @@ export async function cmdPrune(o: Orchestrator, conv: ConvKey, arg: string): Pro
   }
   lines.push("", tr(lang, "<i>Bấm Xoá để xoá topic + state + session (không ảnh hưởng worker đang chạy).</i>", "<i>Tap Delete to remove the topics + state + sessions (running workers are not affected).</i>"));
   await o.h.sendHtml(conv, lines.join("\n"), {
-    reply_markup: singleButton({ text: tr(lang, "🗑 Xoá", "🗑 Delete"), data: `prune:${id}` }),
+    reply_markup: singleButton({ text: tr(lang, "🗑 Xoá", "🗑 Delete"), data: pruneCb.encode(id) }),
   });
 }
 
@@ -115,12 +122,12 @@ export async function cmdPrune(o: Orchestrator, conv: ConvKey, arg: string): Pro
  * entry (purgeConv). A worker that started running again since the list was
  * shown is skipped; a conv whose worktree couldn't be removed is kept for retry.
  */
-export async function handlePruneCallback(o: Orchestrator, cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+export async function handlePruneCallback(o: Orchestrator, cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
   const lang: Lang = o.h.userPrefs?.getLang(cb.from?.id ?? "") ?? "vi";
   const id = (cb.data ?? "").split(":")[1];
   const p = o.prunePending.get(id);
   if (!p || p.chat !== chatOf(conv)) {
-    await o.h.tg.answerCallbackQuery(cb.id, tr(lang, "Yêu cầu này đã hết hạn.", "This request has expired."));
+    answer(tr(lang, "Yêu cầu này đã hết hạn.", "This request has expired."));
     if (messageId) await o.h.tg.editMessageText(conv, messageId, tr(lang, "⌛ Yêu cầu này đã hết hạn (bot đã khởi động lại hoặc đã xử lý).", "⌛ This request has expired (the bot restarted or already handled it)."), { reply_markup: { inline_keyboard: [] } }).catch(() => {});
     return;
   }
@@ -143,7 +150,7 @@ export async function handlePruneCallback(o: Orchestrator, cb: CallbackQuery, co
     if (await purgeConv(o, k)) ok++; // worktree + session + state (keeps state on worktree failure)
     else skipped++;
   }
-  await o.h.tg.answerCallbackQuery(cb.id);
+  answer();
   const msg = tr(lang, `🧹 Đã xoá ${ok}/${p.convs.length} topic${skipped ? ` · bỏ qua ${skipped} (đang chạy hoặc chưa xoá được worktree)` : ""}.`, `🧹 Deleted ${ok}/${p.convs.length} topic(s)${skipped ? ` · skipped ${skipped} (running or worktree couldn't be removed)` : ""}.`);
   if (messageId) await o.h.tg.editMessageText(conv, messageId, msg, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
   else await o.h.sendHtml(conv, msg).catch(() => {});

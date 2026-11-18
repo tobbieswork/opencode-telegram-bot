@@ -22,6 +22,7 @@ import { BUSY_REPLY_TEXT, noteButtonLabel, noteCallbackData } from "./notes.js";
 import { tr } from "./i18n.js";
 import { warnLine } from "./ui/text.js";
 import type { Keyboard } from "./shared.js";
+import { defineCallback } from "./callbacks.js";
 
 export type BusyMode = "ask" | "queue" | "off";
 
@@ -110,14 +111,30 @@ export function queueFullReply(opts: { lang: Lang; messageId?: number }): BusyRe
   };
 }
 
+/**
+ * The `q:` callback def (docs/sdd/callback-registry.md — T4 migration).
+ * Wire form: `q:add:<messageId>` / `q:steer:<messageId>` (messageId = the
+ * Telegram message id of the queued/steered text, decimal digits).
+ */
+export const busyCb = defineCallback<{ kind: "add" | "steer"; messageId: number }>({
+  prefix: "q",
+  encode: (a) => `q:${a.kind}:${a.messageId}`,
+  decode: (rest) => {
+    const m = /^(add|steer):(\d+)$/.exec(rest);
+    if (!m) return null;
+    const messageId = Number(m[2]);
+    return Number.isSafeInteger(messageId) ? { kind: m[1] as "add" | "steer", messageId } : null;
+  },
+});
+
 /** Callback data for the Queue button (distinct from `note:<id>`). */
 export function addCallbackData(messageId: number): string {
-  return "q:add:" + messageId;
+  return busyCb.encode({ kind: "add", messageId });
 }
 
 /** Callback data for the Steer-now button (distinct from `note:<id>`). */
 export function steerCallbackData(messageId: number): string {
-  return "q:steer:" + messageId;
+  return busyCb.encode({ kind: "steer", messageId });
 }
 
 export interface BusyCallback {

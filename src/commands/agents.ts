@@ -5,9 +5,16 @@ import type { ConvKey } from "../conv.js";
 import { esc, trunc } from "../format.js";
 import { warn, error } from "../logger.js";
 import { tr } from "../i18n.js";
+import { oneArg } from "../callbacks.js";
 import { AGENT_WHITELIST } from "../shared.js";
 import { pickerKeyboard } from "../ui/keyboards.js";
 import { errorLine, okLine, raw, warnLine } from "../ui/text.js";
+
+/**
+ * The `agent:` callback def (docs/sdd/callback-registry.md — T4 migration).
+ * Wire form: `agent:<id|close>` (id = an agent id from the /agent picker).
+ */
+export const agentCb = oneArg("agent");
 
 export async function cmdAgents(bot: Bot, conv: ConvKey): Promise<void> {
   const agents = await bot.oc.listAgents();
@@ -68,19 +75,19 @@ function sendAgentPicker(bot: Bot, conv: ConvKey, errorNote?: string, lang: Lang
 }
 
 /** Handle a tap on the /agent picker (data = `agent:<id|close>`). */
-export async function handleAgentCallback(bot: Bot, cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+export async function handleAgentCallback(bot: Bot, cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
   const id = (cb.data ?? "").slice("agent:".length);
   if (id === "close") {
-    await bot.tg.answerCallbackQuery(cb.id);
+    answer();
     if (messageId) await bot.tg.deleteMessage(conv, messageId).catch(() => {});
     return;
   }
   try {
     const how = await applyAgent(bot, conv, id);
     const lang = bot.userPrefs.getLang(cb.from?.id ?? "");
-    await bot.tg.answerCallbackQuery(cb.id, `Agent → ${id}`);
+    answer(`Agent → ${id}`);
     if (messageId) await bot.tg.editMessageText(conv, messageId, okLine(lang, raw(`Agent → <code>${esc(id)}</code> (${how})`))).catch(() => {});
   } catch (e) {
-    await bot.tg.answerCallbackQuery(cb.id, warnLine(bot.userPrefs.getLang(cb.from?.id ?? ""), raw((e as Error).message)));
+    answer(warnLine(bot.userPrefs.getLang(cb.from?.id ?? ""), raw((e as Error).message)));
   }
 }
