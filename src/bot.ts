@@ -33,6 +33,7 @@ import { extractTrailingChoices, extractOptionsMarker, choiceKeyboard, registry 
 import { scheduleForRegistration, reminderBudgetExhausted, nextScheduleAfterReminder, clampTimerDelay, stalePromptIds } from "./reminders.js";
 import { isAlreadyResolvedPermissionError } from "./perm.js";
 import { onPermissionAsked, onPermissionResolved, handlePermissionCallback } from "./commands/permission.js";
+import { handleBusyCallback, handleContinueCallback, prepareNotesTurn } from "./commands/notes.js";
 import type { PermissionPrompt } from "./commands/ctx.js";
 import {
   classifyAction,
@@ -50,22 +51,22 @@ import {
   REACTION_CELEBRATE,
   REACTION_FAIL,
 } from "./reactions.js";
-import { continuePrompt, continueButtonLabel, shouldOfferContinue, continueCallbackData, parseContinueData, alreadyOfferedContinue } from "./continue.js";
+import { continueButtonLabel, shouldOfferContinue, continueCallbackData, alreadyOfferedContinue } from "./continue.js";
 import { GhPrLike, PrSnapshot, PrState, diffSnapshots, renderEvent, updatePrSnapshot } from "./pr-watch.js";
 import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, SAFE_REBOOT_BIN, rebootTokenFile, buildTokenLine, rebootGoData, isRebootConfirmFresh } from "./uptime.js";
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
 import { DraftState, DraftAction, onTextDelta, onToolStart, isDmConv, EDIT_BUDGET } from "./stream.js";
 import { myCommands } from "./commands.js";
-import { dropNotes, prepareNotes, NOTE_CB_PREFIX, BusyNoteStore } from "./notes.js";
+import { dropNotes, NOTE_CB_PREFIX, BusyNoteStore } from "./notes.js";
 import { QueueStore } from "./queue.js";
-import { buildBusyReply, busyKeyboard, queueFullReply, parseBusyCallback } from "./busy.js";
+import { buildBusyReply, busyKeyboard, queueFullReply } from "./busy.js";
 import type { BusyReply } from "./busy.js";
 import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbrowser.js";
 import { log, warn, error } from "./logger.js";
 import { audit } from "./audit.js";
 import { advisorHealth } from "./advisor/advisor-client.js";
 import type { HealthSources } from "./health-probes.js";
-import { QUESTIONS_PREAMBLE, NOTES_KEY } from "./shared.js";
+import { QUESTIONS_PREAMBLE } from "./shared.js";
 import type { Btn, Keyboard } from "./shared.js";
 import { cmdAgents, cmdAgent, handleAgentCallback } from "./commands/agents.js";
 import { cmdSchedule, handleScheduleCallback } from "./commands/schedule.js";
@@ -327,8 +328,9 @@ export function formAcceptsTypedAnswer(
  * can interrupt it.
  *
  * Members that are `public` without being API (tg/oc/st/cfg/orch/scheduleStore/
- * inflight/busyNotes/sendHtml/currentMode) exist only for the handler modules in
- * src/commands/*, which take the Bot as their first argument. Don't use them elsewhere.
+ * inflight/busyNotes/sendHtml/currentMode/startTyping/runPromptTask) exist only for
+ * the handler modules in src/commands/*, which take the Bot as their first
+ * argument. Don't use them elsewhere.
  */
 /** Human age for the /queue list: "45s" / "2m" / "1h 3m" (spec Q3.2). */
 export function formatQueueAge(ms: number): string {
@@ -523,7 +525,7 @@ export class Bot {
       sendHtml: (conv, html, opts) => this.sendHtml(conv, html, opts),
       noteNextStepMessage: (conv, id, residual) => this.noteNextStepMessage(conv, id, residual),
       applyModelAndVariant: (sid, state) => this.applyModelAndVariant(sid, state),
-      prepareNotes: (conv, sid) => this.prepareNotesTurn(conv, sid),
+      prepareNotes: (conv, sid) => prepareNotesTurn(this, conv, sid),
       startTyping: (conv) => this.startTyping(conv),
       startWorking: (conv, lang) => this.startWorking(conv, lang),
       stopWorking: (conv) => this.stopWorking(conv),
@@ -1645,7 +1647,7 @@ export class Bot {
    * Keep "typing…" showing for as long as the turn runs. Telegram's indicator
    * expires after ~5s, so we re-arm it on a timer until the reply is sent (stopTyping).
    */
-  private startTyping(conv: ConvKey): void {
+  public startTyping(conv: ConvKey): void {
     this.stopTyping(conv);
     this.tg.sendChatAction(conv, "typing");
     const t = setInterval(() => this.tg.sendChatAction(conv, "typing"), 4000);
@@ -2673,7 +2675,7 @@ export class Bot {
         if (state.guidedLanguageSession === sid) this.st.set(conv, { guidedLanguageSession: undefined });
       }
       // Scratchpad notes (/note): retire last turn's notes or surface pending ones.
-      await this.prepareNotesTurn(conv, sid, lang ?? "vi");
+      await prepareNotesTurn(this, conv, sid, lang ?? "vi");
       // Inject the "ask via question tool" preamble once per session so the agent
       // knows it is headless and should surface decisions as answerable questions.
       let promptText = text;
@@ -2694,7 +2696,7 @@ export class Bot {
     return { busy: false };
   }
 
-  private async runPromptTask(conv: ConvKey, sid: string, text: string, ac: AbortController, userMsgId?: number, lang?: Lang): Promise<void> {
+  public async runPromptTask(conv: ConvKey, sid: string, text: string, ac: AbortController, userMsgId?: number, lang?: Lang): Promise<void> {
     const langEff: Lang = lang ?? this.userPrefs.getLang(this.st.peek(conv)?.createdBy ?? "");
     // One id for this user message, reused by the reconnect retry below: the
     // server dedupes on it, so the retry waits on the same turn instead of
@@ -3471,80 +3473,6 @@ export class Bot {
     );
   }
 
-  /**
-   * The busy reply's "📥 Xếp hàng" / "🔀 Định tuyến ngay" buttons (docs/sdd/
-   * queue-and-steer.md, phase 2). Both fetch the dropped message's text from the
-   * busy-note store (retained while the turn runs) and CONSUME it before any
-   * await, so a double-tap can't act twice.
-   *   q:add   → enqueue (cap 3; a full queue says so and keeps the note button).
-   *   q:steer → immediate oc.prompt(sid, text, { delivery: "steer" }): the server
-   *             delivers it at the running turn's next safe point (S-native).
-   *             A failure (server error / the session already gone) falls back
-   *             to the queue (Q2.3: never drop). For a Manager chat sid is the
-   *             Manager's OWN session — workers are separate sessions, so a
-   *             Manager steer touches only the Manager's turn (Q2.5).
-   */
-  private async handleBusyCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
-    const lang = this.userPrefs.getLang(cb.from?.id ?? "");
-    const parsed = parseBusyCallback(cb.data);
-    if (parsed === null) {
-      await this.tg.answerCallbackQuery(cb.id);
-      return;
-    }
-    // Consume the entry NOW (before any await) so a double-tap can't queue/steer twice.
-    const text = this.busyNotes.take(conv, parsed.messageId);
-    if (text == null) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Không tìm thấy nội dung tin nhắn đó.", "That message's content is no longer available."));
-      return;
-    }
-    const senderId = cb.from?.id != null ? String(cb.from.id) : undefined;
-    // Replace the tapped button's row with the outcome (best-effort).
-    const settleEdit = (finalText: string): void => {
-      if (messageId != null) void this.tg.editMessageText(conv, messageId, finalText, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
-    };
-    if (parsed.kind === "add") {
-      const r = this.queue.push(conv, { text, senderId });
-      if (!r.ok) {
-        await this.tg.answerCallbackQuery(cb.id, tr(lang, "Hàng chờ đầy (3 tin).", "Queue is full (3 messages)."));
-        settleEdit(tr(lang, "⚠️ Hàng chờ đầy (3 tin) — bấm note để giữ.", "⚠️ Queue is full (3 messages) — use the note button to keep it."));
-        return;
-      }
-      const pos = r.position;
-      audit({ action: "queue_add", chatId: conv, userId: senderId, meta: { messageId: parsed.messageId, textLen: text.length, queuedCount: pos, senderId } });
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, `✅ Đã thêm vào hàng chờ (vị trí #${pos}).`, `✅ Added to the queue (position #${pos}).`));
-      settleEdit(tr(lang, `✅ Đã thêm vào hàng chờ (vị trí #${pos}). Sẽ chạy sau khi tin hiện tại xong.`, `✅ Added to the queue (position #${pos}). Will run after the current message finishes.`));
-      return;
-    }
-    // Steer (S-native): deliver to the running turn's session right away.
-    const steerFallback = async (reason: string): Promise<void> => {
-      warn("steer fallback:", reason, conv);
-      audit({ action: "queue_steer", chatId: conv, userId: senderId, meta: { messageId: parsed.messageId, ok: false, degraded: true, reason } });
-      const r = this.queue.push(conv, { text, senderId });
-      if (r.ok) audit({ action: "queue_add", chatId: conv, userId: senderId, meta: { messageId: parsed.messageId, textLen: text.length, queuedCount: r.position, via: "steer_fallback" } });
-      const msg = r.ok
-        ? tr(lang, `Không steer được — đã cho vào hàng chờ (vị trí #${r.position}).`, `Couldn't steer — added to the queue (position #${r.position}).`)
-        : tr(lang, "Không steer được và hàng chờ đã đầy (3 tin).", "Couldn't steer and the queue is full (3 messages).");
-      await this.tg.answerCallbackQuery(cb.id, msg);
-      settleEdit(msg);
-    };
-    const sid = this.st.peek(conv)?.sessionID;
-    if (sid === undefined) {
-      // Race: the turn already ended and the session id is gone — queue instead.
-      await steerFallback("no active session");
-      return;
-    }
-    try {
-      await this.oc.prompt(sid, text, { delivery: "steer" });
-      audit({ action: "queue_steer", chatId: conv, userId: senderId, meta: { messageId: parsed.messageId, ok: true, degraded: false } });
-    } catch (e) {
-      await steerFallback((e as Error)?.message ?? "prompt failed");
-      return;
-    }
-    const msg = tr(lang, "🔀 Đang định tuyến — áp dụng tại điểm an toàn tiếp theo.", "🔀 Steering — applies at the next safe point.");
-    await this.tg.answerCallbackQuery(cb.id, msg);
-    settleEdit(msg);
-  }
-
   /** M3 — rot:cf / rot:cx — confirm or cancel a manager rotation offer. */
   private async handleRotationCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
 
@@ -3652,22 +3580,6 @@ export class Bot {
     } catch (e) {
       warn("handoff summary:", (e as Error).message);
       return "";
-    }
-  }
-
-  /**
-   * Start of a user-initiated turn: retire notes already shown last turn, or make
-   * pending notes visible in this turn's system context. Never throws — a notes
-   * failure must not break the turn.
-   */
-  private async prepareNotesTurn(conv: ConvKey, sid: string, lang: Lang = "vi"): Promise<void> {
-    try {
-      const prep = prepareNotes(this.st.get(conv), lang);
-      if (prep.put || prep.remove) this.st.set(conv, prep.state);
-      if (prep.put) await this.oc.setInstruction(sid, NOTES_KEY, prep.put);
-      else if (prep.remove) await this.oc.removeInstruction(sid, NOTES_KEY);
-    } catch (e) {
-      warn("notes turn prep:", (e as Error).message);
     }
   }
 
@@ -3946,7 +3858,7 @@ export class Bot {
       return;
     }
     if (data.startsWith("cont:")) {
-      await this.handleContinueCallback(cb, conv, messageId);
+      await handleContinueCallback(this, cb, conv, messageId);
       return;
     }
     if (data.startsWith(NOTE_CB_PREFIX)) {
@@ -3954,7 +3866,7 @@ export class Bot {
       return;
     }
     if (data.startsWith("q:add:") || data.startsWith("q:steer:")) {
-      await this.handleBusyCallback(cb, conv, messageId);
+      await handleBusyCallback(this, cb, conv, messageId);
       return;
     }
     if (data.startsWith("reboot:")) {
@@ -4432,34 +4344,6 @@ export class Bot {
     const ac = new AbortController();
     this.inflight.set(conv, ac);
     void this.runPromptTask(conv, state.sessionID, prompt, ac).catch((e) => error("prompt task:", e?.message));
-  }
-
-  /** Handle a tap on the "⏯ Chạy tiếp" button (data = `cont:<sessionID>`). */
-  private async handleContinueCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
-    const target = parseContinueData(cb.data);
-    // The button is one-shot: drop it immediately so a re-tap (or a stale button
-    // left over after a /new) can never fire a second continue.
-    if (messageId) {
-      await this.tg
-        .editMessageReplyMarkup(conv, messageId, { reply_markup: { inline_keyboard: [] } })
-        .catch(() => {});
-    }
-    const state = this.st.peek(conv);
-    // Reject malformed data, or a conv whose session is no longer the one that
-    // failed (a /new or /use replaced it) — continuing would hit the wrong session.
-    if (!target || !state?.sessionID || state.sessionID !== target) {
-      await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Nút này không còn áp dụng cho phiên hiện tại.", "This button no longer applies to the current session."));
-      return;
-    }
-    if (this.inflight.has(conv)) {
-      await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "Đang chạy task — hẵng thử lại sau.", "A task is running — try again in a moment."));
-      return;
-    }
-    await this.tg.answerCallbackQuery(cb.id, tr(this.userPrefs.getLang(cb.from?.id ?? ""), "⏯ Đang chạy tiếp…", "⏯ Continuing…"));
-    this.startTyping(conv);
-    const ac = new AbortController();
-    this.inflight.set(conv, ac);
-    void this.runPromptTask(conv, target, continuePrompt(this.userPrefs.getLang(cb.from?.id ?? "")), ac).catch((e) => error("prompt task:", e?.message));
   }
 
   /**

@@ -11,7 +11,9 @@
  */
 import type { Telegram } from "../telegram.js";
 import type { OpenCodeCtl } from "../opencode.js";
-import type { StateManager, UserPrefsStore } from "../state.js";
+import type { StateManager, UserPrefsStore, Lang } from "../state.js";
+import type { BusyNoteStore } from "../notes.js";
+import type { QueueStore } from "../queue.js";
 import type { Orchestrator } from "../orchestrator.js";
 import type { ConvKey } from "../conv.js";
 import type { Keyboard } from "../shared.js";
@@ -50,4 +52,12 @@ export interface BotCtx {
   cancelReminder(conv: ConvKey, promptId: string): void;
   findPromptConv(promptId: string): ConvKey | undefined;
   editCardInPlace(conv: ConvKey, messageId: number, text: string, kb?: Keyboard): Promise<number>;
+  /** Retained busy messages per conv (owned by Bot, shared with the Orchestrator). */
+  busyNotes: BusyNoteStore;
+  /** Per-conv queue of messages added while a turn was running (owned by Bot, shared with the Orchestrator). */
+  queue: QueueStore;
+  /** In-flight prompt abort controllers per conv (owned by Bot; moves with prompt-runner, T6). */
+  inflight: Map<ConvKey, AbortController>;
+  startTyping(conv: ConvKey): void;
+  runPromptTask(conv: ConvKey, sid: string, text: string, ac: AbortController, userMsgId?: number, lang?: Lang): Promise<void>;
 }
