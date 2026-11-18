@@ -28,7 +28,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { handleSpecCallback } from "../src/commands/spec.js";
+import { handleSpecCallback, managerSpecAccept, managerSpecAuto, managerSpecList, managerSpecRun } from "../src/commands/spec.js";
 import { markerCommitSubject, workerCommitsSinceFork } from "../src/spec-checkpoint.js";
 import { ensureSpecWorktree } from "../src/worktree.js";
 import { initMarkers } from "../src/spec.js";
@@ -170,7 +170,7 @@ function mkBot(lang: "vi" | "en", items: any[] = OK_ITEMS) {
       sendMessage: async (c: string, t: string) => void sent.push({ c, t }),
     },
     oc,
-    cfg: { maxWorkers: 10, replyMaxLen: 4000 },
+    cfg: { maxWorkers: 10, replyMaxLen: 4000, allowAny: true, allowedUserIds: [], opencodeDirectory: tmp },
     userPrefs: { getLang: () => lang },
     sendHtml: async (c: string, h: string, o?: any) => void sent.push({ c, t: h, kb: o?.reply_markup?.inline_keyboard }),
     startTyping: () => {},
@@ -233,7 +233,7 @@ try {
     if (lang === "vi") check("accept(vi): vi confirmation", all.includes("đã được chấp nhận"), all);
     else check("accept(en): en confirmation", all.includes("accepted — marked done"), all);
     // S6.2: spec_accept audit with the required meta.
-    const ev = auditLines().find((e) => e.action === "spec_accept" && e.userId === "7");
+    const ev = auditLines().find((e) => e.action === "spec_accept" && (e as any).meta?.commit === fx.workerHash);
     check(`accept(${lang}): spec_accept audited`, !!ev, JSON.stringify(auditLines().map((l) => l.action)));
     check(`accept(${lang}): meta {spec,task,branch,worker,commit,userId}`, !!ev && ev.meta.spec === "gamma" && ev.meta.task === "S2" && ev.meta.branch === "spec/gamma" && ev.meta.worker === "spec-gamma" && ev.meta.commit === fx.workerHash && ev.meta.userId === 7, JSON.stringify(ev?.meta));
   }
@@ -574,6 +574,101 @@ try {
     check("route(spcstop): the worker is stopped", st.peek(REAL_WORKER_CONV)?.worker?.status === "stopped", String(st.peek(REAL_WORKER_CONV)?.worker?.status));
     check("route(spcstop): the session was interrupted", oc.interrupts.includes("ses_1"), JSON.stringify(oc.interrupts));
     check("route(spcstop): the worktree + uncommitted file are kept", existsSync(fx.wt.root) && existsSync(join(fx.wt.root, "uncommitted.txt")));
+  }
+
+  // ── Manager tools (MCP bridge): spec_list / spec_run / spec_accept / spec_auto ──
+  const DELTA = `# Delta spec
+
+## 5. Tasks
+1. [x] (deadbe1) **D1 First.** Done.
+2. [ ] **D2 Second.** Needs: human review
+3. [ ] **D3 Third.** Plain.
+`;
+  const EPS = `# Epsilon spec
+
+## 5. Tasks
+1. [x] (cafebabe) **E1 Only.** Done.
+`;
+  const BROKEN = `# Broken spec
+
+## 5. Tasks
+1. [ ] **NoID.** Bad title.
+`;
+  {
+    const repo = join(tmp, `delta-${++seq}`);
+    mkdirSync(join(repo, "docs", "sdd"), { recursive: true });
+    writeFileSync(join(repo, "docs", "sdd", "delta.md"), DELTA);
+    writeFileSync(join(repo, "docs", "sdd", "epsilon.md"), EPS);
+    writeFileSync(join(repo, "docs", "sdd", "broken.md"), BROKEN);
+    git(repo, ["init", "-q", "-b", "main"]);
+    git(repo, ["config", "user.email", "test@test.local"]);
+    git(repo, ["config", "user.name", "Test"]);
+    git(repo, ["add", "-A"]);
+    git(repo, ["commit", "-q", "-m", "init"]);
+
+    // wiring: the orchestrator exposes the four tools and they bind to the handlers
+    const { bot, sent, st, orch } = mkBot("en");
+    st.set(CONV, { directory: repo });
+    const tools = (orch as any).toolsFor(CONV);
+    const names = tools.map((t: any) => t.name);
+    check("m(wire): the four spec tools are exposed", ["spec_list", "spec_run", "spec_accept", "spec_auto"].every((n) => names.includes(n)), names.join(","));
+    const byName = (n: string) => tools.find((t: any) => t.name === n);
+    const out = await byName("spec_list").run({});
+    check("m(list): in-progress spec shows the next task with its block", out.includes("delta — 1/3") && out.includes("next: D2 Second [blocked: human review]"), out);
+    check("m(list): finished spec is all-done", out.includes("epsilon — 1/1 · all done"), out);
+    check("m(list): parse errors are flagged, not grouped", out.includes("⚠️ broken — parse error:"), out);
+    check("m(list): no running worker yet", !out.includes("● running"), out);
+
+    // running state
+    const r2 = mkBot("en");
+    r2.st.set(CONV, { directory: repo });
+    seedWorker(r2.st, repo, "running", { name: "spec-delta", specRun: { spec: "delta", branch: "spec/delta", task: "D2", conv: CONV, uid: 7 } });
+    const out2 = await (r2.orch as any).toolsFor(CONV).find((t: any) => t.name === "spec_list").run({});
+    check("m(list): running spec shows the running task", out2.includes("delta — 1/3 · ● running task D2 (running)"), out2);
+
+    // run: blocked task probes (no spawn), both ref forms
+    const r3 = mkBot("en");
+    r3.st.set(CONV, { directory: repo });
+    const p1 = await (r3.orch as any).toolsFor(CONV).find((t: any) => t.name === "spec_run").run({ spec: "delta", task: "D2" });
+    check("m(run): blocked task → probe, tells the manager to runAnyway", p1.includes("BLOCKED") && p1.includes("runAnyway=true"), p1);
+    check("m(run): the probe message has the Run-anyway button", r3.sent.some((m: any) => m.kb?.flat().some((b: any) => b.callback_data === "specrunok:delta:2")), JSON.stringify(r3.sent.map((m: any) => m.kb)));
+    check("m(run): no worker spawned", r3.st.findWorker("123", "spec-delta") === undefined);
+    const p2 = await (r3.orch as any).toolsFor(CONV).find((t: any) => t.name === "spec_run").run({ spec: "delta", task: "2" });
+    check("m(run): numeric ref resolves the same task", p2.includes("BLOCKED"), p2);
+
+    // run: unknown spec / unknown task → clear errors (tool errors, no crash)
+    let e1 = "";
+    try { await managerSpecRun(r3.bot as any, CONV, "nosuch", "1"); } catch (e) { e1 = (e as Error).message; }
+    check("m(run): unknown spec → clear error", e1 === 'spec "nosuch" not found in docs/sdd/', e1);
+    let e2 = "";
+    try { await managerSpecRun(r3.bot as any, CONV, "delta", "D9"); } catch (e) { e2 = (e as Error).message; }
+    check("m(run): unknown task → clear error", e2.startsWith('task "D9" not found'), e2);
+
+    // accept: happy path (id ref) — marker + audit, via the shared live-state re-derivation
+    const fx = await newRunFixture();
+    const r4 = mkBot("en");
+    r4.st.set(CONV, { directory: fx.repo });
+    seedWorker(r4.st, fx.wt.root, "done");
+    const a1 = await (r4.orch as any).toolsFor(CONV).find((t: any) => t.name === "spec_accept").run({ spec: "gamma", task: "S2" });
+    check("m(accept): accepted by id ref", a1.startsWith("Accepted"), a1);
+    const md = readFileSync(join(fx.wt.root, "docs", "sdd", "gamma.md"), "utf8");
+    check("m(accept): marker written with the worker commit", md.includes(`2. [x] (${fx.workerHash}) **S2 Second.**`), md.split("\n")[3] ?? "");
+    check("m(accept): audited", auditLines().some((l: any) => l.action === "spec_accept" && l.meta?.commit === fx.workerHash));
+
+    // accept: no run → refused, nothing marked
+    const fx2 = await newRunFixture();
+    const r5 = mkBot("en");
+    r5.st.set(CONV, { directory: fx2.repo });
+    const a2 = await (r5.orch as any).toolsFor(CONV).find((t: any) => t.name === "spec_accept").run({ spec: "gamma", task: "2" });
+    check("m(accept): no run → refused (numeric ref)", a2.startsWith("Could not accept"), a2);
+    const md2 = readFileSync(join(fx2.wt.root, "docs", "sdd", "gamma.md"), "utf8");
+    const s2line = md2.split("\n").find((l) => l.includes("**S2 Second.**")) ?? "";
+    check("m(accept): refusal leaves the marker untouched", s2line.includes("[ ]") && !s2line.includes("[x] ("), s2line);
+
+    // auto: no run → clear tool error
+    let e3 = "";
+    try { await managerSpecAuto(r5.bot as any, CONV, "gamma", "S2"); } catch (e) { e3 = (e as Error).message; }
+    check("m(auto): no run → clear error", e3 === 'no run of spec "gamma" found', e3);
   }
 } finally {
   rmSync(tmp, { recursive: true, force: true });

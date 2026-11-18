@@ -1355,3 +1355,120 @@ export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: Conv
     : undefined;
   await bot.sendHtml(conv, detail, keyboard);
 }
+
+// ── Manager tools (MCP bridge) ──────────────────────────────────────────────
+// The same pipeline the Telegram taps drive, callable from the Manager agent
+// (tg-bridge). The bridge route is manager-only (loopback + bearer token);
+// these wrappers act as the chat's owner and keep every guard of the tap
+// path — allow-list, one-run claim, live-state re-derivation, audit.
+
+/** Resolve a task reference ("6" or "T6") to the task's number + block reason. */
+function taskNumberFromRef(md: string, name: string, ref: string): { n: number; needs?: string } {
+  const res = parseSpec(md);
+  if ("error" in res) throw new Error(`spec "${name}" does not parse: ${res.error.message} (line ${res.error.line})`);
+  const trimmed = ref.trim();
+  const num = /^\d+$/.test(trimmed) ? parseInt(trimmed, 10) : NaN;
+  const t = res.tasks.find((t) => t.n === num) ?? res.tasks.find((t) => t.id.toLowerCase() === trimmed.toLowerCase());
+  if (!t) throw new Error(`task "${ref}" not found in spec "${name}" (tasks: ${res.tasks.map((t) => t.id).join(", ")})`);
+  return { n: t.n, needs: t.needs };
+}
+
+/** Read the spec's markdown from the conversation's repo (friendly errors). */
+async function managerSpecFile(bot: Bot, conv: ConvKey, name: string): Promise<string> {
+  if (!NAME_RE.test(name)) throw new Error(`bad spec name "${name}"`);
+  const root = await gitRoot(convDir(bot, conv));
+  if (!root) throw new Error("the conversation directory is not a git repository");
+  const file = join(root, "docs", "sdd", `${name}.md`);
+  let md: string;
+  try {
+    md = readFileSync(file, "utf8");
+  } catch {
+    throw new Error(`spec "${name}" not found in docs/sdd/`);
+  }
+  return md;
+}
+
+/** The owner uid the manager acts as (the allow-list gate below re-checks it). */
+function managerUid(bot: Bot): number | undefined {
+  return bot.cfg.allowedUserIds?.[0];
+}
+
+function managerLang(bot: Bot, uid: number | undefined): Lang {
+  return bot.userPrefs.getLang(uid != null ? String(uid) : "");
+}
+
+function managerCb(uid: number | undefined): CallbackQuery {
+  return { from: { id: uid } } as unknown as CallbackQuery;
+}
+
+/** spec_list — the spec board as plain text (progress, running worker, next task). */
+export async function managerSpecList(bot: Bot, conv: ConvKey): Promise<string> {
+  const root = await gitRoot(convDir(bot, conv));
+  if (!root) throw new Error("the conversation directory is not a git repository");
+  const sdd = join(root, "docs", "sdd");
+  const entries = scanSpecs(sdd);
+  if (!entries.length) return "No spec with a Tasks section in docs/sdd/.";
+  const chat = chatOf(conv);
+  const lines: string[] = [];
+  for (const e of entries) {
+    if ("error" in e) {
+      lines.push(`⚠️ ${e.name} — parse error: ${e.error.message} (line ${e.error.line})`);
+      continue;
+    }
+    const res = parseSpec(readFileSync(join(sdd, `${e.name}.md`), "utf8"));
+    if ("error" in res) continue; // already reported above
+    const w = bot.st.findWorker(chat, `spec-${e.name}`)?.[1].worker;
+    if (w && BUSY.includes(w.status)) {
+      const slot = bot.st.peek(chat)?.specRunning?.[e.name];
+      lines.push(`${e.name} — ${e.done}/${e.total} · ● running task ${slot?.task ?? w.specRun?.task ?? "?"} (${w.status})`);
+      continue;
+    }
+    const next = nextAutoTask(res.tasks);
+    if (!next) {
+      lines.push(`${e.name} — ${e.done}/${e.total} · all done`);
+    } else {
+      lines.push(`${e.name} — ${e.done}/${e.total} · next: ${next.id} ${next.title}${next.needs ? ` [blocked: ${next.needs}]` : ""}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+/** spec_run — same path as the Run tap. Blocked tasks probe first; pass runAnyway to spawn. */
+export async function managerSpecRun(bot: Bot, conv: ConvKey, name: string, taskRef: string, runAnyway = false): Promise<string> {
+  const uid = managerUid(bot);
+  if (!isUserAllowed(bot.cfg, uid)) throw new Error("the manager has no user id on the allow-list");
+  const md = await managerSpecFile(bot, conv, name);
+  const { n, needs } = taskNumberFromRef(md, name, taskRef);
+  if (runAnyway) {
+    await specRunSecondTap(bot, managerCb(uid), conv, name, n);
+    return `Spawning "${name}" task ${n} (run-anyway). The checkpoint card arrives in this conversation when the worker finishes.`;
+  }
+  await specRunFirstTap(bot, managerCb(uid), conv, name, n);
+  if (needs) {
+    return `Task ${n} of "${name}" is BLOCKED ("Needs: ${needs}"). A probe + "Run anyway" offer was posted; call spec_run again with runAnyway=true to spawn.`;
+  }
+  return `Run requested for "${name}" task ${n}. The checkpoint card arrives in this conversation when the worker finishes.`;
+}
+
+/** spec_accept — same path as the Accept button (live-state re-derivation, marker, push). */
+export async function managerSpecAccept(bot: Bot, conv: ConvKey, name: string, taskRef: string): Promise<string> {
+  const uid = managerUid(bot);
+  if (!isUserAllowed(bot.cfg, uid)) throw new Error("the manager has no user id on the allow-list");
+  const md = await managerSpecFile(bot, conv, name);
+  const { n } = taskNumberFromRef(md, name, taskRef);
+  const acc = await specAccept(bot, conv, managerLang(bot, uid), uid, name, n);
+  return acc.ok
+    ? `Accepted "${name}" task ${n} (marked done, branch pushed). See the conversation for the next-task offer.`
+    : `Could not accept "${name}" task ${n} — the refusal reason is posted in the conversation.`;
+}
+
+/** spec_auto — same path as the "Auto-run next" button (accept + auto-continue armed). */
+export async function managerSpecAuto(bot: Bot, conv: ConvKey, name: string, taskRef: string): Promise<string> {
+  const uid = managerUid(bot);
+  if (!isUserAllowed(bot.cfg, uid)) throw new Error("the manager has no user id on the allow-list");
+  if (!bot.st.findWorker(chatOf(conv), `spec-${name}`)) throw new Error(`no run of spec "${name}" found`);
+  const md = await managerSpecFile(bot, conv, name);
+  const { n } = taskNumberFromRef(md, name, taskRef);
+  await specAuto(bot, conv, managerLang(bot, uid), uid, name, n);
+  return `Auto started for "${name}" task ${n}: it accepts, then the next task runs with auto-continue armed (it stops at a blocked or failing task).`;
+}
