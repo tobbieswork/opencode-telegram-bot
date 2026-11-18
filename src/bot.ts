@@ -359,6 +359,15 @@ export class Bot {
   public inflight = new Map<ConvKey, AbortController>();
   /** Convs with a /btw side question running (one at a time per conv). */
   public btwRunning = new Set<ConvKey>();
+  /**
+   * Quick-replies auto-hide: the one still-active (untapped) choices keyboard
+   * per conv — the message id that carries it + its registry id. A fresh
+   * choices reply retires the previous one (retireActiveChoice); an accepted
+   * tap clears it so its ✓ history is never clobbered. In-memory, like the
+   * choice registry: a restart drops it and stale keyboards answer
+   * "expired" exactly as before.
+   */
+  private activeChoice = new Map<ConvKey, { messageId: number; regId: string }>();
   private browsers = new Map<ConvKey, BrowseState>();
   private questionForms = new Map<string, QuestionFormState>();
   private permissionPrompts = new Map<string, PermissionPrompt>();
@@ -1309,10 +1318,12 @@ export class Bot {
     const marker = this.cfg.suggest ? extractOptionsMarker(clean) : null;
     const ch = marker ? null : extractTrailingChoices(clean);
     const opts: string[] | undefined = marker ? marker.options : ch?.options;
-    const kb: Keyboard | undefined =
-      opts && opts.length > 0
-        ? choiceKeyboard(registry.put(conv, this.st.peek(conv)?.sessionID, opts), opts, marker !== null)
-        : undefined;
+    let choiceRegId: string | undefined;
+    let kb: Keyboard | undefined;
+    if (opts && opts.length > 0) {
+      choiceRegId = registry.put(conv, this.st.peek(conv)?.sessionID, opts);
+      kb = choiceKeyboard(choiceRegId, opts, marker !== null);
+    }
     const body = marker ? marker.body : ch ? ch.body : clean;
     const worker = this.st.peek(conv)?.worker;
     const purpose: MsgPurpose = worker ? "worker-done" : "reply";
@@ -1364,6 +1375,7 @@ export class Bot {
         }
         this.indexSent(conv, lastId, c, purpose);
       }
+      if (kb && choiceRegId) await this.retireActiveChoice(conv, lastId, choiceRegId);
       this.celebrateWorkerDone(conv, lastId, celebrate);
       return;
     }
@@ -1372,7 +1384,29 @@ export class Bot {
       lastId = await this.tg.sendMessageId(conv, chunks[i], i === chunks.length - 1 && kb ? { reply_markup: kb } : {});
       this.indexSent(conv, lastId, chunks[i], purpose);
     }
+    if (kb && choiceRegId) await this.retireActiveChoice(conv, lastId, choiceRegId);
     this.celebrateWorkerDone(conv, lastId, celebrate);
+  }
+
+  /**
+   * Quick-replies auto-hide: retire the conv's previous still-active choices
+   * keyboard, then record the fresh one. Removing the record first means a
+   * tap racing the edit answers "expired" rather than firing a stale prompt;
+   * the markup edit is best-effort (a failed edit never breaks the reply).
+   * Records the new keyboard only when we captured its message id (the
+   * richReplies→HTML fallback path does not).
+   */
+  private async retireActiveChoice(conv: ConvKey, newMsgId: number, newRegId: string | undefined): Promise<void> {
+    const prev = this.activeChoice.get(conv);
+    if (prev) {
+      registry.delete(prev.regId);
+      await this.tg.editMessageReplyMarkup(conv, prev.messageId, {}).catch(() => {});
+    }
+    if (newRegId && Number.isInteger(newMsgId) && newMsgId > 0) {
+      this.activeChoice.set(conv, { messageId: newMsgId, regId: newRegId });
+    } else {
+      this.activeChoice.delete(conv);
+    }
   }
 
   /**
@@ -4528,6 +4562,10 @@ export class Bot {
     }
     // Consume BEFORE any await so a double-tap can never double-fire (R3.4).
     registry.delete(id);
+    // Auto-hide bookkeeping: this keyboard is no longer an active, untapped
+    // choices set (it becomes the inert ✓ below), so drop the conv's pointer —
+    // a later reply must not clobber the ✓ history.
+    if (this.activeChoice.get(conv)?.regId === id) this.activeChoice.delete(conv);
     // R3.1: a tap is a typed message — the same entry point as a typed message
     // (runPrompt for plain sessions, promptManager for the Manager), so it is
     // audited, shows the typing indicator, gets the turn footer + next-step
