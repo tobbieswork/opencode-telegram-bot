@@ -176,12 +176,12 @@ const EXCEPTIONS: Exc[] = [
   },
   {
     file: "src/commands/admin.ts",
-    text: '{ text: tr(lang, "✅ Xác nhận reboot", "✅ Confirm reboot"), callback_data: rebootGoData(Date.now()) },',
+    text: '{ text: tr(lang, "✅ Xác nhận reboot", "✅ Confirm reboot"), data: rebootGoData(Date.now()) },',
     why: "button label (module-extracted from bot.ts)",
   },
   {
     file: "src/commands/admin.ts",
-    text: '{ text: tr(lang, "❌ Huỷ", "❌ Cancel"), callback_data: "reboot:cancel" },',
+    text: '{ text: tr(lang, "❌ Huỷ", "❌ Cancel"), data: "reboot:cancel" },',
     why: "button label (module-extracted from bot.ts)",
   },
   {

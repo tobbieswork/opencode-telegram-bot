@@ -21,6 +21,7 @@ import type { ModelInfo } from "../opencode.js";
 import { esc, trunc, stripTags, fmtNum, timeAgo } from "../format.js";
 import { tr } from "../i18n.js";
 import { raw, warnLine } from "../ui/text.js";
+import { confirmKeyboard } from "../ui/keyboards.js";
 import { warn, error } from "../logger.js";
 import { QUESTIONS_PREAMBLE } from "../shared.js";
 import type { UsageRow, RotationInfo } from "../usage.js";
@@ -49,17 +50,14 @@ function deployedVersion(): Promise<string> {
 /** Posts the two-step "confirm reboot" card (`reboot:go` / `reboot:cancel`). */
 export async function sendRebootConfirm(ctx: BotCtx, conv: ConvKey): Promise<void> {
   const lang = ctx.userPrefs.getLang(ctx.st.peek(conv)?.createdBy ?? "");
-  const kb: import("../shared.js").Keyboard = {
-    inline_keyboard: [
-      [
-        { text: tr(lang, "✅ Xác nhận reboot", "✅ Confirm reboot"), callback_data: rebootGoData(Date.now()) },
-        { text: tr(lang, "❌ Huỷ", "❌ Cancel"), callback_data: "reboot:cancel" },
-      ],
-    ],
-  };
+  const kb = confirmKeyboard(
+    lang,
+    { text: tr(lang, "✅ Xác nhận reboot", "✅ Confirm reboot"), data: rebootGoData(Date.now()) },
+    { text: tr(lang, "❌ Huỷ", "❌ Cancel"), data: "reboot:cancel" },
+  );
   const secs = Math.round(ctx.cfg.rebootDelayMs / 1000);
   const text =
-    tr(lang, `⚠️ <b>Chắc reboot máy không?</b>\n`, `⚠️ <b>Reboot the box?</b>\n`) +
+    warnLine(lang, raw(tr(lang, `<b>Chắc reboot máy không?</b>\n`, `<b>Reboot the box?</b>\n`))) +
     tr(lang, `Máy sẽ khởi động lại trong ~${secs} giây; bot + OpenCode sẽ tắt và tự chạy lại sau (linger). `, `The box reboots in ~${secs}s; the bot + OpenCode stop and self-resume after (linger). `) +
     tr(lang, "Bấm <b>Xác nhận</b> nếu bạn chắc chắn, hoặc <b>Huỷ</b>.", "Tap <b>Confirm</b> if you're sure, or <b>Cancel</b>.");
   await ctx.tg.sendMessage(conv, text, { reply_markup: kb });
