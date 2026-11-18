@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.45.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.45.0...opencode-telegram-bot-v1.45.1) (2026-11-18)
+
+
+### Bug Fixes
+
+* correct Vietnamese wording "hẵng" to "hãy" ([5157517](https://github.com/tobbieswork/opencode-telegram-bot/commit/51575173e8aadb83073b9732b017b06d920ee254))
+* correct Vietnamese wording "hẵng" to "hãy" in task-running toasts ([696e456](https://github.com/tobbieswork/opencode-telegram-bot/commit/696e4562aeac60dbb5511c6d8ef3e6475f68112b))
+
 ## [1.45.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.44.3...opencode-telegram-bot-v1.45.0) (2026-11-18)
 
 
