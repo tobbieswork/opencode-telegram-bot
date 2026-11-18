@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.44.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.43.0...opencode-telegram-bot-v1.44.0) (2026-11-18)
+
+
+### Features
+
+* expose the spec pipeline to the Manager via MCP tools ([7ff69b5](https://github.com/tobbieswork/opencode-telegram-bot/commit/7ff69b560ee851e8a390ee47f93d869b4474d4de))
+* expose the spec pipeline to the Manager via MCP tools (spec_list, spec_run, spec_accept, spec_auto) ([bcf9ef9](https://github.com/tobbieswork/opencode-telegram-bot/commit/bcf9ef9a29003ef5ed156762e107e0c2f386ce43))
+
 ## [1.43.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.42.1...opencode-telegram-bot-v1.43.0) (2026-11-18)
 
 
