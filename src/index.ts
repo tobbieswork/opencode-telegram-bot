@@ -7,6 +7,7 @@ import { Telegram } from "./telegram.js";
 import { StateManager } from "./state.js";
 import { Bot } from "./bot.js";
 import { log, warn, error } from "./logger.js";
+import { registeredPrefixes } from "./callbacks.js";
 import { configureAudit } from "./audit.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -62,6 +63,10 @@ async function main(): Promise<void> {
   log(`uploads sweep: deleted ${sweep.files} files (${(sweep.bytes / 1024 / 1024).toFixed(1)} MB)`);
   const bot = new Bot(tg, oc, st, cfg);
   bot.start(); // relay OpenCode question forms to Telegram
+  // C1.2 self-check (docs/sdd/callback-registry.md): list every registered
+  // callback prefix at startup so a missing registration is visible in the
+  // journal. A duplicate already threw at module load (both owners named).
+  log(`callback registry: ${registeredPrefixes().length} prefixes \u2014 ${registeredPrefixes().join(", ")}`);
   // Recover any reply a previous (crashed/restarted) process produced but never
   // relayed. Fire-and-forget so polling starts immediately.
   void bot.recoverOrphanedReplies().catch((e) => warn("reply recovery:", e?.message));

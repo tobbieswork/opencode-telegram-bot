@@ -25,6 +25,7 @@ import type { ConvKey } from "./conv.js";
 import type { Btn, Keyboard } from "./shared.js";
 import { esc, trunc, stripTags } from "./format.js";
 import { tr } from "./i18n.js";
+import { fields } from "./callbacks.js";
 
 /** Card states, in lifecycle order. */
 export type WatchPhase = "working" | "idle" | "done" | "failed" | "stopped";
@@ -482,3 +483,11 @@ export const watchRegistry = {
     watchRecords.delete(id);
   },
 };
+
+/**
+ * The `w:` callback def (docs/sdd/callback-registry.md — T6 migration).
+ * Wire form: `w:<id>:<action>` — the 4-char registry id and a one-char
+ * action (c=Close, r=Watch again, s=Stop task). The id is bounded by the
+ * producer (watchKeyboard), so no 64-byte fallback is needed.
+ */
+export const watchCb = fields("w", 2);

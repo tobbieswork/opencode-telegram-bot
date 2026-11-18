@@ -47,11 +47,15 @@ import {
   _resetWarnOnceForTest,
   _setTokenTtlMsForTest,
 } from "../src/callbacks.js";
-import { bsCallback, pbCallback, registerBotCallbacks } from "../src/bot.js";
+import { bsCallback, pbCallback, registerBotCallbacks, wwCb } from "../src/bot.js";
 import type { Bot } from "../src/bot.js";
 import { choiceCallback, choiceKeyboard, registry as choiceRecords } from "../src/choices.js";
 import { continueCallback, continueCallbackData, parseContinueData } from "../src/continue.js";
 import { rebootCallback, rebootGoData } from "../src/uptime.js";
+import { watchCb } from "../src/watch.js";
+import { nsCb } from "../src/nextsteps.js";
+import { noteCb } from "../src/notes.js";
+import { specCb, specrunCb, specblockedCb, specrunokCb, spcaccCb, spcredoCb, spcstopCb, spcprCb, spcreadyCb, spccleanCb } from "../src/commands/spec.js";
 import type { CallbackQuery } from "../src/telegram.js";
 
 let failures = 0;
@@ -459,6 +463,64 @@ async function main(): Promise<void> {
     check("T5 dispatch: bs:close routes to the browse handler", (await dispatchCallback(base(bot), cb("bs:close"))) === true && calls.length === 1 && calls[0] === "bs", JSON.stringify(calls));
     check("T5 dispatch: …answered exactly once, with the handler's toast", answers.length === 1 && answers[0]?.text === "bs-done", JSON.stringify(answers));
     check("T5 dispatch: bs:nav:2 routes (arg form)", (await dispatchCallback(base(bot), cb("bs:nav:2"))) === true && calls.length === 2 && calls[1] === "bs", JSON.stringify(calls));
+  }
+  // ── T6: the remaining 14 prefixes + old-chain removal (C1.2/C3.1/C3.3) ──
+  {
+    // bot.js's module load registers the prefixes; the sections above cleared
+    // the registry, so restore the real registration.
+    _clearCallbacksForTest();
+    registerBotCallbacks();
+
+    // C1.2 + migration complete: ALL 35 inventoried prefixes are registered,
+    // and no duplicate threw (registerCallback would throw on a dup, naming
+    // both owners). This is the "old chain removed" precondition.
+    const all = [
+      "agent", "ap", "bs", "ch", "cmd", "cont", "fq", "kill", "mdl", "mode",
+      "ns", "note", "nw", "pb", "perm", "prune", "q", "reboot", "rot", "sch",
+      "spec", "specblocked", "specrun", "specrunok", "spcacc", "spcclean",
+      "spcready", "spcredo", "spcpr", "spcstop", "use", "variant", "w", "ww", "wt",
+    ];
+    const reg = registeredPrefixes();
+    check("T6: all 35 prefixes are registered (no duplicate threw)", reg.length === 35 && all.every((p) => reg.includes(p)), JSON.stringify(reg));
+    check("T6: spcauto is NOT registered (pre-existing gap, behavior preserved)", !reg.includes("spcauto"), JSON.stringify(reg));
+
+    // The 14 newly-migrated prefixes have their owners recorded.
+    check("T6: w owner", callbackOwner("w") === "watch.ts (watch card)", callbackOwner("w"));
+    check("T6: ww owner", callbackOwner("ww") === "bot.ts (working watch)", callbackOwner("ww"));
+    check("T6: ns owner", callbackOwner("ns") === "nextsteps.ts (next steps)", callbackOwner("ns"));
+    check("T6: note owner", callbackOwner("note") === "notes.ts (busy note)", callbackOwner("note"));
+    check("T6: spec owner", callbackOwner("spec") === "commands/spec.ts (spec list/detail)", callbackOwner("spec"));
+    check("T6: specrun owner", callbackOwner("specrun") === "commands/spec.ts (spec run)", callbackOwner("specrun"));
+
+    // Round-trips (C3.3): each new def encodes the real wire form and decodes back.
+    check("T6 w: round-trips", watchCb.encode(["ab12", "c"]) === "w:ab12:c" && JSON.stringify(watchCb.decode("ab12:c")) === JSON.stringify(["ab12", "c"]));
+    check("T6 ww: round-trips", wwCb.encode("go") === "ww:go" && wwCb.decode("go") === "go");
+    check("T6 ns: round-trips", nsCb.encode(["ab12", "3"]) === "ns:ab12:3" && JSON.stringify(nsCb.decode("ab12:3")) === JSON.stringify(["ab12", "3"]));
+    check("T6 note: round-trips", noteCb.encode("12345") === "note:12345" && noteCb.decode("12345") === "12345");
+    check("T6 spec: round-trips", specCb.encode("my-spec") === "spec:my-spec" && specCb.decode("my-spec") === "my-spec");
+    check("T6 specrun: round-trips", specrunCb.encode(["my-spec", "2"]) === "specrun:my-spec:2" && JSON.stringify(specrunCb.decode("my-spec:2")) === JSON.stringify(["my-spec", "2"]));
+    check("T6 specblocked: round-trips", specblockedCb.encode(["my-spec", "1"]) === "specblocked:my-spec:1" && JSON.stringify(specblockedCb.decode("my-spec:1")) === JSON.stringify(["my-spec", "1"]));
+    check("T6 specrunok: round-trips", specrunokCb.encode(["my-spec", "1"]) === "specrunok:my-spec:1" && JSON.stringify(specrunokCb.decode("my-spec:1")) === JSON.stringify(["my-spec", "1"]));
+    check("T6 spcacc: round-trips", spcaccCb.encode(["my-spec", "4"]) === "spcacc:my-spec:4" && JSON.stringify(spcaccCb.decode("my-spec:4")) === JSON.stringify(["my-spec", "4"]));
+    check("T6 spcredo: round-trips", spcredoCb.encode(["my-spec", "4"]) === "spcredo:my-spec:4" && JSON.stringify(spcredoCb.decode("my-spec:4")) === JSON.stringify(["my-spec", "4"]));
+    check("T6 spcstop: round-trips", spcstopCb.encode(["my-spec", "4"]) === "spcstop:my-spec:4" && JSON.stringify(spcstopCb.decode("my-spec:4")) === JSON.stringify(["my-spec", "4"]));
+    check("T6 spcpr: round-trips", spcprCb.encode("my-spec") === "spcpr:my-spec" && spcprCb.decode("my-spec") === "my-spec");
+    check("T6 spcready: round-trips", spcreadyCb.encode("my-spec") === "spcready:my-spec" && spcreadyCb.decode("my-spec") === "my-spec");
+    check("T6 spcclean: round-trips", spccleanCb.encode("my-spec") === "spcclean:my-spec" && spccleanCb.decode("my-spec") === "my-spec");
+
+    // Malformed (C3.3): a wrong field count is rejected (→ C2.2 expired toast).
+    check("T6 w: one field is malformed", watchCb.decode("ab12") === null);
+    check("T6 specrun: one field is malformed", specrunCb.decode("my-spec") === null);
+    check("T6 note: empty is malformed", noteCb.decode("") === null);
+
+    // Dispatch wiring (C2.1): the newly-registered method-based handlers route.
+    const { bot, answers } = fakeBot();
+    const calls: string[] = [];
+    (bot as Record<string, unknown>).handleWatchCallback = async () => { calls.push("w"); };
+    (bot as Record<string, unknown>).handleWorkingWatchButton = async () => { calls.push("ww"); };
+    check("T6 dispatch: w:ab12:c routes", (await dispatchCallback(base(bot), cb("w:ab12:c"))) === true && calls.length === 1 && calls[0] === "w", JSON.stringify(calls));
+    check("T6 dispatch: ww:go routes", (await dispatchCallback(base(bot), cb("ww:go"))) === true && calls.length === 2 && calls[1] === "ww", JSON.stringify(calls));
+    check("T6 dispatch: answered exactly once per tap", answers.length === 2, JSON.stringify(answers));
   }
 }
 

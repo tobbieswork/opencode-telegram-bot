@@ -56,7 +56,7 @@ import { parseProcUptime, shouldRemindAboutReboot, formatUptimeHuman, msPerDay, 
 import { toolActivityLabel, activityDoneLine } from "./activity.js";
 import { DraftState, DraftAction, onTextDelta, onToolStart, isDmConv, EDIT_BUDGET } from "./stream.js";
 import { cmdCb, myCommands } from "./commands.js";
-import { dropNotes, prepareNotes, NOTE_CB_PREFIX, BusyNoteStore } from "./notes.js";
+import { dropNotes, prepareNotes, NOTE_CB_PREFIX, BusyNoteStore, noteCb } from "./notes.js";
 import { QueueStore } from "./queue.js";
 import { buildBusyReply, busyCb, busyKeyboard, queueFullReply, parseBusyCallback } from "./busy.js";
 import type { BusyReply } from "./busy.js";
@@ -71,7 +71,7 @@ import { cmdAgents, cmdAgent, handleAgentCallback, agentCb } from "./commands/ag
 import { cmdSchedule, handleScheduleCallback, schCb } from "./commands/schedule.js";
 import { Advisor } from "./advisor/advisor.js";
 import { cmdHelp, cmdStatus, cmdHealth, cmdContext, cmdUsage, cmdHistory, cmdNote, cmdRotation, handleNoteCallback, cmdLang, cmdStyle } from "./commands/meta.js";
-import { cmdSpec, handleSpecCallback, specAutoContinue } from "./commands/spec.js";
+import { cmdSpec, handleSpecCallback, specAutoContinue, specCb, specrunCb, specblockedCb, specrunokCb, spcaccCb, spcredoCb, spcstopCb, spcprCb, spcreadyCb, spccleanCb } from "./commands/spec.js";
 import {
   clampWatchInterval,
   createWatch,
@@ -90,11 +90,12 @@ import {
   WATCH_POLL_GAP_MS,
   type WatchEvent,
   type WatchState,
+  watchCb,
 } from "./watch.js";
 import { cmdBtw } from "./btw.js";
 import { cmdAsk } from "./ask.js";
 import { reviewPrompt, reviewUsage } from "./review.js";
-import { decide, callbackFor, parseCallback, computeFilesNew, registry as nsRegistry } from "./nextsteps.js";
+import { decide, callbackFor, parseCallback, computeFilesNew, registry as nsRegistry, nsCb } from "./nextsteps.js";
 import { gitFingerprint } from "./gitstate.js";
 import type { NextStepFacts } from "./nextsteps.js";
 import { managerFloorFromMessages, runRotationHandoff, rotationGate } from "./rotation.js";
@@ -244,6 +245,14 @@ export const bsCallback = defineCallback<{ op: string; arg?: string }>({
     return { op: parts[0], arg: arg === "" ? undefined : arg };
   },
 });
+
+/**
+ * The "ww:" callback def (docs/sdd/callback-registry.md — T6 migration).
+ * Wire form: the fixed "ww:go" — the only value the Working-line watch
+ * button has ever carried, so decode is strict (a foreign value is
+ * malformed, not "some other op").
+ */
+export const wwCb = oneArg("ww");
 
 /** Key under which the per-session language instruction is stored (namespaced `api/<key>`). */
 const LANGUAGE_INSTRUCTION_KEY = "tgbot.language";
@@ -2624,20 +2633,20 @@ export class Bot {
    * there's no current session, otherwise hand off to startWatch (which is
    * safe against double-invocation: it closes any prior watch card first).
    */
-  private async handleWorkingWatchButton(cb: CallbackQuery, conv: ConvKey): Promise<void> {
+  public async handleWorkingWatchButton(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void = (toast) => { void this.tg.answerCallbackQuery(cb.id, toast).catch(() => {}); }): Promise<void> {
     const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     // Same gate as /watch (cmdWatch): only available while watchActive.
     if (!this.cfg.watchActive) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, STRINGS.working_watch_inactive.vi, STRINGS.working_watch_inactive.en));
+      await answer(tr(lang, STRINGS.working_watch_inactive.vi, STRINGS.working_watch_inactive.en));
       return;
     }
     // No current session → say so (same wording style as cmdWatch's watchNoSession).
     const state = this.st.peek(conv);
     if (!state?.sessionID) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, STRINGS.working_watch_no_session.vi, STRINGS.working_watch_no_session.en));
+      await answer(tr(lang, STRINGS.working_watch_no_session.vi, STRINGS.working_watch_no_session.en));
       return;
     }
-    await this.tg.answerCallbackQuery(cb.id);
+    await answer();
     await this.startWatch(conv, state, cb.from?.id);
   }
 
@@ -2649,34 +2658,34 @@ export class Bot {
    * a card whose conversation has moved to another session is refused, and an
    * unknown id (a restart dropped the registry) answers "expired" (W4.4).
    */
-  private async handleWatchCallback(cb: CallbackQuery, conv: ConvKey): Promise<void> {
+  public async handleWatchCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void = (toast) => { void this.tg.answerCallbackQuery(cb.id, toast).catch(() => {}); }): Promise<void> {
     const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     const [, id, action] = (cb.data ?? "").split(":");
     const rec = watchRegistry.get(id);
     if (!rec || rec.conv !== conv) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Hết hiệu lực.", "Expired."));
+      await answer(tr(lang, "Hết hiệu lực.", "Expired."));
       return;
     }
     const cur = this.st.peek(conv)?.sessionID;
     if (cur && cur !== rec.sessionID) {
       // W4.3: the conversation moved to another session — refuse, do nothing.
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Phiên đã đổi — bấm này hết hiệu lực.", "The conversation moved to another session — this tap is refused."));
+      await answer(tr(lang, "Phiên đã đổi — bấm này hết hiệu lực.", "The conversation moved to another session — this tap is refused."));
       return;
     }
     if (action === "c") {
       // Close (W4.1): stop updating and delete the card; the agent is untouched.
       this.stopWatch(conv, "closed", { deleteCard: true });
-      await this.tg.answerCallbackQuery(cb.id);
+      await answer();
       return;
     }
     if (action === "r") {
       // Watch again (W3.3): behaves as a new /watch on the current session.
       const state = this.st.get(conv);
       if (!state.sessionID) {
-        await this.tg.answerCallbackQuery(cb.id, tr(lang, "Chưa có phiên hiện tại.", "No current session."));
+        await answer(tr(lang, "Chưa có phiên hiện tại.", "No current session."));
         return;
       }
-      await this.tg.answerCallbackQuery(cb.id);
+      await answer();
       await this.startWatch(conv, state, cb.from?.id);
       return;
     }
@@ -2689,7 +2698,7 @@ export class Bot {
       // "not running", no state change.
       const w = this.watches.get(conv);
       if (!w || w.frozen || w.state.phase !== "working") {
-        await this.tg.answerCallbackQuery(cb.id, tr(lang, "Không có tác vụ nào đang chạy.", "Nothing is running."));
+        await answer(tr(lang, "Không có tác vụ nào đang chạy.", "Nothing is running."));
         return;
       }
       // Claim the stop synchronously, BEFORE any await: the state is already
@@ -2704,13 +2713,13 @@ export class Bot {
       w.state = r.state;
       w.frozen = true;
       w.polling = false;
-      await this.tg.answerCallbackQuery(cb.id);
+      await answer();
       await this.stopTaskFor(conv, rec.sessionID);
       audit({ action: "watch_stop_task", chatId: conv, session: rec.sessionID, userId: cb.from?.id });
       if (r.edit) await this.pushWatchEdit(w, r.edit); // the ONE final "Stopped" edit (W4.2)
       return;
     }
-    await this.tg.answerCallbackQuery(cb.id);
+    await answer();
   }
 
   // ── the long-running prompt ──────────────────────────────────────────────
@@ -4121,7 +4130,7 @@ export class Bot {
     await this.tg.editMessageText(conv, messageId, v.text, { reply_markup: v.keyboard });
   }
 
-  /** Handle any inline-button tap: the typed registry first (C2.1), then the legacy chain (C3.2). */
+  /** Handle any inline-button tap: every prefix is served by the typed registry (C2.1). */
   private async handleCallback(cb: CallbackQuery): Promise<void> {
     const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     if (!this.allowed(cb.from?.id)) {
@@ -4135,112 +4144,14 @@ export class Bot {
       await this.tg.answerCallbackQuery(cb.id);
       return;
     }
-    // Typed callback registry first (C2.1/C3.2): a registered prefix is
-    // decoded and answered by src/callbacks.ts; everything else falls
-    // through to the legacy startsWith chain below. The two gates above
-    // (allow-list, no-conv) are the single C2.3 spot.
+    // Every button tap is served by the typed registry (C2.1): the two gates
+    // above (allow-list, no-conv) are the single C2.3 spot, and all 35
+    // prefixes are registered (C1.2), so a registered tap never falls
+    // through. The legacy startsWith chain is gone (docs/sdd/callback-
+    // registry.md, T6).
     if (await dispatchCallback({ bot: this, conv, messageId, lang }, cb)) return;
-    if (data.startsWith("ch:")) {
-      await this.handleChoiceCallback(cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
-      return;
-    }
-    if (data.startsWith("w:")) {
-      await this.handleWatchCallback(cb, conv);
-      return;
-    }
-    // "👁 Watch" button on the Working line. "ww:go" does NOT start with "w:"
-    // (it's "ww", not "w:"), so the w: branch above can never swallow it.
-    if (data.startsWith("ww:")) {
-      await this.handleWorkingWatchButton(cb, conv);
-      return;
-    }
-    if (data.startsWith("ns:")) {
-      await this.handleNextStepCallback(cb, conv, messageId);
-      return;
-    }
-    if (data.startsWith("fq:")) {
-      await this.handleFormCallback(cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
-      return;
-    }
-    if (data.startsWith("mode:")) {
-      await this.handleModeCallback(cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
-      return;
-    }
-    if (data.startsWith("perm:")) {
-      await this.handlePermissionCallback(cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
-      return;
-    }
-    if (data.startsWith("pb:")) {
-      await this.handlePlanToBuildCallback(cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t));
-      return;
-    }
-    if (data.startsWith("cont:")) {
-      await this.handleContinueCallback(cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
-      return;
-    }
-    if (data.startsWith(NOTE_CB_PREFIX)) {
-      await handleNoteCallback(this, cb, conv, messageId);
-      return;
-    }
-    if (data.startsWith("q:add:") || data.startsWith("q:steer:")) {
-      await this.handleBusyCallback(cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
-      return;
-    }
-    if (data.startsWith("reboot:")) {
-      await this.handleRebootCallback(cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
-      return;
-    }
-    if (data.startsWith("rot:")) {
-      await this.handleRotationCallback(cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
-      return;
-    }
-    if (data.startsWith("nw:")) {
-      await this.handleNewConfirmCallback(cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
-      return;
-    }
-    if (data.startsWith("use:")) {
-      await this.handleUseCallback(cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
-      return;
-    }
-    if (data.startsWith("agent:")) {
-      await handleAgentCallback(this, cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
-      return;
-    }
-    if (data.startsWith("variant:")) {
-      await this.handleVariantCallback(cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
-      return;
-    }
-    if (data.startsWith("mdl:")) {
-      await this.handleModelCallback(cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
-      return;
-    }
-    if (data.startsWith("kill:")) return this.orch.handleKillCallback(cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
-    if (await this.orch.handleCallback(cb, conv, messageId)) return;
-    // All spec-to-tasks callbacks (S2 list/detail + S4 Run + S6 controls +
-    // S5 PR flow): spec:<name>, specrun:<name>:<n> (next-runnable Run),
-    // specblocked:<name>:<n> (blocked Run, first tap), specrunok:<name>:<n>
-    // (blocked "Run anyway", 2nd tap) and the checkpoint-card controls
-    // spcacc:<name>:<n> (Accept), spcredo:<name>:<n> (Redo with note) and
-    // spcstop:<name>:<n> (Stop), plus the PR controls spcpr:<name> (open
-    // draft PR), spcready:<name> (mark ready) and spcclean:<name> (clean up).
-    if (data.startsWith("spec:") || data.startsWith("specrun:") || data.startsWith("specblocked:") || data.startsWith("specrunok:") || data.startsWith("spcacc:") || data.startsWith("spcredo:") || data.startsWith("spcstop:") || data.startsWith("spcpr:") || data.startsWith("spcready:") || data.startsWith("spcclean:")) {
-      await handleSpecCallback(this, cb, conv);
-      return;
-    }
-    if (data.startsWith("cmd:")) {
-      await this.runCommandButton(cb, conv, data.slice(4), (t) => void this.tg.answerCallbackQuery(cb.id, t));
-      return;
-    }
-    if (data.startsWith("sch:")) {
-      await handleScheduleCallback(this, cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
-      return;
-    }
-    if (data.startsWith("bs:")) {
-      await this.handleBrowseCallback(cb, conv, (t) => void this.tg.answerCallbackQuery(cb.id, t), messageId);
-      return;
-    }
-    // C2.2: matched neither the registry nor the legacy chain — a stale or
-    // mistyped button. Toast it (warned once) instead of vanishing.
+    // C2.2: the prefix was never registered (or the data has no colon) — a
+    // stale or mistyped button. Toast it (warned once) instead of vanishing.
     await answerExpired(this, cb, lang, data);
   }
 
@@ -4677,35 +4588,35 @@ export class Bot {
    * N3.4: fixed text, the label says what happens. N3.5 is the shared
    * allow-list gate at the top of handleCallback (this.allowed).
    */
-  private async handleNextStepCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+  public async handleNextStepCallback(cb: CallbackQuery, conv: ConvKey, messageId?: number, answer: (toast?: string) => void = (toast) => { void this.tg.answerCallbackQuery(cb.id, toast).catch(() => {}); }): Promise<void> {
     const lang = this.userPrefs.getLang(cb.from?.id ?? "");
     const parsed = parseCallback(cb.data ?? "");
     if (!parsed) {
-      await this.tg.answerCallbackQuery(cb.id);
+      await answer();
       return;
     }
     const rec = nsRegistry.get(parsed.id, Date.now());
     if (!rec) {
       // N3.6: unknown id — outlived a bot restart (the registry is in-memory) or expired.
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Nút này đã hết hạn.", "This button has expired."));
+      await answer(tr(lang, "Nút này đã hết hạn.", "This button has expired."));
       return;
     }
     // N3.2: the tap is bound to the session the button was created for.
     const state = this.st.peek(conv);
     if (!state?.sessionID || state.sessionID !== rec.sessionID) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Nút này không còn áp dụng cho phiên hiện tại.", "This button no longer applies to the current session."));
+      await answer(tr(lang, "Nút này không còn áp dụng cho phiên hiện tại.", "This button no longer applies to the current session."));
       return;
     }
     // N3.3: a turn is running → refuse and KEEP the button (no markup edit).
     // (Manager turns have no inflight entry — fire-and-forget — but the board
     // action is read-only, so a busy Manager never blocks a /board tap.)
     if (this.inflight.has(conv)) {
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "Đang chạy task — hẵng thử lại sau.", "A task is running — try again later."));
+      await answer(tr(lang, "Đang chạy task — hẵng thử lại sau.", "A task is running — try again later."));
       return;
     }
     if (rec.rule === "review" && state.manager) {
       // The /review guard: the Manager has no repo (stale button after /manager on).
-      await this.tg.answerCallbackQuery(cb.id, tr(lang, "🔍 Manager không có repo để review.", "🔍 The Manager has no repo to review."));
+      await answer(tr(lang, "🔍 Manager không có repo để review.", "🔍 The Manager has no repo to review."));
       return;
     }
     // N3.1: one-shot — drop the next-step row and consume the record BEFORE
@@ -4726,22 +4637,22 @@ export class Bot {
     if (rec.rule === "review") {
       const prompt = reviewPrompt("", lang);
       if (!prompt) {
-        await this.tg.answerCallbackQuery(cb.id);
+        await answer();
         return;
       }
-      await this.tg.answerCallbackQuery(cb.id);
+      await answer();
       await this.runPrompt(conv, prompt, state, undefined, lang);
       return;
     }
     if (rec.rule === "board") {
       // S5: /board is read-only (no agent turn) — safe even mid-manager-turn.
-      await this.tg.answerCallbackQuery(cb.id);
+      await answer();
       await this.orch.cmdBoard(conv).catch((e) => warn("nextstep board tap:", (e as Error)?.message));
       return;
     }
     // "new-keep": open the /new confirm card (nw: flow) — it asks before
     // doing anything (N3.4: the label says what happens).
-    await this.tg.answerCallbackQuery(cb.id);
+    await answer();
     await this.cmdNew(conv);
   }
 
@@ -5425,6 +5336,24 @@ export function registerBotCallbacks(): void {
   registerCallback(modelCb, (ctx, cb) => ctx.bot.handleModelCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "bot.ts (model picker)");
   // T5 — the folder browser menu and its sub-actions.
   registerCallback(bsCallback, (ctx, cb) => ctx.bot.handleBrowseCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "bot.ts (folder browser)");
+  // T6 — the remaining 14 prefixes (watch, working-watch, next-steps, busy
+  // note, and the spec family). Completing this makes the legacy startsWith
+  // chain in handleCallback dead, so it is deleted. SPCAUTO is deliberately
+  // left unregistered (no chain branch handled it either).
+  registerCallback(watchCb, (ctx, cb) => ctx.bot.handleWatchCallback(cb, ctx.conv, ctx.answer), "watch.ts (watch card)");
+  registerCallback(wwCb, (ctx, cb) => ctx.bot.handleWorkingWatchButton(cb, ctx.conv, ctx.answer), "bot.ts (working watch)");
+  registerCallback(nsCb, (ctx, cb) => ctx.bot.handleNextStepCallback(cb, ctx.conv, ctx.messageId, ctx.answer), "nextsteps.ts (next steps)");
+  registerCallback(noteCb, (ctx, cb) => handleNoteCallback(ctx.bot, cb, ctx.conv, ctx.messageId, ctx.answer), "notes.ts (busy note)");
+  registerCallback(specCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec list/detail)");
+  registerCallback(specrunCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec run)");
+  registerCallback(specblockedCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec run-blocked)");
+  registerCallback(specrunokCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec run-anyway)");
+  registerCallback(spcaccCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec accept)");
+  registerCallback(spcredoCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec redo)");
+  registerCallback(spcstopCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec stop)");
+  registerCallback(spcprCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec PR flow)");
+  registerCallback(spcreadyCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec PR ready)");
+  registerCallback(spccleanCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec clean up)");
 }
 
 registerBotCallbacks();

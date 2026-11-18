@@ -17,6 +17,7 @@
 export type NotesStage = "pending" | "shown";
 
 import type { Lang } from "./state.js";
+import { oneArg } from "./callbacks.js";
 
 /** The two ChatState fields this module manages (kept structural, no import cycle). */
 export interface NoteState {
@@ -177,3 +178,10 @@ export class BusyNoteStore {
     this.map.delete(conv);
   }
 }
+
+/**
+ * The `note:` callback def (docs/sdd/callback-registry.md — T6 migration).
+ * Wire form: `note:<messageId>` — a numeric Telegram message id, bounded by
+ * the producer (noteCallbackData), so no 64-byte fallback is needed.
+ */
+export const noteCb = oneArg("note");

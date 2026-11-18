@@ -62,17 +62,17 @@ export async function cmdNote(bot: Bot, conv: ConvKey, arg: string): Promise<voi
  * user message's Telegram id (carried in the callback data); if the turn has
  * already ended (or the bot restarted) the entry is gone → "not found".
  */
-export async function handleNoteCallback(bot: Bot, cb: CallbackQuery, conv: ConvKey, messageId?: number): Promise<void> {
+export async function handleNoteCallback(bot: Bot, cb: CallbackQuery, conv: ConvKey, messageId?: number, answer: (toast?: string) => void = (toast) => { void bot.tg.answerCallbackQuery(cb.id, toast).catch(() => {}); }): Promise<void> {
   const lang = bot.userPrefs.getLang(cb.from?.id ?? "");
   const id = parseNoteCallback(cb.data);
   if (id == null) {
-    await bot.tg.answerCallbackQuery(cb.id);
+    await answer();
     return;
   }
   // Consume the entry NOW (before any await) so a double-tap can't append twice.
   const text = bot.busyNotes.take(conv, id);
   if (text == null) {
-    await bot.tg.answerCallbackQuery(cb.id, tr(lang, "Không tìm thấy nội dung tin nhắn đó.", "That message's content is no longer available."));
+    await answer(tr(lang, "Không tìm thấy nội dung tin nhắn đó.", "That message's content is no longer available."));
     return;
   }
   // Save via the SAME path as cmdNote: append + persist + best-effort PUT.
@@ -83,7 +83,7 @@ export async function handleNoteCallback(bot: Bot, cb: CallbackQuery, conv: Conv
   if (sid) {
     await bot.oc.setInstruction(sid, NOTES_KEY, noteEntryText(next.notes!, lang)).catch((e) => warn("note put:", (e as Error).message));
   }
-  await bot.tg.answerCallbackQuery(cb.id, tr(lang, "📝 Đã ghi — agent sẽ xem ở lượt tiếp theo.", "📝 Saved — the agent will see it on the next turn."));
+  await answer(tr(lang, "📝 Đã ghi — agent sẽ xem ở lượt tiếp theo.", "📝 Saved — the agent will see it on the next turn."));
   // Remove the button: edit the busy message back to plain text (empty keyboard).
   // Best-effort — the message may be too old or deleted; ignore gracefully.
   if (messageId != null) {
