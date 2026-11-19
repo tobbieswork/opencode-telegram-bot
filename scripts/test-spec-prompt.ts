@@ -28,6 +28,28 @@ const RULE_LINES = [
   "do not start the next task.",
 ];
 
+// T2 (ocr-hardening): the fixed report schema the brief must render (the
+// worker's final message must end with this block; the host parses it).
+const REPORT_LINES = [
+  "## Report",
+  "Status: DONE | BLOCKED | FAILED",
+  "Coverage:",
+  "Files:",
+  "Tests:",
+  "Follow-ups:",
+];
+
+// T3 (ocr-hardening): the prompt-only tool-discipline budget lines. The full
+// block is the snapshot the manager reviews: the rendered brief must contain
+// it verbatim, and it is part of the never-cut set.
+const DISCIPLINE_BLOCK = [
+  "## Tool discipline",
+  "- Files already shown in the brief are in context — do not re-read them.",
+  "- Max 2–3 tool calls per sub-step; batch independent calls in parallel.",
+  "- Do not re-run a verification command that already ran green in this session unless files it covers changed since.",
+  "- End with the Report section once all sub-steps are done/skipped — do not go looking for marginal extra work.",
+].join("\n");
+
 // ── real spec: tasks n=3, n=4, n=5 ─────────────────────────────────────────
 const parsed = parseSpec(spec);
 if (!("tasks" in parsed)) {
@@ -65,6 +87,8 @@ for (const n of [3, 4, 5]) {
       prompt.includes("- npm run smoke last (only when asked)")
   );
   check(`n=${n}: working rules present`, RULE_LINES.every((l) => prompt.includes(l)));
+  check(`n=${n}: report schema rendered (all five fields)`, REPORT_LINES.every((l) => prompt.includes(l)), prompt);
+  check(`n=${n}: tool discipline block rendered verbatim (snapshot)`, prompt.includes(DISCIPLINE_BLOCK), prompt);
 }
 
 // ── synthetic long spec: cap must hold, cuts named, fixed parts intact ─────
@@ -103,6 +127,7 @@ const longSpec = [
   check("long: first cut is the LAST-named requirement", cut[0] === "requirement L10.1 text", JSON.stringify(cut));
   check("long: task body still fully present", prompt.includes(t.body));
   check("long: working rules still fully present", RULE_LINES.every((l) => prompt.includes(l)));
+  check("long: tool discipline still fully present (never cut)", prompt.includes(DISCIPLINE_BLOCK), prompt);
   check("long: prompt ends with the truncation line", prompt.endsWith(`Truncated (size cap): ${cut.join(", ")}`));
   const firstCutId = cut[0].replace("requirement ", "").replace(" text", "");
   check("long: cut requirement keeps its id with a marker", prompt.includes(`- ${firstCutId} (text cut)`));
@@ -154,13 +179,17 @@ const missingReqSpec = `# Missing req spec
 // ── forced cap on a real task: full cut priority chain ──────────────────────
 {
   const t = byN(3); // reqIds [S2.2, S2.3]
-  const cap = 500;
+  // 1300 sits between the uncutable base (task + rules + discipline + report)
+  // and that base + the verify-order section, so the whole cut chain fires.
+  const cap = 1300;
   const { prompt, cut } = buildTaskPrompt(spec, t, cap);
   check("forced cap: within the given cap", prompt.length <= cap, `len ${prompt.length}`);
   check("forced cap: cut reqs from the end backwards first", cut[0] === "requirement S2.3 text" && cut[1] === "requirement S2.2 text", JSON.stringify(cut));
   check("forced cap: out-of-scope cut before verify order", cut[2] === "out-of-scope section" && (cut.length < 4 || cut[3] === "verify order section"), JSON.stringify(cut));
   check("forced cap: task body still fully present", prompt.includes(t.body));
   check("forced cap: working rules still fully present", RULE_LINES.every((l) => prompt.includes(l)));
+  check("forced cap: report schema still fully present (never cut)", REPORT_LINES.every((l) => prompt.includes(l)), prompt);
+  check("forced cap: tool discipline still fully present (never cut)", prompt.includes(DISCIPLINE_BLOCK), prompt);
   check("forced cap: prompt ends with the truncation line", prompt.endsWith(`Truncated (size cap): ${cut.join(", ")}`));
 }
 

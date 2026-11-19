@@ -243,6 +243,62 @@ try {
     check("card(html): angle brackets are escaped", hostile.text.includes("&lt;script&gt;") && hostile.text.includes("&lt;b&gt;"), hostile.text);
   }
 
+  // ── T2 (ocr-hardening): the parsed report block on the card ───────────────
+  {
+    const rTask = { n: 2, id: "S2", title: "Second", marker: "todo" as const, body: "x", reqIds: [], checkpoint: "review the diff" };
+    const base = {
+      task: rTask,
+      workerName: "spec-alpha",
+      branch: "spec/alpha",
+      commit: { hash: "abc1234", subject: "feat: S2 work" },
+      files: ["src/foo.ts", "docs/sdd/alpha.md"],
+      checks: { ran: [{ name: "typecheck", ok: true }, { name: "test:unit", ok: false }], notRan: ["smoke"] },
+      errored: false,
+      lang: "en" as const,
+    };
+    const fullReport = {
+      status: "DONE",
+      coverage: "- brief section: done\n- parser + card: done",
+      files: "src/foo.ts",
+      tests: "npm run typecheck ok, npm run test:unit ok",
+      followUps: "none",
+      missing: [] as string[],
+    };
+    // A full report: the compact block renders, no missing-fields warning.
+    const withFull = renderCheckpointCard({ ...base, report: fullReport });
+    check("card(report): shows the report header", withFull.text.includes("Worker report:"), withFull.text);
+    check("card(report): shows Status value", withFull.text.includes("<b>Status</b>: DONE"), withFull.text);
+    check("card(report): shows multi-line Coverage (value + indented continuation)", withFull.text.includes("<b>Coverage</b>: - brief section: done") && withFull.text.includes("  - parser + card: done"), withFull.text);
+    check("card(report): shows Files/Tests/Follow-ups", withFull.text.includes("<b>Files</b>: src/foo.ts") && withFull.text.includes("<b>Tests</b>:") && withFull.text.includes("<b>Follow-ups</b>: none"), withFull.text);
+    check("card(report): full report → NO missing-fields warning", !withFull.text.includes("Missing report fields"), withFull.text);
+
+    // A partial report: the missing fields get a ⚠️ line — SOFT, the buttons
+    // never depend on the report (Accept is still offered).
+    const partialReport = { status: "DONE", files: "src/foo.ts", missing: ["Coverage", "Tests", "Follow-ups"] as string[] };
+    const withPartial = renderCheckpointCard({ ...base, report: partialReport });
+    check("card(report partial): ⚠️ line lists the missing fields", withPartial.text.includes("Missing report fields:") && withPartial.text.includes("Coverage, Tests, Follow-ups"), withPartial.text);
+    const pkb = withPartial.keyboard.inline_keyboard.flat().map((b) => b.callback_data ?? "");
+    check("card(report partial): SOFT — Accept still offered", pkb.includes("spcacc:alpha:2"), JSON.stringify(pkb));
+
+    // An empty Follow-ups is PRESENT (the schema allows it) → not listed as missing.
+    const emptyFollowUps = { status: "DONE", coverage: "x", files: "a", tests: "t", followUps: "", missing: [] as string[] };
+    const withEmpty = renderCheckpointCard({ ...base, report: emptyFollowUps });
+    check("card(report): empty Follow-ups renders without a missing warning", withEmpty.text.includes("<b>Follow-ups</b>:") && !withEmpty.text.includes("Missing report fields"), withEmpty.text);
+
+    // No report (final message had no text) → no report section at all.
+    const noReportCard = renderCheckpointCard(base);
+    check("card(no report): no report section", !noReportCard.text.includes("Worker report:"), noReportCard.text);
+
+    // HTML safety: hostile report values are escaped.
+    const hostileReport = { status: "DONE", coverage: "<script>x</script>", missing: [] as string[] };
+    const withHostile = renderCheckpointCard({ ...base, report: hostileReport });
+    check("card(report html): no raw <script> leaks", !withHostile.text.includes("<script>") && withHostile.text.includes("&lt;script&gt;"), withHostile.text);
+
+    // i18n: the Vietnamese header.
+    const viReport = renderCheckpointCard({ ...base, lang: "vi", report: fullReport });
+    check("card(report vi): Vietnamese report header", viReport.text.includes("Report của worker:"), viReport.text);
+  }
+
   // ── Wiring: setStatus(terminal) on a spec worker posts the card ────────────
   // A real temp git repo: `main` with the spec, `spec/alpha` cut from it, a
   // marker commit, then a worker commit (so a worker commit exists).
@@ -277,6 +333,18 @@ Some design.
   const HEAD = git(repo, ["rev-parse", "--abbrev-ref", "HEAD"]);
   check("fixture: on spec/alpha", HEAD === "spec/alpha", HEAD);
 
+  // T2: the worker's final message with the full report block — the PRODUCTION
+  // shape of latestReply ({ text, time }), not a bare string.
+  const FULL_REPORT = [
+    "All sub-steps done.",
+    "",
+    "Status: DONE",
+    "Coverage: - brief: done, - parser + card: done",
+    "Files: src/foo.ts",
+    "Tests: npm run typecheck ok, npm run test:unit ok",
+    "Follow-ups: none",
+  ].join("\n");
+
   configureAudit({ path: join(tmp, "audit.jsonl") });
 
   function mkOrch(ocOverrides: any = {}) {
@@ -296,7 +364,9 @@ Some design.
           ],
         },
       ],
-      latestReply: async () => "worker tail summary",
+      // No final message by default (a turn that ended without text); the
+      // report cases override with the production { text, time } shape.
+      latestReply: async () => undefined,
       ...ocOverrides,
     };
     const st = new StateManager(join(tmp, `wire-${Math.random().toString(36).slice(2)}.json`));
@@ -313,8 +383,9 @@ Some design.
   }
 
   // (a) done + a worker commit + checks → card posted to specRun.conv, Accept offered.
+  // T2: the final message carries the full report block (production object shape).
   {
-    const { sent, st, orch } = mkOrch();
+    const { sent, st, orch } = mkOrch({ latestReply: async () => ({ text: FULL_REPORT, time: 1 }) });
     st.set("100:7", {
       worker: { name: "spec-alpha", status: "running", specRun: { spec: "alpha", branch: "spec/alpha", task: "S2", conv: "100", uid: 7 } },
       sessionID: "ses_1",
@@ -337,6 +408,12 @@ Some design.
     check("wire(done): spec_checkpoint audited", !!ev, JSON.stringify(lines.map((l) => l.action)));
     check("wire(done): outcome=fail (a check failed)", ev?.outcome === "fail" || ev?.meta?.outcome === "fail", JSON.stringify(ev));
     check("wire(done): meta carries spec/branch/worker", !!ev && ev.meta.spec === "alpha" && ev.meta.branch === "spec/alpha" && ev.meta.worker === "spec-alpha", JSON.stringify(ev?.meta));
+    // T2: the parsed report block is on the card (no missing-fields warning)
+    // and stored on the worker entry; lastResult comes from the OBJECT shape.
+    check("wire(done): card carries the report block (Status value)", (card?.h ?? "").includes("<b>Status</b>: DONE") && (card?.h ?? "").includes("Worker report:"), card?.h);
+    check("wire(done): full report → no missing-fields warning", !(card?.h ?? "").includes("Missing report fields"), card?.h);
+    check("wire(done): report stored on the worker entry", st.peek("100:7")?.worker?.report?.status === "DONE" && st.peek("100:7")?.worker?.report?.missing.length === 0, JSON.stringify(st.peek("100:7")?.worker?.report));
+    check("wire(done): audit lastResult set from { text } shape", typeof ev?.meta?.lastResult === "string" && ev.meta.lastResult.length > 0, JSON.stringify(ev?.meta?.lastResult));
   }
 
   // (b) done but the worker made NO commit (marker only) → NO Accept, "no commit".
@@ -399,7 +476,30 @@ Some design.
     (orch as any).setStatus("400:13", "done");
     const posted = await waitFor(() => sent.some((m) => m.c === "400"), 300);
     check("wire(non-spec): no card posted for a non-spec worker", !posted, JSON.stringify(sent.map((m) => m.c)));
+    // T2: a non-spec worker is unaffected — no report is parsed or stored.
+    check("wire(non-spec): no report parsed onto a non-spec worker", st.peek("400:13")?.worker?.report === undefined, JSON.stringify(st.peek("400:13")?.worker?.report));
   }
+
+  // (e) T2: the final message is missing report fields → the card carries a
+  // ⚠️ line listing them (SOFT: Accept is still offered when the run is green).
+  {
+    const { sent, st, orch } = mkOrch({ latestReply: async () => ({ text: "Status: DONE\nFiles: src/foo.ts", time: 1 }) });
+    st.set("500:15", {
+      worker: { name: "spec-alpha", status: "running", specRun: { spec: "alpha", branch: "spec/alpha", task: "S2", conv: "500", uid: 7 } },
+      sessionID: "ses_5",
+      directory: repo,
+    });
+    (orch as any).setStatus("500:15", "done");
+    const posted = await waitFor(() => sent.some((m) => m.c === "500"));
+    check("wire(partial report): a card is posted", posted, JSON.stringify(sent.map((m) => m.c)));
+    const card = sent.find((m) => m.c === "500");
+    check("wire(partial report): ⚠️ line lists exactly the missing fields", (card?.h ?? "").includes("Missing report fields: Coverage, Tests, Follow-ups"), card?.h);
+    check("wire(partial report): present fields still on the card", (card?.h ?? "").includes("<b>Status</b>: DONE") && (card?.h ?? "").includes("<b>Files</b>: src/foo.ts"), card?.h);
+    const kbs = (card?.o?.reply_markup?.inline_keyboard ?? []).flat().map((b: any) => b.callback_data ?? "");
+    check("wire(partial report): SOFT — Accept still offered", kbs.includes("spcacc:alpha:2"), JSON.stringify(kbs));
+    check("wire(partial report): partial report stored with its missing list", st.peek("500:15")?.worker?.report?.missing.join(",") === "Coverage,Tests,Follow-ups", JSON.stringify(st.peek("500:15")?.worker?.report));
+  }
+
 } finally {
   rmSync(tmp, { recursive: true, force: true });
 }

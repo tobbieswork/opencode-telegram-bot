@@ -16,6 +16,7 @@
  * conversation's directory + git root and re-parses the spec files with the
  * pure parser in src/spec.ts. Nothing is persisted.
  */
+import { execFile } from "node:child_process";
 import { readdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { Bot } from "../bot.js";
@@ -24,7 +25,7 @@ import type { ConvKey } from "../conv.js";
 import { chatOf } from "../conv.js";
 import type { Lang, SpecPrState, WorkerStatus } from "../state.js";
 import { MACHINE_STATE_KEY } from "../state.js";
-import { gitRoot, ensureSpecWorktree, resolveBaseBranch, runGit, specBranchName, specSlug, removeWorktree } from "../worktree.js";
+import { gitRoot, ensureSpecWorktree, linkWorktreeNodeModules, resolveBaseBranch, runGit, specBranchName, specSlug, removeWorktree } from "../worktree.js";
 import { ghApi, githubRepoSlug, ghPrReady } from "../github.js";
 import { parseSpec, initMarkers, markTask, type ParsedTask } from "../spec.js";
 import { buildTaskPrompt } from "../spec-prompt.js";
@@ -554,6 +555,40 @@ async function noRunMessage(bot: Bot, conv: ConvKey, lang: Lang, name: string): 
     .catch(() => {});
 }
 
+/** T1 (ocr-hardening) — one step of the host-side accept gate, run by the
+ * bot ITSELF in the worktree (cwd). Never re-derived from the worker's
+ * session history: a check that "ran green" only in the worker's shell is
+ * not a check the host can stand behind. */
+interface GateStep {
+  script: "typecheck" | "test:unit";
+  pass: boolean;
+  timedOut: boolean;
+  /** Last ~15 lines of the command output (for the red refusal message). */
+  tail: string;
+}
+
+const GATE_TIMEOUT_MS = 300_000;
+
+async function runGateStep(cwd: string, script: "typecheck" | "test:unit"): Promise<GateStep> {
+  const res = await new Promise<{ code: number; out: string; killed: boolean }>((resolve) => {
+    execFile("npm", ["run", script], { cwd, timeout: GATE_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 }, (err, so, se) => {
+      const e = err as (NodeJS.ErrnoException & { code?: number | string; killed?: boolean }) | null;
+      resolve({
+        code: e ? (typeof e.code === "number" ? e.code : 1) : 0,
+        out: [so, se].filter(Boolean).join("\n"),
+        killed: !!e?.killed,
+      });
+    });
+  });
+  const tail = res.out
+    .split("\n")
+    .map((l) => l.replace(/\s+$/, ""))
+    .slice(-15)
+    .join("\n")
+    .trim();
+  return { script, pass: res.code === 0, timedOut: res.killed, tail };
+}
+
 /**
  * S6 (S3.4/S4.4) — Accept. Re-derives everything from LIVE state (S6.4), never
  * trusting the card: the worker must still exist for this spec and be done;
@@ -670,6 +705,43 @@ async function specAccept(
       .catch(() => {});
     return { ok: false };
   }
+  // T1 (ocr-hardening): the host-side deterministic gate. S3.2 above
+  // re-classifies the worker's SELF-REPORTED shell history, but the merge
+  // decision does not rest on it: the host runs the canonical checks itself,
+  // in the worktree. Hard prerequisite — no bypass, no config flag. Red →
+  // refuse with the failing output's tail; no marker, no commit, no push, no
+  // audit entry, and the worker entry is untouched (so "Redo with note"
+  // still works).
+  await linkWorktreeNodeModules(dir!);
+  const gateTc = await runGateStep(dir!, "typecheck");
+  const gateUnit = gateTc.pass ? await runGateStep(dir!, "test:unit") : undefined;
+  if (!gateTc.pass || !gateUnit?.pass) {
+    const failed = !gateTc.pass ? gateTc : gateUnit!;
+    const detail = [
+      failed.timedOut
+        ? tr(lang, `⏱ hết ${GATE_TIMEOUT_MS / 60_000} phút chờ`, `⏱ timed out after ${GATE_TIMEOUT_MS / 60_000}m`)
+        : null,
+      failed.tail || tr(lang, "(không có output)", "(no output)"),
+    ]
+      .filter(Boolean)
+      .join("\n");
+    await bot.tg
+      .sendMessage(
+        conv,
+        errorLine(
+          lang,
+          raw(
+            tr(
+              lang,
+              `Không thể chấp nhận — gate host trong worktree ĐỎ ở bước <code>npm run ${failed.script}</code>:\n<pre>${esc(detail)}</pre>`,
+              `Can't accept — the host-side gate in the worktree is RED at <code>npm run ${failed.script}</code>:\n<pre>${esc(detail)}</pre>`,
+            ),
+          ),
+        ),
+      )
+      .catch(() => {});
+    return { ok: false };
+  }
   // S4.4: mark the task done in the WORKTREE's spec file, and commit that
   // single change on the spec branch. The user's checkout is never touched.
   writeFileSync(file, markTask(md, n, commit.hash));
@@ -680,7 +752,7 @@ async function specAccept(
     action: "spec_accept",
     chatId: conv,
     userId: uid != null ? String(uid) : undefined,
-    meta: { spec: name, task: task.id, branch: w.specRun!.branch, worker: w.name, commit: commit.hash, userId: uid ?? null },
+    meta: { spec: name, task: task.id, branch: w.specRun!.branch, worker: w.name, commit: commit.hash, userId: uid ?? null, gate: { typecheck: gateTc.pass ? "pass" : "fail", unit: gateUnit?.pass ? "pass" : "fail" } },
   });
   // Offer the next runnable task (same pattern as the "spec:" detail branch).
   const nextRes = parseSpec(readFileSync(file, "utf8"));

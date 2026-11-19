@@ -74,6 +74,9 @@ async function newPrFixture(): Promise<{ repo: string; origin: string; wt: { roo
   const repo = join(tmp, `repo-${seq}`);
   mkdirSync(join(repo, "docs", "sdd"), { recursive: true });
   writeFileSync(join(repo, "docs", "sdd", "gamma.md"), GAMMA);
+  // T1 (accept gate): Accept runs `npm run …` in the spec worktree — the
+  // fixture repo carries green canonical scripts so the gate passes.
+  writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "gamma-fixture", private: true, scripts: { typecheck: "node -e ''", "test:unit": "node -e ''" } }, null, 1));
   git(repo, ["init", "-q", "-b", "main"]);
   git(repo, ["config", "user.email", "test@test.local"]);
   git(repo, ["config", "user.name", "Test"]);

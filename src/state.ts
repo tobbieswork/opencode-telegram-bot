@@ -6,6 +6,7 @@ import type { StyleName } from "./style.js";
 import type { PrSnapshot } from "./pr-watch.js";
 import type { AgentId } from "./advisor/agents.js";
 import type { RotationHistoryEntry, FloorTrendEntry } from "./rotation-health.js";
+import type { WorkerReport } from "./spec-report.js";
 
 export interface ModelRef {
   id: string;
@@ -83,6 +84,12 @@ export interface WorkerInfo {
    * manager board's per-worker jump buttons). Set at spawn.
    */
   introMessageId?: number;
+  /**
+   * T2 (ocr-hardening): the worker's final-message report block, parsed by the
+   * host when a SPEC worker reaches a terminal status (postSpecCheckpoint).
+   * Optional → state.json backward compatible (old entries simply lack it).
+   */
+  report?: WorkerReport;
 }
 
 /** One entry of ChatState.specRunning: a spec task with a running worker. */

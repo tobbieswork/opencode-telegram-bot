@@ -31,9 +31,11 @@ Review a set of code changes in this repo and report findings backed by evidence
    - No argument, clean tree: `git diff origin/main...HEAD` (fallback `main...HEAD`); also `git log --oneline origin/main..HEAD`
    - Still empty: say "nothing to review" and stop. Do not invent findings.
 3. Ignore noise: lockfiles, `CHANGELOG.md` and version bumps (release-please generates them), `.DS_Store`, mode-only changes, generated or vendored files.
-4. Read the **full enclosing function** (and callers when behaviour depends on them) for every hunk. `src/bot.ts` (~150KB) and `src/orchestrator.ts` (~75KB) are too big to read whole: read by hunk plus surrounding function, and grep call sites. For a large diff, go file by file.
-5. **Verify** (seconds, safe): `npm run typecheck`, then `npm run test:unit`. Report the real result. If a check fails, say so with the relevant output. If you could not run it, say that. Do not claim it passed.
-6. Write the report (format below).
+4. **Coverage list (pre-step).** List every file in the change set, with the same range as step 2: `git diff --name-only <range>` (single commit: `git show --name-only --format= <sha>`; PR: fetch the head, then `git diff --name-only origin/main...<head>`; uncommitted work: also add the untracked files from `git status --short`). This list is the coverage universe: **every file is either reviewed or explicitly skipped with a reason** (a file ignored by step 3 is skipped with the reason `noise: <kind>`). No verdict without a complete coverage table.
+5. Read the **full enclosing function** (and callers when behaviour depends on them) for every hunk. `src/bot.ts` (~150KB) and `src/orchestrator.ts` (~75KB) are too big to read whole: read by hunk plus surrounding function, and grep call sites. For a large diff, go file by file.
+6. **Verify** (seconds, safe): `npm run typecheck`, then `npm run test:unit`. Report the real result. If a check fails, say so with the relevant output. If you could not run it, say that. Do not claim it passed.
+7. **Citation check (before you send).** Every finding cites `file:line`. Verify that each cited line exists in the diff: `git diff <range> -- <file> | grep -nF '<distinctive snippet of the cited line>'` (single commit: `git show <sha> -- <file>`). A citation that does not match is a finding about the review itself, not the code — re-find the correct line and fix the citation, or drop the finding. Never ship a citation you cannot point to in the diff.
+8. Write the report (format below).
 
 ## Evidence rules
 
@@ -107,9 +109,15 @@ Review a set of code changes in this repo and report findings backed by evidence
 
 ### Verdict
 Approve | Approve with comments | Request changes — <one line why>
+
+### Coverage
+| File | Status |
+|------|--------|
+| `src/stream.ts` | reviewed |
+| `package-lock.json` | skipped — noise: lockfile |
 ```
 
-Omit an empty severity section. If there are no findings, output Summary, Checked / not checked, and `Verdict: Approve`.
+Omit an empty severity section. If there are no findings, output Summary, Checked / not checked, and `Verdict: Approve`. The **Coverage** table is always last: one row per file from the coverage list (step 4), `reviewed` or `skipped — <reason>`.
 
 ## Severity
 

@@ -26,6 +26,7 @@
  * interpolated value is HTML-escaped (the card is sent as Telegram HTML).
  */
 import type { ParsedTask } from "./spec.js";
+import { FIELD_KEYS, REPORT_FIELDS, type WorkerReport } from "./spec-report.js";
 import { tr } from "./i18n.js";
 import type { Lang } from "./state.js";
 import { esc } from "./format.js";
@@ -179,6 +180,13 @@ export interface CheckpointCardArgs {
   checks: { ran: RanCheck[]; notRan: string[] };
   /** S3.7: the run ended in error (failed/stopped, or an errored shell item). */
   errored: boolean;
+  /**
+   * T2 (ocr-hardening): the worker's parsed final-message report block. The
+   * present fields render as a compact block; `missing` renders a ⚠️ line.
+   * SOFT by design — missing fields never affect the buttons (accept is
+   * governed by T1's gate). Omitted when the final message had no text.
+   */
+  report?: WorkerReport;
   /** S6.5: auto run-next is on for this run (the card says so; no auto button). */
   auto?: boolean;
   lang: Lang;
@@ -202,12 +210,13 @@ function buttonLabels(lang: Lang): { accept: string; auto: string; redo: string;
 /**
  * S3.1/S3.3/S3.7 — render the checkpoint card. Pure: every fact is passed in.
  * The card carries the task id, the commit (short hash + subject), the files
- * changed, the checks run with their result, the checks NOT run, and the
+ * changed, the worker's parsed report block (T2, with a ⚠️ line for missing
+ * fields), the checks run with their result, the checks NOT run, and the
  * task's checkpoint sentence. An errored run or a run without a commit says so
  * and offers Redo with note + Stop ONLY (no Accept).
  */
 export function renderCheckpointCard(args: CheckpointCardArgs): CheckpointCard {
-  const { task, workerName, branch, commit, files, checks, errored, auto, lang } = args;
+  const { task, workerName, branch, commit, files, checks, errored, auto, report, lang } = args;
   const spec = branch.startsWith("spec/") ? branch.slice("spec/".length) : branch;
   const canAccept = !errored && !!commit; // S3.7: never offer Accept otherwise
   const lines: string[] = [];
@@ -252,6 +261,26 @@ export function renderCheckpointCard(args: CheckpointCardArgs): CheckpointCard {
   if (files && files.length) {
     lines.push(tr(lang, "📄 Files đã thay đổi:", "📄 Files changed:"));
     for (const f of files) lines.push(`• <code>${esc(f)}</code>`);
+  }
+
+  // T2 (ocr-hardening) — the worker's parsed report block (compact). Present
+  // fields first (schema order, multi-line values indented), then a ⚠️ line
+  // for the missing fields — SOFT: the buttons never depend on it.
+  if (report) {
+    const present = REPORT_FIELDS.filter((f) => report[FIELD_KEYS[f]] !== undefined);
+    if (present.length) {
+      lines.push(tr(lang, "📋 Report của worker:", "📋 Worker report:"));
+      for (const f of present) {
+        const parts = (report[FIELD_KEYS[f]] ?? "").split("\n");
+        lines.push(`• <b>${f}</b>${parts[0] ? `: ${esc(parts[0])}` : ":"}`);
+        for (const l of parts.slice(1)) lines.push(`  ${esc(l)}`);
+      }
+    }
+    if (report.missing.length) {
+      lines.push(
+        warnLine(lang, `${tr(lang, "Thiếu field report:", "Missing report fields:")} ${report.missing.join(", ")}`),
+      );
+    }
   }
 
   // S3.1 — the checks that were run, with their result.
