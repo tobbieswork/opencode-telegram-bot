@@ -4,12 +4,13 @@
  * prompt for one parsed task from the spec's text. No I/O, no clock, no env.
  *
  * Risk "Prompt size" (spec, design): the prompt is capped at `cap`
- * characters (default PROMPT_CAP = 6000). The task part and the working
- * rules are NEVER cut. When the cap would be exceeded, items are cut in
- * priority order — requirement texts (from the end of the task's reqIds
- * backwards, then from the start), then the out-of-scope section, then the
- * verify order — and every cut is named in `cut` and in a trailing
- * "Truncated (size cap): …" line. `cut` is empty ⇔ nothing was truncated.
+ * characters (default PROMPT_CAP = 6000). The task part, the working rules
+ * and the Report schema (T2, ocr-hardening) are NEVER cut. When the cap
+ * would be exceeded, items are cut in priority order — requirement texts
+ * (from the end of the task's reqIds backwards, then from the start), then
+ * the out-of-scope section, then the verify order — and every cut is named
+ * in `cut` and in a trailing "Truncated (size cap): …" line. `cut` is empty
+ * ⇔ nothing was truncated.
  */
 import { findRequirement, type ParsedTask } from "./spec.js";
 
@@ -78,6 +79,9 @@ export function outOfScopeSection(md: string): string | undefined {
  *                   smoke last (only when asked).
  *   Working rules — S2.3: write tests before code; make exactly one
  *                   conventional commit for this task; stop after it.
+ *   Report        — T2 (ocr-hardening): the fixed Status / Coverage / Files
+ *                   / Tests / Follow-ups block the worker's final message
+ *                   must end with (the host parses it on completion).
  *
  * Size cap: see the file header. A cut requirement keeps its id in place
  * with a "(text cut)" marker; a cut section disappears entirely.
@@ -100,6 +104,19 @@ export function buildTaskPrompt(
     "- Write tests before code.",
     "- Make exactly one conventional commit for this task.",
     "- Stop after that commit — do not start the next task.",
+  ].join("\n");
+
+  // T2 (ocr-hardening): the fixed report schema — the worker's final message
+  // must END with this block; the host (postSpecCheckpoint) parses it. Part of
+  // the never-cut set, like the working rules: the schema is the point.
+  const reportPart = [
+    "## Report",
+    "End your final message with this exact block (the host parses it — keep the field names and colons verbatim):",
+    "Status: DONE | BLOCKED | FAILED",
+    "Coverage: each deliverable of the task, each marked done or skipped (+reason)",
+    "Files: the paths you changed",
+    "Tests: the verify commands you ran and their results",
+    "Follow-ups: anything left for a later task (may be empty)",
   ].join("\n");
 
   const verifyPart = [
@@ -131,6 +148,7 @@ export function buildTaskPrompt(
     if (oosText !== undefined && !cutOos) sections.push(`## Out of scope\n${oosText}`);
     if (!cutVerify) sections.push(verifyPart);
     sections.push(rulePart);
+    sections.push(reportPart);
     const body = sections.join("\n");
     return cut.length === 0 ? body : `${body}\n\nTruncated (size cap): ${cut.join(", ")}`;
   };

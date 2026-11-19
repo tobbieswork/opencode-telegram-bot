@@ -12,6 +12,7 @@ import { McpBridge, BridgeTool, makeRunScriptTool } from "./mcp-bridge.js";
 import { addWorktree, diffSummary, gitBoundary, gitRoot, gitStatusBrief, mergeWorktree, removeWorktree, resolveBaseBranch, runGit } from "./worktree.js";
 import { parseSpec, type ParsedTask } from "./spec.js";
 import { classifyShellItems, computeNotRan, renderCheckpointCard, checkpointOutcome, EXPECTED_CHECKS } from "./spec-checkpoint.js";
+import { parseWorkerReport, REPORT_FIELDS } from "./spec-report.js";
 import { managerSpecAccept, managerSpecAuto, managerSpecList, managerSpecRun } from "./commands/spec.js";
 import type { Bot } from "./bot.js";
 import { listDirs } from "./fsbrowser.js";
@@ -1273,8 +1274,20 @@ export class Orchestrator {
       task ?? { n: 0, id: taskId, title: "", marker: "todo", body: "", reqIds: [] };
 
     // ── S6.2: audit the checkpoint (who tapped, which task, the outcome) ──
-    const rawReply = sessionID ? await this.h.oc.latestReply(sessionID, 0, { lastTurn: true }).catch(() => undefined) : undefined;
+    // latestReply resolves { text, time } (a bare string only in test seams).
+    const reply = sessionID ? await this.h.oc.latestReply(sessionID, 0, { lastTurn: true }).catch(() => undefined) : undefined;
+    const rawReply = typeof reply === "string" ? reply : reply?.text;
     const lastResult = typeof rawReply === "string" ? trunc(rawReply, 500) : undefined;
+    // T2 (ocr-hardening): parse the fixed report block from the final message
+    // (spec workers only — a non-spec worker never reaches this method).
+    const report = typeof rawReply === "string" ? parseWorkerReport(rawReply) : undefined;
+    if (report !== undefined && report.missing.length > 0) {
+      warn(`worker report missing fields (${w.name}, ${spec} ${taskId}): ${report.missing.join(", ")}`);
+    }
+    if (report !== undefined && report.missing.length < REPORT_FIELDS.length) {
+      // Parsed fields ride on the worker entry (state.json backward compatible).
+      this.h.st.set(workerConv, { worker: { ...w, report } });
+    }
     const outcome = checkpointOutcome(commit, ran, errored);
     audit({
       action: "spec_checkpoint",
@@ -1295,6 +1308,7 @@ export class Orchestrator {
       checks: { ran, notRan },
       errored,
       auto: w.specRun.auto,
+      report,
       lang,
     });
     await this.h.sendHtml(conv, card.text, { reply_markup: card.keyboard }).catch((e) => {

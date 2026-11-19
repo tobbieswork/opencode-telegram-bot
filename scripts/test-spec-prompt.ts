@@ -28,6 +28,17 @@ const RULE_LINES = [
   "do not start the next task.",
 ];
 
+// T2 (ocr-hardening): the fixed report schema the brief must render (the
+// worker's final message must end with this block; the host parses it).
+const REPORT_LINES = [
+  "## Report",
+  "Status: DONE | BLOCKED | FAILED",
+  "Coverage:",
+  "Files:",
+  "Tests:",
+  "Follow-ups:",
+];
+
 // ── real spec: tasks n=3, n=4, n=5 ─────────────────────────────────────────
 const parsed = parseSpec(spec);
 if (!("tasks" in parsed)) {
@@ -65,6 +76,7 @@ for (const n of [3, 4, 5]) {
       prompt.includes("- npm run smoke last (only when asked)")
   );
   check(`n=${n}: working rules present`, RULE_LINES.every((l) => prompt.includes(l)));
+  check(`n=${n}: report schema rendered (all five fields)`, REPORT_LINES.every((l) => prompt.includes(l)), prompt);
 }
 
 // ── synthetic long spec: cap must hold, cuts named, fixed parts intact ─────
@@ -154,13 +166,14 @@ const missingReqSpec = `# Missing req spec
 // ── forced cap on a real task: full cut priority chain ──────────────────────
 {
   const t = byN(3); // reqIds [S2.2, S2.3]
-  const cap = 500;
+  const cap = 900;
   const { prompt, cut } = buildTaskPrompt(spec, t, cap);
   check("forced cap: within the given cap", prompt.length <= cap, `len ${prompt.length}`);
   check("forced cap: cut reqs from the end backwards first", cut[0] === "requirement S2.3 text" && cut[1] === "requirement S2.2 text", JSON.stringify(cut));
   check("forced cap: out-of-scope cut before verify order", cut[2] === "out-of-scope section" && (cut.length < 4 || cut[3] === "verify order section"), JSON.stringify(cut));
   check("forced cap: task body still fully present", prompt.includes(t.body));
   check("forced cap: working rules still fully present", RULE_LINES.every((l) => prompt.includes(l)));
+  check("forced cap: report schema still fully present (never cut)", REPORT_LINES.every((l) => prompt.includes(l)), prompt);
   check("forced cap: prompt ends with the truncation line", prompt.endsWith(`Truncated (size cap): ${cut.join(", ")}`));
 }
 
