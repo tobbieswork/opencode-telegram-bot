@@ -1,0 +1,9 @@
+# Oneshot nightly snapshot of the bot's durable data/ files into the private
+# backup repo, driven by backup-state.timer (03:30).
+# See deploy/backup-state.sh for what it backs up and how to restore.
+[Unit]
+Description=OpenCode bot state backup (nightly snapshot)
+
+[Service]
+Type=oneshot
+ExecStart=/home/phatnd12/fpt/opencode-telegram-bot/deploy/backup-state.sh
