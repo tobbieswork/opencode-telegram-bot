@@ -989,7 +989,7 @@ export class Orchestrator {
     if (s?.sessionID) await this.h.oc.prompt(s.sessionID, text).catch((e) => warn("redo note:", (e as Error)?.message));
     await this.h.tg.sendMessage(p.workerConv, text).catch(() => {});
     if (w) this.setStatus(p.workerConv, "running");
-    await this.h.sendHtml(conv, tr(lang, "📨 Đã gửi ghi chú cho worker.", "📨 Note sent to worker.")).catch(() => {});
+    await this.h.sendHtml(conv, tr(lang, `📨 Đã gửi ghi chú cho worker <b>${esc(w?.name ?? "?")}</b> — làm lại ${esc(p.task)}.`, `📨 Note sent to worker <b>${esc(w?.name ?? "?")}</b> — redoing ${esc(p.task)}.`)).catch(() => {});
     audit({
       action: "spec_redo",
       chatId: conv,

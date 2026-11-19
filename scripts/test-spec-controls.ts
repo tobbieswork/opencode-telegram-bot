@@ -467,6 +467,37 @@ try {
     check("redo(busy): refused with a wait message", sentBusy.map((m) => m.t).join("\n").includes("can't redo right now"), sentBusy.map((m) => m.t).join("\n"));
   }
 
+  // ── Redo cancel — the ✍️ prompt's cancel button (visible + cancel note mode) ──
+  for (const lang of ["vi", "en"] as const) {
+    const fx = await newRunFixture();
+    const { bot, sent, st } = mkBot(lang);
+    seedWorker(st, fx.wt.root, "done");
+    await handleSpecCallback(bot, cb("spcredo:gamma:2"), CONV);
+    // The note prompt is the message that carries the keyboard (the cancel button).
+    const prompt = sent.find((m) => m.c === CONV && m.kb);
+    const kbs = (prompt?.kb ?? []).flat().map((b: any) => b.callback_data);
+    check(`redo-cancel(${lang}): the note prompt offers a cancel button`, prompt && kbs.includes("spcredocancel:"), JSON.stringify(kbs));
+    check(`redo-cancel(${lang}): the prompt explains note mode + TTL`, prompt?.t?.includes(lang === "vi" ? "hết hạn sau 10 phút" : "expires in 10 min"), prompt?.t);
+    // Tap the cancel button: clears the pending note, confirms, audits.
+    const cancelSent = sent.length;
+    await handleSpecCallback(bot, cb("spcredocancel:"), CONV);
+    check(`redo-cancel(${lang}): tapping cancel clears the pending note`, (bot as any).orch.redoPending.size === 0);
+    check(`redo-cancel(${lang}): a cancel confirmation is sent`, sent.slice(cancelSent).some((m) => m.c === CONV && m.t && m.t.includes(lang === "vi" ? "Đã hủy" : "Cancelled")), JSON.stringify(sent.slice(cancelSent).map((m) => m.t)));
+    const ev = auditLines().find((e) => e.action === "spec_redo_cancel" && e.meta?.spec === "gamma");
+    check(`redo-cancel(${lang}): spec_redo_cancel audited {spec,task}`, !!ev && ev.meta.task === "S2", JSON.stringify(ev));
+    // After cancel, the next plain text is NOT consumed as a note.
+    const consumed = await (bot as any).orch.tryConsumeRedoNote(CONV, "a manager message");
+    check(`redo-cancel(${lang}): after cancel, plain text is NOT consumed`, consumed === false);
+  }
+  {
+    // Cancel with nothing pending is a harmless no-op (no crash, no audit).
+    const { bot, sent } = mkBot("en");
+    const cancelBefore = auditLines().filter((e) => e.action === "spec_redo_cancel").length;
+    await handleSpecCallback(bot, cb("spcredocancel:"), CONV);
+    check("redo-cancel(no-pending): no crash, just a confirmation", sent.some((m) => m.t && m.t.includes("Cancelled")), JSON.stringify(sent.map((m) => m.t)));
+    check("redo-cancel(no-pending): nothing audited", auditLines().filter((e) => e.action === "spec_redo_cancel").length === cancelBefore);
+  }
+
   // ── Stop — busy worker: stopped, worktree + uncommitted work kept ────────
   for (const lang of ["vi", "en"] as const) {
     const fx = await newRunFixture({ uncommitted: true });

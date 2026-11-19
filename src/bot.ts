@@ -97,7 +97,7 @@ import { cmdReboot, handleRebootCallback, cmdStatus, cmdContext, cmdUsage } from
 import { cmdSchedule, handleScheduleCallback, schCb } from "./commands/schedule.js";
 import { Advisor } from "./advisor/advisor.js";
 import { cmdHelp, cmdHealth, cmdNote, cmdRotation, handleNoteCallback, cmdLang, cmdStyle } from "./commands/meta.js";
-import { cmdSpec, handleSpecCallback, specAutoContinue, specCb, specrunCb, specblockedCb, specrunokCb, specrerunCb, speccancelCb, spcaccCb, spcautoCb, spcredoCb, spcstopCb, spcprCb, spcreadyCb, spccleanCb } from "./commands/spec.js";
+import { cmdSpec, handleSpecCallback, specAutoContinue, specCb, specrunCb, specblockedCb, specrunokCb, specrerunCb, speccancelCb, spcaccCb, spcautoCb, spcredoCb, spcredocancelCb, spcstopCb, spcprCb, spcreadyCb, spccleanCb } from "./commands/spec.js";
 import { trackPending as trackPendingFree, drainInflight as drainInflightFree, notifyQueuedNotRunning as notifyQueuedNotRunningFree, runPrompt as runPromptFree, runPromptTask as runPromptTaskFree, drainQueue as drainQueueFree, stopCurrent as stopCurrentFree } from "./commands/prompt-runner.js";
 import {
   clampWatchInterval,
@@ -3938,6 +3938,7 @@ export function registerBotCallbacks(): void {
   registerCallback(spcaccCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec accept)");
   registerCallback(spcautoCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec auto)");
   registerCallback(spcredoCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec redo)");
+  registerCallback(spcredocancelCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec redo cancel)");
   registerCallback(spcstopCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec stop)");
   registerCallback(spcprCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec PR flow)");
   registerCallback(spcreadyCb, (ctx, cb) => handleSpecCallback(ctx.bot, cb, ctx.conv, ctx.answer), "commands/spec.ts (spec PR ready)");
