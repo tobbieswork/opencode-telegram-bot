@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.48.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.48.0...opencode-telegram-bot-v1.48.1) (2026-11-19)
+
+
+### Bug Fixes
+
+* give the S8 smoke fixture no-op gate scripts (typecheck + test:unit) ([747ba31](https://github.com/tobbieswork/opencode-telegram-bot/commit/747ba316d80522a27882d58253f39e3c5ef771ba))
+* S8 smoke fixture needs no-op gate scripts for T1's accept gate ([2b3b9e5](https://github.com/tobbieswork/opencode-telegram-bot/commit/2b3b9e573d7ae35c28ecd6d66482bc6d1a4d2bdd))
+
 ## [1.48.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.47.2...opencode-telegram-bot-v1.48.0) (2026-11-19)
 
 
