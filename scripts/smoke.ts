@@ -616,6 +616,22 @@ async function main(): Promise<void> {
     // writing a `--global` identity into the user's real gitconfig.
     gitVoid(["config", "user.name", "smoke"]);
     gitVoid(["config", "user.email", "smoke@testws.local"]);
+    // T1 (ocr-hardening) accept gate: specAccept runs `npm run typecheck`
+    // + `npm run test:unit` INSIDE the spec worktree. The hermetic fixture
+    // repo has no real test infrastructure, so give it NO-OP scripts with
+    // those exact names — the gate runs for real (and green) without
+    // dragging a toolchain into /tmp/opencode/testws.
+    const pkgPath = join(ws, "package.json");
+    const PKG = JSON.stringify(
+      { name: "smoke-testws", private: true, scripts: { "typecheck": "exit 0", "test:unit": "exit 0" } },
+      null,
+      2,
+    ) + "\n";
+    writeFileSync(pkgPath, PKG);
+    gitVoid(["add", "--", "package.json"]);
+    if (gitO(["diff", "--cached", "--quiet", "--", "package.json"]) === undefined) {
+      gitVoid(["-c", "user.name=smoke", "-c", "user.email=smoke@testws.local", "commit", "-q", "-m", "smoke: S8 fixture package.json (no-op gate scripts)"]);
+    }
 
     // Runtime-written fixture (hermetic — never committed into this repo).
     // Modeled on docs/sdd/throwaway-e2e.md; parses with the strict S1 parser.
@@ -628,7 +644,7 @@ async function main(): Promise<void> {
       "- S1.1 The task shall create a file `hello.txt` at the repository root, containing exactly one line: `smoke ok` followed by a newline. No other changes.",
       "",
       "## 2. Tasks",
-      "1. [ ] **S1 Create hello.txt** (S1.1). Create the file as described in S1.1. This fixture repo has no test infrastructure (no `package.json`), so the tests-first working rule does not apply here — create the file directly. *Checkpoint: `cat hello.txt` prints `smoke ok`.*",
+      "1. [ ] **S1 Create hello.txt** (S1.1). Create the file as described in S1.1. This fixture repo's `package.json` scripts are no-ops (a stub for the host's accept gate), so the tests-first working rule does not apply here — create the file directly. *Checkpoint: `cat hello.txt` prints `smoke ok`.*",
       "",
       "## 3. Out of scope",
       "- Anything besides the single file `hello.txt`.",
