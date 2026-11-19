@@ -55,7 +55,7 @@ import { rebootCallback, rebootGoData } from "../src/uptime.js";
 import { watchCb } from "../src/watch.js";
 import { nsCb } from "../src/nextsteps.js";
 import { noteCb } from "../src/notes.js";
-import { specCb, specrunCb, specblockedCb, specrunokCb, spcaccCb, spcredoCb, spcstopCb, spcprCb, spcreadyCb, spccleanCb } from "../src/commands/spec.js";
+import { specCb, specrunCb, specblockedCb, specrunokCb, speccancelCb, specrerunCb, spcaccCb, spcredoCb, spcstopCb, spcprCb, spcreadyCb, spccleanCb } from "../src/commands/spec.js";
 import type { CallbackQuery } from "../src/telegram.js";
 
 let failures = 0;
@@ -471,17 +471,18 @@ async function main(): Promise<void> {
     _clearCallbacksForTest();
     registerBotCallbacks();
 
-    // C1.2 + migration complete: ALL 35 inventoried prefixes are registered,
+    // C1.2 + migration complete: ALL 38 inventoried prefixes are registered,
     // and no duplicate threw (registerCallback would throw on a dup, naming
     // both owners). This is the "old chain removed" precondition.
     const all = [
       "agent", "ap", "bs", "ch", "cmd", "cont", "fq", "kill", "mdl", "mode",
       "ns", "note", "nw", "pb", "perm", "prune", "q", "reboot", "rot", "sch",
-      "spec", "specblocked", "specrun", "specrunok", "spcacc", "spcauto", "spcclean",
-      "spcready", "spcredo", "spcpr", "spcstop", "use", "variant", "w", "ww", "wt",
+      "spec", "specblocked", "speccancel", "specrerun", "specrun", "specrunok",
+      "spcacc", "spcauto", "spcclean", "spcready", "spcredo", "spcpr", "spcstop",
+      "use", "variant", "w", "ww", "wt",
     ];
     const reg = registeredPrefixes();
-    check("T6: all 36 prefixes are registered (no duplicate threw)", reg.length === 36 && all.every((p) => reg.includes(p)), JSON.stringify(reg));
+    check("T6: all 38 prefixes are registered (no duplicate threw)", reg.length === 38 && all.every((p) => reg.includes(p)), JSON.stringify(reg));
     check("T6: spcauto is registered (S6.5 auto button routed)", reg.includes("spcauto"), JSON.stringify(reg));
 
     // The 14 newly-migrated prefixes have their owners recorded.
@@ -501,6 +502,8 @@ async function main(): Promise<void> {
     check("T6 specrun: round-trips", specrunCb.encode(["my-spec", "2"]) === "specrun:my-spec:2" && JSON.stringify(specrunCb.decode("my-spec:2")) === JSON.stringify(["my-spec", "2"]));
     check("T6 specblocked: round-trips", specblockedCb.encode(["my-spec", "1"]) === "specblocked:my-spec:1" && JSON.stringify(specblockedCb.decode("my-spec:1")) === JSON.stringify(["my-spec", "1"]));
     check("T6 specrunok: round-trips", specrunokCb.encode(["my-spec", "1"]) === "specrunok:my-spec:1" && JSON.stringify(specrunokCb.decode("my-spec:1")) === JSON.stringify(["my-spec", "1"]));
+    check("T6 speccancel: round-trips", speccancelCb.encode(["my-spec", "1"]) === "speccancel:my-spec:1" && JSON.stringify(speccancelCb.decode("my-spec:1")) === JSON.stringify(["my-spec", "1"]));
+    check("T6 specrerun: round-trips", specrerunCb.encode(["my-spec", "1"]) === "specrerun:my-spec:1" && JSON.stringify(specrerunCb.decode("my-spec:1")) === JSON.stringify(["my-spec", "1"]));
     check("T6 spcacc: round-trips", spcaccCb.encode(["my-spec", "4"]) === "spcacc:my-spec:4" && JSON.stringify(spcaccCb.decode("my-spec:4")) === JSON.stringify(["my-spec", "4"]));
     check("T6 spcredo: round-trips", spcredoCb.encode(["my-spec", "4"]) === "spcredo:my-spec:4" && JSON.stringify(spcredoCb.decode("my-spec:4")) === JSON.stringify(["my-spec", "4"]));
     check("T6 spcstop: round-trips", spcstopCb.encode(["my-spec", "4"]) === "spcstop:my-spec:4" && JSON.stringify(spcstopCb.decode("my-spec:4")) === JSON.stringify(["my-spec", "4"]));

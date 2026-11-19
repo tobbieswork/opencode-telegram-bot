@@ -90,6 +90,15 @@ export interface WorkerInfo {
    * Optional → state.json backward compatible (old entries simply lack it).
    */
   report?: WorkerReport;
+  /**
+   * T5 (ocr-hardening): the SHA256 fingerprint of this run's inputs (task
+   * brief text + worktree spec content + base branch + base HEAD commit),
+   * computed at spawn. The re-run guard compares a re-tap's fingerprint
+   * against the previous done entry's; a match posts the "Chạy lại / Hủy"
+   * card instead of re-spawning silently. Optional → state.json backward
+   * compatible (old entries simply lack it).
+   */
+  briefFp?: string;
 }
 
 /** One entry of ChatState.specRunning: a spec task with a running worker. */

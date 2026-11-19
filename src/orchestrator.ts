@@ -200,6 +200,8 @@ interface SpawnSpec {
    * `uid` (the tapping user's id, for the S6.2 `tapped_by` audit).
    */
   specRun?: { spec: string; branch: string; task: string; conv: ConvKey; uid: number };
+  /** T5 (ocr-hardening): input fingerprint (see WorkerInfo.briefFp), stored on the worker entry. */
+  briefFp?: string;
 }
 
 /** A Manager action waiting for the user's ✅ (confirm mode). */
@@ -819,6 +821,7 @@ export class Orchestrator {
       // off mode makes no git call at all (byte-identical).
       fpBase: this.h.cfg.nextSteps && writes ? await gitFingerprint(directory) : undefined,
       specRun: spec.specRun,
+      briefFp: spec.briefFp,
       createdAt: now,
       updatedAt: now,
     };
@@ -1562,7 +1565,7 @@ export class Orchestrator {
     // fingerprint baseline, so the predecessor's unreviewed changes stay
     // reviewable by the replacement.
     this.h.st.set(r.conv, {
-      worker: { ...this.h.st.get(r.conv).worker!, worktree: w.worktree, repoRoot: w.repoRoot, respawnedFrom: w.name, fpBase: w.fpBase, specRun: w.specRun },
+      worker: { ...this.h.st.get(r.conv).worker!, worktree: w.worktree, repoRoot: w.repoRoot, respawnedFrom: w.name, fpBase: w.fpBase, specRun: w.specRun, briefFp: w.briefFp },
     });
     if (w.specRun) {
       // The dead worker's terminal status already released the one-running-per-spec

@@ -17,15 +17,16 @@
  * pure parser in src/spec.ts. Nothing is persisted.
  */
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { Bot } from "../bot.js";
 import type { CallbackQuery } from "../telegram.js";
 import type { ConvKey } from "../conv.js";
 import { chatOf } from "../conv.js";
-import type { Lang, SpecPrState, WorkerStatus } from "../state.js";
+import type { Lang, SpecPrState, WorkerInfo, WorkerStatus } from "../state.js";
 import { MACHINE_STATE_KEY } from "../state.js";
-import { gitRoot, ensureSpecWorktree, linkWorktreeNodeModules, resolveBaseBranch, runGit, specBranchName, specSlug, removeWorktree } from "../worktree.js";
+import { gitRoot, ensureSpecWorktree, linkWorktreeNodeModules, resolveBaseBranch, runGit, specBranchName, specSlug, removeWorktree, type SpecWorktree } from "../worktree.js";
 import { ghApi, githubRepoSlug, ghPrReady } from "../github.js";
 import { parseSpec, initMarkers, markTask, type ParsedTask } from "../spec.js";
 import { buildTaskPrompt } from "../spec-prompt.js";
@@ -271,6 +272,36 @@ function parseRunRef(body: string): { name: string; n: number } | undefined {
 }
 
 /**
+ * T5 (ocr-hardening): the input fingerprint of a spec task run — SHA256 over
+ * the task brief text (the prompt), the worktree's spec file content, the
+ * base branch name and the base branch's HEAD commit, in that order. Any
+ * input that can't be resolved → undefined (fail-closed: without a provable
+ * fingerprint the re-run card never shows; the run proceeds as usual).
+ */
+export function briefFingerprint(prompt: string, specMd: string, baseBranch: string, baseCommit?: string): string | undefined {
+  if (!baseCommit) return undefined;
+  const h = createHash("sha256");
+  h.update(prompt, "utf8");
+  h.update("\n", "utf8");
+  h.update(specMd, "utf8");
+  h.update("\n", "utf8");
+  h.update(baseBranch, "utf8");
+  h.update("\n", "utf8");
+  h.update(baseCommit, "utf8");
+  return h.digest("hex");
+}
+
+/** The base branch's HEAD commit (full sha), or undefined when unresolvable. */
+async function baseHeadCommit(root: string, base: string): Promise<string | undefined> {
+  try {
+    const sha = (await runGit(root, ["rev-parse", "--verify", `${base}^{commit}`])).trim();
+    return sha || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Ensure the spec branch carries S4 task markers, committing them when absent
  * (S4.3). Committed with the repository's own author (git's configured
  * identity). Returns true when a marker commit was made.
@@ -305,6 +336,8 @@ async function specRunSpawn(
   runAnyway: boolean,
   /** S6.5: carry the auto run-next flag onto the new run (autoContinueFrom passes true). */
   auto?: boolean,
+  /** T5: the user explicitly tapped "Chạy lại" — bypass the re-run guard. */
+  force?: boolean,
 ): Promise<void> {
   const chat = chatOf(conv);
   const workerName = `spec-${name}`;
@@ -315,8 +348,9 @@ async function specRunSpawn(
   // session stay (the run's record); /prune collects the topic later. A BUSY
   // worker with this name is a real collision and stays a hard error.
   const prev = bot.st.findWorker(chat, workerName);
+  const prevWorker = prev?.[1].worker; // T5: the re-run guard reads it BEFORE the free below
   if (prev) {
-    const pst = prev[1].worker?.status;
+    const pst = prevWorker?.status;
     if (pst && !BUSY.includes(pst)) bot.st.set(prev[0], { worker: undefined });
   }
   // The worker name is spec-<name> and must fit the worker-name rules
@@ -347,29 +381,61 @@ async function specRunSpawn(
       .catch(() => {});
     return;
   }
+  // T5 (re-run guard): fingerprint the inputs BEFORE any spawn — the same
+  // worktree, spec content and prompt the run would use, plus the base branch
+  // and its HEAD commit. The worktree/marker steps are idempotent; a failure
+  // here fails the run exactly like a failed launch (claim rolled back).
+  let wt: SpecWorktree;
+  let prompt: string;
+  let fp: string | undefined;
+  try {
+    // S2.1: dedicated worktree on the stable spec branch, cut from main. The
+    // worker runs at the repo root (dir === root).
+    wt = await ensureSpecWorktree(root, root, name);
+    const relSpec = join("docs", "sdd", `${name}.md`);
+    // S4.3: the spec branch must carry task markers before the worker starts.
+    await ensureSpecMarkers(wt.root, relSpec, name);
+    // S2.1: build the prompt from the WORKTREE copy of the spec (so it carries
+    // the markers). Fall back to the main-checkout task if the worktree parse
+    // differs (shouldn't happen for a fresh branch).
+    const wtMd = readFileSync(join(wt.root, relSpec), "utf8");
+    const wtRes = parseSpec(wtMd);
+    const wtTask = "error" in wtRes ? undefined : wtRes.tasks.find((t) => t.n === n);
+    prompt = buildTaskPrompt(wtMd, wtTask ?? task).prompt;
+    fp = briefFingerprint(prompt, wtMd, wt.base, await baseHeadCommit(root, wt.base));
+  } catch (e) {
+    bot.orch.releaseSpecRun(chat, name, workerName);
+    await bot.tg
+      .sendMessage(conv, errorLine(lang, raw(tr(lang, `Không chạy được: ${esc((e as Error).message)}`, `Couldn't run it: ${esc((e as Error).message)}`))))
+      .catch(() => {});
+    return;
+  }
+  // T5 (re-run guard): a previously COMPLETED run of the SAME spec+task whose
+  // inputs fingerprint identically is not re-spawned silently — post the
+  // "Chạy lại / Hủy" card instead. Fail-closed: any doubt (no fingerprint,
+  // predecessor not done, different spec/task, fp mismatch) spawns normally.
+  if (
+    !force &&
+    prevWorker &&
+    prevWorker.status === "done" &&
+    prevWorker.specRun?.spec === name &&
+    prevWorker.specRun?.task === task.id &&
+    fp !== undefined &&
+    prevWorker.briefFp === fp
+  ) {
+    bot.orch.releaseSpecRun(chat, name, workerName);
+    await postReRunCard(bot, conv, lang, name, n, task, prevWorker, wt).catch((e) => warn("re-run card:", (e as Error).message));
+    return;
+  }
   // The launch calls the Telegram API (worker topic + intro message), so a
   // transient network blip can fail it (live incident 2026-11-16: a blip
-  // swallowed two Run taps AND the error notice). Retry the whole launch a few
-  // times, holding the claim — the worktree/marker steps are idempotent, so a
-  // retry is safe.
+  // swallowed two Run taps AND the error notice). Retry the launch a few times,
+  // holding the claim.
   const MAX_ATTEMPTS = 3;
   const RETRY_DELAY_MS = Number(process.env.SPEC_RUN_RETRY_DELAY_MS ?? 15000);
   let lastErr: unknown;
   for (let attempt = 1; ; attempt++) {
     try {
-      // S2.1: dedicated worktree on the stable spec branch, cut from main. The
-      // worker runs at the repo root (dir === root).
-      const wt = await ensureSpecWorktree(root, root, name);
-      const relSpec = join("docs", "sdd", `${name}.md`);
-      // S4.3: the spec branch must carry task markers before the worker starts.
-      await ensureSpecMarkers(wt.root, relSpec, name);
-      // S2.1: build the prompt from the WORKTREE copy of the spec (so it carries
-      // the markers). Fall back to the main-checkout task if the worktree parse
-      // differs (shouldn't happen for a fresh branch).
-      const wtMd = readFileSync(join(wt.root, relSpec), "utf8");
-      const wtRes = parseSpec(wtMd);
-      const wtTask = "error" in wtRes ? undefined : wtRes.tasks.find((t) => t.n === n);
-      const prompt = buildTaskPrompt(wtMd, wtTask ?? task).prompt;
       const r = await bot.orch.spawn(chat, {
         name: workerName,
         directory: wt.directory,
@@ -380,6 +446,8 @@ async function specRunSpawn(
         // spec/<name> branch); skip the orchestrator's worktree pass so it
         // doesn't wrap this in a second tg/ worktree (matters in "always" mode).
         isolate: false,
+        // T5: store the input fingerprint on the worker entry.
+        briefFp: fp,
         // S5: conv = the conv the Run tap happened in (where the checkpoint card
         // is posted); uid = the tapping user (S6.2 tapped_by).
         specRun: { spec: name, branch: wt.branch, task: task.id, conv, uid: uid ?? 0, ...(auto ? { auto: true } : {}) },
@@ -390,7 +458,7 @@ async function specRunSpawn(
         chatId: conv,
         userId: uid != null ? String(uid) : undefined,
         session: bot.st.peek(r.conv)?.sessionID,
-        meta: { spec: name, task: task.id, branch: wt.branch, worker: workerName, runAnyway },
+        meta: { spec: name, task: task.id, branch: wt.branch, worker: workerName, runAnyway, ...(force ? { reRun: true } : {}) },
       });
       await bot.tg
         .sendMessage(
@@ -529,6 +597,106 @@ async function specRunSecondTap(bot: Bot, cb: CallbackQuery, conv: ConvKey, name
     return;
   }
   await specRunSpawn(bot, conv, lang, uid, name, n, task, root, true);
+}
+
+/**
+ * T5 (re-run guard): the "Chạy lại" button of the re-run card — an explicit
+ * user choice to spawn anyway. Same gates as the first tap (allowlist, git
+ * root, spec lookup, done check); it then spawns with force=true, which
+ * bypasses the re-run guard and marks the spec_run audit with reRun: true.
+ * (No blocked-probe here: the button IS the explicit confirmation, exactly
+ * like "Run anyway" for the first tap.)
+ */
+async function specRunReTap(bot: Bot, cb: CallbackQuery, conv: ConvKey, name: string, n: number): Promise<void> {
+  const uid = cb.from?.id;
+  const lang = bot.userPrefs.getLang(uid ?? "");
+  if (!isUserAllowed(bot.cfg, uid)) {
+    await bot.tg.sendMessage(conv, "⛔ <b>Not authorized.</b> You are not on the allowlist.").catch(() => {});
+    return;
+  }
+  const dir = convDir(bot, conv);
+  const root = await gitRoot(dir);
+  if (!root) {
+    await bot.tg.sendMessage(conv, tr(lang, "📁 Repo không phải git — không chạy được spec.", "📁 Not a git repository — can't run the spec."));
+    return;
+  }
+  let md: string;
+  try {
+    md = readFileSync(join(root, "docs", "sdd", `${name}.md`), "utf8");
+  } catch {
+    await bot.tg.sendMessage(conv, errorLine(lang, raw(tr(lang, `Không tìm thấy spec ${esc(name)} trong docs/sdd.`, `Spec ${esc(name)} not found in docs/sdd.`))));
+    return;
+  }
+  const res = parseSpec(md);
+  if ("error" in res) {
+    await bot.tg.sendMessage(conv, errorLine(lang, tr(lang, "Spec này không phân tích được — không chạy được.", "This spec can't be parsed — it can't be run.")));
+    return;
+  }
+  const task = res.tasks.find((t) => t.n === n);
+  if (!task) {
+    await bot.tg.sendMessage(conv, errorLine(lang, tr(lang, "Không tìm thấy task này trong spec.", "Task not found in the spec.")));
+    return;
+  }
+  if (task.marker === "done") {
+    await bot.tg.sendMessage(conv, okLine(lang, raw(tr(lang, `Task ${esc(task.id)} đã xong — không chạy lại.`, `Task ${esc(task.id)} is already done — not re-running.`))));
+    return;
+  }
+  await specRunSpawn(bot, conv, lang, uid, name, n, task, root, false, false, true);
+}
+
+/**
+ * T5 (re-run guard): the card for a re-tap whose inputs fingerprint
+ * identically to a previously COMPLETED run of the same spec+task —
+ * "🔁 <Task> đã chạy thành công với cùng input (worker <name>, commit <hash>,
+ * <time>)" with two actions: **Chạy lại** (spawn anyway — specrerun) and
+ * **Hủy** (nothing happens — speccancel).
+ */
+async function postReRunCard(
+  bot: Bot,
+  conv: ConvKey,
+  lang: Lang,
+  name: string,
+  n: number,
+  task: ParsedTask,
+  prevWorker: WorkerInfo,
+  wt: SpecWorktree,
+): Promise<void> {
+  // The previous run's commit: the newest non-marker commit on the spec
+  // branch since the fork (same scoping as the checkpoint card).
+  let commit: string | undefined;
+  try {
+    const marker = `docs: add S4 task markers to ${name}.md`;
+    const raw = await runGit(wt.root, ["log", "--format=%h %s", `${wt.base}..HEAD`]);
+    for (const line of raw.split("\n").map((l) => l.trim()).filter(Boolean)) {
+      const sp = line.indexOf(" ");
+      if (sp < 1) continue;
+      if (line.slice(sp + 1).trim() === marker) continue;
+      commit = line.slice(0, sp);
+      break;
+    }
+  } catch {
+    /* best-effort: the card still shows without a commit */
+  }
+  const loc = lang === "en" ? "en-US" : "vi-VN";
+  const when = prevWorker.updatedAt > 0 ? new Date(prevWorker.updatedAt).toLocaleString(loc, { dateStyle: "short", timeStyle: "short" }) : undefined;
+  const parts: string[] = [`worker <code>${esc(prevWorker.name)}</code>`];
+  if (commit) parts.push(`commit <code>${esc(commit)}</code>`);
+  if (when) parts.push(esc(when));
+  const text = tr(
+    lang,
+    `🔁 Task <b>${esc(task.id)}</b> đã chạy thành công với cùng input (${parts.join(", ")})`,
+    `🔁 Task <b>${esc(task.id)}</b> already ran successfully with identical inputs (${parts.join(", ")})`,
+  );
+  await bot.sendHtml(conv, text, {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: tr(lang, "🔁 Chạy lại", "🔁 Re-run"), callback_data: `specrerun:${name}:${n}` },
+          { text: tr(lang, "Hủy", "Cancel"), callback_data: `speccancel:${name}:${n}` },
+        ],
+      ],
+    },
+  });
 }
 
 // ── S6 (checkpoint-card controls): Accept / Redo with note / Stop ─────────────
@@ -1287,6 +1455,26 @@ export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: Conv
     await specRunSecondTap(bot, cb, conv, ref.name, ref.n);
     return;
   }
+  if (data.startsWith("specrerun:")) {
+    const ref = parseRunRef(data.slice("specrerun:".length));
+    if (!ref) {
+      await bot.tg.sendMessage(conv, errorLine(lang, tr(lang, "Không rõ task nào.", "Unknown task.")));
+      return;
+    }
+    await specRunReTap(bot, cb, conv, ref.name, ref.n);
+    return;
+  }
+  if (data.startsWith("speccancel:")) {
+    const ref = parseRunRef(data.slice("speccancel:".length));
+    if (!ref) {
+      await bot.tg.sendMessage(conv, errorLine(lang, tr(lang, "Không rõ task nào.", "Unknown task.")));
+      return;
+    }
+    await bot.tg
+      .sendMessage(conv, okLine(lang, raw(tr(lang, "Đã hủy — không chạy lại.", "Cancelled — not re-running."))))
+      .catch(() => {});
+    return;
+  }
   if (data.startsWith("specblocked:")) {
     const ref = parseRunRef(data.slice("specblocked:".length));
     if (!ref) {
@@ -1566,6 +1754,8 @@ export const spccleanCb = oneArg("spcclean");
 export const specrunCb = fields("specrun", 2);
 export const specblockedCb = fields("specblocked", 2);
 export const specrunokCb = fields("specrunok", 2);
+export const specrerunCb = fields("specrerun", 2);
+export const speccancelCb = fields("speccancel", 2);
 export const spcaccCb = fields("spcacc", 2);
 export const spcredoCb = fields("spcredo", 2);
 export const spcstopCb = fields("spcstop", 2);
