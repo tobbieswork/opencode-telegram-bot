@@ -39,7 +39,7 @@ import { audit } from "../audit.js";
 import { isUserAllowed } from "../schedule.js";
 import { tr } from "../i18n.js";
 import { esc, trunc } from "../format.js";
-import { oneArg, fields } from "../callbacks.js";
+import { oneArg, fields, simple } from "../callbacks.js";
 
 /** One spec in docs/sdd/: parsed (with progress) or unparseable (S1.4). */
 type SpecEntry =
@@ -1166,8 +1166,17 @@ async function specRedo(
     return;
   }
   bot.orch.redoPending.set(conv, { spec: name, task: w.specRun!.task, workerConv: found[0], uid, since: Date.now() });
-  await bot.tg
-    .sendMessage(conv, tr(lang, `✍️ Gửi một ghi chú cho worker ${esc(w.name)} — nó sẽ làm lại task ${esc(w.specRun!.task)} kèm ghi chú đó.`, `✍️ Send a note for worker ${esc(w.name)} — it will redo task ${esc(w.specRun!.task)} with it.`))
+  const noteText = tr(
+    lang,
+    `✍️ Gửi một ghi chú cho worker <b>${esc(w.name)}</b> — nó sẽ làm lại task ${esc(w.specRun!.task)} kèm ghi chú đó.\nTin chữ thường kế tiếp của bạn sẽ là ghi chú. Nhấn <b>Hủy ghi chú</b> nếu đổi ý. (hết hạn sau 10 phút)`,
+    `✍️ Send a note for worker <b>${esc(w.name)}</b> — it will redo task ${esc(w.specRun!.task)} with it.\nYour next plain-text message will be the note. Tap <b>Cancel note</b> to abort. (expires in 10 min)`,
+  );
+  await bot
+    .sendHtml(conv, noteText, {
+      reply_markup: {
+        inline_keyboard: [[{ text: tr(lang, "↩️ Hủy ghi chú", "↩️ Cancel note"), callback_data: spcredocancelCb.encode(undefined) }]],
+      },
+    })
     .catch(() => {});
 }
 
@@ -1511,6 +1520,16 @@ export async function handleSpecCallback(bot: Bot, cb: CallbackQuery, conv: Conv
     await specAuto(bot, conv, lang, cb.from?.id, ref.name, ref.n);
     return;
   }
+  if (data.startsWith("spcredocancel:")) {
+    const pending = bot.orch.redoPending.get(conv);
+    bot.orch.redoPending.delete(conv);
+    await bot.tg
+      .sendMessage(conv, okLine(lang, raw(tr(lang, "↩️ Đã hủy — không gửi ghi chú nào.", "↩️ Cancelled — no note sent."))))
+      .catch(() => {});
+    if (pending)
+      audit({ action: "spec_redo_cancel", chatId: conv, userId: cb.from?.id != null ? String(cb.from.id) : undefined, meta: { spec: pending.spec, task: pending.task } });
+    return;
+  }
   if (data.startsWith("spcredo:")) {
     const ref = parseRunRef(data.slice("spcredo:".length));
     if (!ref) {
@@ -1758,5 +1777,6 @@ export const specrerunCb = fields("specrerun", 2);
 export const speccancelCb = fields("speccancel", 2);
 export const spcaccCb = fields("spcacc", 2);
 export const spcredoCb = fields("spcredo", 2);
+export const spcredocancelCb = simple("spcredocancel");
 export const spcstopCb = fields("spcstop", 2);
 export const spcautoCb = fields("spcauto", 2);
