@@ -57,6 +57,9 @@ function mkRepo(): string {
   mkdirSync(join(repo, "docs", "sdd"), { recursive: true });
   writeFileSync(join(repo, "docs", "sdd", "alpha.md"), ALPHA);
   writeFileSync(join(repo, "docs", "sdd", "unmarked.md"), UNMARKED);
+  // T1 (accept gate): the auto-continue Accept runs `npm run …` in the spec
+  // worktree — the fixture repo carries green canonical scripts.
+  writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "alpha-fixture", private: true, scripts: { typecheck: "node -e ''", "test:unit": "node -e ''" } }, null, 1));
   git(repo, ["init", "-q"]);
   git(repo, ["config", "user.email", "test@test.local"]);
   git(repo, ["config", "user.name", "Test"]);

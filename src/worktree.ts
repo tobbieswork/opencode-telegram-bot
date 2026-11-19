@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { basename, dirname, join, relative } from "node:path";
-import { existsSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
+import { existsSync, lstatSync, symlinkSync, unlinkSync } from "node:fs";
 import { tr } from "./i18n.js";
 import type { Lang } from "./state.js";
 
@@ -106,6 +106,38 @@ export async function ensureSpecWorktree(repoRoot: string, dir: string, specName
     }
   }
   return { directory: join(root, relative(repoRoot, dir)), root, branch, base };
+}
+
+/**
+ * T1 accept gate (ocr-hardening): the gate runs `npm run …` INSIDE the
+ * worktree, but a worktree never inherits node_modules (it is gitignored,
+ * not committed). Best-effort link the MAIN checkout's node_modules into
+ * the worktree root when it is missing. If the main checkout has none
+ * either, do nothing — the gate runs anyway and fails closed (a red
+ * refusal with the command's output tail).
+ */
+export async function linkWorktreeNodeModules(wtRoot: string): Promise<void> {
+  const nm = join(wtRoot, "node_modules");
+  let replaceBrokenLink = false;
+  try {
+    const st = lstatSync(nm);
+    if (st.isSymbolicLink() && !existsSync(nm)) replaceBrokenLink = true;
+    else return;
+  } catch {
+    /* missing — link it below */
+  }
+  const commonDir = (await git(wtRoot, ["rev-parse", "--git-common-dir"]).catch(() => "")).trim();
+  if (!commonDir) return;
+  const gitDir = isAbsolute(commonDir) ? commonDir : join(wtRoot, commonDir);
+  const mainRoot = basename(gitDir) === ".git" ? dirname(gitDir) : gitDir;
+  const src = join(mainRoot, "node_modules");
+  if (!existsSync(src)) return;
+  try {
+    if (replaceBrokenLink) unlinkSync(nm);
+    symlinkSync(src, nm);
+  } catch {
+    /* raced by a concurrent accept — the link existing is what we want */
+  }
 }
 
 export interface Worktree {

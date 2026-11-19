@@ -77,7 +77,14 @@ let seq = 0;
 
 /** A fresh S4-style run: repo on main, spec worktree on spec/gamma, the
  * marker commit (exact S4 subject) and — by default — a worker commit. */
-async function newRunFixture(opts: { workerCommit?: boolean; uncommitted?: boolean } = {}): Promise<{
+/** T1 gate fixture: 30 padding lines + one error line, exit 1 — stands in
+ * for a red `tsc`/test run; the refusal tail must end on that error line. */
+const GATE_RED_JS = `for (let i = 1; i <= 30; i++) console.log('src/broken.ts:1:' + i + ' padding line ' + i + ' to exercise the 15-line tail');
+console.error("src/broken.ts(1,5): error TS2304: Cannot find name 'brokenName'.");
+process.exit(1);
+`;
+
+async function newRunFixture(opts: { workerCommit?: boolean; uncommitted?: boolean; red?: "typecheck" | "unit" } = {}): Promise<{
   repo: string;
   wt: { root: string; directory: string; branch: string; base: string };
   workerHash?: string;
@@ -86,6 +93,17 @@ async function newRunFixture(opts: { workerCommit?: boolean; uncommitted?: boole
   const repo = join(tmp, `gamma-${seq}`);
   mkdirSync(join(repo, "docs", "sdd"), { recursive: true });
   writeFileSync(join(repo, "docs", "sdd", "gamma.md"), GAMMA);
+  // T1 (accept gate): the gate runs `npm run …` in the worktree cut from this
+  // repo, so the repo carries the canonical scripts. Green by default;
+  // `red` makes that one step fail with a distinctive output (see above).
+  const gateScripts =
+    opts.red === "typecheck"
+      ? { typecheck: 'node gate-red.js', 'test:unit': "node -e ''" }
+      : opts.red === "unit"
+        ? { typecheck: "node -e ''", 'test:unit': 'node gate-red.js' }
+        : { typecheck: "node -e ''", 'test:unit': "node -e ''" };
+  writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "gamma-fixture", private: true, scripts: gateScripts }, null, 1));
+  if (opts.red) writeFileSync(join(repo, "gate-red.js"), GATE_RED_JS);
   git(repo, ["init", "-q", "-b", "main"]);
   git(repo, ["config", "user.email", "test@test.local"]);
   git(repo, ["config", "user.name", "Test"]);
@@ -236,6 +254,7 @@ try {
     const ev = auditLines().find((e) => e.action === "spec_accept" && (e as any).meta?.commit === fx.workerHash);
     check(`accept(${lang}): spec_accept audited`, !!ev, JSON.stringify(auditLines().map((l) => l.action)));
     check(`accept(${lang}): meta {spec,task,branch,worker,commit,userId}`, !!ev && ev.meta.spec === "gamma" && ev.meta.task === "S2" && ev.meta.branch === "spec/gamma" && ev.meta.worker === "spec-gamma" && ev.meta.commit === fx.workerHash && ev.meta.userId === 7, JSON.stringify(ev?.meta));
+    check(`accept(${lang}): audit meta carries the host gate result`, !!ev && ev.meta.gate?.typecheck === "pass" && ev.meta.gate?.unit === "pass", JSON.stringify(ev?.meta));
   }
 
   // ── Accept — refusals ─────────────────────────────────────────────────────
@@ -350,6 +369,45 @@ try {
     seedWorker(botVi.st, fx.wt.root, "done", { createdAt: commitTs * 1000 + 60_000, updatedAt: commitTs * 1000 + 60_000 });
     await handleSpecCallback(botVi, cb("spcacc:gamma:2"), CONV);
     check("accept-refuse(stale-commit): vi message", sentVi.map((m) => m.t).join("\n").includes("cũ hơn thời điểm run bắt đầu"), sentVi.map((m) => m.t).join("\n"));
+  }
+  {
+    // (j) T1 host gate red — the typecheck step fails in the WORKTREE:
+    // refuse with the failing output's tail; no marker, no commit, no audit
+    // entry, worker entry untouched (so "Redo with note" still works).
+    const fx = await newRunFixture({ red: "typecheck" });
+    const { bot, sent, st } = mkBot("en");
+    seedWorker(st, fx.wt.root, "done");
+    const before = git(fx.wt.root, ["rev-list", "--count", "HEAD"]);
+    const accBefore = auditLines().filter((e) => e.action === "spec_accept").length;
+    await handleSpecCallback(bot, cb("spcacc:gamma:2"), CONV);
+    const all = sent.map((m) => m.t).join("\n");
+    check("accept-refuse(gate-tc-red): no commit made", git(fx.wt.root, ["rev-list", "--count", "HEAD"]) === before);
+    check("accept-refuse(gate-tc-red): en message names the red step", all.includes("npm run typecheck") && all.includes("RED"), all);
+    check("accept-refuse(gate-tc-red): tail ends with the LAST error line", all.includes("error TS2304: Cannot find name"), all);
+    check("accept-refuse(gate-tc-red): tail is the last ~15 lines only", all.includes("padding line 30") && !all.includes("padding line 1 "), all);
+    check("accept-refuse(gate-tc-red): no marker written", !readFileSync(join(fx.wt.root, "docs", "sdd", "gamma.md"), "utf8").includes("2. [x]"));
+    check("accept-refuse(gate-tc-red): no spec_accept audit", auditLines().filter((e) => e.action === "spec_accept").length === accBefore, JSON.stringify(auditLines().map((l) => l.action)));
+    check("accept-refuse(gate-tc-red): worker entry untouched (redo still works)", st.peek(WORKER_CONV)?.worker?.status === "done", String(st.peek(WORKER_CONV)?.worker?.status));
+    const { bot: botVi, sent: sentVi } = mkBot("vi");
+    seedWorker(botVi.st, fx.wt.root, "done");
+    await handleSpecCallback(botVi, cb("spcacc:gamma:2"), CONV);
+    check("accept-refuse(gate-tc-red): vi message", sentVi.map((m) => m.t).join("\n").includes("gate host"), sentVi.map((m) => m.t).join("\n"));
+  }
+  {
+    // (k) T1 host gate red — typecheck green but the unit step fails: same
+    // refusal semantics, message names test:unit.
+    const fx = await newRunFixture({ red: "unit" });
+    const { bot, sent } = mkBot("en");
+    seedWorker(bot.st, fx.wt.root, "done");
+    const before = git(fx.wt.root, ["rev-list", "--count", "HEAD"]);
+    const accBefore = auditLines().filter((e) => e.action === "spec_accept").length;
+    await handleSpecCallback(bot, cb("spcacc:gamma:2"), CONV);
+    const all = sent.map((m) => m.t).join("\n");
+    check("accept-refuse(gate-unit-red): no commit made", git(fx.wt.root, ["rev-list", "--count", "HEAD"]) === before);
+    check("accept-refuse(gate-unit-red): en message names the red step", all.includes("npm run test:unit"), all);
+    check("accept-refuse(gate-unit-red): tail ends with the LAST error line", all.includes("error TS2304: Cannot find name"), all);
+    check("accept-refuse(gate-unit-red): no marker written", !readFileSync(join(fx.wt.root, "docs", "sdd", "gamma.md"), "utf8").includes("2. [x]"));
+    check("accept-refuse(gate-unit-red): no spec_accept audit", auditLines().filter((e) => e.action === "spec_accept").length === accBefore, JSON.stringify(auditLines().map((l) => l.action)));
   }
 
   // ── Redo with note — the pending-note flow (both languages) ──────────────
