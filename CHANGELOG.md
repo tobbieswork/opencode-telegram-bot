@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.51.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.50.0...opencode-telegram-bot-v1.51.0) (2026-11-19)
+
+
+### Features
+
+* cancel button + clearer prompt for spec redo-note mode ([c055ce9](https://github.com/tobbieswork/opencode-telegram-bot/commit/c055ce9400ecaf03c4138fe6a3768392bf5c93dd))
+* cancel button + clearer prompt for spec redo-note mode ([4097ab4](https://github.com/tobbieswork/opencode-telegram-bot/commit/4097ab444ddeedde40461792ebad433e7dd21469))
+
 ## [1.50.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.49.0...opencode-telegram-bot-v1.50.0) (2026-11-19)
 
 
