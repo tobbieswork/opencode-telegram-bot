@@ -121,7 +121,7 @@ A committed, self-contained backup path plus a systemd user timer (mirrors the e
 
 ## 5. Tasks
 
-1. [ ] **T1 State backup.** `deploy/backup-state.sh` + `deploy/backup-state.{service,timer}`: nightly snapshot of durable `data/` files to a private GitHub repo, 7-generation pruning, documented restore. *Checkpoint: one real run — snapshot present in the remote repo, extraction yields a parseable `state.json`, ≤7 generations kept. (Owner confirms the destination first.)*
+1. [x] (bc32011) **T1 State backup.** `deploy/backup-state.sh` + `deploy/backup-state.{service,timer}`: nightly snapshot of durable `data/` files to a private GitHub repo, 7-generation pruning, documented restore. *Checkpoint: one real run — snapshot present in the remote repo, extraction yields a parseable `state.json`, ≤7 generations kept. (Owner confirms the destination first.)*
 2. [ ] **T2 Audit archive.** Dated `audit.log` archive before rotation in `src/audit.ts`, same-day collision-safe, 14-file retention. *Checkpoint: tests green + a forced rotation produces a dated archive with correct content.*
 3. [ ] **T3 Health disk probe.** `disk` probe in `src/health-probes.ts`: sizes of `~/.opencode` + `data/`, free-space warn threshold, optional SMART, no sudo. *Checkpoint: tests green + a live `/health` shows the disk line.*
 4. [ ] **T4 Data-flow doc.** `docs/data-flow.md` one-pager: LLM/endpoint path, redaction scope + the prompt gap, advisor path, `[TODO]` owner fields. *Checkpoint: doc reviewed + owner fills the two `[TODO]`s.*
