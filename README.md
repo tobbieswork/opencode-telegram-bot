@@ -351,6 +351,7 @@ All settings are environment variables (see `.env.example`).
 | `OPENCODE_TG_UPTIME_THRESHOLD_DAYS` | | `30` | Uptime in days before the reboot nudge |
 | `OPENCODE_TG_UPTIME_REMIND_INTERVAL_DAYS` | | `3` | Days before the nudge repeats after a snooze |
 | `OPENCODE_TG_REBOOT_DELAY_MS` | | `15000` | Delay between confirming `/reboot` and the reboot, so the reply gets delivered (min 1000) |
+| `OPENCODE_TG_DISK_WARN_FREE_GB` | | `10` | `/health` disk line: warn when the filesystem free space drops below this many GiB |
 | `OPENCODE_TG_DNS_HEAL` | | on | `0` = turn off the stale-VPN-DNS self-heal (restarts `systemd-resolved` after repeated fetch failures) |
 | `OPENCODE_TG_DNS_STALE_IP` | | — | The VPN DNS server IP that lingers after an unclean VPN stop (empty keeps the heal off) |
 | `OPENCODE_TG_DNS_HEAL_MIN_FAILURES` | | `3` | Consecutive network failures before a heal may run |

@@ -2,7 +2,7 @@ import { dirname, join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { writeFile, unlink } from "node:fs/promises";
 import { execFile } from "node:child_process";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { Telegram, Update, CallbackQuery, Message, MessageGenerationStopped, MessageReactionUpdated } from "./telegram.js";
 import { OpenCodeCtl, assistantText, ModelInfo } from "./opencode.js";
 import { StateManager, ChatState, MsgPurpose, MACHINE_STATE_KEY, UserPrefsStore, Lang } from "./state.js";
@@ -76,7 +76,7 @@ import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbro
 import { log, warn, error } from "./logger.js";
 import { audit } from "./audit.js";
 import { advisorHealth } from "./advisor/advisor-client.js";
-import type { HealthSources } from "./health-probes.js";
+import { dirSize, diskDevice, freeSpace, smartHealth, type HealthSources } from "./health-probes.js";
 import { CARRYOVER_KEY } from "./shared.js";
 import type { Btn, Keyboard } from "./shared.js";
 import { cmdAgents, cmdAgent, handleAgentCallback, agentCb } from "./commands/agents.js";
@@ -713,6 +713,21 @@ export class Bot {
         minFailures: this.cfg.dnsHealMinFailures,
         healCount: dns.healCount,
         lastPollOkAt: dns.lastPollOkAt,
+      },
+      disk: {
+        warnFreeBytes: this.cfg.diskWarnFreeBytes,
+        facts: async () => {
+          const opencodeDir = join(homedir(), ".opencode");
+          const dataDir = dirname(this.cfg.stateFile);
+          const [opencodeBytes, dataBytes, freeBytes] = await Promise.all([
+            dirSize(opencodeDir),
+            dirSize(dataDir),
+            freeSpace(dataDir),
+          ]);
+          const device = diskDevice(dataDir);
+          const smart = device ? await smartHealth(device) : null;
+          return { opencodeBytes, dataBytes, freeBytes, smart };
+        },
       },
     };
   }
