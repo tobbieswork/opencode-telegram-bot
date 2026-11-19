@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.50.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.49.0...opencode-telegram-bot-v1.50.0) (2026-11-19)
+
+
+### Features
+
+* add disk probe to /health ([0eaccac](https://github.com/tobbieswork/opencode-telegram-bot/commit/0eaccacb41260b65a1ad59b9dbf0d08d25e681d7))
+* nightly state backup to private repo with 7-generation pruning ([bc32011](https://github.com/tobbieswork/opencode-telegram-bot/commit/bc32011c8b68458bcbb473e5aa72e5caf825b27b))
+* rotate audit log to dated archives with 14-file retention ([9f265ea](https://github.com/tobbieswork/opencode-telegram-bot/commit/9f265ea1800595222ac29f98a74a9919e6080355))
+* scale hardening T1-T4 (state backup, audit archive, health disk probe, data-flow doc) ([96c3c0f](https://github.com/tobbieswork/opencode-telegram-bot/commit/96c3c0ff9889111d74d2753545a3140e5da8619e))
+
 ## [1.49.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.48.1...opencode-telegram-bot-v1.49.0) (2026-11-19)
 
 
