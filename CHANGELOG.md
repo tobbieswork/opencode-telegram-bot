@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.48.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.47.2...opencode-telegram-bot-v1.48.0) (2026-11-19)
+
+
+### Features
+
+* fixed spec-worker report schema (brief + host parse + checkpoint card) ([439e36c](https://github.com/tobbieswork/opencode-telegram-bot/commit/439e36c7d301eb1aa48081f176cd4e9285478e00))
+* host-side accept gate (typecheck + test:unit) in specAccept ([aa2dfb1](https://github.com/tobbieswork/opencode-telegram-bot/commit/aa2dfb174661b982cbad52e9ddcf0cce9a0952f5))
+* ocr-hardening T1-T5 (accept gate, report schema, tool discipline, review guardrail, re-run guard) ([e1a7d11](https://github.com/tobbieswork/opencode-telegram-bot/commit/e1a7d11afc943946ce101db693fae1ae70856743))
+* review-code skill coverage guardrail + citation check ([f298704](https://github.com/tobbieswork/opencode-telegram-bot/commit/f298704e2683334fc31d7199e8e165e14423e75d))
+* tool-discipline budget lines in the spec worker brief ([6e252b0](https://github.com/tobbieswork/opencode-telegram-bot/commit/6e252b0a2958f79f10c162f502fcd0a04073a81e))
+
 ## [1.47.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.47.1...opencode-telegram-bot-v1.47.2) (2026-11-19)
 
 
