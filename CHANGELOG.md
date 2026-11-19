@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.47.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.47.1...opencode-telegram-bot-v1.47.2) (2026-11-19)
+
+
+### Bug Fixes
+
+* register the spcauto: callback (Auto-run next button was dead) ([6f03d4a](https://github.com/tobbieswork/opencode-telegram-bot/commit/6f03d4a5c1df9ce930dead86f28ce275fbb437a6))
+* register the spcauto: callback (Auto-run next button was dead) ([551a4d1](https://github.com/tobbieswork/opencode-telegram-bot/commit/551a4d12781651c7864fdd6266c77ba8312feb39))
+
 ## [1.47.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.47.0...opencode-telegram-bot-v1.47.1) (2026-11-18)
 
 
