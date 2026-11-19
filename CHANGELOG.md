@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.49.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.48.1...opencode-telegram-bot-v1.49.0) (2026-11-19)
+
+
+### Features
+
+* ocr-hardening T5 (input-fingerprint re-run guard) ([3536cc8](https://github.com/tobbieswork/opencode-telegram-bot/commit/3536cc898a49f464c6215bf34b3cb149e6f0a138))
+
 ## [1.48.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.48.0...opencode-telegram-bot-v1.48.1) (2026-11-19)
 
 
