@@ -89,6 +89,8 @@ export interface Config {
   uptimeRemindIntervalDays: number;
   /** Delay (ms) between tapping "confirm reboot" and the actual reboot, so the message gets delivered. */
   rebootDelayMs: number;
+  /** /health disk probe: warn (not fail) when the filesystem free space drops below this many bytes. */
+  diskWarnFreeBytes: number;
   /**
    * Auto-respawn a worker that died from context overflow (a fresh session in
    * the SAME directory/worktree, handed the original task + git evidence).
@@ -301,6 +303,8 @@ export function loadConfig(root: string): Config {
     uptimeThresholdDays: parseIntSetting("OPENCODE_TG_UPTIME_THRESHOLD_DAYS", 30, 1),
     uptimeRemindIntervalDays: parseIntSetting("OPENCODE_TG_UPTIME_REMIND_INTERVAL_DAYS", 3, 1),
     rebootDelayMs: parseIntSetting("OPENCODE_TG_REBOOT_DELAY_MS", 15000, 1000),
+    // /health disk probe: warn when free space is below this (GiB -> bytes).
+    diskWarnFreeBytes: parseIntSetting("OPENCODE_TG_DISK_WARN_FREE_GB", 10, 1) * 1024 * 1024 * 1024,
     recoverOverflow: process.env.OPENCODE_TG_RECOVER_OVERFLOW === "1" || process.env.OPENCODE_TG_RECOVER_OVERFLOW === "true",
     dnsHeal: process.env.OPENCODE_TG_DNS_HEAL !== "0",
     dnsStaleIp: process.env.OPENCODE_TG_DNS_STALE_IP?.trim() ?? "",

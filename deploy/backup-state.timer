@@ -1,0 +1,12 @@
+# Nightly state backup, 03:30 local. Persistent=true: if the box was off at
+# 03:30, the run fires at next boot instead of being skipped.
+[Unit]
+Description=Run the OpenCode bot state backup nightly
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+Unit=backup-state.service
+
+[Install]
+WantedBy=timers.target

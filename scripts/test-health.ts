@@ -4,8 +4,11 @@
  *
  * Run:  npx tsx scripts/test-health.ts
  */
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { collectHealth, formatHealth, type Probe } from "../src/health.js";
-import { buildProbes, type HealthSources } from "../src/health-probes.js";
+import { buildProbes, dirSize, diskDevice, fmtBytes, freeSpace, smartHealth, type HealthSources } from "../src/health-probes.js";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: string): void {
@@ -68,6 +71,10 @@ async function main(): Promise<void> {
       advisor: { enabled: true, ping: async () => ({ ok: true, sessions: 2 }) },
       uptime: { enabled: true, lastOkAt: NOW - 3 * 3600_000 },
       dnsHeal: { enabled: true, consecutiveFailures: 0, minFailures: 3, healCount: 0, lastPollOkAt: NOW - 10_000 },
+      disk: {
+        warnFreeBytes: 10 * 1024 ** 3,
+        facts: async () => ({ opencodeBytes: 711 * 1024 * 1024, dataBytes: 42 * 1024 * 1024, freeBytes: 277 * 1024 ** 3, smart: null }),
+      },
     });
     const run = async (mut: (s: HealthSources) => void) => {
       const s = base();
@@ -75,7 +82,7 @@ async function main(): Promise<void> {
       return collectHealth(buildProbes(s, () => NOW), NOW);
     };
     const happy = await run(() => {});
-    check("probes cover every subsystem in order", happy.map((l) => l.id).join() === "opencode,mcp-bridge,scheduler,pr-watch,advisor,uptime,dns-heal", happy.map((l) => l.id).join());
+    check("probes cover every subsystem in order", happy.map((l) => l.id).join() === "opencode,mcp-bridge,scheduler,pr-watch,advisor,uptime,dns-heal,disk", happy.map((l) => l.id).join());
     check("all-healthy sources -> every line ok", happy.every((l) => l.status === "ok"), JSON.stringify(happy));
     check("opencode shows its version", byId(happy, "opencode").detail === "v1.2.3");
 
@@ -102,6 +109,44 @@ async function main(): Promise<void> {
     check("dns-heal at the failure threshold -> fail", byId(await run((s) => { s.dnsHeal.consecutiveFailures = 3; }), "dns-heal").status === "fail");
     check("dns-heal reports how many heals ran", byId(await run((s) => { s.dnsHeal.healCount = 2; }), "dns-heal").detail === "2 heals");
     check("dns-heal off -> off", byId(await run((s) => { s.dnsHeal.enabled = false; }), "dns-heal").status === "off");
+
+    // ── disk: sizes, free-space warn threshold, optional SMART ──────
+    const diskHappy = byId(happy, "disk");
+    check("disk ok + shows both dir sizes + free space", diskHappy.status === "ok" && /opencode 711M/.test(diskHappy.detail) && /data 42M/.test(diskHappy.detail) && /free 277G/.test(diskHappy.detail), diskHappy.detail);
+    check("disk omits SMART when unavailable", !/SMART/.test(diskHappy.detail), diskHappy.detail);
+    const diskLow = byId(await run((s) => { s.disk.facts = async () => ({ opencodeBytes: 1, dataBytes: 1, freeBytes: 5 * 1024 ** 3, smart: null }); }), "disk");
+    check("disk warn when free space is below the threshold", diskLow.status === "warn" && /\(low\)/.test(diskLow.detail), diskLow.detail);
+    const diskSmart = byId(await run((s) => { s.disk.facts = async () => ({ opencodeBytes: 1, dataBytes: 1, freeBytes: 277 * 1024 ** 3, smart: "SMART ok" }); }), "disk");
+    check("disk shows the SMART summary when available", diskSmart.status === "ok" && /SMART ok/.test(diskSmart.detail), diskSmart.detail);
+    const diskNoFree = byId(await run((s) => { s.disk.facts = async () => ({ opencodeBytes: 1, dataBytes: 1, freeBytes: null, smart: null }); }), "disk");
+    check("disk unknown free space -> 'free ?', still ok", diskNoFree.status === "ok" && /free \?/.test(diskNoFree.detail), diskNoFree.detail);
+    const diskThrow = byId(await run((s) => { s.disk.facts = async () => { throw new Error("ENOENT: no such dir"); }; }), "disk");
+    check("disk facts throwing -> fail with the message", diskThrow.status === "fail" && /ENOENT/.test(diskThrow.detail), diskThrow.detail);
+  }
+
+  // ── disk helpers (src/health-probes.ts) ─────────────────────────────
+  {
+    check("fmtBytes bytes", fmtBytes(512) === "512B", fmtBytes(512));
+    check("fmtBytes kilobytes", fmtBytes(2048) === "2K", fmtBytes(2048));
+    check("fmtBytes megabytes", fmtBytes(711 * 1024 * 1024) === "711M", fmtBytes(711 * 1024 * 1024));
+    check("fmtBytes gigabytes", fmtBytes(277 * 1024 ** 3) === "277G", fmtBytes(277 * 1024 ** 3));
+    check("fmtBytes negative/NaN -> ?", fmtBytes(-1) === "?" && fmtBytes(NaN) === "?");
+
+    const tmp = mkdtempSync(join(tmpdir(), "diskprobe-"));
+    mkdirSync(join(tmp, "sub"), { recursive: true });
+    writeFileSync(join(tmp, "a.txt"), "x".repeat(1000));
+    writeFileSync(join(tmp, "sub", "b.txt"), "y".repeat(2500));
+    const size = await dirSize(tmp);
+    check("dirSize sums regular files recursively", size === 3500, String(size));
+    check("dirSize missing dir -> 0", (await dirSize(join(tmp, "nope"))) === 0);
+    rmSync(tmp, { recursive: true, force: true });
+
+    const free = await freeSpace(process.cwd());
+    check("freeSpace(cwd) is a positive byte count", typeof free === "number" && free > 0, String(free));
+    const dev = diskDevice(process.cwd());
+    check("diskDevice -> null or a /dev/ block device", dev === null || dev.startsWith("/dev/"), String(dev));
+    const smart = await smartHealth("/dev/null");
+    check("smartHealth resolves to null or a summary (never throws)", smart === null || typeof smart === "string", String(smart));
   }
 
   // ── rendering (R2.1, R2.5) ───────────────────────────────────────────────

@@ -7,11 +7,13 @@
  *
  *  - one JSON object per line (JSONL), mode 0600
  *  - secrets redacted with redactSecrets, free text truncated
- *  - rotated to `<file>.1` at a size limit (one generation kept)
+ *  - rotated to a dated archive `<file>.YYYY-MM-DD` (UTC date) at a size limit;
+ *    same-day collisions get a counter: `<file>.YYYY-MM-DD.1`, `.2`, …
+ *  - retention: the 14 newest dated archives are kept, older ones are pruned
  *  - NEVER throws: auditing must not break the bot. A failure is warned once.
  */
-import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
-import { dirname } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync, unlinkSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { redactSecrets } from "./redact.js";
 import { warn } from "./logger.js";
 
@@ -45,6 +47,8 @@ export type AuditFn = (event: AuditEvent) => void;
 
 const DEFAULT_MAX_BYTES = 5 * 1024 * 1024;
 const DEFAULT_MAX_TEXT = 500;
+/** How many dated archives to keep; older ones are pruned after each rotation. */
+const RETENTION_ARCHIVES = 14;
 
 export function createAudit(opts: AuditOptions): AuditFn {
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES;
@@ -60,7 +64,7 @@ export function createAudit(opts: AuditOptions): AuditFn {
         entry.text = clean.length > maxText ? `${clean.slice(0, maxText)}…` : clean;
       }
       mkdirSync(dirname(opts.path), { recursive: true, mode: 0o700 });
-      rotateIfNeeded(opts.path, maxBytes);
+      rotateIfNeeded(opts.path, maxBytes, now);
       appendFileSync(opts.path, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
     } catch (e) {
       if (!warned) {
@@ -71,14 +75,46 @@ export function createAudit(opts: AuditOptions): AuditFn {
   };
 }
 
-function rotateIfNeeded(path: string, maxBytes: number): void {
+function rotateIfNeeded(path: string, maxBytes: number, now: () => Date): void {
   let size = 0;
   try {
     size = statSync(path).size;
   } catch {
     return; // no file yet
   }
-  if (size >= maxBytes) renameSync(path, `${path}.1`); // overwrites the previous generation
+  if (size < maxBytes) return;
+  archiveDated(path, now());
+  pruneArchives(path);
+}
+
+/**
+ * Rename the active file to `<path>.YYYY-MM-DD` (UTC date of rotation). If an
+ * archive already exists for that day (a second rotation on the same day),
+ * append an increasing counter — `<path>.YYYY-MM-DD.1`, `.2`, … — so an
+ * existing same-day archive is never clobbered.
+ */
+function archiveDated(path: string, date: Date): void {
+  const day = date.toISOString().slice(0, 10);
+  let target = `${path}.${day}`;
+  for (let n = 1; existsSync(target); n++) target = `${path}.${day}.${n}`;
+  renameSync(path, target);
+}
+
+/** Keep only the newest RETENTION_ARCHIVES dated archives, oldest deleted first. */
+function pruneArchives(path: string): void {
+  const dir = dirname(path);
+  const escaped = basename(path).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`^${escaped}\\.(\\d{4}-\\d{2}-\\d{2})(?:\\.(\\d+))?$`);
+  const archives: Array<{ file: string; day: string; n: number }> = [];
+  for (const name of readdirSync(dir)) {
+    const m = re.exec(name);
+    if (!m) continue;
+    archives.push({ file: name, day: m[1], n: m[2] === undefined ? 0 : Number(m[2]) });
+  }
+  archives.sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : a.n - b.n));
+  for (const a of archives.slice(0, Math.max(0, archives.length - RETENTION_ARCHIVES))) {
+    unlinkSync(join(dir, a.file));
+  }
 }
 
 // ── Process-wide instance, configured once at startup (wired in task 3) ──────

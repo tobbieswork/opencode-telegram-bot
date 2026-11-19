@@ -23,6 +23,8 @@ export interface ProbeResult {
   lastOkAt?: number;
   /** When set, an `ok` result whose lastOkAt is older than this becomes `warn`. */
   staleAfterMs?: number;
+  /** When true (and ok), the line is reported as `warn` regardless of staleness. */
+  warn?: boolean;
   detail?: string;
 }
 
@@ -62,7 +64,7 @@ async function runProbe(p: Probe, now: number, timeoutMs: number): Promise<Healt
     const r = await Promise.race([Promise.resolve().then(() => p.check()), timeout]);
     if (!r.ok) return { id: p.id, status: "fail", lastOkAt: r.lastOkAt, detail: r.detail };
     const stale = r.staleAfterMs != null && r.lastOkAt != null && now - r.lastOkAt > r.staleAfterMs;
-    return { id: p.id, status: stale ? "warn" : "ok", lastOkAt: r.lastOkAt, detail: r.detail };
+    return { id: p.id, status: r.warn || stale ? "warn" : "ok", lastOkAt: r.lastOkAt, detail: r.detail };
   } catch (e) {
     return { id: p.id, status: "fail", detail: e instanceof Error ? e.message : String(e) };
   } finally {
