@@ -14,7 +14,10 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { handleSpecCallback } from "../src/commands/spec.js";
+import { handleSpecCallback, briefFingerprint } from "../src/commands/spec.js";
+import { parseSpec } from "../src/spec.js";
+import { buildTaskPrompt } from "../src/spec-prompt.js";
+import { ensureSpecWorktree, defaultBranch } from "../src/worktree.js";
 import { Orchestrator } from "../src/orchestrator.js";
 import { Bot } from "../src/bot.js";
 import { StateManager } from "../src/state.js";
@@ -280,6 +283,109 @@ try {
     await handleSpecCallback(bot, cb("specrun:alpha:2"), CONV);
     check("reuse: a fresh run of the same spec succeeds (reuses worktree)", orch.spawns.length === 1, JSON.stringify(orch.spawns));
   }
+
+  // ── T5 (ocr-hardening): input-fingerprint re-run guard ───────────────────
+  // A re-tap whose inputs fingerprint identically to a previously COMPLETED
+  // run of the same spec+task gets the "Chạy lại / Hủy" card instead of a
+  // silent re-spawn; any doubt spawns normally (fail-closed).
+  {
+    // Mirror specRunSpawn's fingerprint exactly: worktree spec content + the
+    // prompt built from it + the base branch + its HEAD commit. "alpha"
+    // already carries markers, so the worktree spec is byte-identical to the
+    // fixture and ensureSpecMarkers is a no-op.
+    const t5wt = await ensureSpecWorktree(repo, repo, "alpha");
+    const alphaMd = readFileSync(join(t5wt.root, "docs", "sdd", "alpha.md"), "utf8");
+    const alphaRes = parseSpec(alphaMd);
+    if ("error" in alphaRes) throw new Error("alpha fixture must parse");
+    const base = await defaultBranch(repo);
+    const baseCommit = git(repo, ["rev-parse", "--verify", `${base}^{commit}`]);
+    const fpFor = (num: number) => {
+      const t = alphaRes.tasks.find((x) => x.n === num);
+      if (!t) throw new Error(`alpha task ${num} missing`);
+      return briefFingerprint(buildTaskPrompt(alphaMd, t).prompt, alphaMd, base, baseCommit);
+    };
+    const S2_FP = fpFor(2);
+    check("rerun: fingerprint is a stable sha256 hex", typeof S2_FP === "string" && /^[0-9a-f]{64}$/.test(S2_FP), String(S2_FP));
+    const seedPrev = (stState: any, fp: string | undefined, task: string, status: "done" | "failed" = "done") => {
+      stState.worker = {
+        name: "spec-alpha",
+        status,
+        updatedAt: 1750000000000,
+        specRun: { spec: "alpha", branch: "spec/alpha", task, conv: CONV, uid: 7 },
+        ...(fp === undefined ? {} : { briefFp: fp }),
+      };
+    };
+
+    // (a) identical fp + done + same task → card, NO spawn, claim released.
+    {
+      const { bot, sent, orch, stState } = mkBot("vi", repo);
+      seedPrev(stState, S2_FP, "S2");
+      await handleSpecCallback(bot, cb("specrun:alpha:2"), CONV);
+      check("rerun(a): no spawn on an identical done run", orch.spawns.length === 0, String(orch.spawns.length));
+      const all = sent.map((m) => m.text).join("\n");
+      check("rerun(a): card says it already succeeded (same inputs)", all.includes("S2") && all.includes("spec-alpha") && (all.includes("thành công") || all.includes("successfully")), all.slice(0, 300));
+      const kb = sent.flatMap((m) => m.kb ?? []).flat();
+      check("rerun(a): offers 'Chạy lại' (specrerun:alpha:2)", kb.some((b) => b.callback_data === "specrerun:alpha:2"), JSON.stringify(kb));
+      check("rerun(a): offers 'Hủy' (speccancel:alpha:2)", kb.some((b) => b.callback_data === "speccancel:alpha:2"), JSON.stringify(kb));
+      check("rerun(a): claim released after the card", orch.claims.length === 1 && orch.releases.length === 1, JSON.stringify({ claims: orch.claims, releases: orch.releases }));
+    }
+
+    // (b) 'Chạy lại' → spawns anyway; the spec_run audit carries reRun: true.
+    {
+      const { bot, orch, stState } = mkBot("vi", repo);
+      seedPrev(stState, S2_FP, "S2");
+      await handleSpecCallback(bot, cb("specrerun:alpha:2"), CONV);
+      check("rerun(b): 'Chạy lại' spawns", orch.spawns.length === 1, String(orch.spawns.length));
+      check("rerun(b): the new run carries the same fingerprint", orch.spawns[0]?.briefFp === S2_FP, JSON.stringify({ got: orch.spawns[0]?.briefFp, want: S2_FP }));
+      check("rerun(b): spawn is S2 on spec/alpha", orch.spawns[0]?.specRun?.task === "S2" && orch.spawns[0]?.specRun?.branch === "spec/alpha", JSON.stringify(orch.spawns[0]?.specRun));
+      const lines = readFileSync(join(tmp, "audit.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+      check("rerun(b): audit spec_run with reRun=true", lines.some((e) => e.action === "spec_run" && e.meta?.task === "S2" && e.meta?.reRun === true), JSON.stringify(lines.map((l) => [l.action, l.meta?.task, l.meta?.reRun])));
+    }
+
+    // (c) 'Hủy' → nothing happens (no spawn, no claim), confirmation posted.
+    {
+      const { bot, sent, orch, stState } = mkBot("vi", repo);
+      seedPrev(stState, S2_FP, "S2");
+      await handleSpecCallback(bot, cb("speccancel:alpha:2"), CONV);
+      check("rerun(c): 'Hủy' does not spawn", orch.spawns.length === 0 && orch.claims.length === 0, JSON.stringify({ spawns: orch.spawns, claims: orch.claims }));
+      const all = sent.map((m) => m.text).join("\n");
+      check("rerun(c): says cancelled", all.includes("hủy") || all.includes("ancelled"), all.slice(0, 200));
+    }
+
+    // (d) different fp → spawn normally (the guard needs an identical fp).
+    {
+      const { bot, orch, stState } = mkBot("vi", repo);
+      seedPrev(stState, "0".repeat(64), "S2");
+      await handleSpecCallback(bot, cb("specrun:alpha:2"), CONV);
+      check("rerun(d): different fp spawns normally", orch.spawns.length === 1, String(orch.spawns.length));
+    }
+
+    // (e) predecessor failed → spawn normally (only 'done' is guarded).
+    {
+      const { bot, orch, stState } = mkBot("vi", repo);
+      seedPrev(stState, S2_FP, "S2", "failed");
+      await handleSpecCallback(bot, cb("specrun:alpha:2"), CONV);
+      check("rerun(e): failed predecessor spawns normally", orch.spawns.length === 1, String(orch.spawns.length));
+    }
+
+    // (f) predecessor done but WITHOUT a fingerprint → spawn normally
+    // (fail-closed: an unprovable match never blocks the run).
+    {
+      const { bot, orch, stState } = mkBot("vi", repo);
+      seedPrev(stState, undefined, "S2");
+      await handleSpecCallback(bot, cb("specrun:alpha:2"), CONV);
+      check("rerun(f): missing fp on the old entry spawns normally", orch.spawns.length === 1, String(orch.spawns.length));
+    }
+
+    // (g) identical fp but a different task → spawn normally (same spec+task
+    // is required for the guard).
+    {
+      const { bot, orch, stState } = mkBot("vi", repo);
+      seedPrev(stState, S2_FP, "S2"); // predecessor did S2; the re-tap is S4
+      await handleSpecCallback(bot, cb("specrun:alpha:4"), CONV);
+      check("rerun(g): different task spawns normally", orch.spawns.length === 1 && orch.spawns[0]?.specRun?.task === "S4", JSON.stringify(orch.spawns.map((s: any) => s.specRun)));
+    }
+  }
   // ── Bot.handleCallback dispatch routes the new S4 prefixes (regression) ──
   // The handler tests above call handleSpecCallback directly; this drives the
   // ── Re-run name freeing: a finished previous run must not block the name ──
@@ -377,6 +483,12 @@ try {
     // Blocked Run, second tap → routed, spawns.
     await (bot as any).handleCallback(cbFor("specrunok:alpha:3"));
     check("route: specrunok: routed and spawns (second tap)", rec.spawns.length === before + 1, JSON.stringify(rec.spawns.map((x: any) => x.specRun)));
+    // T5: the re-run card's buttons are routed (specrerun spawns, speccancel confirms).
+    const beforeRerun = rec.spawns.length;
+    await (bot as any).handleCallback(cbFor("specrerun:alpha:2"));
+    check("route: specrerun: routed and spawns (Chạy lại)", rec.spawns.length === beforeRerun + 1, JSON.stringify(rec.spawns.map((x: any) => x.specRun)));
+    await (bot as any).handleCallback(cbFor("speccancel:alpha:2"));
+    check("route: speccancel: routed (confirmation posted)", sent2.some((m) => (m.text ?? "").includes("Cancelled") || (m.text ?? "").includes("hủy")), JSON.stringify(sent2.map((m) => m.text?.slice(0, 80))));
   
   // ── Spawn resilience (2026-11-16 incident): a network blip during the
   // launch must not swallow the tap — retry the launch, hold the claim, and
