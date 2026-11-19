@@ -1,11 +1,15 @@
 # Data flow: what leaves this machine, and where
 
-- **Status:** T4 of `docs/sdd/scale-hardening.md` — one-pager; two `[TODO]` fields awaiting the owner (§4)
+- **Status:** T4 of `docs/sdd/scale-hardening.md` — one-pager
 - **Date:** 2026-11-19
 - **Related:** `src/redact.ts` (the guard), `src/advisor/` (advisor path), `advisor-daemon/README.md`
 
-Three outbound paths exist. This doc states, for each: what is sent, what is
+The LLM endpoint is **deployment-specific** (each host points OpenCode at
+its own provider) and is *not* a fact of this repo. This doc describes the
+flow generically and states, for each outbound path: what is sent, what is
 not, and where the guard (`redactSecrets`) does and does not run.
+
+Three outbound paths exist.
 
 ## 1. Main LLM path (bot → OpenCode → model)
 
@@ -13,7 +17,7 @@ not, and where the guard (`redactSecrets`) does and does not run.
 Telegram (user text, worker prompts)
   → opencode-bot (systemd user service, this repo)
   → OpenCode service (local `opencode serve`, @opencode/client)
-  → https://code-agent.cads.live/v1        (provider DC5, model qwen/qwen3.8-27b)
+  → the host's LLM provider endpoint (deployment-specific)
   → model
 ```
 
@@ -28,10 +32,10 @@ Telegram (user text, worker prompts)
 systemd journal, and Telegram metadata (chat ids, user ids) — these never
 enter an OpenCode session. What is sent is exactly what the agent works on.
 
-**Config:** the endpoint lives outside this repo — provider `DC5`
-(`baseURL` + model) in `~/.config/opencode/opencode.jsonc`. The bot's own
-`OPENCODE_SERVICE_URL` points at the *local* OpenCode service, not at the
-LLM endpoint.
+**Config:** the endpoint lives outside this repo — the provider's `baseURL`
++ model in the host's `~/.config/opencode/opencode.jsonc` (one per
+deployment). The bot's own `OPENCODE_SERVICE_URL` points at the *local*
+OpenCode service, not at the LLM endpoint.
 
 ## 2. Redaction scope — and the prompt gap
 
@@ -47,12 +51,14 @@ a first4…last4 fingerprint. Everything else passes through byte-identical.
 
 **The explicit gap — read this:** redaction does **not** run on the prompt
 sent to the LLM. A secret that exists in a repo file (or in command output)
-reaches `code-agent.cads.live` **intact** the moment the agent reads it —
-the guard only sees text flowing back *out* to Telegram. This is intrinsic
-to a coding agent (the model must see file contents to edit them) and not a
-missed guard; it is listed here so the trust boundary is known: **this
+reaches the LLM endpoint **intact** the moment the agent reads it — the
+guard only sees text flowing back *out* to Telegram. This is intrinsic to a
+coding agent (the model must see file contents to edit them) and not a
+missed guard; it is listed here so the trust boundary is known: **the LLM
 endpoint is a trusted party with full repo visibility**, including any
-secret checked in or left in the worktree.
+secret checked in or left in the worktree. This applies to *whatever*
+endpoint a deployment configures — the trust decision is per-deployment, so
+it belongs in that deployment's notes, not in this repo.
 
 ## 3. Advisor path (read-only second opinion)
 
@@ -72,11 +78,10 @@ only when both `ADVISOR_URL` and `ADVISOR_TOKEN` are set. Note: whatever
 context is included in `/ask` follows this path to the *other* machine's
 model (Claude/Gemini) — the same "context = what is sent" rule applies.
 
-## 4. Owner fields
+## 4. Per-deployment facts (not in this repo)
 
-`[TODO owner]` **Who operates `code-agent.cads.live/v1`** — operator/team,
-and the access route (e.g. on-prem CADS network vs. cloud provider):
-
-`[TODO owner]` **Log-retention policy at the endpoint** — does the endpoint
-store prompts/responses (including file contents read from the repos, §2
-gap)? For how long, and who can access the stored logs:
+The LLM endpoint's **operator**, **access route**, and **log-retention
+policy** are properties of a *specific deployment*, not of this codebase.
+They are deliberately not recorded here (the repo is generic; a single
+endpoint would be a false invariant for every other deployment). Record
+them in the deployment that uses this bot, not in `docs/`.
