@@ -1483,9 +1483,10 @@ export async function managerSpecAuto(bot: Bot, conv: ConvKey, name: string, tas
 // Wire forms are UNCHANGED by this migration (producers keep the same
 // strings): spec:/spcpr:/spcready:/spcclean: carry the spec NAME only (NAME_RE
 // rejects ":", so the name can never carry a colon); specrun:/specblocked:/
-// specrunok:/spcacc:/spcredo:/spcstop: carry "<name>:<n>". SPCAUTO is
-// intentionally NOT defined: no chain branch handled it before either, so it
-// stays unregistered and falls to the "expired" toast (pre-existing behavior).
+// specrunok:/spcacc:/spcredo:/spcstop:/spcauto: carry "<name>:<n>". spcauto
+// (the S6.5 "Auto-run next" button) was never routed by the old chain — its
+// handler sat unreachable in handleSpecCallback — so it is registered here to
+// close the gap; tapping it previously fell to the "expired" toast.
 export const specCb = oneArg("spec");
 export const spcprCb = oneArg("spcpr");
 export const spcreadyCb = oneArg("spcready");
@@ -1496,3 +1497,4 @@ export const specrunokCb = fields("specrunok", 2);
 export const spcaccCb = fields("spcacc", 2);
 export const spcredoCb = fields("spcredo", 2);
 export const spcstopCb = fields("spcstop", 2);
+export const spcautoCb = fields("spcauto", 2);
