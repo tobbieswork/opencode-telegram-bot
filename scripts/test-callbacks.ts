@@ -477,12 +477,12 @@ async function main(): Promise<void> {
     const all = [
       "agent", "ap", "bs", "ch", "cmd", "cont", "fq", "kill", "mdl", "mode",
       "ns", "note", "nw", "pb", "perm", "prune", "q", "reboot", "rot", "sch",
-      "spec", "specblocked", "specrun", "specrunok", "spcacc", "spcclean",
+      "spec", "specblocked", "specrun", "specrunok", "spcacc", "spcauto", "spcclean",
       "spcready", "spcredo", "spcpr", "spcstop", "use", "variant", "w", "ww", "wt",
     ];
     const reg = registeredPrefixes();
-    check("T6: all 35 prefixes are registered (no duplicate threw)", reg.length === 35 && all.every((p) => reg.includes(p)), JSON.stringify(reg));
-    check("T6: spcauto is NOT registered (pre-existing gap, behavior preserved)", !reg.includes("spcauto"), JSON.stringify(reg));
+    check("T6: all 36 prefixes are registered (no duplicate threw)", reg.length === 36 && all.every((p) => reg.includes(p)), JSON.stringify(reg));
+    check("T6: spcauto is registered (S6.5 auto button routed)", reg.includes("spcauto"), JSON.stringify(reg));
 
     // The 14 newly-migrated prefixes have their owners recorded.
     check("T6: w owner", callbackOwner("w") === "watch.ts (watch card)", callbackOwner("w"));
