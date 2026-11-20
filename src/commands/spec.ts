@@ -1057,7 +1057,11 @@ async function specAuto(
     void noRunMessage(bot, conv, lang, name);
     return { ok: false };
   }
-  if (!sr.auto) bot.st.set(found[0], { worker: { ...w, specRun: { ...sr, auto: true } } });
+  if (!sr.auto) {
+    // Re-peek (not the snapshot `w`): preserve any concurrent worker change.
+    const cur = bot.st.peek(found[0])?.worker ?? w;
+    if (cur.specRun) bot.st.set(found[0], { worker: { ...cur, specRun: { ...cur.specRun, auto: true } } });
+  }
   const dir = found[1].directory;
   const res = await specAccept(bot, conv, lang, uid, name, n);
   if (res.ok && dir) await autoContinueFrom(bot, conv, lang, uid, name, dir);

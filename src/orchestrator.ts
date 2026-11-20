@@ -1289,7 +1289,10 @@ export class Orchestrator {
     }
     if (report !== undefined && report.missing.length < REPORT_FIELDS.length) {
       // Parsed fields ride on the worker entry (state.json backward compatible).
-      this.h.st.set(workerConv, { worker: { ...w, report } });
+      // Re-peek (not the stale `w` from function start): a Stop/Accept tap
+      // during the async work above would otherwise be clobbered by the spread.
+      const cur = this.h.st.peek(workerConv)?.worker;
+      if (cur) this.h.st.set(workerConv, { worker: { ...cur, report } });
     }
     const outcome = checkpointOutcome(commit, ran, errored);
     audit({
@@ -1949,10 +1952,14 @@ export class Orchestrator {
         // topic back at the same subfolder of the main checkout so a new
         // message there starts a fresh session that works.
         const sub = relative(wt.root, found[1].directory ?? wt.root);
+        // Re-peek (not the snapshot `w` from the top of the handler): the
+        // worktree deletion above is async, so a concurrent tap could have
+        // updated the worker — preserve it instead of clobbering via spread.
+        const cur = this.h.st.peek(found[0])?.worker ?? w;
         this.h.st.set(found[0], {
           sessionID: undefined,
           directory: join(w.repoRoot, sub),
-          worker: { ...w, worktree: undefined, status: "stopped", updatedAt: Date.now() },
+          worker: { ...cur, worktree: undefined, status: "stopped", updatedAt: Date.now() },
         });
         if (w.specRun) this.releaseSpecRun(chatOf(found[0]), w.specRun.spec, w.name); // S4: this inline stop bypasses setStatus
         void this.h.tg.editForumTopic(found[0], `${ICON.stopped} ${w.name}`).catch(() => {});
