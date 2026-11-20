@@ -9,7 +9,8 @@ import { tr } from "./i18n.js";
 import { Config } from "./config.js";
 import { ConvKey, chatOf, convKey, parseConv } from "./conv.js";
 import { McpBridge, BridgeTool, makeRunScriptTool } from "./mcp-bridge.js";
-import { addWorktree, diffSummary, gitBoundary, gitRoot, gitStatusBrief, mergeWorktree, removeWorktree, resolveBaseBranch, runGit } from "./worktree.js";
+import { addWorktree, chapterPatch, diffFileList, diffSummary, DIFF_CHAPTER_THRESHOLD, gitBoundary, gitRoot, gitStatusBrief, groupDiffChapters, mergeWorktree, removeWorktree, resolveBaseBranch, runGit } from "./worktree.js";
+import type { DiffFiles } from "./worktree.js";
 import { parseSpec, type ParsedTask } from "./spec.js";
 import { classifyShellItems, computeNotRan, renderCheckpointCard, checkpointOutcome, EXPECTED_CHECKS } from "./spec-checkpoint.js";
 import { parseWorkerReport, REPORT_FIELDS } from "./spec-report.js";
@@ -1954,6 +1955,55 @@ export class Orchestrator {
     };
   }
 
+  /** Emoji index marks for the diff-chapter keyboard (max 8 chapters). */
+  private static readonly DIFF_NUM = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣"];
+
+  /**
+   * Chaptered diff index (plannotator #4 adapted): for a large worktree diff
+   * (> DIFF_CHAPTER_THRESHOLD files), post the deterministic chapter index
+   * (grouped by top-level path, biggest areas first) with one button per
+   * chapter; tapping one posts that chapter's patch (postDiffChapter).
+   */
+  private async postDiffChapters(conv: ConvKey, lang: Lang, w: WorkerInfo, diffFiles: DiffFiles): Promise<void> {
+    const wt = w.worktree!;
+    const chapters = groupDiffChapters(diffFiles.tracked, diffFiles.untracked);
+    const total = diffFiles.tracked.length + diffFiles.untracked.length;
+    const lines: string[] = [
+      `${tr(lang, `📄 <b>Diff ${esc(wt.branch)}</b> so với`, `📄 <b>Diff ${esc(wt.branch)}</b> vs`)} <code>${esc(wt.base)}</code> — ${total} ${tr(lang, "file", "files")} · ${chapters.length} ${tr(lang, "chương", "chapters")}`,
+      tr(lang, "Bấm chương để xem diff của các file đó.", "Tap a chapter to see its files' diff."),
+      "",
+    ];
+    const rows: Btn[][] = [];
+    for (let i = 0; i < chapters.length; i++) {
+      const c = chapters[i];
+      const num = Orchestrator.DIFF_NUM[i] ?? `${i + 1}.`;
+      lines.push(`${num} <b>${esc(c.title)}</b> (${c.files.length}) — <i>${esc(c.files.slice(0, 6).join(", "))}${c.files.length > 6 ? ", …" : ""}</i>`);
+      rows.push([{ text: `${num} ${c.title} (${c.files.length})`, callback_data: wtCb.encode({ name: w.name, op: `diffc-${i}` }) }]);
+    }
+    await this.h.sendHtml(conv, lines.join("\n"), { reply_markup: { inline_keyboard: rows } });
+  }
+
+  /** One chapter's patch (on-demand): tracked via `git diff base --`, untracked listed. */
+  private async postDiffChapter(conv: ConvKey, lang: Lang, w: WorkerInfo, op: string): Promise<void> {
+    const wt = w.worktree;
+    const idx = parseInt(op.slice("diffc-".length), 10);
+    if (!wt || Number.isNaN(idx)) {
+      await this.h.sendHtml(conv, warnLine(lang, raw(tr(lang, "Không tìm thấy chương.", "Chapter not found."))));
+      return;
+    }
+    const diffFiles = await diffFileList(wt).catch(() => ({ tracked: [], untracked: [] as string[] }));
+    const c = groupDiffChapters(diffFiles.tracked, diffFiles.untracked)[idx];
+    if (!c) {
+      await this.h.sendHtml(conv, warnLine(lang, raw(tr(lang, "Chương không còn tồn tại (diff đã thay đổi) — mở lại Diff.", "Chapter no longer exists (diff changed) — re-open Diff."))));
+      return;
+    }
+    const patch = await chapterPatch(wt, diffFiles, c);
+    const body = `${tr(lang, `📄 <b>${esc(c.title)}</b> — ${c.files.length} file`, `📄 <b>${esc(c.title)}</b> — ${c.files.length} file(s)`)}`;
+    // sendMessage (not sendHtml): it HTML-aware chunk-splits a large <pre> and
+    // puts the keyboard on the last chunk.
+    await this.h.tg.sendMessage(conv, `${body}\n<pre>${esc(patch || tr(lang, "(không có thay đổi đã theo dõi)", "(no tracked changes)"))}</pre>`);
+  }
+
   public async handleWorktreeCallback(cb: CallbackQuery, conv: ConvKey, answer: (toast?: string) => void, messageId?: number): Promise<void> {
     const lang = this.h.userPrefs?.getLang(cb.from?.id ?? "") ?? "vi";
     const [, name, op] = (cb.data ?? "").split(":");
@@ -1979,14 +2029,22 @@ export class Orchestrator {
         return;
       }
     }
-    if (BUSY.includes(w.status) && op !== "diff") {
+    const isDiffView = op === "diff" || op.startsWith("diffc-");
+    if (BUSY.includes(w.status) && !isDiffView) {
       answer(tr(lang, "Worker đang chạy — /kill hoặc chờ xong rồi thử lại.", "The worker is running — /kill or wait for it to finish and try again."));
       return;
     }
     answer();
     try {
       if (op === "diff") {
+        const diffFiles = await diffFileList(wt).catch(() => ({ tracked: [], untracked: [] as string[] }));
+        if (diffFiles.tracked.length + diffFiles.untracked.length > DIFF_CHAPTER_THRESHOLD) {
+          await this.postDiffChapters(conv, lang, w, diffFiles);
+        } else {
         await this.h.sendHtml(conv, `${tr(lang, `📄 <b>Diff ${esc(wt.branch)}</b> so với`, `📄 <b>Diff ${esc(wt.branch)}</b> vs`)} <code>${esc(wt.base)}</code>\n<pre>${esc(await diffSummary(wt))}</pre>`);
+        }
+      } else if (op.startsWith("diffc-")) {
+        await this.postDiffChapter(conv, lang, w, op);
       } else if (op === "merge") {
         await this.h.sendHtml(conv, `🔀 ${esc(await mergeWorktree(w.repoRoot, wt, w.name, lang))}`);
       } else if (op === "rm") {

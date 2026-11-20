@@ -181,6 +181,76 @@ export async function diffSummary(wt: { root: string; base: string }): Promise<s
   return lines.join("\n");
 }
 
+
+/** A worktree's changes vs its base, split by origin (for chaptered review,
+ *  plannotator #4 adapted): tracked = `git diff --name-only base` (modified or
+ *  added-then-staged/committed), untracked = never-`git add`ed new files. */
+export interface DiffFiles {
+  tracked: string[];
+  untracked: string[];
+}
+
+export async function diffFileList(wt: { root: string; base: string }): Promise<DiffFiles> {
+  const tracked = (await git(wt.root, ["diff", "--name-only", wt.base]).catch(() => ""))
+    .split("\n").map((s) => s.trim()).filter(Boolean);
+  const untracked = (await git(wt.root, ["ls-files", "--others", "--exclude-standard"]).catch(() => ""))
+    .split("\n").map((s) => s.trim()).filter(Boolean);
+  return { tracked, untracked };
+}
+
+/** One logical group of a diff's files (a "chapter"). */
+export interface DiffChapter {
+  title: string;   // top-level path segment, "(root)", or "(other)"
+  files: string[]; // file paths in this chapter (tracked-changed + untracked)
+}
+
+/** Max chapters in the /wt diff index (keeps the keyboard compact; overflow
+ *  merges into "(other)"). */
+export const DIFF_CHAPTER_MAX = 8;
+/** /wt diff shows the chapter index (not the flat stat) above this many files. */
+export const DIFF_CHAPTER_THRESHOLD = 12;
+
+/**
+ * Deterministic grouping of a diff's files into chapters by top-level path
+ * segment — the pragmatic, zero-LLM approximation of plannotator's semantic
+ * "core → consequences → glue last" ordering: biggest areas (most files)
+ * first, ties by name, so the highest-signal chapters lead. Pure (no I/O).
+ */
+export function groupDiffChapters(tracked: string[], untracked: string[], max = DIFF_CHAPTER_MAX): DiffChapter[] {
+  const all = Array.from(new Set([...tracked, ...untracked]));
+  const byKey = new Map<string, string[]>();
+  for (const f of all) {
+    const seg = f.includes("/") ? f.slice(0, f.indexOf("/")) : "(root)";
+    if (!byKey.has(seg)) byKey.set(seg, []);
+    byKey.get(seg)!.push(f);
+  }
+  const chapters = Array.from(byKey.entries()).map(([title, files]) => ({ title, files: [...files].sort() }));
+  chapters.sort((a, b) => b.files.length - a.files.length || a.title.localeCompare(b.title));
+  if (chapters.length > max) {
+    const keep = chapters.slice(0, max - 1);
+    const rest = chapters.slice(max - 1);
+    keep.push({ title: "(other)", files: rest.flatMap((c) => c.files).sort() });
+    return keep;
+  }
+  return chapters;
+}
+
+/**
+ * Patch content for one chapter: tracked files via `git diff base --`, untracked
+ * (never-added) files listed by name (their full content is usually too large
+ * for a Telegram message; the list tells you which new files to open).
+ */
+export async function chapterPatch(wt: { root: string; base: string }, diffFiles: DiffFiles, chapter: DiffChapter): Promise<string> {
+  const trackedIn = chapter.files.filter((f) => diffFiles.tracked.includes(f));
+  const untrackedIn = chapter.files.filter((f) => diffFiles.untracked.includes(f));
+  const parts: string[] = [];
+  if (trackedIn.length) {
+    const p = await git(wt.root, ["diff", wt.base, "--", ...trackedIn]).catch((e) => `(diff failed: ${e.message})`);
+    if (p) parts.push(p);
+  }
+  if (untrackedIn.length) parts.push(`(untracked: ${untrackedIn.join(", ")})`);
+  return parts.join("\n\n");
+}
 /**
  * A brief snapshot of a working directory's git state for a worker that does
  * NOT run in its own worktree: the diffstat, the changed/untracked files, and
