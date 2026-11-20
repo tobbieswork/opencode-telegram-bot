@@ -2852,7 +2852,8 @@ export class Bot {
     // anchor existed are skipped; if none is anchored, send nothing at all.
     const anchored = this.orch
       .workersOf(chatOf(conv))
-      .filter(([, ws]) => BUSY.includes(ws.worker!.status) && (ws.worker!.introMessageId ?? 0) > 0)
+      // B3.3: a background worker has no topic to jump to — never a jump row.
+      .filter(([k, ws]) => !isBackgroundConv(k) && BUSY.includes(ws.worker!.status) && (ws.worker!.introMessageId ?? 0) > 0)
       .slice(0, this.cfg.maxWorkers)
       .map(([, ws]) => ws.worker!);
     if (anchored.length === 0) return;

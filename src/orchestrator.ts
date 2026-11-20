@@ -2167,10 +2167,10 @@ export class Orchestrator {
           return (
             `${ws.length} workers (${busy} busy, max ${this.h.cfg.maxWorkers}). Approval mode: ${auto() ? "auto" : "confirm"}.\n` +
             ws
-              .map(([, s]) => {
+              .map(([k, s]) => {
                 const w = s.worker!;
                 return [
-                  `## ${w.name} — ${w.status} (${s.agent ?? "build"}, ${w.writes ? "writes" : "read-only"})`,
+                  `## ${w.name} — ${w.status} (${s.agent ?? "build"}, ${w.writes ? "writes" : "read-only"})${isBackgroundConv(k) ? " · bg" : ""}`,
                   `dir: ${s.directory}${w.worktree ? ` (worktree branch ${w.worktree.branch})` : ""}`,
                   w.lastResult ? `last result: ${trunc(w.lastResult, 400)}` : "",
                 ]
