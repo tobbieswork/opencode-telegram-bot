@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.54.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.54.0...opencode-telegram-bot-v1.54.1) (2026-11-20)
+
+
+### Bug Fixes
+
+* a completed canonical check with no recorded exit is a pass, not a fail ([ee0c8ce](https://github.com/tobbieswork/opencode-telegram-bot/commit/ee0c8cebb579ba2de18b28954f86036f5dd6564d))
+* completed canonical check with no recorded exit is a pass ([8b3fb83](https://github.com/tobbieswork/opencode-telegram-bot/commit/8b3fb832c9fbde4447da2cbc2d410c4c0cb77a87))
+
 ## [1.54.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.53.0...opencode-telegram-bot-v1.54.0) (2026-11-20)
 
 
