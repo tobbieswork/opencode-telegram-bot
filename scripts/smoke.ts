@@ -16,25 +16,36 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 class MockTelegram {
   out: string[] = [];
   keyboards: any[] = [];
+  /** Parallel to `out`: the conv each outbound message was addressed to — the
+   *  W4 background scenario asserts its relays land on the main chat conv,
+   *  not on a topic conv. */
+  outConvs: string[] = [];
+  /** W4: the S8 spec worker (and any live spawn) creates one forum topic; the
+   *  background scenario asserts its spawn adds NO topic. */
+  topicsCreated = 0;
   private msgCounter = 0;
   async sendMessage(_chatId: number, text: string, opts: Record<string, unknown> = {}): Promise<void> {
     this.out.push(text);
+    this.outConvs.push(String(_chatId));
     if (opts?.reply_markup) this.keyboards.push(opts.reply_markup);
   }
   async sendMessageId(_chatId: number, text: string, opts: Record<string, unknown> = {}): Promise<number> {
     const id = ++this.msgCounter;
     this.out.push(text);
+    this.outConvs.push(String(_chatId));
     if (opts?.reply_markup) this.keyboards.push(opts.reply_markup);
     return id;
   }
   async editMessageText(_chatId: number, _messageId: number, text: string, opts: Record<string, unknown> = {}): Promise<void> {
     this.out.push("[edit] " + text);
+    this.outConvs.push(String(_chatId));
     if (opts?.reply_markup) this.keyboards.push(opts.reply_markup);
   }
   // The watch card edits through the strict variant (surfaces vanished-card
   // 400s); the mock records it exactly like editMessageText.
   async editMessageTextStrict(_chatId: number, _messageId: number, text: string, opts: Record<string, unknown> = {}): Promise<void> {
     this.out.push("[edit] " + text);
+    this.outConvs.push(String(_chatId));
     if (opts?.reply_markup) this.keyboards.push(opts.reply_markup);
   }
   // Rich path (OPENCODE_TG_RICH=1 in .env): the bot tries sendRichMessage
@@ -43,6 +54,7 @@ class MockTelegram {
   async sendRich(_to: number, markdown: string, opts: { reply_markup?: unknown } = {}): Promise<number> {
     const id = ++this.msgCounter;
     this.out.push(markdown);
+    this.outConvs.push(String(_to));
     if (opts?.reply_markup) this.keyboards.push(opts.reply_markup);
     return id;
   }
@@ -61,6 +73,7 @@ class MockTelegram {
   // run settles. The mock hands out thread ids and no-ops the rest.
   private threadCounter = 0;
   async createForumTopic(_chatId: number, _name: string, _iconColor?: number): Promise<number> {
+    this.topicsCreated++;
     return ++this.threadCounter;
   }
   async editForumTopic(_conv: string, _name: string): Promise<void> {}
@@ -820,6 +833,198 @@ async function main(): Promise<void> {
     }
   }
 
+  // ── background worker (W4, end-to-end) ───────────────────────────────────
+  // The full background path on a real OpenCode service: the Manager (a real
+  // LLM) spawns a worker with background:true → (a) NO forum topic is
+  // created, (b) the done result is relayed to the MAIN chat, (c) the worker
+  // is tracked/listed as background (the "· bg" marker), and (d) /stop works
+  // on it. Inert-safe like the other scenarios: if the OpenCode service is
+  // unavailable the Manager never comes up and the scenario SKIPS (no
+  // failure).
+  console.log("\n=== BACKGROUND WORKER (W4: bg spawn → main-chat relay → list → /stop) ===");
+  {
+    const ws = "/tmp/opencode/testws";
+    const bgFile = join(ws, "bg-smoke.txt");
+    const outBefore = mock.out.length;
+    const topicsBefore = mock.topicsCreated;
+    const convsBefore = new Set(Object.keys(st.all()));
+    let bgFail = false;
+    const bgFailMsg = (step: string): void => {
+      bgFail = true;
+      console.log(`❌ BG: ${step}`);
+    };
+    const poll = async (pred: () => boolean, ms = 120000): Promise<boolean> => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) {
+        if (pred()) return true;
+        await waitMs(300);
+      }
+      return pred();
+    };
+    const workerStatus = (name: string) => st.findWorker("42", name)?.[1].worker?.status;
+    // A Manager prompt is a full LLM turn behind bot.handle (which has no
+    // internal timeout): if the turn or a bridge MCP call hangs, the scenario
+    // must not hang with it.
+    const withTimeout = <T,>(p: Promise<T>, ms: number): Promise<T | undefined> =>
+      Promise.race([
+        p,
+        new Promise<undefined>((r) => {
+          const t = setTimeout(() => r(undefined), ms);
+          (t as any).unref?.();
+        }),
+      ]);
+
+    const run = async (): Promise<void> => {
+      // ── bring up the Manager (needs the OpenCode service) ────────────────
+      await bot.handle(upd("/auto on"));
+      show("bg: /auto on");
+      await bot.handle(upd("/manager on"));
+      show("bg: /manager on");
+      const top = st.get(42);
+      if (!top.manager || !top.sessionID) {
+        console.log("⚠️  BG: Manager did not come up (OpenCode service unavailable?) — scenario SKIPPED (inert-safe)");
+        return;
+      }
+
+      // (a)+(b)+(c): the Manager spawns a small bg worker. The mode is
+      // requested explicitly (the I10 auto-decision policy is prompt-level
+      // and tuned on real spawns — the E2E verifies the mechanics).
+      await withTimeout(bot.handle(
+        upd(
+          `Spawn exactly ONE worker in the BACKGROUND (background: true — no topic): name "bg-a", directory ${ws}. ` +
+            'Its task, verbatim: "Create a brand-new file named bg-smoke.txt whose only line is: bg ok. ' +
+            "Actually create the file now (use whatever file tool is available). Do not do anything else; " +
+            'end with a single short confirmation sentence." Do not ask questions — everything you need is here. ' +
+            "Announce the mode in one line and stop.",
+        ),
+        180000,
+      ));
+      show("bg: manager prompt (spawn bg-a)");
+      const gotA = await poll(() => st.findWorker("42", "bg-a") !== undefined, 120000);
+      const convA = st.findWorker("42", "bg-a")?.[0];
+      console.log("bg-a spawned by the Manager:", gotA, "| conv:", convA ?? "(none)");
+      if (gotA) {
+        // Capture the out-bound index BEFORE the finish poll: the bot sets
+        // status "done" a moment before it sends the done relay (onWorkerFinished
+        // sets the status, then sends the card/review line), so an index taken
+        // after the status flip would already be past the relay message.
+        const doneOutIdx = mock.out.length; // only messages AFTER this index are the done relay
+        const finishedA = await poll(() => ["done", "failed", "stopped"].includes(workerStatus("bg-a") ?? ""), 180000);
+        const statusA = workerStatus("bg-a");
+        console.log("bg-a finished:", finishedA, "| status:", statusA ?? "?");
+        if (!finishedA) bgFailMsg("bg-a did not finish within 180 s");
+        else if (statusA === "failed") bgFailMsg("bg-a FAILED — see the Manager's relay above");
+        if (statusA === "done") {
+          // (b) the BOT's own done relay (worktree card, or the review line
+          // when there is no worktree) lands on the MAIN chat — not on the
+          // bg conv, not nothing. The Manager's [Bot event] summary is
+          // printed for context only: it is the Manager's own message, not
+          // the bot's relay, so it must not stand in for (b).
+          const relayedB = await poll(
+            () => mock.out.slice(doneOutIdx).some((m, i) => mock.outConvs[doneOutIdx + i] === "42" && /xem lại thay đổi của worker|review the worker|Worktree of|Worktree của/.test(m)),
+            45000,
+          );
+          const managerMentioned = mock.out.slice(doneOutIdx).some((m, i) => mock.outConvs[doneOutIdx + i] === "42" && /bg-a/i.test(m));
+          console.log("bg: bot done relay (card / review line) on the MAIN chat (b):", relayedB ? "yes" : "NO", "| Manager summary mentions bg-a (info):", managerMentioned ? "yes" : "no");
+          if (!relayedB) bgFailMsg("the bot's done relay (worktree card / review line) did not land on the main chat conv");
+        }
+      } else {
+        bgFailMsg("the Manager did not spawn worker bg-a — skipping the bg-a done checks");
+      }
+      // (c) hard: tracked under the synthetic bg: conv (listed as background).
+      if (gotA) {
+        const isBgConv = convA !== undefined && convA.startsWith("bg:42:");
+        console.log("bg-a tracked under the synthetic bg conv (c):", isBgConv, convA ?? "");
+        if (!isBgConv) bgFailMsg(`bg-a is not under a bg: conv (got ${convA ?? "none"})`);
+      }
+      // (c) soft: the Manager's list_workers relay shows the "· bg" marker.
+      await withTimeout(
+        bot.handle(upd("Call tg-bridge_list_workers and reply with its complete output, verbatim — no extra words.")),
+        180000,
+      );
+      const listedBg = await poll(() => mock.out.slice(outBefore).some((m) => m.includes("· bg")), 60000);
+      console.log('bg: list_workers relay shows the "· bg" marker (c, soft):', listedBg ? "yes" : "NOT RELAYED (soft check, not a failure)");
+
+      // (d) /stop works on a background worker — catch the 2nd worker mid-turn.
+      await withTimeout(bot.handle(
+        upd(
+          `Spawn exactly ONE worker in the BACKGROUND (background: true — no topic): name "bg-b", directory ${ws}. ` +
+            'Its task, verbatim: "Count from 1 to 30, writing each number on its own line, very carefully, do not summarize." ' +
+            "Do not ask questions — everything you need is here. Announce the mode in one line and stop.",
+        ),
+        180000,
+      ));
+      show("bg: manager prompt (spawn bg-b)");
+      const gotB = await poll(() => st.findWorker("42", "bg-b") !== undefined, 120000);
+      console.log("bg-b spawned by the Manager:", gotB);
+      if (gotB) {
+        const sessB = st.findWorker("42", "bg-b")?.[1].sessionID;
+        // Catch the worker MID-TURN (the same busy-poll the WATCH scenario uses).
+        let busyB = false;
+        for (let i = 0; i < 400 && !busyB; i++) {
+          if (!sessB) break;
+          try {
+            busyB = (await oc.sessionState(sessB)).busy;
+          } catch {
+            break; // a client hiccup is not "busy" — stop polling
+          }
+          if (!busyB) await waitMs(300);
+        }
+        const statusBeforeKill = workerStatus("bg-b");
+        console.log("bg-b caught mid-turn (busy):", busyB, "| status before /kill:", statusBeforeKill ?? "?");
+        // (d) /kill on a background worker: it must answer, and the worker
+        // must end stopped. stopWorker marks "stopped" unconditionally, so
+        // this holds even when a fast model finished the task before the
+        // kill arrived (the mid-turn catch above is informative only).
+        const killBefore = mock.out.length;
+        await bot.handle(upd("/kill bg-b"));
+        const stopMsg = mock.out.slice(killBefore).find((m) => /Stopped worker|Đã dừng worker/.test(m)) ?? "";
+        const statusAfterKill = workerStatus("bg-b");
+        console.log("bg: /stop answered (d):", stopMsg ? "yes" : "NO", "| status after /kill:", statusAfterKill ?? "?");
+        if (!stopMsg || statusAfterKill !== "stopped") bgFailMsg("/stop did not stop the background worker");
+      }
+
+      // (a) no forum topic was created for either spawn, and no live (topic)
+      // worker conv appeared for this chat.
+      const noTopics = mock.topicsCreated === topicsBefore;
+      console.log("bg: no forum topic created (a):", noTopics, `(topics ${topicsBefore} → ${mock.topicsCreated})`);
+      if (!noTopics) bgFailMsg("a forum topic was created — the spawn was not background");
+      const liveConvs = Object.keys(st.all()).filter((k) => !convsBefore.has(k) && k.startsWith("42:"));
+      console.log("bg: no live (topic) worker conv appeared (a):", liveConvs.length === 0, liveConvs.length ? JSON.stringify(liveConvs) : "");
+      if (liveConvs.length) bgFailMsg("a live (topic) worker conv appeared: " + liveConvs.join(", "));
+
+      if (!bgFail) console.log("✅ BG: background worker end-to-end (no topic → main-chat relay → listed bg → /stop)");
+    };
+
+    try {
+      await run();
+    } finally {
+      // cleanup (ALWAYS): stop stragglers, remove the fixture file + any
+      // worktree, and put the main chat back to normal (the Manager
+      // conversion must not leak past this section).
+      for (const name of ["bg-a", "bg-b"]) {
+        const f = st.findWorker("42", name);
+        if (f && f[1].sessionID && !["done", "failed", "stopped"].includes(f[1].worker!.status)) {
+          await oc.interrupt(f[1].sessionID).catch(() => {});
+        }
+        const w = f?.[1].worker;
+        if (w?.worktree) {
+          try {
+            console.log("bg cleanup:", await removeWorktree(ws, { root: w.worktree.root, branch: w.worktree.branch }));
+          } catch (e) {
+            console.log("bg cleanup: removeWorktree failed —", (e as Error).message);
+          }
+        }
+      }
+      rmSync(bgFile, { force: true });
+      if (st.get(42).manager) {
+        await bot.handle(upd("/manager off"));
+        show("bg: /manager off");
+      }
+    }
+    if (bgFail) process.exitCode = 1;
+  }
+
   await bot.handle(upd("/clear"));
   show("/clear");
 
@@ -833,6 +1038,11 @@ async function main(): Promise<void> {
   console.log("State file:", cfg.stateFile, "\n", stateDump);
 
   oc.stopEvents();
+  // main() has finished doing everything — exit explicitly. Open handles
+  // (e.g. the MCP bridge's HTTP server from the Manager scenario) would
+  // otherwise keep the event loop alive and the harness would hang until
+  // the outer timeout.
+  process.exit(process.exitCode ?? 0);
 }
 
 main().catch((e) => {

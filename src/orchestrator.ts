@@ -124,7 +124,7 @@ const workerPreamble = (name: string, agent?: string, lang?: Lang) =>
   // script-mode capability note (last section, before the task).
   (agent === "build" ? "\n\n" + scriptInstruction(lang ?? "en") : "");
 
-const MANAGER_PROMPT = (maxWorkers: number) => `---
+export const MANAGER_PROMPT = (maxWorkers: number) => `---
 description: Telegram manager — splits work across parallel worker sessions
 mode: primary
 permissions:
@@ -143,8 +143,8 @@ permissions:
 ---
 You are the Manager. The user talks to you from Telegram (usually in Vietnamese — always reply in the
 user's language). You do NOT edit files or run commands yourself. You get work done by delegating it to
-workers: each worker is a separate OpenCode coding session with its own Telegram topic, running in a
-directory you choose.
+workers: each worker is a separate OpenCode coding session running in a directory you choose — either
+LIVE (its own Telegram topic) or in the BACKGROUND (no topic; the result is relayed to the main chat).
 
 ## Tools
 Call these directly as native tools (never through \`execute\`):
@@ -154,6 +154,16 @@ Call these directly as native tools (never through \`execute\`):
 - tg-bridge_send_to_worker — give an existing worker a follow-up instruction.
 - tg-bridge_get_worker_result — read a worker's latest full reply.
 - tg-bridge_stop_worker — interrupt a worker.
+
+## Mode: background vs live
+Set \`background: true\` on \`tg-bridge_spawn_worker\` to run a worker in the BACKGROUND — no Telegram
+topic is created, and its result is relayed to the main chat when it finishes.
+- BACKGROUND: small, well-scoped, low-risk tasks — a single-file change, a quick fix or lookup with a
+  clear definition of done.
+- LIVE (the default): big, long-running, high-risk or watch-worthy work — anything the user would want
+  to follow in a topic in real time, or that may need mid-task decisions.
+- When in doubt, pick LIVE — the topic lets the user watch.
+Always announce which mode you picked and why, in one line, when you spawn the worker.
 
 ## How to work
 1. Understand the request. If something important is ambiguous, ask ONE question with the \`question\` tool.
@@ -1031,7 +1041,8 @@ export class Orchestrator {
     // would be reported to the Manager, which might restart the work).
     this.setStatus(conv, "stopped");
     if (s.sessionID) await this.h.oc.interrupt(s.sessionID).catch(() => {});
-    if (close) await this.h.tg.closeForumTopic(conv);
+    // B2.5: a background worker has no topic — there is nothing to close.
+    if (close && !isBackgroundConv(conv)) await this.h.tg.closeForumTopic(conv);
     const lang = this.langOf(conv);
     return `${tr(lang, "⏹ Đã dừng worker", "⏹ Stopped worker")} <b>${esc(w.name)}</b>.${w.worktree ? tr(lang, " Worktree vẫn giữ — dùng /wt trong topic để xem diff / merge / xoá.", " Worktree kept — use /wt in the topic to view diff / merge / delete.") : ""}`;
   }

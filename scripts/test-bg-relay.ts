@@ -264,6 +264,24 @@ const BG = "bg:42:fix";
   check("sweep still relays for a live conv (unchanged)", sentIds.length === 1 && sentIds[0].conv === "42" && /raw assistant text/.test(sentIds[0].text), JSON.stringify(sentIds));
 }
 
+// ── B3.4/B2.5: /stop on a bg worker — no closeForumTopic (no topic exists) ─
+{
+  const h = makeHarness("stop", "always", true);
+  const r = await h.orch.spawn("42", spec("stopme", h.repo, { task: "do S", background: true }));
+  check("bg worker conv is the synthetic bg conv", r.conv === "bg:42:stopme", r.conv);
+  const before = h.closeTopics.length;
+  const msg = await (h.orch as any).stopWorker(r.conv, true);
+  check("stopWorker returns the stop notice", /Stopped worker|Đã dừng worker/.test(msg), msg);
+  check("stopWorker does NOT call closeForumTopic for a bg conv (B2.5)", h.closeTopics.length === before, JSON.stringify(h.closeTopics));
+  check("bg worker marked stopped", h.st.peek(r.conv)?.worker?.status === "stopped");
+  // Live control: a live worker's /stop still closes its topic.
+  const l = await h.orch.spawn("42", spec("livestop", h.repo, { task: "do L" }));
+  const beforeLive = h.closeTopics.length;
+  await (h.orch as any).stopWorker(l.conv, true);
+  check("live /stop still closes the topic (unchanged)", h.closeTopics.length === beforeLive + 1 && h.closeTopics[h.closeTopics.length - 1] === l.conv, JSON.stringify(h.closeTopics));
+  h.clearReportTimers();
+}
+
 rmSync(tmp, { recursive: true, force: true });
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
