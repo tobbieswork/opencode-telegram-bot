@@ -83,8 +83,8 @@ async function main(): Promise<void> {
     const c = docCalls[0];
     check("long: sent to the conv", c.to === "123", JSON.stringify(c.to));
     check(
-      "long: file is report-<timestamp>.md under tmpdir",
-      /^report-\d+\.md$/.test(c.file.split("/").pop() ?? "") && c.file.startsWith(tmpdir()),
+      "long: file is report-<timestamp>-<seq>.md under tmpdir",
+      /^report-\d+-\d+\.md$/.test(c.file.split("/").pop() ?? "") && c.file.startsWith(tmpdir()),
       c.file,
     );
     check("long: temp file exists right after send", existsSync(c.file));

@@ -25,7 +25,7 @@ return "Done: 5 files processed, 3 TODOs found";
 Rules:
 - Available tools: read_file, write_file, grep, glob, exec
 - All paths are relative to your worktree (or absolute within it)
-- exec: no shell metacharacters (; | & > < $( backticks)
+- exec: one plain command only — no shell metacharacters (; | & > < $( backticks), no script interpreters or shells (node, python, bash, ...)
 - The script runs in 60s. Keep it simple and sequential.
 - Return a final string summary (max 500 chars).
 - Use script mode ONLY when the task is 5+ tool steps. For 1-4 steps, just call tools normally.`;

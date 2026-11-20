@@ -50,13 +50,78 @@ export function validatePath(p: string, worktree: string): boolean {
 }
 
 /**
+ * Binaries that must never be the command of a sandbox `exec`:
+ * - script interpreters (node, python, ...) accept full programs as arguments,
+ *   so `exec("node -e \"...\"\")` would run arbitrary code outside the worktree
+ *   (file reads, network exfiltration, child processes) and bypass every other
+ *   guard in this module;
+ * - shells (sh, bash, ...) via `-c` do the same;
+ * - `env` could prefix any of the above (`env node -e ...`);
+ * - `npx`/`pnpx` fetch and run arbitrary registry code.
+ * Plain project tooling (npm, git, grep, ...) is still allowed.
+ */
+const BLOCKED_EXECUTABLES: ReadonlySet<string> = new Set([
+  "node",
+  "nodejs",
+  "deno",
+  "bun",
+  "tsx",
+  "python",
+  "ruby",
+  "perl",
+  "php",
+  "lua",
+  "luajit",
+  // busybox exposes every applet (incl. sh) through one binary; installed on this box.
+  "busybox",
+  "sh",
+  "bash",
+  "zsh",
+  "dash",
+  "ksh",
+  "env",
+  "npx",
+  "pnpx",
+]);
+/** Versioned interpreters: python3, python3.11, ... ("python" itself is in the set above). */
+const VERSIONED_BLOCKED_EXECUTABLES = /^python\d/;
+
+/**
+ * The basename of the executable a plain command would run. Skips leading
+ * `VAR=value` environment assignments and a single layer of surrounding
+ * quotes; returns "" when the command has no command token.
+ */
+export function commandExecutable(cmd: string): string {
+  for (const token of cmd.trim().split(/\s+/)) {
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) continue;
+    let t = token;
+    if (t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))) {
+      t = t.slice(1, -1);
+    }
+    return t.split("/").pop() ?? "";
+  }
+  return "";
+}
+
+/**
+ * True when `cmd` would run a script interpreter or shell — i.e. arbitrary
+ * code execution that bypasses the worktree confinement (see BLOCKED_EXECUTABLES).
+ */
+export function isBlockedExecutable(cmd: string): boolean {
+  const bin = commandExecutable(cmd);
+  return bin !== "" && (BLOCKED_EXECUTABLES.has(bin) || VERSIONED_BLOCKED_EXECUTABLES.test(bin));
+}
+
+/**
  * True only when the command contains no shell metacharacters, i.e. it must be
  * a single plain command: no `;`, `|`, `&`, `>`, `<`, `$(`, backticks
- * (`&&`/`||` contain `&`/`|` and are covered).
+ * (`&&`/`||` contain `&`/`|` and are covered), and no script interpreter or
+ * shell as the command itself.
  */
 export function validateExec(cmd: string): boolean {
   if (typeof cmd !== "string" || cmd.length === 0) return false;
   if (/[;|&<>`\n\r]/.test(cmd)) return false;
   if (cmd.includes("$(")) return false;
+  if (isBlockedExecutable(cmd)) return false;
   return true;
 }
