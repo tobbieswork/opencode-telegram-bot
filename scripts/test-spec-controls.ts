@@ -224,6 +224,14 @@ try {
     check("helper: empty / blank lines survive", workerCommitsSinceFork([], "gamma").length === 0 && workerCommitsSinceFork(["", "  "], "gamma").length === 0);
     check("helper: a branch with ONLY the marker commit → no worker commit", workerCommitsSinceFork([`h1 ${markerCommitSubject("gamma")}`], "gamma").length === 0);
     check("helper: marker subject is the exact S4 string", markerCommitSubject("gamma") === "docs: add S4 task markers to gamma.md");
+    // S6.4 marker commits (`docs: mark <id> done`, created by the Accept path)
+    // are excluded — a self-marking worker can leave a prior task's marker as
+    // the newest entry (W2 incident, 2026-11-20).
+    const s64Lines = ["w2code feat: W2 relay work (self-marked)", "m1 docs: mark W1 done", "w1code feat: W1 spawn work"];
+    const s64 = workerCommitsSinceFork(s64Lines, "gamma");
+    check("helper: S6.4 marker commit (docs: mark W1 done) is excluded", s64.length === 2 && s64.every((c) => c.subject !== "docs: mark W1 done"), JSON.stringify(s64));
+    check("helper: newest non-marker commit wins (worker code, not the marker)", s64[0].hash === "w2code" && s64[0].subject === "feat: W2 relay work (self-marked)", JSON.stringify(s64));
+    check("helper: a genuine worker docs commit is NOT excluded", workerCommitsSinceFork(["d1 docs: update guide"], "gamma").length === 1);
   }
 
   // ── Accept — happy path (both languages): the e2e git checkpoint ─────────

@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.55.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.54.2...opencode-telegram-bot-v1.55.0) (2026-11-20)
+
+
+### Features
+
+* log MCP bridge token at startup ([b54289b](https://github.com/tobbieswork/opencode-telegram-bot/commit/b54289b3bbbe21ae70f673a7c895ba21c457b3a1))
+* log MCP bridge token at startup ([d66fce4](https://github.com/tobbieswork/opencode-telegram-bot/commit/d66fce4b39eed7597803aa0cd3144d9a291a99cf))
+
+## [1.54.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.54.1...opencode-telegram-bot-v1.54.2) (2026-11-20)
+
+
+### Bug Fixes
+
+* **spec:** exclude S6.4 marker commits from Accept's commit selection ([6c3f9fa](https://github.com/tobbieswork/opencode-telegram-bot/commit/6c3f9facf05c5e0f38199e3a055e6dd9b54d40fc))
+* **spec:** exclude S6.4 marker commits from Accept's commit selection ([69d16d3](https://github.com/tobbieswork/opencode-telegram-bot/commit/69d16d3ab50909042d298aadc9708dbb21a6830f))
+
+## [1.54.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.54.0...opencode-telegram-bot-v1.54.1) (2026-11-20)
+
+
+### Bug Fixes
+
+* a completed canonical check with no recorded exit is a pass, not a fail ([ee0c8ce](https://github.com/tobbieswork/opencode-telegram-bot/commit/ee0c8cebb579ba2de18b28954f86036f5dd6564d))
+* completed canonical check with no recorded exit is a pass ([8b3fb83](https://github.com/tobbieswork/opencode-telegram-bot/commit/8b3fb832c9fbde4447da2cbc2d410c4c0cb77a87))
+
 ## [1.54.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.53.0...opencode-telegram-bot-v1.54.0) (2026-11-20)
 
 

@@ -8,8 +8,15 @@
  * semantics verified live in the S0 findings, docs/sdd/spec-tasks.md §7):
  *   - state.status === "error"                    → not run (errored): the
  *     tool failed before the command ran; carry its error message.
- *   - state.status === "completed", exit !== 0    → ran, FAILED.
  *   - state.status === "completed", exit === 0    → ran, passed.
+ *   - state.status === "completed", exit !== 0    → ran, FAILED.
+ *   - state.status === "completed", exit NOT
+ *     recorded (metadata.exit undefined — a wrapped/redirected command such as
+ *     `npm run test:unit > log 2>&1; echo exit=$?` leaves no exit) → ran,
+ *     treated as PASSED: it completed without a tool error and there is no
+ *     evidence of a non-zero exit. Treating this as a failure was a false-fail
+ *     that halted the auto-continue chain (background-workers W0, 2026-11-20);
+ *     T1's host gate is the backstop for genuine failures.
  * Anything else (pending/running, or a check with no item at all) is "not run".
  *
  * Retry-aware (user decision 2026-11-17): for each check name, the LAST
@@ -99,8 +106,14 @@ export function classifyShellItems(
       const msg = st.error?.message != null ? String(st.error.message) : "tool error";
       e = { name, ok: false, error: msg };
     } else if (st.status === "completed") {
-      // exit 0 → passed; any other exit (incl. a masked wrapper exit) → failed.
-      e = { name, ok: st.metadata?.exit === 0 };
+      // A completed command with a recorded exit: 0 → passed, non-zero →
+      // failed. With NO recorded exit (metadata.exit undefined — wrapped /
+      // redirected commands), treat as passed: it ran to completion and there
+      // is no evidence of a non-zero exit (a false-fail here halted the
+      // auto-continue chain — background-workers W0, 2026-11-20). T1's host
+      // gate remains the backstop for genuine failures.
+      const exit = st.metadata?.exit;
+      e = { name, ok: exit == null ? true : exit === 0 };
     } else {
       // "pending" / "running" / unknown: no recorded result → not run.
       continue;
@@ -130,15 +143,20 @@ export function markerCommitSubject(spec: string): string {
 
 /**
  * S6.4 — parse `git log --format=%h %s` output (newest first) into
- * { hash, subject } commits, excluding the S4 marker commit. Blank lines and
- * hash-only lines are ignored. The caller scopes the range (e.g. `base..HEAD`);
- * this only filters + parses.
+ * { hash, subject } commits, excluding the S4 marker commit AND the S6.4
+ * marker commits (`docs: mark <id> done`, created by the Accept path). A
+ * self-marking worker can leave a prior task's marker commit as the newest
+ * entry, which would corrupt the Accept's commit selection (W2 incident,
+ * 2026-11-20) — so those are filtered here. Blank lines and hash-only lines
+ * are ignored. The caller scopes the range (e.g. `base..HEAD`); this only
+ * filters + parses.
  */
 export function workerCommitsSinceFork(
   lines: string[],
   spec: string,
 ): { hash: string; subject: string }[] {
   const marker = markerCommitSubject(spec);
+  const s64Marker = /^docs: mark \w+ done$/;
   const out: { hash: string; subject: string }[] = [];
   for (const raw of lines ?? []) {
     const line = String(raw).trim();
@@ -146,6 +164,7 @@ export function workerCommitsSinceFork(
     if (sp < 1) continue;
     const subject = line.slice(sp + 1).trim();
     if (subject === marker) continue;
+    if (s64Marker.test(subject)) continue;
     out.push({ hash: line.slice(0, sp), subject });
   }
   return out;
