@@ -77,7 +77,7 @@ import { log, warn, error } from "./logger.js";
 import { audit } from "./audit.js";
 import { advisorHealth } from "./advisor/advisor-client.js";
 import { buildProbes, dirSize, diskDevice, freeSpace, smartHealth, type HealthSources } from "./health-probes.js";
-import { collectHealth } from "./health.js";
+import { collectHealth, type HealthLine } from "./health.js";
 import { DashboardServer, type DashboardHealth, type DashboardSpec, type DashboardState, type DashboardWorker } from "./dashboard.js";
 import { CARRYOVER_KEY } from "./shared.js";
 import type { Btn, Keyboard } from "./shared.js";
@@ -572,6 +572,9 @@ export class Bot {
   private scheduler?: Scheduler;
   /** Read-only web dashboard (Login with Telegram, OIDC). Off unless cfg.dashboardPort is set. */
   private dashboard?: DashboardServer;
+  /** Cached /health lines for the dashboard, 60s TTL: the disk probes (recursive dirSize walk,
+   * smartctl spawn) must not run on every 15s poll, however many viewers are connected. */
+  private dashHealth?: { lines: HealthLine[]; at: number };
   /** Claude advisor (topic + Claude session on the Mac) — present only when enabled. */
   public advisor?: Advisor;
 
@@ -756,7 +759,14 @@ export class Bot {
         ? { name: e.name, title: e.title, done: 0, total: 0, error: e.error.message }
         : { name: e.name, title: e.title, done: e.done, total: e.total },
     );
+    // 60s cache: probes are cheap enough for /health on demand, but the dashboard polls every 15s.
+    if (this.dashHealth && now - this.dashHealth.at < 60_000) {
+      const lines = this.dashHealth.lines;
+      const health: DashboardHealth[] = lines.map((l) => ({ id: l.id, status: l.status, detail: l.detail, lastOkAt: l.lastOkAt }));
+      return { workers, specs, health, now };
+    }
     const lines = await collectHealth(buildProbes(this.healthSources(), () => now), now);
+    this.dashHealth = { lines, at: now };
     const health: DashboardHealth[] = lines.map((l) => ({ id: l.id, status: l.status, detail: l.detail, lastOkAt: l.lastOkAt }));
     return { workers, specs, health, now };
   }
