@@ -97,6 +97,7 @@ preamble (`src/orchestrator.ts:75–82`):
 |---|---|
 | Tool allowlist | `read`, `write` (worktree-only), `grep`, `glob`, `bash` (worktree-only, no shell metacharacters) — full native set in `src/activity.ts:22–44` |
 | Sandboxing | `worker_threads` with no host globals; 60s timeout; 256MB `resourceLimits` |
+| No arbitrary code | `exec` rejects script interpreters and shells (`node`, `python`, `bash`, ...) as the command — they would run arbitrary code outside the worktree (`allowlist.ts`) |
 | Path restriction | All file ops confined to the worker's worktree directory (validated in `allowlist.ts`) |
 | No network | Script has no `fetch`, no `http`, no DNS — the only external call is `rpc()` |
 | No self-replication | Script cannot spawn workers, cannot access the MCP bridge directly |

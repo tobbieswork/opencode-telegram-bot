@@ -57,7 +57,7 @@ export function executeTool(tool: string, params: Record<string, unknown>, workt
     }
     case "exec": {
       const cmd = strParam(params, "cmd");
-      if (!validateExec(cmd)) return guardError(`exec command rejected (shell metacharacters not allowed): ${cmd}`);
+      if (!validateExec(cmd)) return guardError(`exec command rejected (no shell metacharacters, script interpreters or shells): ${cmd}`);
       let cwd: string;
       if (typeof params.cwd === "string" && params.cwd.length > 0) {
         if (!validatePath(params.cwd, work)) return guardError("exec: cwd is outside the worktree");

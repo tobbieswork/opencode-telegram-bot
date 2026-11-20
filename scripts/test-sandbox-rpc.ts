@@ -71,6 +71,23 @@ fs.symlinkSync(path.join(outside, "secret.txt"), path.join(wt, "escape-link")); 
   check("backtick command → false", validateExec("ls `whoami`") === false);
   check("'ls & sleep 1' → false", validateExec("ls & sleep 1") === false);
   check("empty command → false", validateExec("") === false);
+  // interpreter/shell ban: a plain `node -e "..."` carries no metacharacters,
+  // so without this guard exec would run arbitrary code outside the worktree.
+  check("'node -e' → false (interpreter)", validateExec('node -e "process.stdout.write(1)"') === false);
+  check("'python3 -c' → false", validateExec('python3 -c "print(1)"') === false);
+  check("'python -c' → false", validateExec('python -c "print(1)"') === false);
+  check("'python3.11 -c' → false (versioned)", validateExec('python3.11 -c "print(1)"') === false);
+  check("'bash -c' → false (shell)", validateExec('bash -c "id"') === false);
+  check("absolute /usr/bin/node → false", validateExec("/usr/bin/node -v") === false);
+  check("quoted binary → false", validateExec('"node" -v') === false);
+  check("'env node' → false (env prefix bypass)", validateExec('env node -e "1"') === false);
+  check("VAR=x python3 → false (assignment prefix)", validateExec('FOO=bar python3 -c "1"') === false);
+  check("'tsx -e' → false (TS interpreter)", validateExec('tsx -e "1"') === false);
+  check("'npx' → false (registry code)", validateExec("npx some-pkg") === false);
+  check("busybox sh -c id -> false (applet shell)", validateExec("busybox sh -c id") === false);
+  check("'npm run x' → true (project tooling allowed)", validateExec("npm run test:unit") === true);
+  check("'git status' → true", validateExec("git status") === true);
+  check("interpreter name as argument → true (no false positive)", validateExec("grep -rn python3 src/") === true);
 }
 
 // ── RPC server ───────────────────────────────────────────────────────────────
@@ -140,6 +157,8 @@ fs.symlinkSync(path.join(outside, "secret.txt"), path.join(wt, "escape-link")); 
   check("exec with metacharacters → 403", r.status === 403, `status ${r.status}`);
   r = await rpc({ tool: "exec", params: { cmd: "echo $(whoami)" } });
   check("exec with $() → 403", r.status === 403, `status ${r.status}`);
+  r = await rpc({ tool: "exec", params: { cmd: "node -e \"process.stdout.write(1)\"" } });
+  check("exec with interpreter → 403", r.status === 403, `status ${r.status}`);
   r = await rpc({ tool: "exec", params: { cmd: "ls", cwd: "../.." } });
   check("exec cwd outside worktree → 403", r.status === 403, `status ${r.status}`);
 

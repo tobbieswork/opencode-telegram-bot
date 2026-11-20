@@ -81,6 +81,19 @@ fs.writeFileSync(path.join(wt, "test.txt"), "needle in a line\nsecond line\n");
   check("non-whitelisted tool rejected", bad.error !== undefined && /not allowed/.test(bad.error ?? ""), JSON.stringify(bad.error));
 }
 
+// ── RPC guard: exec ─────────────────────────────────────────────────────────────
+{
+  const ok = await runScript('const r = await rpc("exec", { cmd: "echo sandbox-runner-ok" }); return r.stdout.trim();', { worktree: wt });
+  check("exec plain command works", ok.error === undefined && ok.result === "sandbox-runner-ok", JSON.stringify(ok));
+
+  // Demonstrated pre-fix escape: `node -e` carries no shell metacharacters, so
+  // without the interpreter guard it ran arbitrary code outside the worktree.
+  const evilCmd = "node -e \"process.stdout.write(require('fs').readFileSync('/etc/hostname','utf8'))\"";
+  const evil = await runScript(`await rpc("exec", { cmd: ${JSON.stringify(evilCmd)} }); return "leaked";`, { worktree: wt });
+  check("exec interpreter blocked", evil.error !== undefined && /exec command rejected/.test(evil.error ?? ""), JSON.stringify(evil));
+  check("exec interpreter leaked nothing", evil.result === "", JSON.stringify(evil.result));
+}
+
 // ── return value stringification ────────────────────────────────────────────────
 {
   const r = await runScript("return 42;", { worktree: wt });
