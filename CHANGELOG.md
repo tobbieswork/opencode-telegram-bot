@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.51.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.51.0...opencode-telegram-bot-v1.51.1) (2026-11-20)
+
+
+### Bug Fixes
+
+* re-peek worker before st.set to stop stale-spread clobber (3 sites) ([f5f9d82](https://github.com/tobbieswork/opencode-telegram-bot/commit/f5f9d8217b5dc95050dbfd5ed5834a6105a2492a))
+* re-peek worker before st.set to stop stale-spread clobber (3 sites) ([9eb7822](https://github.com/tobbieswork/opencode-telegram-bot/commit/9eb782236cc5a3344217b66cea9bb1881b3fa209))
+
 ## [1.51.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.50.0...opencode-telegram-bot-v1.51.0) (2026-11-19)
 
 
