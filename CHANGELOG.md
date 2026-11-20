@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.55.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.54.2...opencode-telegram-bot-v1.55.0) (2026-11-20)
+
+
+### Features
+
+* log MCP bridge token at startup ([b54289b](https://github.com/tobbieswork/opencode-telegram-bot/commit/b54289b3bbbe21ae70f673a7c895ba21c457b3a1))
+* log MCP bridge token at startup ([d66fce4](https://github.com/tobbieswork/opencode-telegram-bot/commit/d66fce4b39eed7597803aa0cd3144d9a291a99cf))
+
 ## [1.54.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.54.1...opencode-telegram-bot-v1.54.2) (2026-11-20)
 
 
