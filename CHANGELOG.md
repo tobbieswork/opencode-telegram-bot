@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.54.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.54.1...opencode-telegram-bot-v1.54.2) (2026-11-20)
+
+
+### Bug Fixes
+
+* **spec:** exclude S6.4 marker commits from Accept's commit selection ([6c3f9fa](https://github.com/tobbieswork/opencode-telegram-bot/commit/6c3f9facf05c5e0f38199e3a055e6dd9b54d40fc))
+* **spec:** exclude S6.4 marker commits from Accept's commit selection ([69d16d3](https://github.com/tobbieswork/opencode-telegram-bot/commit/69d16d3ab50909042d298aadc9708dbb21a6830f))
+
 ## [1.54.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.54.0...opencode-telegram-bot-v1.54.1) (2026-11-20)
 
 
