@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.57.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.57.0...opencode-telegram-bot-v1.57.1) (2026-11-20)
+
+
+### Bug Fixes
+
+* cache dashboard health probes (60s TTL) ([aaaa75e](https://github.com/tobbieswork/opencode-telegram-bot/commit/aaaa75e82164574770320dce67076bfbf76a5ffe))
+* cache dashboard health probes (60s TTL) ([e366a5e](https://github.com/tobbieswork/opencode-telegram-bot/commit/e366a5e33ee9b6a930cf4a4c94550d8ce7610604))
+
 ## [1.57.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.56.0...opencode-telegram-bot-v1.57.0) (2026-11-20)
 
 
