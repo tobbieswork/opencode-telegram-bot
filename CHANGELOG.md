@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.54.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.53.0...opencode-telegram-bot-v1.54.0) (2026-11-20)
+
+
+### Features
+
+* chaptered on-demand diff view for large /wt diffs ([bc0f359](https://github.com/tobbieswork/opencode-telegram-bot/commit/bc0f359f09735d7e1bda6554250687a87032c774))
+* chaptered on-demand diff view for large /wt diffs ([2bd2695](https://github.com/tobbieswork/opencode-telegram-bot/commit/2bd26959d61d95a80a22ee561127285ae2e4f256))
+
 ## [1.53.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.52.0...opencode-telegram-bot-v1.53.0) (2026-11-20)
 
 
