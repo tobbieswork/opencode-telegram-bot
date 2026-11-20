@@ -42,7 +42,7 @@ import { esc, trunc } from "../format.js";
 import { oneArg, fields, simple } from "../callbacks.js";
 
 /** One spec in docs/sdd/: parsed (with progress) or unparseable (S1.4). */
-type SpecEntry =
+export type SpecEntry =
   | { name: string; title: string; done: number; total: number }
   | { name: string; title: string; error: { line: number; message: string } };
 
@@ -76,7 +76,7 @@ function specTitle(md: string, fallback: string): string {
 }
 
 /** Scan docs/sdd/: every *.md with a Tasks section (parsed or failed). */
-function scanSpecs(sdd: string): SpecEntry[] {
+export function scanSpecs(sdd: string): SpecEntry[] {
   let files: string[];
   try {
     files = readdirSync(sdd).filter((f) => f.endsWith(".md")).sort();

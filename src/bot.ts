@@ -8,7 +8,7 @@ import { OpenCodeCtl, assistantText, ModelInfo } from "./opencode.js";
 import { StateManager, ChatState, MsgPurpose, MACHINE_STATE_KEY, UserPrefsStore, Lang } from "./state.js";
 import { ConvKey, convKey, chatOf, isBackgroundConv, parseConv } from "./conv.js";
 import { answerExpired, defineCallback, dispatchCallback, oneArg, registerCallback } from "./callbacks.js";
-import { Orchestrator, BUSY, apCb, killCb, wtCb } from "./orchestrator.js";
+import { Orchestrator, BUSY, apCb, killCb, wtCb, boardGroup, boardReason } from "./orchestrator.js";
 import { handlePruneCallback, pruneCb } from "./orchestrator/purge.js";
 import { closeFinishedTopicsAtStartup, deleteOrphanTopicsAtStartup } from "./orchestrator/topics.js";
 import { ScheduleStore, Scheduler } from "./scheduler.js";
@@ -76,7 +76,9 @@ import { DirItem, isUnderRoot, listDirs, parentWithin, shortPath } from "./fsbro
 import { log, warn, error } from "./logger.js";
 import { audit } from "./audit.js";
 import { advisorHealth } from "./advisor/advisor-client.js";
-import { dirSize, diskDevice, freeSpace, smartHealth, type HealthSources } from "./health-probes.js";
+import { buildProbes, dirSize, diskDevice, freeSpace, smartHealth, type HealthSources } from "./health-probes.js";
+import { collectHealth } from "./health.js";
+import { DashboardServer, type DashboardHealth, type DashboardSpec, type DashboardState, type DashboardWorker } from "./dashboard.js";
 import { CARRYOVER_KEY } from "./shared.js";
 import type { Btn, Keyboard } from "./shared.js";
 import { cmdAgents, cmdAgent, handleAgentCallback, agentCb } from "./commands/agents.js";
@@ -97,7 +99,7 @@ import { cmdReboot, handleRebootCallback, cmdStatus, cmdContext, cmdUsage } from
 import { cmdSchedule, handleScheduleCallback, schCb } from "./commands/schedule.js";
 import { Advisor } from "./advisor/advisor.js";
 import { cmdHelp, cmdHealth, cmdNote, cmdRotation, handleNoteCallback, cmdLang, cmdStyle } from "./commands/meta.js";
-import { cmdSpec, handleSpecCallback, specAutoContinue, specCb, specrunCb, specblockedCb, specrunokCb, specrerunCb, speccancelCb, spcaccCb, spcautoCb, spcredoCb, spcredocancelCb, spcstopCb, spcprCb, spcreadyCb, spccleanCb } from "./commands/spec.js";
+import { cmdSpec, handleSpecCallback, scanSpecs, specAutoContinue, specCb, specrunCb, specblockedCb, specrunokCb, specrerunCb, speccancelCb, spcaccCb, spcautoCb, spcredoCb, spcredocancelCb, spcstopCb, spcprCb, spcreadyCb, spccleanCb } from "./commands/spec.js";
 import { trackPending as trackPendingFree, drainInflight as drainInflightFree, notifyQueuedNotRunning as notifyQueuedNotRunningFree, runPrompt as runPromptFree, runPromptTask as runPromptTaskFree, drainQueue as drainQueueFree, stopCurrent as stopCurrentFree } from "./commands/prompt-runner.js";
 import {
   clampWatchInterval,
@@ -568,6 +570,8 @@ export class Bot {
   public userPrefs: UserPrefsStore;
   /** /schedule tick engine — only constructed/started when cfg.schedule is on. */
   private scheduler?: Scheduler;
+  /** Read-only web dashboard (Login with Telegram, OIDC). Off unless cfg.dashboardPort is set. */
+  private dashboard?: DashboardServer;
   /** Claude advisor (topic + Claude session on the Mac) — present only when enabled. */
   public advisor?: Advisor;
 
@@ -576,6 +580,8 @@ export class Bot {
     public oc: OpenCodeCtl,
     public st: StateManager,
     public cfg: Config,
+    /** The bot own numeric Telegram id (from getMe) - the OIDC client id for the dashboard. */
+    public botId?: number,
   ) {
     // Same data dir as state.json (derived from cfg.stateFile); a SEPARATE file
     // on purpose so /clear and the per-chat sweeps can't wipe schedules.
@@ -684,11 +690,75 @@ export class Bot {
     // high (see src/rotation.ts). Runs every 10 min; no-op until a manager conv
     // crosses a threshold.
     this.startRotationMonitor();
+    // Read-only web dashboard (Login with Telegram, OIDC). Off unless OPENCODE_TG_DASHBOARD_PORT is set.
+    if (this.cfg.dashboardPort > 0) this.startDashboard();
   }
 
   /** Stop the /schedule tick engine (called from index.ts during shutdown). */
   stopScheduler(): void {
     this.scheduler?.stop();
+  }
+
+  /** Start the read-only web dashboard. Only called when cfg.dashboardPort is set. */
+  private startDashboard(): void {
+    if (!this.cfg.dashboardPublicUrl || !this.cfg.dashboardClientSecret) {
+      warn("dashboard: OPENCODE_TG_DASHBOARD_PUBLIC_URL or OPENCODE_TG_DASHBOARD_CLIENT_SECRET missing - login stays broken until both are set (BotFather, Login Widget)");
+    }
+    this.dashboard = new DashboardServer({
+      port: this.cfg.dashboardPort,
+      clientId: this.cfg.dashboardClientId || this.botId || 0,
+      clientSecret: this.cfg.dashboardClientSecret,
+      publicUrl: this.cfg.dashboardPublicUrl,
+      allowedUserIds: this.cfg.allowedUserIds,
+      allowAny: this.cfg.allowAny,
+      snapshot: () => this.dashboardSnapshot(),
+    });
+    void this.dashboard
+      .listen()
+      .then((port) => log("dashboard: http://127.0.0.1:" + port + " (public: " + this.cfg.dashboardPublicUrl + ")"))
+      .catch((e) => warn("dashboard:", (e as Error)?.message));
+  }
+
+  /** Close the dashboard HTTP server (called from index.ts during shutdown). */
+  stopDashboard(): void {
+    if (this.dashboard) {
+      void this.dashboard.close().catch((e) => warn("dashboard close:", (e as Error)?.message));
+      this.dashboard = undefined;
+    }
+  }
+
+  /** Read-only snapshot for the web dashboard: the same data /board and /spec render. */
+  async dashboardSnapshot(): Promise<DashboardState> {
+    const now = Date.now();
+    const workers: DashboardWorker[] = [];
+    for (const [key, cs] of Object.entries(this.st.all())) {
+      const w = cs.worker;
+      if (!w) continue;
+      workers.push({
+        name: w.name,
+        status: w.status,
+        group: boardGroup(w),
+        reason: boardReason(w, "en"),
+        agent: cs.agent,
+        branch: w.worktree?.branch,
+        directory: cs.directory,
+        chat: Number(chatOf(key as ConvKey)),
+        updatedAt: w.updatedAt,
+        spec: w.specRun ? { spec: w.specRun.spec, task: w.specRun.task, auto: w.specRun.auto } : undefined,
+        lastResult: w.lastResult?.slice(-300),
+      });
+    }
+    workers.sort((a, b) => b.updatedAt - a.updatedAt);
+    // docs/sdd of the repo this bot runs from (data/state.json sits in <root>/data).
+    const sdd = join(dirname(dirname(this.cfg.stateFile)), "docs", "sdd");
+    const specs: DashboardSpec[] = scanSpecs(sdd).map((e) =>
+      "error" in e
+        ? { name: e.name, title: e.title, done: 0, total: 0, error: e.error.message }
+        : { name: e.name, title: e.title, done: e.done, total: e.total },
+    );
+    const lines = await collectHealth(buildProbes(this.healthSources(), () => now), now);
+    const health: DashboardHealth[] = lines.map((l) => ({ id: l.id, status: l.status, detail: l.detail, lastOkAt: l.lastOkAt }));
+    return { workers, specs, health, now };
   }
 
   /**

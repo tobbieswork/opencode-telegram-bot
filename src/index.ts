@@ -61,7 +61,7 @@ async function main(): Promise<void> {
     maxBytes: UPLOADS_MAX_TOTAL_BYTES,
   });
   log(`uploads sweep: deleted ${sweep.files} files (${(sweep.bytes / 1024 / 1024).toFixed(1)} MB)`);
-  const bot = new Bot(tg, oc, st, cfg);
+  const bot = new Bot(tg, oc, st, cfg, me.id);
   bot.start(); // relay OpenCode question forms to Telegram
   // C1.2 self-check (docs/sdd/callback-registry.md): list every registered
   // callback prefix at startup so a missing registration is visible in the
@@ -88,8 +88,9 @@ async function main(): Promise<void> {
     // 1. Stop polling first: unacked updates get redelivered on the next start
     //    instead of being acked by a process that is about to die.
     tg.stop();
-    // 2. No new scheduled work.
+    // 2. No new scheduled work, no new dashboard logins.
     bot.stopScheduler();
+    bot.stopDashboard();
     // 3. Keep the OpenCode service + event stream ALIVE for the drain (no
     //    teardown yet): in-flight turns finish and their terminal events
     //    arrive over the stream; the final send only needs Telegram.
