@@ -500,6 +500,30 @@ Some design.
     check("wire(partial report): partial report stored with its missing list", st.peek("500:15")?.worker?.report?.missing.join(",") === "Coverage,Tests,Follow-ups", JSON.stringify(st.peek("500:15")?.worker?.report));
   }
 
+  // (f) RACE REGRESSION (site 1): a concurrent tap lands DURING the async work
+  // of postSpecCheckpoint — simulated by the latestReply override doing an
+  // st.set (arm auto) before returning. The report set must re-peek the fresh
+  // worker and NOT clobber the concurrent change (old code spread stale `w`).
+  {
+    const { st, orch } = mkOrch({
+      latestReply: async () => {
+        const cur = st.peek("600:17")!.worker!;
+        st.set("600:17", { worker: { ...cur, specRun: { ...cur.specRun, auto: true } } });
+        return { text: FULL_REPORT, time: 1 };
+      },
+    });
+    st.set("600:17", {
+      worker: { name: "spec-alpha", status: "running", specRun: { spec: "alpha", branch: "spec/alpha", task: "S2", conv: "600", uid: 7 } },
+      sessionID: "ses_6",
+      directory: repo,
+    });
+    (orch as any).setStatus("600:17", "done");
+    await waitFor(() => !!st.peek("600:17")?.worker?.report);
+    const w = st.peek("600:17")?.worker;
+    check("race(report): concurrent auto=true is NOT clobbered by the report set", w?.specRun?.auto === true, JSON.stringify(w?.specRun));
+    check("race(report): the report is still stored", w?.report?.status === "DONE", JSON.stringify(w?.report));
+  }
+
 } finally {
   rmSync(tmp, { recursive: true, force: true });
 }
