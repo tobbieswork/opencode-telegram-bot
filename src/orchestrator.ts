@@ -268,6 +268,27 @@ export const wtCb = defineCallback<{ name: string; op: string }>({
   },
 });
 
+/**
+ * Frame a redo note as a review decision for the worker — plannotator's
+ * "decision heading + denied suffix" contract, adapted. A machine-readable
+ * heading lets the worker recognise it as a checkpoint decision (not a new
+ * task); the manager's note is carried verbatim; the suffix stops the worker
+ * from "fixing" a misread note blindly (treat each point as unverified,
+ * verdict it against the actual code, only then change code).
+ */
+export function frameRedoNote(spec: string, task: string, note: string): string {
+  return (
+    `[Checkpoint: ${spec} ${task} \u2014 REDO]\n` +
+    `${note}\n\n` +
+    "This is a review decision on the run above, not a new task. Treat each point " +
+    "in the note as unverified review input: inspect it against the actual code \u2014 " +
+    "do not assume it is correct. For each point, give a one-line verdict " +
+    "(Confirmed / Partly / Not a bug / Already intended) with concise code evidence. " +
+    "Only then change the code to address the confirmed points, and briefly report " +
+    "what you changed."
+  );
+}
+
 export class Orchestrator {
   private bridge?: McpBridge;
   private approvals = new Map<string, Approval>();
@@ -986,7 +1007,7 @@ export class Orchestrator {
     const s = this.h.st.peek(p.workerConv);
     const w = s?.worker;
     // The SAME session, so the redo keeps the run's context (S3.5).
-    if (s?.sessionID) await this.h.oc.prompt(s.sessionID, text).catch((e) => warn("redo note:", (e as Error)?.message));
+    if (s?.sessionID) await this.h.oc.prompt(s.sessionID, frameRedoNote(p.spec, p.task, text)).catch((e) => warn("redo note:", (e as Error)?.message));
     await this.h.tg.sendMessage(p.workerConv, text).catch(() => {});
     if (w) this.setStatus(p.workerConv, "running");
     await this.h.sendHtml(conv, tr(lang, `📨 Đã gửi ghi chú cho worker <b>${esc(w?.name ?? "?")}</b> — làm lại ${esc(p.task)}.`, `📨 Note sent to worker <b>${esc(w?.name ?? "?")}</b> — redoing ${esc(p.task)}.`)).catch(() => {});

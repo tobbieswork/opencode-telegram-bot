@@ -32,7 +32,7 @@ import { handleSpecCallback, managerSpecAccept, managerSpecAuto, managerSpecList
 import { markerCommitSubject, workerCommitsSinceFork } from "../src/spec-checkpoint.js";
 import { ensureSpecWorktree } from "../src/worktree.js";
 import { initMarkers } from "../src/spec.js";
-import { Orchestrator } from "../src/orchestrator.js";
+import { Orchestrator, frameRedoNote } from "../src/orchestrator.js";
 import { Bot } from "../src/bot.js";
 import { StateManager } from "../src/state.js";
 import { configureAudit } from "../src/audit.js";
@@ -410,6 +410,18 @@ try {
     check("accept-refuse(gate-unit-red): no spec_accept audit", auditLines().filter((e) => e.action === "spec_accept").length === accBefore, JSON.stringify(auditLines().map((l) => l.action)));
   }
 
+  // ── frameRedoNote — the redo-note → worker framing (plannotator contract) ──
+  {
+    const f = frameRedoNote("gamma", "S2", "fix the failing test");
+    check("frameRedoNote: machine-readable heading (spec + task + REDO)", f.startsWith("[Checkpoint: gamma S2") && f.includes("REDO]"), JSON.stringify(f.slice(0, 40)));
+    check("frameRedoNote: note carried verbatim", f.includes("fix the failing test"), JSON.stringify(f));
+    check("frameRedoNote: declares a review decision, not a new task", f.includes("review decision") && f.includes("not a new task"), JSON.stringify(f));
+    check("frameRedoNote: unverified-input guard", f.includes("unverified review input") && f.includes("do not assume it is correct"), JSON.stringify(f));
+    check("frameRedoNote: verdict-before-fix suffix", f.includes("one-line verdict") && f.includes("Confirmed / Partly / Not a bug / Already intended") && f.includes("Only then change the code"), JSON.stringify(f));
+    const multi = frameRedoNote("gamma", "S2", "line one\nline two");
+    check("frameRedoNote: multi-line note preserved in order", multi.indexOf("line one") < multi.indexOf("line two") && multi.includes("line two\n\n"), JSON.stringify(multi));
+  }
+
   // ── Redo with note — the pending-note flow (both languages) ──────────────
   for (const lang of ["vi", "en"] as const) {
     const fx = await newRunFixture();
@@ -423,7 +435,8 @@ try {
     // The next plain text in the conv is consumed as the note.
     const consumed = await (bot as any).orch.tryConsumeRedoNote(CONV, "fix the failing test");
     check(`redo(${lang}): the note is consumed`, consumed === true);
-    check(`redo(${lang}): the note reaches the SAME session`, oc.prompts.length === 1 && oc.prompts[0].s === "ses_1" && oc.prompts[0].m === "fix the failing test", JSON.stringify(oc.prompts));
+    const framedA = oc.prompts[0]?.m ?? "";
+    check(`redo(${lang}): the note reaches the SAME session, framed as a review decision`, oc.prompts.length === 1 && oc.prompts[0].s === "ses_1" && framedA.startsWith("[Checkpoint: gamma S2") && framedA.includes("REDO]") && framedA.includes("fix the failing test") && framedA.includes("unverified review input") && framedA.includes("one-line verdict"), JSON.stringify(oc.prompts));
     check(`redo(${lang}): the worker is running again`, st.peek(WORKER_CONV)?.worker?.status === "running", String(st.peek(WORKER_CONV)?.worker?.status));
     check(`redo(${lang}): the note is shown in the worker topic`, sent.some((m) => m.c === WORKER_CONV && m.t.includes("fix the failing test")), JSON.stringify(sent.map((m) => [m.c, m.t?.slice(0, 40)])));
     check(`redo(${lang}): confirmation sent to the card conv`, sent.some((m) => m.c === CONV && ((lang === "vi" && m.t.includes("Đã gửi ghi chú")) || (lang === "en" && m.t.includes("Note sent to worker")))), sent.map((m) => m.t).join(" | "));
@@ -671,7 +684,7 @@ try {
     // The next plain text: consumed as the note, delivered to the session.
     await (bot as any).handle({ message: { message_id: 3, chat: { id: 12345 }, from: { id: 7 }, text: "please fix the test" } });
     check("route(spcredo): the plain text is consumed as the note", (bot as any).orch.redoPending.size === 0);
-    check("route(spcredo): the note reached the worker session", oc.prompts.some((p: any) => p.s === "ses_1" && p.m === "please fix the test"), JSON.stringify(oc.prompts));
+    check("route(spcredo): the note reached the worker session, framed as a review decision", oc.prompts.some((p: any) => p.s === "ses_1" && typeof p.m === "string" && p.m.includes("[Checkpoint:") && p.m.includes("please fix the test") && p.m.includes("unverified review input")), JSON.stringify(oc.prompts));
     check("route(spcredo): the worker is running again", st.peek(REAL_WORKER_CONV)?.worker?.status === "running", String(st.peek(REAL_WORKER_CONV)?.worker?.status));
   }
   {
