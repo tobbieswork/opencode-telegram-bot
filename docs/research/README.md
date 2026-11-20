@@ -14,6 +14,7 @@ Mỗi báo cáo có TL;DR ở cuối. Ngày nghiên cứu: 2026-11.
 | [`bot-scale-and-risks.md`](./bot-scale-and-risks.md) | — (phân tích chính dự án) | Trục scale, ≥12 rủi ro tương lai kèm early-warning, roadmap 1-owner system | **Tham chiếu chiến lược** — đọc trước khi scale / thêm user·repo·worker |
 | [`modern-web-guidance-study.md`](./modern-web-guidance-study.md) | `GoogleChrome/modern-web-guidance-src` (8.9k★) | Pipeline calibration tự-verify (golden/zero-passrate → opportunity/uplift → prune), retrieval 4 lớp, deterministic pre-scan | **Hành động được** — ý: opportunity/uplift trên gate `typecheck`+`test:unit`; deterministic pre-scan cho `review-code` |
 | [`agent-browser-study.md`](./agent-browser-study.md) | `vercel-labs/agent-browser` (52.6k★) | Snapshot+ref loop, "fail not success", daemon multi-session | **Hành động được** — ý: worker dùng headless browser riêng (thay browsermcp) |
+| [`plannotator-study.md`](./plannotator-study.md) | `backnotprop/plannotator` (13.7k★, +3.5k tuần) | Non-blocking = message contract (decision là queued turn), inbox 6-section derived-state, guided review schema-enforced, deny-suffix | **Hành động được** — đã apply: redo note = framed review-decision (heading + verify-before-fix, PR #332); còn #3 dashboard + #4 chaptered review |
 
 ## Đã biến thành spec (không lưu report thô)
 
@@ -22,12 +23,14 @@ Mỗi báo cáo có TL;DR ở cuối. Ngày nghiên cứu: 2026-11.
   schema, tool discipline, review guardrail, re-run guard). **Đã implement + merge
   toàn bộ** (PR #314/#316/#318, 2026-11-19). Report thô bỏ, giá trị sống trong spec + git history.
 
-## Pattern chung (3 repo hội tụ)
+## Pattern chung (4 repo hội tụ)
 
-> **deterministic đo/trước, LLM quyết/sau — và phần đo phải tự-verify.**
+> **deterministic đo/trước, LLM quyết/sau — phần đo phải tự-verify; verify trước khi
+> hành động; state là derived (single source of truth).**
 
 - OCR: pre-gate build+test trước khi LLM accept; precision threshold cho review rule.
 - MWG: grader tự chứng minh (golden 100% / zero-passrate 0%) trước khi đo; prune content model đã biết.
 - agent-browser: verify-after-act (snapshot lại), "fail not success".
+- plannotator: deny-suffix (coi feedback là unverified → verdict với code thật → rồi mới sửa); state derived trên message log, first-rule-wins + test invariant.
 
 Đây là phương pháp nên giữ khi thiết kế thêm guardrail/gate/skill cho bot.
