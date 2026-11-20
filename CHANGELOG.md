@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.52.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.51.1...opencode-telegram-bot-v1.52.0) (2026-11-20)
+
+
+### Features
+
+* frame redo notes as review decisions (heading + verify-before-fix) ([0550124](https://github.com/tobbieswork/opencode-telegram-bot/commit/05501244e73a6a5de8940fb6b06fec084499b9b0))
+* frame redo notes as review decisions (heading + verify-before-fix) ([6d187a6](https://github.com/tobbieswork/opencode-telegram-bot/commit/6d187a654961eb32f4b765b76aec1264725d31c1))
+
 ## [1.51.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.51.0...opencode-telegram-bot-v1.51.1) (2026-11-20)
 
 
