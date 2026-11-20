@@ -143,15 +143,20 @@ export function markerCommitSubject(spec: string): string {
 
 /**
  * S6.4 — parse `git log --format=%h %s` output (newest first) into
- * { hash, subject } commits, excluding the S4 marker commit. Blank lines and
- * hash-only lines are ignored. The caller scopes the range (e.g. `base..HEAD`);
- * this only filters + parses.
+ * { hash, subject } commits, excluding the S4 marker commit AND the S6.4
+ * marker commits (`docs: mark <id> done`, created by the Accept path). A
+ * self-marking worker can leave a prior task's marker commit as the newest
+ * entry, which would corrupt the Accept's commit selection (W2 incident,
+ * 2026-11-20) — so those are filtered here. Blank lines and hash-only lines
+ * are ignored. The caller scopes the range (e.g. `base..HEAD`); this only
+ * filters + parses.
  */
 export function workerCommitsSinceFork(
   lines: string[],
   spec: string,
 ): { hash: string; subject: string }[] {
   const marker = markerCommitSubject(spec);
+  const s64Marker = /^docs: mark \w+ done$/;
   const out: { hash: string; subject: string }[] = [];
   for (const raw of lines ?? []) {
     const line = String(raw).trim();
@@ -159,6 +164,7 @@ export function workerCommitsSinceFork(
     if (sp < 1) continue;
     const subject = line.slice(sp + 1).trim();
     if (subject === marker) continue;
+    if (s64Marker.test(subject)) continue;
     out.push({ hash: line.slice(0, sp), subject });
   }
   return out;
