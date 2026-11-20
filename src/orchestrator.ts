@@ -289,6 +289,30 @@ export function frameRedoNote(spec: string, task: string, note: string): string 
   );
 }
 
+/**
+ * /board urgency grouping (plannotator #3, adapted): file each worker by what
+ * it needs from the human, derived from existing state (no worker changes).
+ *  - "needs"  = waiting on you (question/permission), errored, OR a spec worker
+ *               that finished its turn with a run still pending (awaiting
+ *               Accept/Redo — status "done" but specRun not yet released).
+ *  - "busy"   = actively running.
+ *  - "idle"   = done (no pending run) / stopped / idle.
+ */
+export type BoardGroup = "needs" | "busy" | "idle";
+export function boardGroup(w: WorkerInfo): BoardGroup {
+  if (w.status === "waiting" || w.status === "failed") return "needs";
+  if (w.status === "done" && w.specRun) return "needs";
+  if (w.status === "running") return "busy";
+  return "idle";
+}
+/** Short "why" line for a needs-you worker (empty for busy/idle). */
+export function boardReason(w: WorkerInfo, lang: Lang): string {
+  if (w.status === "waiting") return tr(lang, "❓ chờ bạn trả lời", "❓ needs your answer");
+  if (w.status === "failed") return tr(lang, "lỗi — cần xem", "errored — needs a look");
+  if (w.status === "done" && w.specRun) return tr(lang, "📋 chờ duyệt", "📋 awaiting accept") + (w.specRun.task ? ` ${w.specRun.task}` : "");
+  return "";
+}
+
 export class Orchestrator {
   private bridge?: McpBridge;
   private approvals = new Map<string, Approval>();
@@ -562,15 +586,28 @@ export class Orchestrator {
       await this.h.sendHtml(conv, `${head}\n\n${tr(lang, "Chưa có worker. Tạo bằng <code>/spawn &lt;tên&gt; [thư mục]</code> hoặc bật /manager.", "No workers yet. Create one with <code>/spawn &lt;name&gt; [dir]</code> or turn on /manager.")}`);
       return;
     }
-    const lines = workers
-      .sort(([, a], [, b]) => (b.worker!.updatedAt ?? 0) - (a.worker!.updatedAt ?? 0))
-      .map(([, s]) => {
-        const w = s.worker!;
-        const where = w.worktree ? `🌿 <code>${esc(w.worktree.branch)}</code>` : `<code>${esc(trunc(s.directory ?? "", 40))}</code>`;
-        return `${ICON[w.status]} <b>${esc(w.name)}</b> · ${esc(s.agent ?? "build")} · ${timeAgo(w.updatedAt)}\n    ${where}`;
-      });
     const lang = this.h.userPrefs?.getLang(top.createdBy ?? "") ?? "vi";
-    await this.h.sendHtml(conv, `${head}\n\n${lines.join("\n")}\n\n<i>${tr(lang, "/kill &lt;tên&gt; để dừng · /stopall dừng tất cả", "/kill &lt;name&gt; to stop · /stopall stops all")}</i>`);
+    const buckets: Record<BoardGroup, [ConvKey, ChatState][]> = { needs: [], busy: [], idle: [] };
+    for (const pair of workers) buckets[boardGroup(pair[1].worker!)].push(pair);
+    const labels: Array<[BoardGroup, string]> = [
+      ["needs", tr(lang, "🔴 Cần bạn", "🔴 Needs you")],
+      ["busy", tr(lang, "🟢 Đang chạy", "🟢 In progress")],
+      ["idle", tr(lang, "⚪ Xong / trống", "⚪ Done / idle")],
+    ];
+    const parts: string[] = [];
+    for (const [key, label] of labels) {
+      const ws = buckets[key];
+      if (!ws.length) continue;
+      ws.sort(([, a], [, b]) => (b.worker!.updatedAt ?? 0) - (a.worker!.updatedAt ?? 0));
+      const lines = ws.map(([, cs]) => {
+        const w = cs.worker!;
+        const where = w.worktree ? `🌿 <code>${esc(w.worktree.branch)}</code>` : `<code>${esc(trunc(cs.directory ?? "", 40))}</code>`;
+        const reason = boardReason(w, lang);
+        return `${ICON[w.status]} <b>${esc(w.name)}</b> · ${esc(cs.agent ?? "build")} · ${timeAgo(w.updatedAt)}${reason ? `\n    ${reason}` : ""}\n    ${where}`;
+      });
+      parts.push(`${label}\n${lines.join("\n")}`);
+    }
+    await this.h.sendHtml(conv, `${head}\n\n${parts.join("\n\n")}\n\n<i>${tr(lang, "/kill &lt;tên&gt; để dừng · /stopall dừng tất cả", "/kill &lt;name&gt; to stop · /stopall stops all")}</i>`);
   }
 
   /**
