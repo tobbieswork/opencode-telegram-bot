@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.57.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.56.0...opencode-telegram-bot-v1.57.0) (2026-11-20)
+
+
+### Features
+
+* read-only web dashboard with Login with Telegram (OIDC) ([189e790](https://github.com/tobbieswork/opencode-telegram-bot/commit/189e790492bd91d4233c0dee8a27d0e5499179c4))
+* read-only web dashboard with Login with Telegram (OIDC) ([9c21872](https://github.com/tobbieswork/opencode-telegram-bot/commit/9c218724c5f73d16df2aaf76eac26c179f1178e2))
+
 ## [1.56.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.55.0...opencode-telegram-bot-v1.56.0) (2026-11-20)
 
 
