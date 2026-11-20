@@ -7,7 +7,7 @@ import { OpenCodeCtl, userText } from "./opencode.js";
 import { StateManager, ChatState, WorkerInfo, WorkerStatus, UserPrefsStore, Lang, SpecRunState } from "./state.js";
 import { tr } from "./i18n.js";
 import { Config } from "./config.js";
-import { ConvKey, chatOf, convKey, parseConv } from "./conv.js";
+import { ConvKey, bgConvKey, chatOf, convKey, isBackgroundConv, parseConv, relayConv } from "./conv.js";
 import { McpBridge, BridgeTool, makeRunScriptTool } from "./mcp-bridge.js";
 import { addWorktree, chapterPatch, diffFileList, diffSummary, DIFF_CHAPTER_THRESHOLD, gitBoundary, gitRoot, gitStatusBrief, groupDiffChapters, mergeWorktree, removeWorktree, resolveBaseBranch, runGit } from "./worktree.js";
 import type { DiffFiles } from "./worktree.js";
@@ -124,7 +124,7 @@ const workerPreamble = (name: string, agent?: string, lang?: Lang) =>
   // script-mode capability note (last section, before the task).
   (agent === "build" ? "\n\n" + scriptInstruction(lang ?? "en") : "");
 
-const MANAGER_PROMPT = (maxWorkers: number) => `---
+export const MANAGER_PROMPT = (maxWorkers: number) => `---
 description: Telegram manager — splits work across parallel worker sessions
 mode: primary
 permissions:
@@ -143,8 +143,8 @@ permissions:
 ---
 You are the Manager. The user talks to you from Telegram (usually in Vietnamese — always reply in the
 user's language). You do NOT edit files or run commands yourself. You get work done by delegating it to
-workers: each worker is a separate OpenCode coding session with its own Telegram topic, running in a
-directory you choose.
+workers: each worker is a separate OpenCode coding session running in a directory you choose — either
+LIVE (its own Telegram topic) or in the BACKGROUND (no topic; the result is relayed to the main chat).
 
 ## Tools
 Call these directly as native tools (never through \`execute\`):
@@ -154,6 +154,16 @@ Call these directly as native tools (never through \`execute\`):
 - tg-bridge_send_to_worker — give an existing worker a follow-up instruction.
 - tg-bridge_get_worker_result — read a worker's latest full reply.
 - tg-bridge_stop_worker — interrupt a worker.
+
+## Mode: background vs live
+Set \`background: true\` on \`tg-bridge_spawn_worker\` to run a worker in the BACKGROUND — no Telegram
+topic is created, and its result is relayed to the main chat when it finishes.
+- BACKGROUND: small, well-scoped, low-risk tasks — a single-file change, a quick fix or lookup with a
+  clear definition of done.
+- LIVE (the default): big, long-running, high-risk or watch-worthy work — anything the user would want
+  to follow in a topic in real time, or that may need mid-task decisions.
+- When in doubt, pick LIVE — the topic lets the user watch.
+Always announce which mode you picked and why, in one line, when you spawn the worker.
 
 ## How to work
 1. Understand the request. If something important is ambiguous, ask ONE question with the \`question\` tool.
@@ -203,6 +213,15 @@ interface SpawnSpec {
   specRun?: { spec: string; branch: string; task: string; conv: ConvKey; uid: number };
   /** T5 (ocr-hardening): input fingerprint (see WorkerInfo.briefFp), stored on the worker entry. */
   briefFp?: string;
+  /**
+   * B1 (background workers, docs/sdd/background-workers.md): when `true`, the
+   * worker runs WITHOUT a Telegram topic — no `createForumTopic`, no intro
+   * message, no deep-link card. It is stored under the synthetic
+   * `bg:<chatId>:<name>` conv (see `bgConvKey`) and its Telegram output is
+   * relayed to the main chat. Off (the default) is byte-identical to the live
+   * topic path.
+   */
+  background?: boolean;
 }
 
 /** A Manager action waiting for the user's ✅ (confirm mode). */
@@ -884,22 +903,30 @@ export class Orchestrator {
       createdAt: now,
       updatedAt: now,
     };
-    let threadId: number;
-    try {
-      threadId = await this.h.tg.createForumTopic(chatId, this.topicName(worker), TOPIC_COLORS[name.length % TOPIC_COLORS.length]);
-    } catch (e) {
-      if (worktree && repoRoot) await removeWorktree(repoRoot, worktree).catch(() => {});
-      throw new Error(
-        tr(
-          this.langOf(chat),
-          `Không tạo được topic (${(e as Error).message}). Cần bật chế độ topic: chat riêng với bot có topic mode, ` +
-            "hoặc supergroup bật Topics và bot là admin có quyền “Manage topics”.",
-          `Could not create a topic (${(e as Error).message}). Topic mode is required: a private chat with the bot that has topic mode, ` +
-            "or a supergroup with Topics enabled where the bot is an admin with “Manage topics” permission.",
-        ),
-      );
+    // Background mode (B1, docs/sdd/background-workers.md): no Telegram topic —
+    // the worker lives under the synthetic `bg:<chatId>:<name>` conv. The
+    // non-background path below is unchanged.
+    let threadId: number | undefined;
+    let conv: ConvKey;
+    if (spec.background) {
+      conv = bgConvKey(chatId, name);
+    } else {
+      try {
+        threadId = await this.h.tg.createForumTopic(chatId, this.topicName(worker), TOPIC_COLORS[name.length % TOPIC_COLORS.length]);
+      } catch (e) {
+        if (worktree && repoRoot) await removeWorktree(repoRoot, worktree).catch(() => {});
+        throw new Error(
+          tr(
+            this.langOf(chat),
+            `Không tạo được topic (${(e as Error).message}). Cần bật chế độ topic: chat riêng với bot có topic mode, ` +
+              "hoặc supergroup bật Topics và bot là admin có quyền “Manage topics”.",
+            `Could not create a topic (${(e as Error).message}). Topic mode is required: a private chat with the bot that has topic mode, ` +
+              "or a supergroup with Topics enabled where the bot is an admin with “Manage topics” permission.",
+          ),
+        );
+      }
+      conv = convKey(chatId, threadId);
     }
-    const conv = convKey(chatId, threadId);
     const top = this.h.st.get(chat);
     let sessionID: string;
     try {
@@ -910,28 +937,32 @@ export class Orchestrator {
       });
     } catch (e) {
       // Nothing was saved yet: undo the topic and worktree so a retry with the
-      // same name works and nothing is left orphaned.
-      await this.h.tg.deleteForumTopic(conv).catch(() => this.h.tg.editForumTopic(conv, `❌ ${name}`).catch(() => {}));
+      // same name works and nothing is left orphaned. A background spawn has no
+      // topic to undo.
+      if (!spec.background) await this.h.tg.deleteForumTopic(conv).catch(() => this.h.tg.editForumTopic(conv, `❌ ${name}`).catch(() => {}));
       if (worktree && repoRoot) await removeWorktree(repoRoot, worktree).catch(() => {});
       throw e;
     }
     // Worker topic welcome, localized to the conv owner's language. Sent before
     // the record is persisted so its message id can ride on the worker (anchor
-    // for the manager board's switch_to_topic jump buttons).
-    const introId = await this.h
-      .tg.sendMessageId(
-        conv,
-        workerIntroHtml(this.langOf(chat), {
-          name,
-          agent,
-          directory,
-          spawnedBy: spec.spawnedBy,
-          task: spec.task,
-          worktree: worktree ? { branch: worktree.branch, base: worktree.base } : undefined,
-        }),
-      )
-      .catch(() => -1);
-    if (introId > 0) worker.introMessageId = introId;
+    // for the manager board's switch_to_topic jump buttons. A background
+    // worker has no topic, so no intro.
+    if (!spec.background) {
+      const introId = await this.h
+        .tg.sendMessageId(
+          conv,
+          workerIntroHtml(this.langOf(chat), {
+            name,
+            agent,
+            directory,
+            spawnedBy: spec.spawnedBy,
+            task: spec.task,
+            worktree: worktree ? { branch: worktree.branch, base: worktree.base } : undefined,
+          }),
+        )
+        .catch(() => -1);
+      if (introId > 0) worker.introMessageId = introId;
+    }
 
     // Workers inherit the chat's model/variant choice (the Manager's own agent aside).
     this.h.st.set(conv, {
@@ -955,7 +986,10 @@ export class Orchestrator {
     // Bot API 10.4: supergroups use `t.me/c/<id>/<thread>`; private chats with
     // topics use `t.me/<bot_username>/<thread>` (opens only for that chat's
     // owner). No link for either (unknown username, other chat type) → skip.
-    const topicLink = await topicDeepLink(chatId, threadId, await this.h.tg.botUsername());
+    let topicLink: string | undefined;
+    if (!spec.background && threadId !== undefined) {
+      topicLink = await topicDeepLink(chatId, threadId, await this.h.tg.botUsername());
+    }
     if (topicLink) {
       await this.h
         .sendHtml(
@@ -989,11 +1023,14 @@ export class Orchestrator {
     // Markdown — only the topic display is converted.
     const header = "📨 <b>Manager:</b>";
     const chunks = mdToHtmlChunks(trunc(stripTags(message), 1500), this.h.cfg.replyMaxLen - header.length - 1);
-    await this.h.sendHtml(conv, chunks.length ? `${header}\n${chunks[0]}` : header).catch(() => {});
-    for (let i = 1; i < chunks.length; i++) await this.h.sendHtml(conv, chunks[i]).catch(() => {});
+    // I7 (B2.3): a background worker has no topic — the instruction display
+    // goes to the main chat; a live worker's topic is returned unchanged.
+    const relay = relayConv(conv);
+    await this.h.sendHtml(relay, chunks.length ? `${header}\n${chunks[0]}` : header).catch(() => {});
+    for (let i = 1; i < chunks.length; i++) await this.h.sendHtml(relay, chunks[i]).catch(() => {});
     await this.h.oc.prompt(s.sessionID, message);
     this.setStatus(conv, "running");
-    this.h.startTyping(conv);
+    this.h.startTyping(relay);
   }
 
   private async stopWorker(conv: ConvKey, close: boolean): Promise<string> {
@@ -1004,7 +1041,8 @@ export class Orchestrator {
     // would be reported to the Manager, which might restart the work).
     this.setStatus(conv, "stopped");
     if (s.sessionID) await this.h.oc.interrupt(s.sessionID).catch(() => {});
-    if (close) await this.h.tg.closeForumTopic(conv);
+    // B2.5: a background worker has no topic — there is nothing to close.
+    if (close && !isBackgroundConv(conv)) await this.h.tg.closeForumTopic(conv);
     const lang = this.langOf(conv);
     return `${tr(lang, "⏹ Đã dừng worker", "⏹ Stopped worker")} <b>${esc(w.name)}</b>.${w.worktree ? tr(lang, " Worktree vẫn giữ — dùng /wt trong topic để xem diff / merge / xoá.", " Worktree kept — use /wt in the topic to view diff / merge / delete.") : ""}`;
   }
@@ -1204,7 +1242,8 @@ export class Orchestrator {
       void this.postSpecCheckpoint(conv, status).catch((e) => warn("postSpecCheckpoint:", e?.message));
     }
     if (!BUSY.includes(status)) this.clearSchedTimer(conv); // the run this timer guarded is over
-    if (changed) void this.h.tg.editForumTopic(conv, this.topicName(worker)).catch((e) => warn("editForumTopic:", e?.message));
+    // I5 (B2.5): a background worker has no topic — there is no title to edit.
+    if (changed && !isBackgroundConv(conv)) void this.h.tg.editForumTopic(conv, this.topicName(worker)).catch((e) => warn("editForumTopic:", e?.message));
   }
 
   // ── S4 (spec Run): one-running-per-spec guard ───────────────────────────────
@@ -1484,7 +1523,9 @@ export class Orchestrator {
       // so a later /prune, a later send-failure, or the next startup sweep can
       // still retry. (The marker lives in the state entry, which the failed purge
       // deliberately kept.)
-      if (this.pendingTopicDelete.has(conv)) {
+      // I4 (B2.5): a background conv has no topic, so there is nothing to
+      // purge here — the conv simply stays (the done relay below runs on).
+      if (this.pendingTopicDelete.has(conv) && !isBackgroundConv(conv)) {
         const ok = await this.purgeConv(conv);
         if (ok) {
           this.pendingTopicDelete.delete(conv);
@@ -1525,24 +1566,29 @@ export class Orchestrator {
         // changes gets a Review row — appended to the worktree card (no extra
         // message) or on one short line when there is no worktree.
         const lang = this.langOf(chatOf(conv));
+        // I4 (B2.1): a background worker's card/row lands in the main chat;
+        // a live worker's topic is returned unchanged. The next-step footer
+        // is keyed by the same conv, since that is where the message lives
+        // (dismiss on the next user message edits THAT conv).
+        const relay = relayConv(conv);
         const reviewRow = await this.workerReviewRow(conv, s, w, lang);
         if (w.worktree) {
           const kb = this.worktreeKeyboard(w, lang);
           if (reviewRow) kb.inline_keyboard.push(reviewRow);
           // The card is short (no chunking): send via sendMessageId so the id
           // can be remembered for the N3.7 dismiss.
-          const cardId = await this.h.tg.sendMessageId(conv, this.worktreeText(w, lang), { reply_markup: kb }).catch(() => -1);
+          const cardId = await this.h.tg.sendMessageId(relay, this.worktreeText(w, lang), { reply_markup: kb }).catch(() => -1);
           // Removing the row (tap/dismiss) must keep the card's own buttons.
-          if (reviewRow) this.h.noteNextStepMessage?.(conv, cardId, this.worktreeKeyboard(w, lang));
+          if (reviewRow) this.h.noteNextStepMessage?.(relay, cardId, this.worktreeKeyboard(w, lang));
         } else if (reviewRow) {
           const lineId = await this.h
             .tg.sendMessageId(
-              conv,
+              relay,
               okLine(lang, raw(tr(lang, "Xong — xem lại thay đổi của worker:", "Done — review the worker's changes:"))),
               { reply_markup: { inline_keyboard: [reviewRow] } },
             )
             .catch(() => -1);
-          this.h.noteNextStepMessage?.(conv, lineId);
+          this.h.noteNextStepMessage?.(relay, lineId);
         }
       }
       if (this.h.st.peek(chatOf(conv))?.manager) {
@@ -1558,7 +1604,8 @@ export class Orchestrator {
       // doesn't fill with dead topics. The user reopens it just by messaging in
       // it. A worker respawned for overflow stays OPEN (❌) so the user can read
       // why it died and follow the new one; /prune cleans it up later.
-      if (this.h.cfg.autoClose && (status === "done" || status === "failed") && !respawnedAs) {
+      // I4 (B2.5): a background worker has no topic to close.
+      if (this.h.cfg.autoClose && (status === "done" || status === "failed") && !respawnedAs && !isBackgroundConv(conv)) {
         void this.h.tg.closeForumTopic(conv).catch(() => {});
       }
     } finally {
@@ -2131,10 +2178,10 @@ export class Orchestrator {
           return (
             `${ws.length} workers (${busy} busy, max ${this.h.cfg.maxWorkers}). Approval mode: ${auto() ? "auto" : "confirm"}.\n` +
             ws
-              .map(([, s]) => {
+              .map(([k, s]) => {
                 const w = s.worker!;
                 return [
-                  `## ${w.name} — ${w.status} (${s.agent ?? "build"}, ${w.writes ? "writes" : "read-only"})`,
+                  `## ${w.name} — ${w.status} (${s.agent ?? "build"}, ${w.writes ? "writes" : "read-only"})${isBackgroundConv(k) ? " · bg" : ""}`,
                   `dir: ${s.directory}${w.worktree ? ` (worktree branch ${w.worktree.branch})` : ""}`,
                   w.lastResult ? `last result: ${trunc(w.lastResult, 400)}` : "",
                 ]
@@ -2158,6 +2205,7 @@ export class Orchestrator {
             task: { type: "string", description: "Complete instructions: goal, context, constraints, definition of done" },
             agent: { type: "string", enum: ["build", "plan", "explore"], description: "build = edit code (default); plan = analysis only; explore = quick read-only lookup" },
             writes: { type: "boolean", description: "Whether the task may change files (default true for build)" },
+            background: { type: "boolean", description: "Run without a Telegram topic (background): quieter, the result is relayed to the main chat" },
           },
           required: ["name", "directory", "task"],
         },
@@ -2168,6 +2216,7 @@ export class Orchestrator {
             task: String(a.task ?? ""),
             agent: a.agent,
             writes: a.writes,
+            background: a.background === true,
             spawnedBy: "manager",
           };
           if (!spec.task) throw new Error("task is required");

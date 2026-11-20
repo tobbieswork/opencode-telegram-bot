@@ -10,7 +10,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { convKey, parseConv, chatOf } from "../src/conv.js";
+import { bgConvKey, convKey, parseConv, chatOf, isBackgroundConv, relayConv } from "../src/conv.js";
 import { newMessageID, OpenCodeCtl } from "../src/opencode.js";
 import { StateManager } from "../src/state.js";
 import { McpBridge } from "../src/mcp-bridge.js";
@@ -47,6 +47,14 @@ const tmp = realpathSync(mkdtempSync(join(tmpdir(), "ocbot-multi-")));
   check("parse topic key", JSON.stringify(parseConv("-1001:7")) === JSON.stringify({ chatId: -1001, threadId: 7 }));
   check("parse chat key", parseConv("42").threadId === undefined && parseConv(42).chatId === 42);
   check("chatOf topic", chatOf("-1001:7") === "-1001");
+  check("bg key format", bgConvKey(-1001, "api") === "bg:-1001:api");
+  check("bg key round-trips through parseConv", JSON.stringify(parseConv(bgConvKey(-1001, "api"))) === JSON.stringify({ chatId: -1001, background: true, workerName: "api" }));
+  check("chatOf a bg conv is the main chat", chatOf(bgConvKey(-1001, "api")) === "-1001");
+  check("parse of live keys carries no bg fields", !("background" in parseConv("42:7")) && !("background" in parseConv("42")));
+  check("isBackgroundConv: bg key", isBackgroundConv("bg:-1001:api"));
+  check("isBackgroundConv: chat and topic keys are live", !isBackgroundConv("42") && !isBackgroundConv("-1001:7"));
+  check("relayConv keeps a chat or topic conv as-is", relayConv("42") === "42" && relayConv("-1001:7") === "-1001:7");
+  check("relayConv redirects a bg conv to the main chat", relayConv("bg:-1001:api") === "-1001");
 }
 
 // ── idempotent prompt ids ───────────────────────────────────────────────────

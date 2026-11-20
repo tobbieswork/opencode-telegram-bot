@@ -6,7 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { Telegram, Update, CallbackQuery, Message, MessageGenerationStopped, MessageReactionUpdated } from "./telegram.js";
 import { OpenCodeCtl, assistantText, ModelInfo } from "./opencode.js";
 import { StateManager, ChatState, MsgPurpose, MACHINE_STATE_KEY, UserPrefsStore, Lang } from "./state.js";
-import { ConvKey, convKey, chatOf, parseConv } from "./conv.js";
+import { ConvKey, convKey, chatOf, isBackgroundConv, parseConv } from "./conv.js";
 import { answerExpired, defineCallback, dispatchCallback, oneArg, registerCallback } from "./callbacks.js";
 import { Orchestrator, BUSY, apCb, killCb, wtCb } from "./orchestrator.js";
 import { handlePruneCallback, pruneCb } from "./orchestrator/purge.js";
@@ -910,6 +910,10 @@ export class Bot {
    */
   private async sweepUnrelayedReplies(conv: ConvKey, reason: string, succeeded?: boolean): Promise<void> {
     if (this.sweeping.has(conv)) return; // a sweep for this chat is already running
+    // I6 (B2.4): a background worker's raw assistant text is never relayed —
+    // its result reaches the chat via the done card/row (I4) and the [Bot
+    // event] to the Manager, so the raw-text sweep is a no-op for a bg conv.
+    if (isBackgroundConv(conv)) return;
     this.sweeping.add(conv);
     const st = this.st.get(conv);
     if (!st.sessionID || !st.lastRelayedTime) {
@@ -2848,7 +2852,8 @@ export class Bot {
     // anchor existed are skipped; if none is anchored, send nothing at all.
     const anchored = this.orch
       .workersOf(chatOf(conv))
-      .filter(([, ws]) => BUSY.includes(ws.worker!.status) && (ws.worker!.introMessageId ?? 0) > 0)
+      // B3.3: a background worker has no topic to jump to — never a jump row.
+      .filter(([k, ws]) => !isBackgroundConv(k) && BUSY.includes(ws.worker!.status) && (ws.worker!.introMessageId ?? 0) > 0)
       .slice(0, this.cfg.maxWorkers)
       .map(([, ws]) => ws.worker!);
     if (anchored.length === 0) return;
