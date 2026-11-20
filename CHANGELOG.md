@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.57.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.57.1...opencode-telegram-bot-v1.57.2) (2026-11-20)
+
+
+### Bug Fixes
+
+* block script interpreters and shells in sandbox exec ([5aef3ff](https://github.com/tobbieswork/opencode-telegram-bot/commit/5aef3ff99d3c1cc99f360df7a0c0d76fd9522c95))
+* block script interpreters and shells in sandbox exec ([dfe37a2](https://github.com/tobbieswork/opencode-telegram-bot/commit/dfe37a28d26402929a387c22e4ca41be662860c8))
+* unique report temp-file names (per-process sequence) ([dd5648b](https://github.com/tobbieswork/opencode-telegram-bot/commit/dd5648b05c475ee64f96af7220789c5336d93537))
+
 ## [1.57.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.57.0...opencode-telegram-bot-v1.57.1) (2026-11-20)
 
 
