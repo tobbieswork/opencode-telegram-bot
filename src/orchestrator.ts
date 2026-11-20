@@ -7,7 +7,7 @@ import { OpenCodeCtl, userText } from "./opencode.js";
 import { StateManager, ChatState, WorkerInfo, WorkerStatus, UserPrefsStore, Lang, SpecRunState } from "./state.js";
 import { tr } from "./i18n.js";
 import { Config } from "./config.js";
-import { ConvKey, bgConvKey, chatOf, convKey, parseConv } from "./conv.js";
+import { ConvKey, bgConvKey, chatOf, convKey, isBackgroundConv, parseConv, relayConv } from "./conv.js";
 import { McpBridge, BridgeTool, makeRunScriptTool } from "./mcp-bridge.js";
 import { addWorktree, chapterPatch, diffFileList, diffSummary, DIFF_CHAPTER_THRESHOLD, gitBoundary, gitRoot, gitStatusBrief, groupDiffChapters, mergeWorktree, removeWorktree, resolveBaseBranch, runGit } from "./worktree.js";
 import type { DiffFiles } from "./worktree.js";
@@ -1013,11 +1013,14 @@ export class Orchestrator {
     // Markdown — only the topic display is converted.
     const header = "📨 <b>Manager:</b>";
     const chunks = mdToHtmlChunks(trunc(stripTags(message), 1500), this.h.cfg.replyMaxLen - header.length - 1);
-    await this.h.sendHtml(conv, chunks.length ? `${header}\n${chunks[0]}` : header).catch(() => {});
-    for (let i = 1; i < chunks.length; i++) await this.h.sendHtml(conv, chunks[i]).catch(() => {});
+    // I7 (B2.3): a background worker has no topic — the instruction display
+    // goes to the main chat; a live worker's topic is returned unchanged.
+    const relay = relayConv(conv);
+    await this.h.sendHtml(relay, chunks.length ? `${header}\n${chunks[0]}` : header).catch(() => {});
+    for (let i = 1; i < chunks.length; i++) await this.h.sendHtml(relay, chunks[i]).catch(() => {});
     await this.h.oc.prompt(s.sessionID, message);
     this.setStatus(conv, "running");
-    this.h.startTyping(conv);
+    this.h.startTyping(relay);
   }
 
   private async stopWorker(conv: ConvKey, close: boolean): Promise<string> {
@@ -1228,7 +1231,8 @@ export class Orchestrator {
       void this.postSpecCheckpoint(conv, status).catch((e) => warn("postSpecCheckpoint:", e?.message));
     }
     if (!BUSY.includes(status)) this.clearSchedTimer(conv); // the run this timer guarded is over
-    if (changed) void this.h.tg.editForumTopic(conv, this.topicName(worker)).catch((e) => warn("editForumTopic:", e?.message));
+    // I5 (B2.5): a background worker has no topic — there is no title to edit.
+    if (changed && !isBackgroundConv(conv)) void this.h.tg.editForumTopic(conv, this.topicName(worker)).catch((e) => warn("editForumTopic:", e?.message));
   }
 
   // ── S4 (spec Run): one-running-per-spec guard ───────────────────────────────
@@ -1508,7 +1512,9 @@ export class Orchestrator {
       // so a later /prune, a later send-failure, or the next startup sweep can
       // still retry. (The marker lives in the state entry, which the failed purge
       // deliberately kept.)
-      if (this.pendingTopicDelete.has(conv)) {
+      // I4 (B2.5): a background conv has no topic, so there is nothing to
+      // purge here — the conv simply stays (the done relay below runs on).
+      if (this.pendingTopicDelete.has(conv) && !isBackgroundConv(conv)) {
         const ok = await this.purgeConv(conv);
         if (ok) {
           this.pendingTopicDelete.delete(conv);
@@ -1549,24 +1555,29 @@ export class Orchestrator {
         // changes gets a Review row — appended to the worktree card (no extra
         // message) or on one short line when there is no worktree.
         const lang = this.langOf(chatOf(conv));
+        // I4 (B2.1): a background worker's card/row lands in the main chat;
+        // a live worker's topic is returned unchanged. The next-step footer
+        // is keyed by the same conv, since that is where the message lives
+        // (dismiss on the next user message edits THAT conv).
+        const relay = relayConv(conv);
         const reviewRow = await this.workerReviewRow(conv, s, w, lang);
         if (w.worktree) {
           const kb = this.worktreeKeyboard(w, lang);
           if (reviewRow) kb.inline_keyboard.push(reviewRow);
           // The card is short (no chunking): send via sendMessageId so the id
           // can be remembered for the N3.7 dismiss.
-          const cardId = await this.h.tg.sendMessageId(conv, this.worktreeText(w, lang), { reply_markup: kb }).catch(() => -1);
+          const cardId = await this.h.tg.sendMessageId(relay, this.worktreeText(w, lang), { reply_markup: kb }).catch(() => -1);
           // Removing the row (tap/dismiss) must keep the card's own buttons.
-          if (reviewRow) this.h.noteNextStepMessage?.(conv, cardId, this.worktreeKeyboard(w, lang));
+          if (reviewRow) this.h.noteNextStepMessage?.(relay, cardId, this.worktreeKeyboard(w, lang));
         } else if (reviewRow) {
           const lineId = await this.h
             .tg.sendMessageId(
-              conv,
+              relay,
               okLine(lang, raw(tr(lang, "Xong — xem lại thay đổi của worker:", "Done — review the worker's changes:"))),
               { reply_markup: { inline_keyboard: [reviewRow] } },
             )
             .catch(() => -1);
-          this.h.noteNextStepMessage?.(conv, lineId);
+          this.h.noteNextStepMessage?.(relay, lineId);
         }
       }
       if (this.h.st.peek(chatOf(conv))?.manager) {
@@ -1582,7 +1593,8 @@ export class Orchestrator {
       // doesn't fill with dead topics. The user reopens it just by messaging in
       // it. A worker respawned for overflow stays OPEN (❌) so the user can read
       // why it died and follow the new one; /prune cleans it up later.
-      if (this.h.cfg.autoClose && (status === "done" || status === "failed") && !respawnedAs) {
+      // I4 (B2.5): a background worker has no topic to close.
+      if (this.h.cfg.autoClose && (status === "done" || status === "failed") && !respawnedAs && !isBackgroundConv(conv)) {
         void this.h.tg.closeForumTopic(conv).catch(() => {});
       }
     } finally {
