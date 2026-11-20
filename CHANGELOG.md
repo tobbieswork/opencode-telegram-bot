@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.56.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.55.0...opencode-telegram-bot-v1.56.0) (2026-11-20)
+
+
+### Features
+
+* background workers (W0–W4) — topic-less workers + manager auto-decision ([fe2f753](https://github.com/tobbieswork/opencode-telegram-bot/commit/fe2f75392d83bb137270b8440356821cdac27536))
+* manager bg/live policy + E2E smoke for background workers (W4) ([6edd12c](https://github.com/tobbieswork/opencode-telegram-bot/commit/6edd12c558c856d4df1c35ca60a35a599082a745))
+
 ## [1.55.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.54.2...opencode-telegram-bot-v1.55.0) (2026-11-20)
 
 
