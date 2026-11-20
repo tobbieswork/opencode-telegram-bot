@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.53.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.52.0...opencode-telegram-bot-v1.53.0) (2026-11-20)
+
+
+### Features
+
+* group /board workers by urgency ([af5a989](https://github.com/tobbieswork/opencode-telegram-bot/commit/af5a98977926c443bef1d69e741186dc4995d443))
+* group /board workers by urgency (needs-you / in-progress / idle) ([360e8ad](https://github.com/tobbieswork/opencode-telegram-bot/commit/360e8ad58bb15bf9af5ace88c4900a86a2b6920b))
+
 ## [1.52.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.51.1...opencode-telegram-bot-v1.52.0) (2026-11-20)
 
 
