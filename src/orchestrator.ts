@@ -7,7 +7,7 @@ import { OpenCodeCtl, userText } from "./opencode.js";
 import { StateManager, ChatState, WorkerInfo, WorkerStatus, UserPrefsStore, Lang, SpecRunState } from "./state.js";
 import { tr } from "./i18n.js";
 import { Config } from "./config.js";
-import { ConvKey, chatOf, convKey, parseConv } from "./conv.js";
+import { ConvKey, bgConvKey, chatOf, convKey, parseConv } from "./conv.js";
 import { McpBridge, BridgeTool, makeRunScriptTool } from "./mcp-bridge.js";
 import { addWorktree, chapterPatch, diffFileList, diffSummary, DIFF_CHAPTER_THRESHOLD, gitBoundary, gitRoot, gitStatusBrief, groupDiffChapters, mergeWorktree, removeWorktree, resolveBaseBranch, runGit } from "./worktree.js";
 import type { DiffFiles } from "./worktree.js";
@@ -203,6 +203,15 @@ interface SpawnSpec {
   specRun?: { spec: string; branch: string; task: string; conv: ConvKey; uid: number };
   /** T5 (ocr-hardening): input fingerprint (see WorkerInfo.briefFp), stored on the worker entry. */
   briefFp?: string;
+  /**
+   * B1 (background workers, docs/sdd/background-workers.md): when `true`, the
+   * worker runs WITHOUT a Telegram topic — no `createForumTopic`, no intro
+   * message, no deep-link card. It is stored under the synthetic
+   * `bg:<chatId>:<name>` conv (see `bgConvKey`) and its Telegram output is
+   * relayed to the main chat. Off (the default) is byte-identical to the live
+   * topic path.
+   */
+  background?: boolean;
 }
 
 /** A Manager action waiting for the user's ✅ (confirm mode). */
@@ -884,22 +893,30 @@ export class Orchestrator {
       createdAt: now,
       updatedAt: now,
     };
-    let threadId: number;
-    try {
-      threadId = await this.h.tg.createForumTopic(chatId, this.topicName(worker), TOPIC_COLORS[name.length % TOPIC_COLORS.length]);
-    } catch (e) {
-      if (worktree && repoRoot) await removeWorktree(repoRoot, worktree).catch(() => {});
-      throw new Error(
-        tr(
-          this.langOf(chat),
-          `Không tạo được topic (${(e as Error).message}). Cần bật chế độ topic: chat riêng với bot có topic mode, ` +
-            "hoặc supergroup bật Topics và bot là admin có quyền “Manage topics”.",
-          `Could not create a topic (${(e as Error).message}). Topic mode is required: a private chat with the bot that has topic mode, ` +
-            "or a supergroup with Topics enabled where the bot is an admin with “Manage topics” permission.",
-        ),
-      );
+    // Background mode (B1, docs/sdd/background-workers.md): no Telegram topic —
+    // the worker lives under the synthetic `bg:<chatId>:<name>` conv. The
+    // non-background path below is unchanged.
+    let threadId: number | undefined;
+    let conv: ConvKey;
+    if (spec.background) {
+      conv = bgConvKey(chatId, name);
+    } else {
+      try {
+        threadId = await this.h.tg.createForumTopic(chatId, this.topicName(worker), TOPIC_COLORS[name.length % TOPIC_COLORS.length]);
+      } catch (e) {
+        if (worktree && repoRoot) await removeWorktree(repoRoot, worktree).catch(() => {});
+        throw new Error(
+          tr(
+            this.langOf(chat),
+            `Không tạo được topic (${(e as Error).message}). Cần bật chế độ topic: chat riêng với bot có topic mode, ` +
+              "hoặc supergroup bật Topics và bot là admin có quyền “Manage topics”.",
+            `Could not create a topic (${(e as Error).message}). Topic mode is required: a private chat with the bot that has topic mode, ` +
+              "or a supergroup with Topics enabled where the bot is an admin with “Manage topics” permission.",
+          ),
+        );
+      }
+      conv = convKey(chatId, threadId);
     }
-    const conv = convKey(chatId, threadId);
     const top = this.h.st.get(chat);
     let sessionID: string;
     try {
@@ -910,28 +927,32 @@ export class Orchestrator {
       });
     } catch (e) {
       // Nothing was saved yet: undo the topic and worktree so a retry with the
-      // same name works and nothing is left orphaned.
-      await this.h.tg.deleteForumTopic(conv).catch(() => this.h.tg.editForumTopic(conv, `❌ ${name}`).catch(() => {}));
+      // same name works and nothing is left orphaned. A background spawn has no
+      // topic to undo.
+      if (!spec.background) await this.h.tg.deleteForumTopic(conv).catch(() => this.h.tg.editForumTopic(conv, `❌ ${name}`).catch(() => {}));
       if (worktree && repoRoot) await removeWorktree(repoRoot, worktree).catch(() => {});
       throw e;
     }
     // Worker topic welcome, localized to the conv owner's language. Sent before
     // the record is persisted so its message id can ride on the worker (anchor
-    // for the manager board's switch_to_topic jump buttons).
-    const introId = await this.h
-      .tg.sendMessageId(
-        conv,
-        workerIntroHtml(this.langOf(chat), {
-          name,
-          agent,
-          directory,
-          spawnedBy: spec.spawnedBy,
-          task: spec.task,
-          worktree: worktree ? { branch: worktree.branch, base: worktree.base } : undefined,
-        }),
-      )
-      .catch(() => -1);
-    if (introId > 0) worker.introMessageId = introId;
+    // for the manager board's switch_to_topic jump buttons. A background
+    // worker has no topic, so no intro.
+    if (!spec.background) {
+      const introId = await this.h
+        .tg.sendMessageId(
+          conv,
+          workerIntroHtml(this.langOf(chat), {
+            name,
+            agent,
+            directory,
+            spawnedBy: spec.spawnedBy,
+            task: spec.task,
+            worktree: worktree ? { branch: worktree.branch, base: worktree.base } : undefined,
+          }),
+        )
+        .catch(() => -1);
+      if (introId > 0) worker.introMessageId = introId;
+    }
 
     // Workers inherit the chat's model/variant choice (the Manager's own agent aside).
     this.h.st.set(conv, {
@@ -955,7 +976,10 @@ export class Orchestrator {
     // Bot API 10.4: supergroups use `t.me/c/<id>/<thread>`; private chats with
     // topics use `t.me/<bot_username>/<thread>` (opens only for that chat's
     // owner). No link for either (unknown username, other chat type) → skip.
-    const topicLink = await topicDeepLink(chatId, threadId, await this.h.tg.botUsername());
+    let topicLink: string | undefined;
+    if (!spec.background && threadId !== undefined) {
+      topicLink = await topicDeepLink(chatId, threadId, await this.h.tg.botUsername());
+    }
     if (topicLink) {
       await this.h
         .sendHtml(
@@ -2158,6 +2182,7 @@ export class Orchestrator {
             task: { type: "string", description: "Complete instructions: goal, context, constraints, definition of done" },
             agent: { type: "string", enum: ["build", "plan", "explore"], description: "build = edit code (default); plan = analysis only; explore = quick read-only lookup" },
             writes: { type: "boolean", description: "Whether the task may change files (default true for build)" },
+            background: { type: "boolean", description: "Run without a Telegram topic (background): quieter, the result is relayed to the main chat" },
           },
           required: ["name", "directory", "task"],
         },
@@ -2168,6 +2193,7 @@ export class Orchestrator {
             task: String(a.task ?? ""),
             agent: a.agent,
             writes: a.writes,
+            background: a.background === true,
             spawnedBy: "manager",
           };
           if (!spec.task) throw new Error("task is required");
