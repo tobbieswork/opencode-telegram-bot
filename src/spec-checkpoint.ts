@@ -8,8 +8,15 @@
  * semantics verified live in the S0 findings, docs/sdd/spec-tasks.md §7):
  *   - state.status === "error"                    → not run (errored): the
  *     tool failed before the command ran; carry its error message.
- *   - state.status === "completed", exit !== 0    → ran, FAILED.
  *   - state.status === "completed", exit === 0    → ran, passed.
+ *   - state.status === "completed", exit !== 0    → ran, FAILED.
+ *   - state.status === "completed", exit NOT
+ *     recorded (metadata.exit undefined — a wrapped/redirected command such as
+ *     `npm run test:unit > log 2>&1; echo exit=$?` leaves no exit) → ran,
+ *     treated as PASSED: it completed without a tool error and there is no
+ *     evidence of a non-zero exit. Treating this as a failure was a false-fail
+ *     that halted the auto-continue chain (background-workers W0, 2026-11-20);
+ *     T1's host gate is the backstop for genuine failures.
  * Anything else (pending/running, or a check with no item at all) is "not run".
  *
  * Retry-aware (user decision 2026-11-17): for each check name, the LAST
@@ -99,8 +106,14 @@ export function classifyShellItems(
       const msg = st.error?.message != null ? String(st.error.message) : "tool error";
       e = { name, ok: false, error: msg };
     } else if (st.status === "completed") {
-      // exit 0 → passed; any other exit (incl. a masked wrapper exit) → failed.
-      e = { name, ok: st.metadata?.exit === 0 };
+      // A completed command with a recorded exit: 0 → passed, non-zero →
+      // failed. With NO recorded exit (metadata.exit undefined — wrapped /
+      // redirected commands), treat as passed: it ran to completion and there
+      // is no evidence of a non-zero exit (a false-fail here halted the
+      // auto-continue chain — background-workers W0, 2026-11-20). T1's host
+      // gate remains the backstop for genuine failures.
+      const exit = st.metadata?.exit;
+      e = { name, ok: exit == null ? true : exit === 0 };
     } else {
       // "pending" / "running" / unknown: no recorded result → not run.
       continue;

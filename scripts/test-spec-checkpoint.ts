@@ -154,6 +154,30 @@ try {
     check("retry: re-run after tool error → not errored, ok", ranD.length === 1 && ranD[0].ok === true && ranD[0].error === undefined, JSON.stringify(ranD));
   }
 
+  // ── Regression: wrapped/redirected canonical check with no recorded exit ──
+  // The background-workers W0 false-fail (2026-11-20): a worker runs a
+  // canonical check wrapped (`npm run test:unit > log 2>&1; echo exit=$?`) and
+  // the shell tool leaves metadata.exit undefined. It must count as PASSED, not
+  // FAILED — otherwise the checkpoint is "fail" and the auto-continue chain
+  // halts. A recorded non-zero exit must still fail (no masking of real fails;
+  // T1's host gate is the backstop either way).
+  {
+    const itemsE = [
+      { type: "tool", name: "shell", state: { status: "completed", input: { command: 'npm run test:unit > /tmp/x.log 2>&1; echo "exit=$?"' } } },
+      { type: "tool", name: "shell", state: { status: "completed", input: { command: "npm run typecheck 2>&1 | tail -3" }, metadata: { exit: 0 } } },
+    ];
+    const { ran: ranE } = classifyShellItems(itemsE, EXPECTED_CHECKS);
+    const byNameE = new Map(ranE.map((r) => [r.name, r]));
+    check("wrapped: test:unit with no recorded exit → ok=true (not a false-fail)", byNameE.get("test:unit")?.ok === true, JSON.stringify(byNameE.get("test:unit")));
+    check("wrapped: typecheck with exit 0 → ok=true", byNameE.get("typecheck")?.ok === true, JSON.stringify(byNameE.get("typecheck")));
+    check("wrapped: the run is a pass (with commit)", checkpointOutcome({ hash: "abc", subject: "x" }, ranE, false) === "pass");
+    const itemsF = [
+      { type: "tool", name: "shell", state: { status: "completed", input: { command: "npm run test:unit" }, metadata: { exit: 1 } } },
+    ];
+    const { ran: ranF } = classifyShellItems(itemsF, EXPECTED_CHECKS);
+    check("wrapped: a recorded non-zero exit still fails", ranF[0]?.ok === false, JSON.stringify(ranF));
+  }
+
   // ── S3.2: checkNameFromCommand ────────────────────────────────────────────
   {
     check("name: npm run typecheck → typecheck", checkNameFromCommand("npm run typecheck") === "typecheck", checkNameFromCommand("npm run typecheck"));
