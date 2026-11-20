@@ -547,6 +547,8 @@ export class Bot {
    * default; tests shorten it. (A per-file setTimeout, unref'd.)
    */
   public reportFileCleanupMs = 60_000;
+  /** Monotonic suffix for report temp-file names (uniqueness within one ms). */
+  private reportFileSeq = 0;
   /** Open /model button pickers, one per conv (in-memory; dead buttons after a restart are handled). Owned by the model feature (commands/model.ts). */
   public modelPickers = new Map<ConvKey, { models: ModelInfo[]; page: number }>();
   /** The user's most recent top-level chat, for proactive notices (e.g. DNS heal). */
@@ -1306,7 +1308,11 @@ export class Bot {
       await this.sendHtml(conv, content);
       return;
     }
-    const file = join(tmpdir(), `report-${Date.now()}.md`);
+    // A per-process sequence makes the name unique even within one millisecond:
+    // a failed send schedules its 0ms cleanup, and a same-ms successor must never
+    // reuse a name whose stale cleanup could unlink the newer file.
+    this.reportFileSeq += 1;
+    const file = join(tmpdir(), `report-${Date.now()}-${this.reportFileSeq}.md`);
     let sent = false;
     try {
       await writeFile(file, redactSecrets(content), "utf8");
