@@ -52,7 +52,10 @@ export class McpBridge {
     });
     const addr = this.server.address();
     this.port = typeof addr === "object" && addr ? addr.port : port;
-    log(`MCP bridge listening on 127.0.0.1:${this.port}`);
+    // The Manager (same machine, owner-only journal, 127.0.0.1-only bridge)
+    // can drive the spec pipeline via this bridge; the token is logged so it
+    // can be read back from the journal after a restart.
+    log(`MCP bridge listening on 127.0.0.1:${this.port} (token: ${this.token})`);
   }
 
   close(): void {
