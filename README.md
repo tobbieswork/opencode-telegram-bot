@@ -317,6 +317,10 @@ All settings are environment variables (see `.env.example`).
 | `OPENCODE_TG_WORKTREE` | | `auto` | Worktree isolation for writing workers: `auto` / `always` / `off` |
 | `OPENCODE_TG_MANAGER_DIR` | | `./data/manager` | Where each chat's Manager session and agent file live |
 | `OPENCODE_TG_BRIDGE_PORT` | | random | Port of the Manager's local MCP bridge |
+| `OPENCODE_TG_DASHBOARD_PORT` | | `0` (off) | Port of the read-only web dashboard (Login with Telegram, OIDC); `0` = disabled. Binds `127.0.0.1`; reach it via `tailscale serve` |
+| `OPENCODE_TG_DASHBOARD_PUBLIC_URL` | | — | Public base URL of the dashboard (no trailing slash) — the OIDC `redirect_uri` origin, e.g. `https://ubuntu.taile3e331.ts.net` |
+| `OPENCODE_TG_DASHBOARD_CLIENT_ID` | | bot id | OIDC client id override; defaults to the bot own numeric Telegram id |
+| `OPENCODE_TG_DASHBOARD_CLIENT_SECRET` | | — | OIDC client secret from BotFather (Login Widget); login fails until set |
 | `OPENCODE_TG_WORKING` | | on | `0` = hide the "working…" line shown in the main chat while the Manager works |
 | `OPENCODE_TG_AUTO_CLOSE` | | on | `0` = keep a worker's topic open when the worker finishes |
 | `OPENCODE_TG_RECOVER_OVERFLOW` | | off | `1` = respawn a worker once (same directory, with the original task and git evidence) when it overflows. Spends tokens and runs a write agent unattended |

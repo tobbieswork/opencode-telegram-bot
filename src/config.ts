@@ -71,6 +71,14 @@ export interface Config {
   worktreeMode: "auto" | "always" | "off";
   /** Port of the Manager's local MCP bridge (0 = pick a free one). */
   bridgePort: number;
+  /** Port of the read-only web dashboard (0 = off; see src/dashboard.ts). */
+  dashboardPort: number;
+  /** OIDC client id override (default: the bot own numeric id from BotFather). */
+  dashboardClientId: number;
+  /** OIDC client secret (BotFather, Login Widget). */
+  dashboardClientSecret: string;
+  /** Public base URL of the dashboard (redirect_uri origin; no trailing slash). */
+  dashboardPublicUrl: string;
   /** Close a worker's topic when the worker finishes (the user reopens it by messaging in it). */
   autoClose: boolean;
   /**
@@ -305,6 +313,11 @@ export function loadConfig(root: string): Config {
     rebootDelayMs: parseIntSetting("OPENCODE_TG_REBOOT_DELAY_MS", 15000, 1000),
     // /health disk probe: warn when free space is below this (GiB -> bytes).
     diskWarnFreeBytes: parseIntSetting("OPENCODE_TG_DISK_WARN_FREE_GB", 10, 1) * 1024 * 1024 * 1024,
+    // Read-only web dashboard with Login-with-Telegram (OIDC); off unless a port is set.
+    dashboardPort: parseIntSetting("OPENCODE_TG_DASHBOARD_PORT", 0, 1),
+    dashboardClientId: parseIntSetting("OPENCODE_TG_DASHBOARD_CLIENT_ID", 0, 0),
+    dashboardClientSecret: process.env.OPENCODE_TG_DASHBOARD_CLIENT_SECRET ?? "",
+    dashboardPublicUrl: (process.env.OPENCODE_TG_DASHBOARD_PUBLIC_URL ?? "").replace(/\/+$/, ""),
     recoverOverflow: process.env.OPENCODE_TG_RECOVER_OVERFLOW === "1" || process.env.OPENCODE_TG_RECOVER_OVERFLOW === "true",
     dnsHeal: process.env.OPENCODE_TG_DNS_HEAL !== "0",
     dnsStaleIp: process.env.OPENCODE_TG_DNS_STALE_IP?.trim() ?? "",
