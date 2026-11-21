@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.58.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.57.2...opencode-telegram-bot-v1.58.0) (2026-11-21)
+
+
+### Features
+
+* fold Telegram reply-quotes into the Manager prompt ([c42e989](https://github.com/tobbieswork/opencode-telegram-bot/commit/c42e9894397d024aa398cbcd37ec3905d7299091))
+* fold Telegram reply-quotes into the Manager prompt ([e5dc79d](https://github.com/tobbieswork/opencode-telegram-bot/commit/e5dc79d962fa2d8528438efeea9bac507dd2a40c))
+
 ## [1.57.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.57.1...opencode-telegram-bot-v1.57.2) (2026-11-20)
 
 
