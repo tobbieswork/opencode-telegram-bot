@@ -1,6 +1,6 @@
 {
   "name": "opencode-telegram-bot",
-  "version": "1.57.2",
+  "version": "1.58.0",
   "private": true,
   "type": "module",
   "description": "Remotely control a running OpenCode service from Telegram",
