@@ -116,7 +116,7 @@
     "test:dashboard": "tsx scripts/test-dashboard.ts"
   },
   "dependencies": {
-    "@opencode/client": "^2.2.6"
+    "@opencode/client": "^2.3.2"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
