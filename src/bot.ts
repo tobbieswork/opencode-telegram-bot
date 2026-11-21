@@ -392,6 +392,26 @@ export function formAcceptsTypedAnswer(
   return false;
 }
 
+/** Max chars of a quoted message folded into a Manager prompt. */
+export const QUOTED_REPLY_MAX = 2000;
+
+/**
+ * Fold the message the user is replying to (Telegram quote) into the prompt,
+ * so the Manager can see what the user is pointing at. The quoted body is
+ * clearly marked and capped (QUOTED_REPLY_MAX) — a long quote must not bloat
+ * context. No-op when the reply carries nothing readable (e.g. a sticker).
+ */
+export function foldQuotedReply(
+  text: string,
+  q?: { text?: string; caption?: string; from?: { first_name?: string } },
+): string {
+  const body = (q?.text ?? q?.caption ?? "").trim();
+  if (!body) return text;
+  const name = q?.from?.first_name;
+  const clipped = body.length > QUOTED_REPLY_MAX ? body.slice(0, QUOTED_REPLY_MAX) + "\u2026" : body;
+  return `[You are replying to a quoted message${name ? ` from ${name}` : ""}:\n\u201c${clipped}\u201d\n]\n\n${text}`;
+}
+
 /**
  * Glue between Telegram and OpenCode. Owns per-chat state and the in-flight
  * prompt task, so a running prompt never blocks the polling loop and /stop
@@ -1159,7 +1179,7 @@ export class Bot {
       // (The "🤔 thinking" body-react on the user's message was removed 2026-10-27:
       // the working indicator now covers "the bot is working" on new prompts.)
       if (await this.handleFormText(conv, text, msg.reply_to_message?.message_id)) return;
-      else if (state.manager) await this.orch.promptManager(conv, text, msg.message_id, lang);
+      else if (state.manager) await this.orch.promptManager(conv, foldQuotedReply(text, msg.reply_to_message), msg.message_id, lang);
       else await this.runPrompt(conv, text, state, msg.message_id, lang);
     }
   }
@@ -1712,7 +1732,7 @@ export class Bot {
     if (uid != null) this.st.set(conv, { createdBy: uid });
     const lang = this.userPrefs.getLang(uid ?? "");
     if (await this.handleFormText(conv, text2, msg.reply_to_message?.message_id)) return;
-    else if (state.manager) await this.orch.promptManager(conv, text2, msg.message_id, lang);
+    else if (state.manager) await this.orch.promptManager(conv, foldQuotedReply(text2, msg.reply_to_message), msg.message_id, lang);
     else await this.runPrompt(conv, text2, state, msg.message_id, lang);
   }
 

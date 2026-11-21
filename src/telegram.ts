@@ -29,7 +29,15 @@ export type Message = {
   is_topic_message?: boolean;
   forum_topic_created?: { name: string };
   /** The message this one replies to (same chat); used to detect replies to cards. */
-  reply_to_message?: { message_id?: number; message_thread_id?: number };
+  reply_to_message?: {
+    message_id?: number;
+    message_thread_id?: number;
+    /** Quoted message body (text messages) — surfaced to the Manager as context. */
+    text?: string;
+    /** Quoted message body (media messages). */
+    caption?: string;
+    from?: { first_name?: string };
+  };
   /** Caption on media (photo/sticker/video/voice/document); counts as text. */
   caption?: string;
   sticker?: { file_id?: string; type?: string; emoji?: string };
