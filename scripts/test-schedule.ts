@@ -67,6 +67,8 @@ const NY = "America/New_York";    // DST: 2026 spring 2026-03-08, fall 2026-11-0
 {
   check("every 1h is valid", parseScheduleSpec("every 1h x").spec.hours === 1);
   check("every 168h is valid", parseScheduleSpec("every 168h x").spec.hours === 168);
+  check("every 336h (2 weeks) is valid", parseScheduleSpec("every 336h x").spec.hours === 336);
+  check("every 720h (30 days) is valid", parseScheduleSpec("every 720h x").spec.hours === 720);
   check("every 24h is valid", parseScheduleSpec("every 24h x").spec.hours === 24);
 }
 
@@ -81,7 +83,7 @@ const NY = "America/New_York";    // DST: 2026 spring 2026-03-08, fall 2026-11-0
   check("throws: non-2-digit hour 8:0", throws(() => parseScheduleSpec("daily 8:0 x")));
   check("throws: bad weekday name", throws(() => parseScheduleSpec("weekly foo 09:00 x")));
   check("throws: every < 1h (0h)", throws(() => parseScheduleSpec("every 0h x")));
-  check("throws: every > 168h (200h)", throws(() => parseScheduleSpec("every 200h x")));
+  check("throws: every > 720h (800h)", throws(() => parseScheduleSpec("every 800h x")));
   check("throws: every non-hour unit (90m)", throws(() => parseScheduleSpec("every 90m x")));
   check("throws: once in the past", throws(() => parseScheduleSpec("once 2020-01-01 08:00 x", Z(2026, 9, 1, 0, 0, 0))));
   check("throws: once non-existent date (Feb 30)", throws(() => parseScheduleSpec("once 2026-02-30 08:00 x", Z(2026, 9, 1, 0, 0, 0))));

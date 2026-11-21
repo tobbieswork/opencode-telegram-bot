@@ -21,7 +21,7 @@ export interface SchedSpec {
   time?: { h: number; m: number };
   /** 0=Sun…6=Sat, `weekly` only. */
   day?: number;
-  /** Hours, `every` only (1..168). */
+  /** Hours, `every` only (1..720). */
   hours?: number;
   /** Concrete date, `once` only. */
   date?: { y: number; mo: number; d: number };
@@ -70,14 +70,14 @@ function parseTime(tok: string | undefined, lang: Lang): { h: number; m: number 
   return { h: parseInt(m[1], 10), m: parseInt(m[2], 10) };
 }
 
-/** `<Nh>` (integer hours), 1 ≤ N ≤ 168. */
+/** `<Nh>` (integer hours), 1 ≤ N ≤ 720. */
 function parseHours(tok: string | undefined, lang: Lang): number {
   if (tok === undefined) throw new Error(tr(lang, "schedule: thiếu khoảng cách (vd 6h)", "schedule: missing interval (e.g. 6h)"));
   const m = /^(\d+)h$/.exec(tok);
   if (!m) throw new Error(tr(lang, `schedule: khoảng cách không hợp lệ '${tok}' (dùng số giờ, vd 6h)`, `schedule: invalid interval '${tok}' (use hours, e.g. 6h)`));
   const n = parseInt(m[1], 10);
   if (n < 1) throw new Error(tr(lang, "schedule: 'every' phải ≥ 1h", "schedule: 'every' must be ≥ 1h"));
-  if (n > 168) throw new Error(tr(lang, "schedule: 'every' phải ≤ 168h (7 ngày)", "schedule: 'every' must be ≤ 168h (7 days)"));
+  if (n > 720) throw new Error(tr(lang, "schedule: 'every' phải ≤ 720h (30 ngày)", "schedule: 'every' must be ≤ 720h (30 days)"));
   return n;
 }
 
