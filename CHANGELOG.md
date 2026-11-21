@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.59.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.58.0...opencode-telegram-bot-v1.59.0) (2026-11-21)
+
+
+### Features
+
+* raise /schedule every cap 168h→720h ([ed76f1e](https://github.com/tobbieswork/opencode-telegram-bot/commit/ed76f1e29108b82ea994766670d850facbd690c8))
+* raise /schedule every cap from 168h to 720h (30 days) ([1b9bd67](https://github.com/tobbieswork/opencode-telegram-bot/commit/1b9bd671df0bf030fed3b6895b67487d049c16e0))
+
 ## [1.58.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.57.2...opencode-telegram-bot-v1.58.0) (2026-11-21)
 
 
