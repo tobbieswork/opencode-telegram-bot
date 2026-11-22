@@ -25,6 +25,9 @@ const ANT_KEY = `sk-ant-api03-${"Kw2nRd".repeat(5)}Q7`; // sk-ant- + 26 chars
 const AWS_KEY = "AKIA" + "Q7X2MB9F3K1L0C8E"; // AKIA + 16
 const SLACK_KEY = `xoxb-192837465${"7-Ab3Fg6Hj9K".slice(0, 10)}0987`; // xoxb- + 19
 const GOOG_KEY = "AIza" + "SyA6Hc3V9q0W5t8X2r7Y4u1I3o6P9d2eK4f"; // AIza + 35
+const HF_KEY = `hf_${"Kw2nRd8Lm3".repeat(3)}Qx`; // hf_ + 32 chars
+const NPM_KEY = `npm_${"Tq9vLm2Xa7".repeat(3)}Bc`; // npm_ + 32 chars
+const STRIPE_KEY = `sk_live_${"51Hx3kQz".repeat(3)}Vw`; // sk_live_ + 24 chars
 const JWT = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIwMDAwMDAwMDAwIiwibmFtZSI6InN5bnRoZXRpYy10ZXN0IiwiaWF0IjoxNzAwMDAwMDAwfQ.c2ludGhldGljU2lnTm90QVNr"; // synthetic test JWT (alg none) — not a live credential // classic jwt.io example (not a live credential)
 const PK_BLOCK = `-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA7v5x\nabcdef0123456789\n-----END RSA PRIVATE KEY-----`;
 
@@ -57,6 +60,11 @@ const PK_BLOCK = `-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA7v5x\nabcdef0
 
   const r9 = redactSecrets(`Authorization: Bearer ${JWT} end`);
   check("jwt bearer token masked", !r9.includes(JWT) && r9.includes(`eyJh\u2026${JWT.slice(-4)}`) && r9.includes("Bearer"), r9);
+
+  const r10 = redactSecrets(`hf=${HF_KEY} npm=${NPM_KEY} stripe=${STRIPE_KEY}`);
+  check("huggingface token masked", !r10.includes(HF_KEY) && r10.includes("hf_K\u2026"), r10);
+  check("npm token masked", !r10.includes(NPM_KEY) && r10.includes("npm_\u2026"), r10);
+  check("stripe secret key masked", !r10.includes(STRIPE_KEY) && r10.includes("sk_l\u2026"), r10);
 }
 
 // ── multiple secrets in one message are ALL masked ─────────────────────────
@@ -68,7 +76,7 @@ const PK_BLOCK = `-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA7v5x\nabcdef0
 
 // ── lookalikes that are NOT secrets pass through untouched ─────────────────
 {
-  const clean = "sk-2026-11-06\nghp_short1\nAKIA123\nxoxb-123\nsee 12345:67890 for the ticket\nZm9vYmFyIGhlcmU\neyJabc.def";
+  const clean = "sk-2026-11-06\nghp_short1\nAKIA123\nxoxb-123\nsee 12345:67890 for the ticket\nZm9vYmFyIGhlcmU\neyJabc.def\nhf_abc\nnpm_1.2.3\nsk_live_51Hx\nrk_test_9Z";
   check("lookalikes untouched", redactSecrets(clean) === clean, redactSecrets(clean));
 }
 
@@ -80,7 +88,7 @@ const PK_BLOCK = `-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA7v5x\nabcdef0
 
 // ── idempotent: masking already-masked text changes nothing ────────────────
 {
-  const once = redactSecrets(`x ${GH_PAT} ${OAI_KEY} ${JWT} ${PK_BLOCK} y`);
+  const once = redactSecrets(`x ${GH_PAT} ${OAI_KEY} ${JWT} ${PK_BLOCK} ${HF_KEY} ${NPM_KEY} ${STRIPE_KEY} y`);
   check("idempotent", redactSecrets(once) === once, `${once}\n---\n${redactSecrets(once)}`);
 }
 
