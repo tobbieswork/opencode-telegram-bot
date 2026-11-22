@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.59.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.59.0...opencode-telegram-bot-v1.59.1) (2026-11-22)
+
+
+### Bug Fixes
+
+* **redact:** mask HuggingFace, npm, and Stripe secret formats ([c80c622](https://github.com/tobbieswork/opencode-telegram-bot/commit/c80c62256163b20d3971990e2ca087f241a68b17))
+* **redact:** mask HuggingFace, npm, Stripe secret formats ([d3505f5](https://github.com/tobbieswork/opencode-telegram-bot/commit/d3505f55be8837d92e92c48be18f09cf70d68efb))
+
 ## [1.59.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.58.0...opencode-telegram-bot-v1.59.0) (2026-11-21)
 
 
