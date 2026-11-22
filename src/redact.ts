@@ -9,6 +9,11 @@
  * 2026-11-05) or the Cursor/Fireworks marketplace breach (2026-11-13), where
  * copied agent traces carried unredacted credentials.
  *
+ * The 2026-11-22 Dragos/OpenRouter inference-provider data incidents (incl.
+ * Together.ai prompt leakage) reinforce the same threat: provider-side leaks
+ * expose full prompt content, so the guard also covers the secret formats
+ * most common in 2026 dev .env files (HuggingFace, npm, Stripe keys).
+ *
  * The guard is a pure, always-on function with no config surface: it replaces
  * only strings matching KNOWN secret formats, keeping a first4…last4
  * fingerprint (the repo's secret-display convention) so the user can still tell
@@ -33,6 +38,12 @@ const PATTERNS: Array<[RegExp, (m: string) => string]> = [
   [/\bsk-[A-Za-z0-9_-]{16,255}\b/g, mask],
   // AWS access key IDs.
   [/\bAKIA[0-9A-Z]{16}\b/g, mask],
+  // Stripe secret/restricted keys (sk_live_, sk_test_, rk_live_, rk_test_).
+  [/\b[sr]k_(live|test)_[A-Za-z0-9]{16,255}\b/g, mask],
+  // HuggingFace tokens (hf_...).
+  [/\bhf_[A-Za-z0-9]{20,255}\b/g, mask],
+  // npm access tokens (npm_...).
+  [/\bnpm_[A-Za-z0-9]{20,255}\b/g, mask],
   // Slack bot/user/app tokens.
   [/\bxox[baprs]-[A-Za-z0-9-]{10,255}\b/g, mask],
   // Google API keys.
