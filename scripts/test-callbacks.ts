@@ -57,6 +57,7 @@ import { nsCb } from "../src/nextsteps.js";
 import { noteCb } from "../src/notes.js";
 import { specCb, specrunCb, specblockedCb, specrunokCb, speccancelCb, specrerunCb, spcaccCb, spcredoCb, spcstopCb, spcprCb, spcreadyCb, spccleanCb } from "../src/commands/spec.js";
 import type { CallbackQuery } from "../src/telegram.js";
+import { convOfMessage } from "../src/conv.js";
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: string): void {
@@ -95,6 +96,20 @@ function cb(data: string, id = "cbq-1"): CallbackQuery {
 const base = (bot: Bot) => ({ bot, conv: "c1", messageId: 7, lang: "vi" as const });
 
 async function main(): Promise<void> {
+  // ── InaccessibleMessage guard (Bot API 10.5) ────────────────────────────
+  {
+    // A callback on a deleted/unavailable message carries an InaccessibleMessage:
+    // a truthy object with no chat. convOfMessage must not throw and must
+    // return undefined so the tap degrades to a silent answer.
+    check("convOfMessage: plain message gives chat key", convOfMessage({ chat: { id: 42 } }) === "42");
+    check("convOfMessage: topic message gives chat:topic key", convOfMessage({ chat: { id: 42 }, message_thread_id: 7, is_topic_message: true }) === "42:7");
+    check("convOfMessage: non-topic thread gives chat key", convOfMessage({ chat: { id: 42 }, message_thread_id: 7, is_topic_message: false }) === "42");
+    check("convOfMessage: InaccessibleMessage (no chat) gives undefined, no throw", convOfMessage({}) === undefined);
+    check("convOfMessage: empty chat gives undefined", convOfMessage({ chat: {} }) === undefined);
+    check("convOfMessage: undefined gives undefined", convOfMessage(undefined) === undefined);
+    check("convOfMessage: null gives undefined", convOfMessage(null) === undefined);
+  }
+
   // ── C1.1: the helper defs round-trip ───────────────────────────────────
   {
     _clearCallbacksForTest();

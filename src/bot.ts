@@ -6,7 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { Telegram, Update, CallbackQuery, Message, MessageGenerationStopped, MessageReactionUpdated } from "./telegram.js";
 import { OpenCodeCtl, assistantText, ModelInfo } from "./opencode.js";
 import { StateManager, ChatState, MsgPurpose, MACHINE_STATE_KEY, UserPrefsStore, Lang } from "./state.js";
-import { ConvKey, convKey, chatOf, isBackgroundConv, parseConv } from "./conv.js";
+import { ConvKey, convKey, chatOf, isBackgroundConv, parseConv, convOfMessage } from "./conv.js";
 import { answerExpired, defineCallback, dispatchCallback, oneArg, registerCallback } from "./callbacks.js";
 import { Orchestrator, BUSY, apCb, killCb, wtCb, boardGroup, boardReason } from "./orchestrator.js";
 import { handlePruneCallback, pruneCb } from "./orchestrator/purge.js";
@@ -1073,7 +1073,7 @@ export class Bot {
    */
   enqueue(u: Update): void {
     const m = u.message ?? u.edited_message ?? u.callback_query?.message;
-    const key = m ? this.convOf(m) : "_";
+    const key = convOfMessage(m) ?? "_";
     const prev = this.queues.get(key) ?? Promise.resolve();
     const next = prev
       .then(() => this.handle(u))
@@ -3363,7 +3363,7 @@ export class Bot {
       await this.tg.answerCallbackQuery(cb.id, tr(lang, "⛔ Không được phép", "⛔ Not allowed"));
       return;
     }
-    const conv = cb.message ? this.convOf(cb.message) : undefined;
+    const conv = convOfMessage(cb.message);
     const messageId = cb.message?.message_id;
     const data = cb.data ?? "";
     if (!conv) {
