@@ -15,6 +15,22 @@ export function convKey(chatId: number | string, threadId?: number): ConvKey {
   return threadId ? `${chatId}:${threadId}` : String(chatId);
 }
 
+/**
+ * Conv key of a message-like object, or `undefined` when it carries no usable
+ * chat id. Telegram delivers a *deleted or inaccessible* message as an
+ * InaccessibleMessage — a truthy object with no `chat` (Bot API 10.5 documents
+ * this for callback queries, whose original message may already be gone).
+ * Callers must not assume `m.chat` exists. Returns the same key
+ * `convKey(chatId, threadId)` would, so topic messages still resolve to topic.
+ */
+export function convOfMessage(
+  m: { chat?: { id?: number }; message_thread_id?: number; is_topic_message?: boolean } | null | undefined,
+): ConvKey | undefined {
+  const id = m?.chat?.id;
+  if (typeof id !== "number") return undefined;
+  return convKey(id, m?.is_topic_message ? m?.message_thread_id : undefined);
+}
+
 /** Key of a background (topic-less) worker's conversation in a chat. */
 export function bgConvKey(chatId: number | string, name: string): ConvKey {
   return `bg:${chatId}:${name}`;
