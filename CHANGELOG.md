@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.59.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.59.1...opencode-telegram-bot-v1.59.2) (2026-11-25)
+
+
+### Bug Fixes
+
+* **callback:** guard against InaccessibleMessage (Bot API 10.5) ([062279d](https://github.com/tobbieswork/opencode-telegram-bot/commit/062279d84005681fb1c32b40b8cacfedde3195e5))
+* **callback:** guard against InaccessibleMessage (Bot API 10.5) ([9dfb8ff](https://github.com/tobbieswork/opencode-telegram-bot/commit/9dfb8ff14073b7500182f56b8d3dd5c0bc10f3c8))
+
 ## [1.59.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.59.0...opencode-telegram-bot-v1.59.1) (2026-11-22)
 
 
