@@ -96,6 +96,7 @@ import {
   applyModelAndVariant as applyModelAndVariantFree,
 } from "./commands/model.js";
 import { cmdReboot, handleRebootCallback, cmdStatus, cmdContext, cmdUsage } from "./commands/admin.js";
+import { cmdCmd, handleCmdRun, handleCmdCancel, shCallback, shCancelCallback } from "./commands/cmd.js";
 import { cmdSchedule, handleScheduleCallback, schCb } from "./commands/schedule.js";
 import { Advisor } from "./advisor/advisor.js";
 import { cmdHelp, cmdHealth, cmdNote, cmdRotation, handleNoteCallback, cmdLang, cmdStyle } from "./commands/meta.js";
@@ -906,6 +907,12 @@ export class Bot {
   /** Registry delegate — the reboot handler lives in commands/admin.ts. */
   public handleRebootCallback(cb: CallbackQuery, conv: ConvKey, answer: (t?: string) => void, messageId?: number): Promise<void> {
     return handleRebootCallback(this, cb, conv, messageId, answer);
+  }
+  public handleCmdRun(cb: CallbackQuery, conv: ConvKey, token: string, answer: (t?: string) => void, messageId?: number): Promise<void> {
+    return handleCmdRun(this, cb, conv, token, answer, messageId);
+  }
+  public handleCmdCancel(cb: CallbackQuery, conv: ConvKey, answer: (t?: string) => void, messageId?: number): Promise<void> {
+    return handleCmdCancel(this, cb, conv, answer, messageId);
   }
 
   // ── Uptime monitor + reboot ─────────────────────────────────────────────────
@@ -2230,6 +2237,8 @@ export class Bot {
         return cmdStop(this, conv, state);
       case "/reboot":
         return cmdReboot(this, conv);
+      case "/cmd":
+        return cmdCmd(this, conv, arg, uid);
       case "/status":
         return cmdStatus(this, conv, state);
       case "/health":
@@ -4011,6 +4020,8 @@ export function registerBotCallbacks(): void {
   registerCallback(choiceCallback, (ctx, cb) => ctx.bot.handleChoiceCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "choices.ts (choice buttons)");
   registerCallback(continueCallback, (ctx, cb) => ctx.bot.handleContinueCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "continue.ts (continue button)");
   registerCallback(rebootCallback, (ctx, cb) => ctx.bot.handleRebootCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "uptime.ts (reboot flow)");
+  registerCallback(shCallback, (ctx, cb, token) => ctx.bot.handleCmdRun(cb, ctx.conv, token as string, ctx.answer, ctx.messageId), "commands/cmd.ts (shell run)");
+  registerCallback(shCancelCallback, (ctx, cb) => ctx.bot.handleCmdCancel(cb, ctx.conv, ctx.answer, ctx.messageId), "commands/cmd.ts (shell cancel)");
   // T4 group 2 — confirm / kill / prune prefixes.
   registerCallback(rotCb, (ctx, cb) => ctx.bot.handleRotationCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "bot.ts (manager rotation)");
   registerCallback(permCb, (ctx, cb) => ctx.bot.handlePermissionCallback(cb, ctx.conv, ctx.answer, ctx.messageId), "bot.ts (permission prompts)");

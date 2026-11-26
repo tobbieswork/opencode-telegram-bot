@@ -199,6 +199,7 @@ bot:   The last commit adds retry logic but…
 | `/lang vi\|en` | Set the language: `vi` (Tiếng Việt) or `en` (English) |
 | `/style [name]` | Set the reply style: `default` / `concise` / `explanatory` / `learning` / `proactive` (empty = view the list) |
 | `/reboot` | Reboot the machine (2-step confirmation) |
+| `/cmd <command>` | Run a shell command on the host (60s timeout); allow-list only |
 
 ### When OpenCode asks a question
 
