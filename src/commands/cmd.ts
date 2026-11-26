@@ -47,9 +47,12 @@ export const shCancelCallback = simple("shcancel");
 export interface ShellResult {
   stdout: string;
   stderr: string;
-  /** null when the process was killed (timeout); otherwise the exit code. */
+  /** null when killed by a signal (timeout or otherwise); otherwise the exit code. */
   exit: number | null;
+  /** true only for the exec's own timeout kill (not a self-signal). */
   timedOut: boolean;
+  /** the signal if the process was killed by one (timeout or otherwise), else null. */
+  signal: string | null;
   durationMs: number;
 }
 
@@ -72,12 +75,11 @@ export async function runShellCommand(
       { timeout: timeoutMs, cwd, maxBuffer, killSignal: "SIGKILL" },
       (err, stdout, stderr) => {
         const durationMs = Date.now() - t0;
-        const killed = !!(err && (err as unknown as { killed?: boolean }).killed);
-        const code =
-          err && !killed
-            ? (typeof (err as { code?: unknown }).code === "number" ? (err as { code: number }).code : 1)
-            : 0;
-        resolve({ stdout: stdout ?? "", stderr: stderr ?? "", exit: killed ? null : code, timedOut: killed, durationMs });
+        const e = err as { killed?: boolean; signal?: string | null; code?: number | null } | null;
+        const timedOut = !!(e && e.killed);
+        const signal = e && e.signal ? e.signal : null;
+        const code = e ? (typeof e.code === "number" ? e.code : null) : 0;
+        resolve({ stdout: stdout ?? "", stderr: stderr ?? "", exit: code, timedOut, signal, durationMs });
       },
     );
   });
@@ -101,6 +103,8 @@ export function formatCmdResult(command: string, res: ShellResult, lang: Lang): 
   if (res.timedOut) {
     const s = Math.round(res.durationMs / 1000);
     lines.push(`${UI_ICON.warning} ${tr(lang, `hết hạn sau ${s}s`, `timed out after ${s}s`)}`);
+  } else if (res.signal) {
+    lines.push(`${UI_ICON.warning} ${tr(lang, `bị kill bởi ${res.signal}`, `killed by ${res.signal}`)} · ${secs}s`);
   } else if (res.exit === 0) {
     lines.push(`${UI_ICON.success} exit 0 · ${secs}s`);
   } else {
@@ -120,7 +124,7 @@ export function formatCmdResult(command: string, res: ShellResult, lang: Lang): 
   if (!res.stdout && !res.stderr) {
     lines.push(`(${tr(lang, "không có output", "no output")}, exit ${res.timedOut ? "?" : res.exit})`);
   }
-  return { ok: !res.timedOut && res.exit === 0, html: lines.join("\n") };
+  return { ok: !res.timedOut && !res.signal && res.exit === 0, html: lines.join("\n") };
 }
 
 // ── single-use confirm tokens: token → { command, ts } ────────────────────────

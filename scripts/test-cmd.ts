@@ -89,6 +89,10 @@ async function main(): Promise<void> {
     const r = await runShellCommand("sleep 5", { timeoutMs: 300 });
     check("run: timeout → timedOut, exit null", r.timedOut === true && r.exit === null, JSON.stringify(r));
   }
+  {
+    const r = await runShellCommand("kill -9 $$");
+    check("run: self-signal-kill → signal SIGKILL, exit null, not timedOut", r.signal === "SIGKILL" && r.exit === null && r.timedOut === false, JSON.stringify(r));
+  }
 
   // ── tailCap ─────────────────────────────────────────────────────────
   {
@@ -99,19 +103,23 @@ async function main(): Promise<void> {
 
   // ── formatCmdResult ─────────────────────────────────────────────────
   {
-    const { ok, html } = formatCmdResult("echo hi", { stdout: "hi", stderr: "", exit: 0, timedOut: false, durationMs: 12 }, "en");
+    const { ok, html } = formatCmdResult("echo hi", { stdout: "hi", stderr: "", exit: 0, timedOut: false, signal: null, durationMs: 12 }, "en");
     check("format: exit 0 → success + exit 0 + stdout pre", ok === true && html.includes("exit 0") && html.includes("<pre>hi</pre>"), html);
   }
   {
-    const { ok, html } = formatCmdResult("false", { stdout: "", stderr: "boom", exit: 2, timedOut: false, durationMs: 5 }, "en");
+    const { ok, html } = formatCmdResult("false", { stdout: "", stderr: "boom", exit: 2, timedOut: false, signal: null, durationMs: 5 }, "en");
     check("format: non-zero → error + stderr section", ok === false && html.includes("exit 2") && html.includes("stderr"), html);
   }
   {
-    const { ok, html } = formatCmdResult("sleep 5", { stdout: "", stderr: "", exit: null, timedOut: true, durationMs: 5000 }, "en");
+    const { ok, html } = formatCmdResult("sleep 5", { stdout: "", stderr: "", exit: null, timedOut: true, signal: null, durationMs: 5000 }, "en");
     check("format: timeout → warning, not success", ok === false && html.includes("timed out"), html);
   }
   {
-    const { html } = formatCmdResult("echo a<b>", { stdout: "x<y>&z", stderr: "", exit: 0, timedOut: false, durationMs: 1 }, "en");
+    const { ok, html } = formatCmdResult("kill -9 $$", { stdout: "", stderr: "", exit: null, timedOut: false, signal: "SIGKILL", durationMs: 5 }, "en");
+    check("format: signal-kill → 'killed by SIGKILL', not success", ok === false && html.includes("killed by SIGKILL"), html);
+  }
+  {
+    const { html } = formatCmdResult("echo a<b>", { stdout: "x<y>&z", stderr: "", exit: 0, timedOut: false, signal: null, durationMs: 1 }, "en");
     check("format: command + output HTML-escaped", html.includes("a&lt;b&gt;") && html.includes("x&lt;y&gt;&amp;z"), html);
   }
 
