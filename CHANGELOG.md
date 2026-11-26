@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.60.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.60.0...opencode-telegram-bot-v1.60.1) (2026-11-26)
+
+
+### Bug Fixes
+
+* report /cmd signal-kills distinctly instead of exit 1 ([2836133](https://github.com/tobbieswork/opencode-telegram-bot/commit/2836133f447d8c13d27e9fe8a82beef6e6d97d2f))
+* report /cmd signal-kills distinctly instead of exit 1 ([bc1daea](https://github.com/tobbieswork/opencode-telegram-bot/commit/bc1daea514d0f923d01a9ba0daa2104e6fded968))
+
 ## [1.60.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.59.2...opencode-telegram-bot-v1.60.0) (2026-11-26)
 
 
