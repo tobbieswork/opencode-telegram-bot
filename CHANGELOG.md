@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.60.0](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.59.2...opencode-telegram-bot-v1.60.0) (2026-11-26)
+
+
+### Features
+
+* add /cmd shell command with two-step confirmation ([c8ef4c5](https://github.com/tobbieswork/opencode-telegram-bot/commit/c8ef4c5181cf9606f8b432b23f98f32ddfff5b3f))
+* add /cmd shell command with two-step confirmation ([69614c5](https://github.com/tobbieswork/opencode-telegram-bot/commit/69614c5360d898cfec1aea76511bbf1d3473b7a3))
+
 ## [1.59.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.59.1...opencode-telegram-bot-v1.59.2) (2026-11-25)
 
 
