@@ -185,6 +185,11 @@ const EXCEPTIONS: Exc[] = [
     why: "button label (module-extracted from bot.ts)",
   },
   {
+    file: "src/commands/cmd.ts",
+    text: '{ text: tr(lang, "❌ Huỷ", "❌ Cancel"), data: shCancelCallback.encode(undefined) },',
+    why: "cancel button label (two-step /cmd confirm, mirrors admin.ts reboot card)",
+  },
+  {
     file: "src/commands/browse.ts",
     text: 'if (!existsSync(p)) return ctx.tg.sendMessage(conv, `❌ No such directory: <code>${esc(p)}</code>`);',
     why: "inline message line (module-extracted from bot.ts)",

@@ -486,7 +486,7 @@ async function main(): Promise<void> {
     _clearCallbacksForTest();
     registerBotCallbacks();
 
-    // C1.2 + migration complete: ALL 39 inventoried prefixes are registered,
+    // C1.2 + migration complete: ALL 41 inventoried prefixes are registered,
     // and no duplicate threw (registerCallback would throw on a dup, naming
     // both owners). This is the "old chain removed" precondition.
     const all = [
@@ -494,10 +494,10 @@ async function main(): Promise<void> {
       "ns", "note", "nw", "pb", "perm", "prune", "q", "reboot", "rot", "sch",
       "spec", "specblocked", "speccancel", "specrerun", "specrun", "specrunok",
       "spcacc", "spcauto", "spcclean", "spcready", "spcredo", "spcredocancel", "spcpr", "spcstop",
-      "use", "variant", "w", "ww", "wt",
+      "sh", "shcancel", "use", "variant", "w", "ww", "wt",
     ];
     const reg = registeredPrefixes();
-    check("T6: all 39 prefixes are registered (no duplicate threw)", reg.length === 39 && all.every((p) => reg.includes(p)), JSON.stringify(reg));
+    check("T6: all 41 prefixes are registered (no duplicate threw)", reg.length === 41 && all.every((p) => reg.includes(p)), JSON.stringify(reg));
     check("T6: spcauto is registered (S6.5 auto button routed)", reg.includes("spcauto"), JSON.stringify(reg));
 
     // The 14 newly-migrated prefixes have their owners recorded.
