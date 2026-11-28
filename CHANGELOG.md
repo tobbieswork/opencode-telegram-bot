@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.60.2](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.60.1...opencode-telegram-bot-v1.60.2) (2026-11-28)
+
+
+### Bug Fixes
+
+* **browse:** resolve symlinks before the root-containment check ([#370](https://github.com/tobbieswork/opencode-telegram-bot/issues/370)) ([d224567](https://github.com/tobbieswork/opencode-telegram-bot/commit/d22456723ab8bb829bd793339e3b876917f8d300))
+
 ## [1.60.1](https://github.com/tobbieswork/opencode-telegram-bot/compare/opencode-telegram-bot-v1.60.0...opencode-telegram-bot-v1.60.1) (2026-11-26)
 
 
