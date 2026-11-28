@@ -192,6 +192,9 @@ export async function handleBrowseCallback(ctx: BotCtx, cb: CallbackQuery, conv:
       case "nav": {
         const item = b.items[Number(arg)];
         if (!item) throw new Error(tr(b.lang, "Mục không còn tồn tại — gửi /browse để tải lại.", "The entry no longer exists — send /browse to reload."));
+        if (!isUnderRoot(item.path, ctx.cfg.browseRoots)) {
+          throw new Error(tr(b.lang, "Thư mục nằm ngoài vùng được duyệt — gửi /browse để tải lại.", "Directory is outside the allowed roots — send /browse to reload."));
+        }
         b.path = item.path;
         b.page = 0;
         b.view = "list";
